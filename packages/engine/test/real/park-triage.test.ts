@@ -15,6 +15,7 @@ import {
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { noteOnlyOptions } from '@fleet-dao/shared';
+import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { COMMANDER_ACTOR } from '../../src/commander-contract.ts';
 import { judgeSpin } from '../../src/decisions/spin.ts';
@@ -23,8 +24,11 @@ import {
   COMMANDER_AUDIT_CLAIM,
   COMMANDER_AUDIT_RETRY,
   PARK_TRIAGE_JOB,
+  PARK_TRIAGE_REDO_START_TRIES,
+  PARK_TRIAGE_REDO_STOP_TRIES,
   type ParkTriageItem,
   runParkTriageJob,
+  triageParkedTasks,
 } from '../../src/jobs/park-triage.ts';
 import { COMMANDER_SETTING, parkTriageJob } from '../../src/real/park-triage.ts';
 import type { TaskParkInfo } from '../../src/task-contract.ts';
@@ -341,5 +345,604 @@ describe('real/park-triage', () => {
       supersededBy: COMMANDER_ACTOR,
       successorId: target.id,
     });
+  });
+
+  // —— #3496：重做在叫停等待超时后保留迟到终态的受管接续 ——
+  // 假 Temporal + 假时钟（sleep 只推进虚拟时间），库、审计、提醒走真实现有存储；入口是真的 parkTriageJob + triageParkedTasks。
+  const WF1 = 'task:acme/app#7';
+  const WF2 = 'task:acme/app#7:r2';
+  const T0 = Date.parse('2026-10-21T11:28:00Z');
+  const REDO_ANSWER = [
+    '```json',
+    JSON.stringify({
+      summary: '看完了',
+      verdicts: [{ issue: 7, parkSeq: 3, action: 'redo', reason: '换路由重来' }],
+    }),
+    '```',
+  ].join('\n');
+
+  function world() {
+    const w = {
+      nowMs: T0,
+      runs: new Map<string, { runId: string; status: string; phase: string }>(),
+      signals: [] as string[],
+      starts: [] as string[],
+      describeFault: undefined as ((id: string) => Error | undefined) | undefined,
+      startFault: undefined as ((id: string, n: number) => 'lost' | 'fail' | undefined) | undefined,
+      onSignal: undefined as ((id: string) => void) | undefined,
+      timers: [] as { at: number; fn: () => void }[],
+      at(delayMs: number, fn: () => void) {
+        w.timers.push({ at: w.nowMs + delayMs, fn });
+      },
+      advance(ms: number) {
+        w.nowMs += ms;
+        const due = w.timers.filter((x) => x.at <= w.nowMs).sort((a, b) => a.at - b.at);
+        w.timers = w.timers.filter((x) => x.at > w.nowMs);
+        for (const x of due) x.fn();
+      },
+      finish(id: string, status = 'COMPLETED') {
+        const run = w.runs.get(id);
+        if (run) run.status = status;
+      },
+    };
+    const handle = (id: string) => ({
+      describe: async () => {
+        const fault = w.describeFault?.(id);
+        if (fault) throw fault;
+        const run = w.runs.get(id);
+        if (!run) throw new WorkflowNotFoundError('没有这条执行', id, undefined);
+        return { status: { name: run.status }, runId: run.runId };
+      },
+      query: async () => {
+        const run = w.runs.get(id);
+        if (!run) throw new WorkflowNotFoundError('没有这条执行', id, undefined);
+        return {
+          phase: run.phase,
+          prNumber: 3300,
+          park: {
+            kind: 'rounds',
+            seq: 3,
+            at: new Date(T0 - 30 * 60_000).toISOString(),
+            title: '轮数用尽',
+            head: null,
+            retriedBefore: false,
+          },
+        };
+      },
+      signal: async () => {
+        w.signals.push(id);
+        w.onSignal?.(id);
+      },
+    });
+    const client = {
+      connection: { withDeadline: async (_ms: number, fn: () => Promise<unknown>) => fn() },
+      workflow: {
+        getHandle: handle,
+        start: async (_type: string, opts: { workflowId: string }) => {
+          w.starts.push(opts.workflowId);
+          if (w.runs.has(opts.workflowId))
+            throw new WorkflowExecutionAlreadyStartedError('已经有了', opts.workflowId, 'taskWorkflow');
+          const fault = w.startFault?.(opts.workflowId, w.starts.length);
+          if (fault === 'fail') throw new Error('start 被拒绝');
+          w.runs.set(opts.workflowId, {
+            runId: `run-${w.runs.size + 1}`,
+            status: 'RUNNING',
+            phase: 'running',
+          });
+          if (fault === 'lost') throw new Error('DEADLINE_EXCEEDED：start 的响应丢了');
+          return {};
+        },
+      },
+    };
+    return { w, client };
+  }
+
+  /** 真装配 + 假 Temporal/假时钟；会话、选路这类和本单无关的口子换成固定值。 */
+  function live(world_: ReturnType<typeof world>, taskId: string, state: { stalled: boolean }) {
+    const base = parkTriageJob({
+      db: t.db,
+      gh: {} as never,
+      trees: {} as never,
+      exec: {} as never,
+      tmpDir: '/tmp/none',
+      spawner: {} as never,
+      pickRoute: (async () => ({ ok: false, detail: '测试里不选路' })) as never,
+      sessions: {} as never,
+      temporal: { use: (fn) => fn(world_.client as never) },
+      taskQueue: 'fleet',
+      clock: { nowMs: () => world_.w.nowMs, sleep: async (ms) => world_.w.advance(ms) },
+      now: () => new Date(world_.w.nowMs),
+      log: () => {},
+    })();
+    return {
+      ...base,
+      purposeConfigured: async () => true,
+      mainHead: async () => 'f'.repeat(40),
+      runSession: async () => ({ ok: true as const, answer: REDO_ANSWER, model: 'test-model' }),
+      tasks: async () =>
+        state.stalled ? [{ taskId, owner: 'acme', name: 'app', issueNumber: 7, workflowId: WF1 }] : [],
+    };
+  }
+
+  async function seedRedoRig() {
+    const task = await seedTask();
+    const fake = world();
+    fake.w.runs.set(WF1, { runId: 'run-1', status: 'RUNNING', phase: 'parked' });
+    const state = { stalled: true };
+    return { task, fake, state, d: live(fake, task.id, state) };
+  }
+  const ledgerPhases = async () =>
+    (await t.db.select().from(auditLog))
+      .filter((a) => a.action === 'commander.redo')
+      .map((a) => (a.after as { phase: string }).phase);
+  const parkNotice = async () =>
+    (await t.db.select().from(notifications)).find((n) => n.dedupeKey === `commander:${WF1}:park:3`);
+
+  it('叫停等待窗内旧代没停、稍后才结束：下一轮标准调度沿原裁决接续，只起一个新代（重复调度不再起）', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    fake.w.onSignal = (id) => fake.w.at(90_000, () => fake.w.finish(id));
+    const first = await triageParkedTasks(d);
+    expect(first.left).toHaveLength(1);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([]);
+    // 迟到的终态：任务行也已被放弃，不再出现在停着的候选里（线上 #3258 的样子）
+    fake.w.advance(60_000);
+    expect(fake.w.runs.get(WF1)?.status).toBe('COMPLETED');
+    state.stalled = false;
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([WF2]);
+    await triageParkedTasks(d);
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([WF2]);
+    expect(fake.w.signals).toEqual([WF1]);
+  });
+
+  it('叫停后读旧代状态失败不能当成已终止：旧代仍在跑就不起新代', async () => {
+    const { fake, d } = await seedRedoRig();
+    fake.w.describeFault = () => (fake.w.signals.length > 0 ? new Error('Temporal 暂时不可用') : undefined);
+    const out = await triageParkedTasks(d);
+    expect(fake.w.runs.get(WF1)?.status).toBe('RUNNING');
+    expect(fake.w.starts).toEqual([]);
+    expect(out.acted).toEqual([]);
+  });
+
+  it('叫停已发出但终态没确认时，回执不写「任务没动」，并写明三种阶段里的哪一种', async () => {
+    const { fake, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    const notice = await parkNotice();
+    expect(notice?.body).not.toContain('任务没动');
+    expect(notice?.body).toContain('叫停请求已发送');
+    expect(notice?.body).toContain('终态');
+    expect(notice?.body).toContain('叫停 task:acme/app#7 后还没停');
+  });
+
+  it('旧代仍在跑时接续每一轮都不起新代、补发叫停有界；等它结束后才起一个', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    for (let i = 0; i < 4; i++) await triageParkedTasks(d);
+    expect(fake.w.signals).toHaveLength(PARK_TRIAGE_REDO_STOP_TRIES);
+    expect(fake.w.starts).toEqual([]);
+    fake.w.finish(WF1);
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([WF2]);
+    const body = (await parkNotice())?.body ?? '';
+    expect(body).toContain('已确认启动');
+    expect(body).toContain('叫停 task:acme/app#7 后还没停');
+  });
+
+  it('接续时读旧代状态失败：拒绝，不凭任务行 stopped 放行', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.finish(WF1);
+    fake.w.describeFault = () => new Error('Temporal 暂时不可用');
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    fake.w.describeFault = undefined;
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([WF2]);
+  });
+
+  it('旧代身份变化（run 对不上）：不起新代，记 given-up 交人看，之后不再重试', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    const run = fake.w.runs.get(WF1);
+    if (run) {
+      run.status = 'COMPLETED';
+      run.runId = 'run-other';
+    }
+    await triageParkedTasks(d);
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    const rows = (await t.db.select().from(auditLog)).filter((a) => a.action === 'commander.redo');
+    expect(rows.map((r) => (r.after as { phase: string }).phase)).toEqual([
+      'stop-requested',
+      'stop-unconfirmed',
+      'given-up',
+    ]);
+    expect((await parkNotice())?.body).toContain('run 身份变了');
+  });
+
+  it('起新代的响应丢了但服务端已创建：回执写启动未确认，下一轮发现新代已存在，不再起第二个', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    fake.w.startFault = () => 'lost';
+    const first = await triageParkedTasks(d);
+    expect(first.left).toHaveLength(1);
+    expect(fake.w.starts).toEqual([WF2]);
+    expect((await parkNotice())?.body).toContain('新代待启动或启动没得到确认');
+    state.stalled = false;
+    await triageParkedTasks(d);
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([WF2]);
+    expect(fake.w.runs.size).toBe(2);
+    expect((await parkNotice())?.body).toContain('已经存在');
+  });
+
+  it('起新代被拒：接续最多再试到总次数，试满后不再起、交人', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    fake.w.startFault = () => 'fail';
+    await triageParkedTasks(d);
+    state.stalled = false;
+    for (let i = 0; i < 6; i++) await triageParkedTasks(d);
+    expect(fake.w.starts).toHaveLength(PARK_TRIAGE_REDO_START_TRIES);
+    expect(fake.w.runs.has(WF2)).toBe(false);
+    expect((await parkNotice())?.title).toContain('不再接续');
+  });
+
+  it('接续账写不进：不发叫停，回执如实写没动手', async () => {
+    const { fake, d } = await seedRedoRig();
+    const broken = {
+      ...d,
+      redoJournal: async () => {
+        throw new Error('库连不上');
+      },
+    };
+    await triageParkedTasks(broken);
+    expect(fake.w.signals).toEqual([]);
+    expect((await parkNotice())?.body).toContain('任务没动');
+  });
+
+  it('叫停已发出后进程中断（只有 stop-requested）：重启后的调度凭账接续一次', async () => {
+    const { task, fake, state, d } = await seedRedoRig();
+    state.stalled = false;
+    fake.w.finish(WF1);
+    await d.redoJournal({
+      row: { taskId: task.id, owner: 'acme', name: 'app', issueNumber: 7, workflowId: WF1 },
+      workflowId: WF1,
+      parkSeq: 3,
+      rec: {
+        phase: 'stop-requested',
+        trail: { fromGeneration: 1, runs: [{ workflowId: WF1, runId: 'run-1' }] },
+      },
+    });
+    await Promise.all([triageParkedTasks(d), triageParkedTasks(d)]);
+    await triageParkedTasks(d);
+    expect(fake.w.runs.has(WF2)).toBe(true);
+    expect(fake.w.runs.size).toBe(2);
+  });
+
+  // —— 根独验退回（#3521 review）的五条边界 ——
+  it('读不到旧代 run 身份：任何副作用之前就拒绝，不发叫停', async () => {
+    const { fake, d } = await seedRedoRig();
+    const run = fake.w.runs.get(WF1);
+    if (run) run.runId = undefined as never;
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([]);
+    expect(fake.w.starts).toEqual([]);
+    expect(await ledgerPhases()).toEqual([]);
+    expect((await parkNotice())?.body).toContain('任务没动');
+  });
+
+  it('新代已存在但旧代仍在跑：不报接续完成，也不重起/覆盖新代', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.runs.set(WF2, { runId: 'new-run', status: 'RUNNING', phase: 'running' });
+    const result = await triageParkedTasks(d);
+    expect(fake.w.runs.get(WF1)?.status).toBe('RUNNING');
+    expect(result.acted).toEqual([]);
+    expect(fake.w.starts).toEqual([]);
+    expect((await parkNotice())?.title).not.toContain('接续完成');
+    // 旧代读不到同样不能报完成
+    fake.w.describeFault = (id) => (id === WF1 ? new Error('读不到') : undefined);
+    expect((await triageParkedTasks(d)).acted).toEqual([]);
+  });
+
+  it('起新代的响应丢了、25 小时后仍读不到：未知责任持久保留并报没查成，不写 given-up、不宣称新代不存在', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    fake.w.startFault = () => 'lost';
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.advance(25 * 3_600_000);
+    fake.w.describeFault = () => new Error('unreachable');
+    const first = await triageParkedTasks(d);
+    const second = await triageParkedTasks(d);
+    expect(await ledgerPhases()).not.toContain('given-up');
+    expect(await ledgerPhases()).toContain('unverified');
+    expect((await parkNotice())?.body).not.toContain('没有在跑的新代');
+    expect((await parkNotice())?.body).toContain('没查成');
+    // 每一轮都继续报未核实，不因过了时间就算结清
+    expect(first.problems.join('\n')).toContain('未核实');
+    expect(second.problems.join('\n')).toContain('未核实');
+    expect(fake.w.starts).toEqual([WF2]);
+    // 读得到之后：新代存在 → 收口为 exists
+    fake.w.describeFault = undefined;
+    await triageParkedTasks(d);
+    expect(await ledgerPhases()).toContain('exists');
+    expect(fake.w.starts).toEqual([WF2]);
+  });
+
+  it('旧代停止后任务转给本机：接续拒绝，不再 Start', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.finish(WF1);
+    await t.db.update(tasks).set({ executor: 'local' });
+    const out = await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(out.left.map((x) => x.why).join('\n')).toContain('不属于引擎');
+    expect((await parkNotice())?.body).toContain('不属于引擎');
+    expect(await ledgerPhases()).toContain('given-up');
+  });
+
+  it('任务行读不到或和账对不上：不 Start，保持待接续', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.finish(WF1);
+    await t.db.update(tasks).set({ issueNumber: 99 });
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+  });
+
+  it('同键后来一条坏的 start-requested（trail 空）：阻断该意图并报 problems，不沿旧 trail 继续 Start', async () => {
+    const { task, fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.finish(WF1);
+    await d.redoJournal({
+      row: { taskId: task.id, owner: 'acme', name: 'app', issueNumber: 7, workflowId: WF1 },
+      workflowId: WF1,
+      parkSeq: 3,
+      rec: {
+        phase: 'start-requested',
+        trail: { fromGeneration: 1, runs: [] },
+        newWorkflowId: WF2,
+        generation: 2,
+      },
+    });
+    const out = await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(out.problems.join('\n')).toContain('阻断');
+    const again = await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(again.problems.join('\n')).toContain('阻断');
+  });
+
+  // —— 第 2 轮根独验退回：两处接续缺口 ——
+  it('起新代响应丢了、新代已把任务行改成 running：接续只读确认同一新代已存在，不 Start', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    fake.w.startFault = () => 'lost';
+    await triageParkedTasks(d);
+    state.stalled = false;
+    await t.db.update(tasks).set({ state: 'running' });
+    const result = await triageParkedTasks(d);
+    expect(result.acted).toHaveLength(1);
+    expect(fake.w.starts).toEqual([WF2]);
+    expect((await parkNotice())?.title).toContain('接续完成');
+    expect(await ledgerPhases()).toContain('exists');
+  });
+
+  it('任务行不是停着/已放弃（running）而新代并不存在：只读核对不能变成 Start 或叫停，记 given-up', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.finish(WF1);
+    await t.db.update(tasks).set({ state: 'running' });
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(await ledgerPhases()).toContain('given-up');
+  });
+
+  it('叫停请求记账后、发信号前进程崩溃：接续在同一授权意图内补发已核 run 的叫停，旧代结束后只起一个新代', async () => {
+    const { task, fake, state, d } = await seedRedoRig();
+    state.stalled = false;
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    await d.redoJournal({
+      row: { taskId: task.id, owner: 'acme', name: 'app', issueNumber: 7, workflowId: WF1 },
+      workflowId: WF1,
+      parkSeq: 3,
+      rec: {
+        phase: 'stop-requested',
+        trail: { fromGeneration: 1, runs: [{ workflowId: WF1, runId: 'run-1' }] },
+      },
+    });
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([WF2]);
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([WF2]);
+    expect(await ledgerPhases()).toEqual(['stop-requested', 'stop-requested', 'start-requested', 'started']);
+  });
+
+  it('补发叫停有界：叫停一直不生效时，总共只发 PARK_TRIAGE_REDO_STOP_TRIES 次，不起新代', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    for (let i = 0; i < 6; i++) await triageParkedTasks(d);
+    expect(fake.w.signals).toHaveLength(PARK_TRIAGE_REDO_STOP_TRIES);
+    expect(fake.w.starts).toEqual([]);
+  });
+
+  it.each(['running', 'abandoned'])(
+    '补发叫停只对真正停着的旧代：旧代姿态是 %s 时不再发信号也不 Start',
+    async (phase) => {
+      const { fake, state, d } = await seedRedoRig();
+      await triageParkedTasks(d);
+      state.stalled = false;
+      const run = fake.w.runs.get(WF1);
+      if (run) run.phase = phase;
+      await triageParkedTasks(d);
+      expect(fake.w.signals).toEqual([WF1]);
+      expect(fake.w.starts).toEqual([]);
+    },
+  );
+
+  it('旧代还停着时任务转给本机：接续不补发叫停、不 Start', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    await t.db.update(tasks).set({ executor: 'local' });
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([]);
+  });
+
+  it('旧代还停着时 run 身份变了：接续不补发叫停、不 Start', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    const run = fake.w.runs.get(WF1);
+    if (run) run.runId = 'run-other';
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([]);
+  });
+
+  it('多个旧代都停着时，首次叫停先对全部旧代发出请求，接续只读不再补叫停', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    const WF1B = 'task:acme/app#7:r2';
+    fake.w.runs.set(WF1B, { runId: 'run-2', status: 'RUNNING', phase: 'parked' });
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1, WF1B]);
+    state.stalled = false;
+    for (const id of [WF1, WF1B]) fake.w.finish(id);
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1, WF1B]);
+    expect(fake.w.starts).toEqual(['task:acme/app#7:r3']);
+  });
+
+  it.each(['running', 'unreadable'])(
+    '补发前任何旧代姿态为 %s：整批拒绝，不对其它旧代补发叫停',
+    async (posture) => {
+      const { fake, state, d } = await seedRedoRig();
+      fake.w.runs.set(WF2, { runId: 'run-2', status: 'RUNNING', phase: 'parked' });
+      await triageParkedTasks(d);
+      state.stalled = false;
+      const handle = fake.client.workflow.getHandle;
+      fake.client.workflow.getHandle = (id) => {
+        const old = handle(id);
+        return {
+          ...old,
+          query: async () => {
+            if (id === WF1) {
+              if (posture === 'unreadable') throw new Error('posture unavailable');
+              return { ...(await old.query()), phase: 'running' };
+            }
+            return old.query();
+          },
+        };
+      };
+      await triageParkedTasks(d);
+      expect(fake.w.signals).toEqual([WF1, WF2]);
+      expect(fake.w.starts).toEqual([]);
+    },
+  );
+
+  it('接续查询旧代姿态期间任务转本机：补发信号前重读归属并拒绝', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    const handle = fake.client.workflow.getHandle;
+    fake.client.workflow.getHandle = (id) => {
+      const old = handle(id);
+      return {
+        ...old,
+        query: async () => {
+          await t.db.update(tasks).set({ executor: 'local' });
+          return old.query();
+        },
+      };
+    };
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([]);
+  });
+
+  // 第 3 轮：所有耗时的远端读、写账之后，真正 signal/Start 前必须重读归属，不复用查询前读到的结果
+  it('首次重做：查姿态期间任务转本机，发叫停前重读归属并拒绝，回执写任务没动', async () => {
+    const { fake, d } = await seedRedoRig();
+    const handle = fake.client.workflow.getHandle;
+    fake.client.workflow.getHandle = (id) => {
+      const old = handle(id);
+      return {
+        ...old,
+        query: async () => {
+          const answer = await old.query();
+          await t.db.update(tasks).set({ executor: 'local' });
+          return answer;
+        },
+      };
+    };
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    const out = await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([]);
+    expect(fake.w.starts).toEqual([]);
+    expect(out.acted).toEqual([]);
+    expect(await ledgerPhases()).not.toContain('started');
+  });
+
+  it('接续：读旧代代次期间任务转本机，起新代前重读归属并拒绝，账收口成 given-up', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.finish(WF1);
+    const handle = fake.client.workflow.getHandle;
+    fake.client.workflow.getHandle = (id) => {
+      const old = handle(id);
+      return {
+        ...old,
+        describe: async () => {
+          const answer = await old.describe();
+          if (id === WF1) await t.db.update(tasks).set({ executor: 'local' });
+          return answer;
+        },
+      };
+    };
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(await ledgerPhases()).not.toContain('started');
+  });
+
+  it('首次重做：旧代已终止、第二次读代次期间任务转本机，起新代前重读归属并拒绝', async () => {
+    const { fake, d } = await seedRedoRig();
+    let reads = 0;
+    const handle = fake.client.workflow.getHandle;
+    fake.client.workflow.getHandle = (id) => {
+      const old = handle(id);
+      return {
+        ...old,
+        describe: async () => {
+          const answer = await old.describe();
+          if (id === WF1 && ++reads === 2) await t.db.update(tasks).set({ executor: 'local' });
+          return answer;
+        },
+      };
+    };
+    const wf1 = fake.w.runs.get(WF1);
+    if (!wf1) throw new Error('测试装配缺旧代');
+    wf1.status = 'COMPLETED';
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(await ledgerPhases()).not.toContain('started');
   });
 });

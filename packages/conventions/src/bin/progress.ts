@@ -8,6 +8,8 @@ import { progressSessionId } from '../progress-session.ts';
 // 读的是本地 origin/main 加 gh 读开着的单，加 #1055 收件箱最近 30 天；没有就输出空、退出码 0。
 // 主人＝本会话的血缘：CLAUDE_CODE_SESSION_ID 所属的 Mirasim 会话目录名（agents/hooks/founder-inbox.mjs 的 lineageOf）。
 // `directive --from-inbox <评论号>`：把驾驶舱答案收件箱（#1055）里的一条搬进仓（挂单同 directive），原评论改成已迁。
+// `directive` 和 `--from-inbox` 必须带 `--kind ai|product|task|once|ops`（决定 0111），判类放在读 prompt-log、fetch、调 gh 之前；
+// 非 ai 不写文件、退出 0 并说去处，收件箱的那条评论改成已处理。
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
@@ -35,7 +37,12 @@ import { gitRunner } from '../git-runner.ts';
 import { ghRunner, issueNew } from '../issue-new.ts';
 import { flushPrivateQuotes, privatizeDirective, publicMeaning } from '../private-quotes.ts';
 import {
+  type DirectiveKind,
   inboxPending,
+  isDirectiveKind,
+  KIND_JUDGE,
+  kindDestination,
+  markHandled,
   markMigrated,
   PENDING_TAG,
   PROGRESS_ISSUE,
@@ -208,6 +215,7 @@ try {
       pending: { type: 'boolean' },
       issue: { type: 'string' },
       'from-inbox': { type: 'string' },
+      kind: { type: 'string' },
       meaning: { type: 'string' },
       stdin: { type: 'boolean' },
     },
@@ -218,12 +226,34 @@ try {
     if (!m?.[1]) throw new ProgressRefused(`--issue ${values.issue} 不对，要单号（如 2727）。`);
     return Number(m[1]);
   };
-  if (cmd === 'directive' && external) {
+  // 先判类再动手：放在读 prompt-log、fetch、调 gh 之前（决定 0111）。类别由 AI 自报，代码不猜（决定 0013）。
+  let kind: DirectiveKind | undefined;
+  if (cmd === 'directive') {
+    if (!isDirectiveKind(values.kind))
+      throw new ProgressRefused(
+        `${values.kind === undefined ? '没带 --kind' : `--kind ${values.kind} 认不出`}（要 ai|product|task|once|ops 之一），引导没记。\n${KIND_JUDGE}`,
+      );
+    kind = values.kind;
+  }
+  if (cmd === 'directive' && kind === 'ai' && external) {
     publicMeaning(values.meaning);
     if (positionals.length)
       throw new DirectiveRefused('对外仓原话只从 prompt-log 或 --stdin 读取，不接受命令行正文。');
   }
-  if (cmd === 'quotes:flush') {
+  if (cmd === 'directive' && kind !== undefined && kind !== 'ai') {
+    // 不该记引导的类别：不写文件、不开单；收件箱的那条评论照样标成已处理并写明去处，退出 0。
+    const where = kindDestination(kind, external);
+    const fromInbox = values['from-inbox'];
+    if (fromInbox !== undefined) {
+      const cid = Number(fromInbox);
+      if (!Number.isInteger(cid) || cid <= 0)
+        throw new ProgressRefused(`--from-inbox ${fromInbox} 不对，要收件箱评论号。`);
+      await markHandled(await readInboxComment(cid, { gh }), where, { gh });
+      console.log(`评论 ${cid} 判成 ${kind}，已标成已处理，没写文件。记在：${where}。`);
+    } else {
+      console.log(`判成 ${kind}，不进创始人引导，没写文件。记在：${where}。`);
+    }
+  } else if (cmd === 'quotes:flush') {
     const result = await flushPrivateQuotes(homedir(), privateApi);
     console.log('私有原话补传：成功 ' + result.sent + '，未传成 ' + result.remaining + '（内容不回显）。');
     if (result.remaining) process.exitCode = 2;
@@ -235,7 +265,7 @@ try {
     if (!Number.isInteger(cid) || cid <= 0)
       throw new ProgressRefused(`--from-inbox ${values['from-inbox']} 不对，要收件箱评论号。`);
     const r = await importFromInbox(cid, issueArg(), values.meaning);
-    console.log(`搬进仓了（评论 ${cid}，挂单 #${r.issue}），PR 已挂自动合并：${r.url}`);
+    console.log(`搬进仓了（评论 ${cid}，挂单 #${r.issue}），PR 已挂自动合并：${r.url}\n${KIND_JUDGE}`);
   } else if (cmd === 'directive') {
     let text = positionals.join(' ');
     if (values.stdin) {
@@ -268,7 +298,7 @@ try {
     const made = await recordDirective(safe, deps, issueArg());
     console.log(
       `记下创始人引导 ${made.id}（挂单 #${made.issue}，主：${safe.owner}，时间 ${safe.at}，来源 ${safe.source}）：${made.path}，PR 已挂自动合并 ${made.url}\n` +
-        `${external ? '意思' : '原话'}：${safe.text.replace(/\s+/g, ' ').slice(0, 200)}\n办完就是把单 #${made.issue} 关掉：干活的 PR 写 Closes #${made.issue}（合并自动关），这个文件不用再改。`,
+        `${external ? '意思' : '原话'}：${safe.text.replace(/\s+/g, ' ').slice(0, 200)}\n办完就是把单 #${made.issue} 关掉：干活的 PR 写 Closes #${made.issue}（合并自动关），这个文件不用再改。\n${KIND_JUDGE}`,
     );
   } else if (cmd === 'read') {
     const limit = values.limit === undefined ? 10 : Number(values.limit);
@@ -298,7 +328,10 @@ try {
   }
 } catch (e) {
   console.error(
-    external && process.argv[2] === 'directive' && !(e instanceof DirectiveRefused)
+    external &&
+      process.argv[2] === 'directive' &&
+      !(e instanceof DirectiveRefused) &&
+      !(e instanceof ProgressRefused)
       ? '对外仓引导没记成；私有原话已存的保留待传，内容不回显。'
       : e instanceof Error
         ? e.message

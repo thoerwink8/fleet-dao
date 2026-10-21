@@ -168,7 +168,10 @@ describe('真实progress入口', { timeout: 0 }, () => {
         ['https://fixture', 'synthetic-password@fixture.invalid/project'].join(':'),
       ]).status,
     ).toBe(0);
-    for (const args of [['directive'], ['directive', '--from-inbox', '123']]) {
+    for (const args of [
+      ['directive', '--kind', 'ai'],
+      ['directive', '--kind', 'ai', '--from-inbox', '123'],
+    ]) {
       const result = runChild(process.execPath, ['packages/conventions/src/bin/progress.ts', ...args], {
         env: { ...process.env, INIT_CWD: h, USERPROFILE: h, HOME: h },
       });
