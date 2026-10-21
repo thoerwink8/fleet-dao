@@ -30,3 +30,4 @@
 - 加改接口：shared 契约 → 后端路由（`packages/api`）→ `src/api/http.ts` → mock（`src/api/mock/server.ts` 实现 `FleetApi`，不同步编译不过）。
 - api 的测试也读 web 的文件（`packages/conventions/src/ci-plan.ts` 的 `TEST_READS`）：改这里可能让 api 的测试红。
 - 改了页面行为：同步 design 第十五节「驾驶舱」对应条。
+- 通知中心看门狗提醒的修复区（#3033/#3034，`src/components/alert-repair.tsx`、判法 `src/lib/alert-repair.ts`）只摆后端 `repair` 给的动作，送动作编号 + incident + `requestId`，已修复只认后端 `verified`；改它要同步 `packages/api/src/alert-repair.ts` 的契约和 design 第十五节「看门狗提醒的受控修复」条。
