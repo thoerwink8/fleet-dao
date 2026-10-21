@@ -802,7 +802,7 @@ function mergeText(cwd, name) {
   return readNoFollow(rest ? join(abs, rest) : abs, name);
 }
 
-function collect(cwd, keepBytes) {
+function collect(cwd, keepBytes, restoredObjects = false) {
   CLOSED.clear();
   metadataRead = 0;
   visitedPaths = 0;
@@ -849,22 +849,39 @@ function collect(cwd, keepBytes) {
     const text = mergeText(cwd, item.name).toString('utf8');
     for (const sha of sequenceObjects(item.name, text, cwd)) addClosure(sha, cwd, oids);
   }
+  if (restoredObjects) {
+    // 仅用于新建的隔离恢复仓：普通 reflog 不重建，但其中的对象必须真实恢复；额外对象也不能藏掉。
+    const output = git(
+      ['cat-file', '--batch-all-objects', '--batch-check=%(objectname)'],
+      cwd,
+      undefined,
+      (MAX_OBJECTS + 1) * 41,
+    ).toString('utf8');
+    if (output.length === 0 || !output.endsWith('\n')) fail('恢复物理对象枚举输出为空或截断');
+    const physical = new Set();
+    for (const sha of output.slice(0, -1).split('\n')) {
+      if (!/^[0-9a-f]{40}$/.test(sha)) fail('恢复物理对象枚举输出认不出');
+      if (physical.has(sha)) fail('恢复物理对象枚举重复');
+      physical.add(sha);
+      if (physical.size > MAX_OBJECTS) fail('恢复物理对象太多');
+      oids.add(sha);
+    }
+  }
   const list = [...oids].sort();
   if (list.length > MAX_OBJECTS) fail('快照对象太多');
-  const checked = git(
+  const output = git(
     ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'],
     cwd,
     Buffer.from(`${list.join('\n')}\n`),
-  )
-    .toString('utf8')
-    .trim()
-    .split('\n')
-    .filter(Boolean);
+  ).toString('utf8');
+  if (!output.endsWith('\n')) fail('对象闭包核对输出截断');
+  const checked = output.slice(0, -1).split('\n');
   if (checked.length !== list.length) fail(`对象闭包对不上：要 ${list.length} 个，看到 ${checked.length} 个`);
   let expanded = 0;
-  const objects = checked.map((line) => {
-    const [sha, type, sizeText] = line.split(' ');
-    if (!sha || !type || type === 'missing') fail(`对象缺失：${line}`);
+  const objects = checked.map((line, index) => {
+    const match = /^([0-9a-f]{40}) (blob|tree|commit|tag) (0|[1-9][0-9]*)$/.exec(line);
+    if (!match || match[1] !== list[index]) fail(`对象闭包核对输出认不出：${line}`);
+    const [, sha, type, sizeText] = match;
     const size = Number(sizeText);
     expanded += size;
     if (!Number.isSafeInteger(size) || size < 0 || size > MAX_OBJECT_BYTES || expanded > MAX_TOTAL)
@@ -1501,7 +1518,7 @@ async function restore(components, root) {
     }
     rebuildStash(repo, state.stash);
     checkObjectTypes(repo, state.objects, (obj, got) => `对象 ${obj.sha} 应是 ${obj.type}，实际 ${got}`);
-    return collect(repo, false).state;
+    return collect(repo, false, true).state;
   } finally {
     cleanupOperationRoot(root);
   }

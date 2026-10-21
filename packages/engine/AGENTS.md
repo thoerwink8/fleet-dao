@@ -121,6 +121,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - 复杂快照的 capture、verify、recheck 统一走专用有界流，普通 `UserExec` 仍限 110MiB；v3 帧和拆组件归档字节保持兼容。状态元数据限 32MiB，整帧（含帧头）和单轮临时组件各限 1GiB，文件路径最多 100000、对象最多 250000；PACK 与 BUNDLE 内的 PACK 各先逐块检查单对象及 delta 目标不超过 256MiB、实际 inflate 和目标总量各不超过 1GiB，再独立核验；这趟预算解析每次调用只用一个私有 64KiB 顺序预读缓冲（对象头和 zlib 输入共用，按 bytesWritten 推进，文件字节只读一遍，读取量随包长而不随对象数放大，`test/real/complex-snapshot-pack-budget.test.ts` 钉住），不做跨调用缓存。完整 END 前只落隔离组件，原树不写；恢复目标文件累计不超过 1GiB。浅仓（含浅仓的链接工作树）不支持：v3 不保留 shallow 边界，对象闭包不完整，`collect` 一开头（先于读树、打包、出帧）用 `rev-parse --is-shallow-repository` 现测，每次调用都测、不缓存；是浅仓、命令失败、输出不是 `true`/`false` 都明确失败留原树，`gitEnv` 清掉 `GIT_SHALLOW_FILE`、`GIT_COMMON_DIR` 防环境改写浅边界判定（`test/real/complex-snapshot-shallow.test.ts`，仅 Linux）。这只是提前识别，不支持浅历史保全，不 fetch/unshallow。准备和主命令共用 240 秒，取消或失败后的临时事务按本次 token 与已确认 dev/ino/uid 清理，共享原 10 秒收尾；身份变或收尾读不全明确留待核验，不生成成功回执。
 
+- 复杂快照源采集仍只读 refs/reflog、索引和操作状态的对象闭包，不纳入无关垃圾对象；恢复末次采集仅在全新隔离仓用有界 `cat-file --batch-all-objects` 实读全部物理对象，再核类型/大小并严格比较。普通 reflog 不重建，其遗留对象仍须在实际清单中；额外对象也不按声明裁剪。PACK 在 BUNDLE 前独立核全的顺序不变（`test/real/complex-preserve.test.ts`、`complex-snapshot-batch.test.ts`）。
+
 - 完整检出成功回执由 `placeVerifyCheckout.onCompleted` 在 ensureHead、checkout、最终取消守卫后独立写入，不借撤卡证明成功；写失败诊断证据未知，不改 full 或验收裁决。每次物理调用新 receiptId，调用者确实已分配才传 verifier runId。
 - 看门狗提醒的受控修复（#3033，`packages/api/src/alert-repair.ts`）按看门狗的提醒键、标题和撤卡口径现算动作、核验：改 `jobs/watchdog.ts`、`jobs/idle-running.ts`、`real/watchdog.ts` 里的键格式（`watchdog:idle-running:<任务编号>`、`watchdog:release:train:<提交>:running|failed`）、阈值或撤卡条件，要同步 api 的 `IDLE_PREFIX`、`RELEASE_KEY` 和 core 的 idle-running 判据；`packages/api/test/alert-repair.test.ts` 用真看门狗造提醒，会因此变红。
 - 看门狗只负责报和撤卡，不执行修复；修复动作、幂等、核验和交给修复开单都在 api 里，引擎这边不为它加开关，也不改合并闸、冷验收、改标准路径这些护栏。

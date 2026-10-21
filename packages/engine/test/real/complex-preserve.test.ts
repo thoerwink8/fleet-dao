@@ -404,6 +404,80 @@ function sweepDeps(
 }
 
 describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
+  it('普通 HEAD reflog-only 的 amend 历史独立保全，源 stray 对象不进入归档', async () => {
+    const t = tree('acme_web/3544-reflog');
+    dirtyFile(t);
+    git(t.dir, 'update-ref', '-d', 'refs/fleet/incoming');
+    const old = git(t.dir, 'rev-parse', 'HEAD');
+    writeFileSync(join(t.dir, 'base.txt'), 'amended\n');
+    git(t.dir, 'add', 'base.txt');
+    git(t.dir, 'commit', '-q', '--amend', '-m', 'amended');
+    expect(git(t.dir, 'rev-list', '--all')).not.toContain(old);
+    expect(git(t.dir, 'reflog', '--format=%H', 'HEAD')).toContain(old);
+    expect(existsSync(join(t.dir, '.git', 'ORIG_HEAD'))).toBe(false);
+    const stray = gitClean(t.dir, ['hash-object', '-w', '--stdin'], Buffer.from('stray\n')).trim();
+    const before = [
+      readFileSync(join(t.dir, 'base.txt')),
+      readFileSync(join(t.dir, 'dirty.txt')),
+      readFileSync(join(t.dir, '.git', 'index')),
+      readFileSync(join(t.dir, '.git', 'logs', 'HEAD')),
+      Buffer.from(git(t.dir, 'show-ref')),
+    ];
+    const saved = await preserveWorktree(t, archive, gate());
+    expect(saved).toBeTruthy();
+    const state = JSON.parse(readFileSync(join(saved as string, 'state.json'), 'utf8'));
+    expect(state.objects).toHaveLength(6);
+    expect(state.objects.some((obj: { sha: string }) => obj.sha === old)).toBe(true);
+    expect(state.objects.some((obj: { sha: string }) => obj.sha === stray)).toBe(false);
+    assertPackHasCommits(readFileSync(join(saved as string, 'objects.pack')), [old], 'reflog');
+    await recheckPreservedArchive(t, saved as string, gate(), await locateTree(t), []);
+    expect([
+      readFileSync(join(t.dir, 'base.txt')),
+      readFileSync(join(t.dir, 'dirty.txt')),
+      readFileSync(join(t.dir, '.git', 'index')),
+      readFileSync(join(t.dir, '.git', 'logs', 'HEAD')),
+      Buffer.from(git(t.dir, 'show-ref')),
+    ]).toEqual(before);
+  });
+
+  it('隔离恢复仓多出真实 dangling blob 时严格比较拒绝，不发回执、不删源', async () => {
+    const t = tree('acme_web/3544-extra');
+    dirtyFile(t);
+    const stray = gitClean(t.dir, ['hash-object', '-w', '--stdin'], Buffer.from('extra\n')).trim();
+    const pack = join(root, 'extra.pack');
+    const packed = runChildBytes('git', ['pack-objects', '--stdout'], {
+      cwd: t.dir,
+      env: cleanEnv(),
+      input: `${stray}\n`,
+    });
+    expect(packed.status).toBe(0);
+    writeFileSync(pack, packed.stdout);
+    const wrapper = join(root, 'extra-git.sh');
+    // 不改声明/JSON：只在 fresh 恢复仓 fetch 时实导额外物理对象，其余均转给真实 Git。
+    writeFileSync(
+      wrapper,
+      [
+        '#!/bin/sh',
+        'case "$*" in',
+        `  *'fetch --no-tags '*) git index-pack --stdin --strict < '${pack}' >/dev/null || exit 4 ;;`,
+        'esac',
+        'exec git "$@"',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(wrapper, 0o755);
+    const removed: string[] = [];
+    await expect(
+      preserveThenRemove({ ...t, git: wrapper }, archive, gate(), undefined, async () => {
+        removed.push(t.dir);
+        return { gone: false };
+      }),
+    ).rejects.toThrow(/独立恢复的成果和原树对不上/);
+    expect(removed).toEqual([]);
+    for (const name of archives()) expect(existsSync(join(archive, name, 'receipt.json'))).toBe(false);
+    expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
+  });
+
   it('BUNDLE完整也不能补坏PACK，超大对象头及缺END均从真实verify入口拒绝留源', async () => {
     const t = tree('bad-stream/3213-keep');
     dirtyFile(t);
