@@ -18,6 +18,8 @@ export const ACCEPTANCE_HISTORY_LIMITS = {
   events: 20_000,
   bytes: 32 * 1024 * 1024,
   tokenBytes: 16 * 1024,
+  /** 终态之后允许连续出现的 0 事件页（终态页仍带 token 时的空尾页）；其余预算不变。 */
+  emptyTailPages: 2,
 } as const;
 export interface AcceptanceExecutionIdentity {
   taskId: string;
@@ -180,6 +182,7 @@ export function acceptanceExecutionReader(
           last = 0n,
           events = 0,
           pages = 0,
+          emptyTail = 0,
           bytes = 0,
           startHash = '',
           closed = false;
@@ -209,8 +212,14 @@ export function acceptanceExecutionReader(
             events + (es?.length ?? 0) > ACCEPTANCE_HISTORY_LIMITS.events
           )
             fail('limit');
-          if (response.rawHistory?.length || response.archived || !es?.length) fail('malformed_history');
-          for (const event of es) {
+          if (response.rawHistory?.length || response.archived) fail('malformed_history');
+          // 分页只按 token 耗尽收尾：Temporal 可在终态页后带 token，再给 0 事件的尾页。
+          // 空页只在唯一终态之后合法（之前的空页就是缺事件），且连续个数有限。
+          if (!es?.length) {
+            if (!closed) fail('malformed_history');
+            if (++emptyTail > ACCEPTANCE_HISTORY_LIMITS.emptyTailPages) fail('limit');
+          }
+          for (const event of es ?? []) {
             check();
             const n = BigInt(event.eventId?.toString() ?? '0');
             if (closed || n !== last + 1n) fail('malformed_history');
@@ -306,7 +315,6 @@ export function acceptanceExecutionReader(
           }
           token = response.nextPageToken ?? new Uint8Array();
           if (!token.byteLength) break;
-          if (closed) fail('malformed_history');
           if (token.byteLength > ACCEPTANCE_HISTORY_LIMITS.tokenBytes) fail('limit');
           const key = Buffer.from(token).toString('base64');
           if (seen.has(key)) fail('malformed_history');

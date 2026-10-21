@@ -39,6 +39,11 @@ export interface WorkflowControl {
     workflowId: string,
   ): Promise<{ workflowId: string; runId: string; running: boolean }>;
   /**
+   * 只读现查一个已结束的任务工作流 run（受管纠正 task correct-merged 用）：这个 run 的终态、结果，以及这个编号当前最新的 run。
+   * 不发信号、不改历史、不起新一代；读不到、run 不存在、还没结束都抛错或如实回非 COMPLETED，不猜。
+   */
+  closedTaskWorkflow?(workflowId: string, runId: string): Promise<ClosedTaskWorkflow>;
+  /**
    * 这张单的信号该打到哪一代（在跑的，或都结束了就最高的那一代）。没给就用第一代编号。
    * 问不清抛 WorkflowUnavailableError，不假装打到第一代。
    */
@@ -49,6 +54,17 @@ export interface WorkflowControl {
    * 没接 Temporal、旧 worker 不认都明确拒绝；Temporal 连不上抛 WorkflowUnavailableError。
    */
   remeasureLineBudget?(request: LineBudgetRemeasureRequest): Promise<LineBudgetRemeasureResponse>;
+}
+
+/** 一个任务工作流 run 的终态；status 是 Temporal 的状态名（COMPLETED、RUNNING、FAILED……），result 是 COMPLETED 时的返回值。 */
+export interface ClosedTaskWorkflow {
+  workflowId: string;
+  runId: string;
+  /** 同一工作流编号现在最新的 run；和 runId 不同说明这个编号后来又起过新的 run。 */
+  latestRunId: string;
+  status: string;
+  closeTime?: string | undefined;
+  result?: unknown;
 }
 
 /** 停点编号：parks.generation.continued（预检打印、执行时必须原样带回）。 */
