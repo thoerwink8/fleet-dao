@@ -291,9 +291,10 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       mainPeak = Math.max(mainPeak, mainBytes);
       journalPeak = Math.max(journalPeak, journalBytes);
       blocksPeak = Math.max(blocksPeak, blocks);
-      diag.mainBytes = mainBytes;
+      // 主库没读到就不是 0 字节；journal 不在才是真 0。
+      diag.mainBytes = main ? mainBytes : 'unknown';
       diag.journalBytes = journalBytes;
-      diag.blocks = blocks;
+      diag.blocks = main ? blocks : 'unknown';
       observed++;
     };
     DatabaseSync.prototype.prepare = function (sql: string) {
