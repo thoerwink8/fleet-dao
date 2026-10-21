@@ -12,6 +12,11 @@ export interface TreeHelperOptions {
   helper?: string;
   sudo?: readonly string[];
   signal?: AbortSignal;
+  /**
+   * 只给测试把「还没创建子进程」这段撑开。生产调用不传，call 不会因此多等。
+   * 子进程脚本跑起来时进程已经存在，做不到这段。
+   */
+  beforeSpawn?: () => Promise<void> | void;
 }
 
 type Reply = Record<string, unknown>;
@@ -65,7 +70,11 @@ function helperAction(arg: string | undefined): string {
   return arg && /^[a-z][a-z-]{0,31}$/.test(arg) ? arg : '其它';
 }
 
-/** 父进程眼里还在等哪一段。进程已退出但标准输出没关，算异步收尾，不能当成读完。 */
+/**
+ * 父进程眼里还在等哪一段。
+ * 启动只到进程出现为止：已经有 pid / spawn、但一个字都还没读到，是协议读取，不是启动。
+ * 标准输出收完还没退出，是退出。进程已退出（标准输出未必已关），是异步收尾，不能当成读完。
+ */
 export function helperWaitStage(seen: {
   spawned: boolean;
   stdoutBytes: number;
@@ -73,11 +82,10 @@ export function helperWaitStage(seen: {
   exited: boolean;
   closed: boolean;
 }): HelperWaitStage {
-  if (seen.exited && !seen.closed) return '异步收尾';
-  if (!seen.spawned || (seen.stdoutBytes === 0 && !seen.stdoutEnded)) return '启动';
+  if (!seen.spawned) return '启动';
+  if (seen.exited) return '异步收尾';
   if (!seen.stdoutEnded) return '协议读取';
-  if (!seen.exited) return '退出';
-  return '异步收尾';
+  return '退出';
 }
 
 function clip(text: unknown, max: number): string {
@@ -102,8 +110,10 @@ function waitFailure(
 ): TreeHelperError {
   const tail = wait.stdoutEnded ? '标准输出已结束' : '标准输出未结束';
   const now = Date.now();
+  const up = wait.spawned ? '是' : '否';
   return new TreeHelperError(
-    `受管删树未完成：动作=${wait.action} 等待阶段=${wait.stage} 本段已等${now - wait.stageAt}ms 共${now - wait.startedAt}ms ${tail} ${cause} ${clip(stderr, 1000)} ${clip(stdout, 2000)}`,
+    `受管删树未完成：动作=${wait.action} 等待阶段=${wait.stage} 已启动=${up} 已读字节=${wait.stdoutBytes} ` +
+      `本段已等${now - wait.stageAt}ms 共${now - wait.startedAt}ms ${tail} ${cause} ${clip(stderr, 1000)} ${clip(stdout, 2000)}`,
     exitCode,
   );
 }
@@ -142,8 +152,10 @@ function watchHelper(child: ChildProcess, wait: HelperWaitSeen): void {
 }
 
 /**
- * 启动、读协议、等退出、等标准输出关闭是四段不同的等待。回执要等进程退出且输出关闭才解析；
- * 取消、超时、起不来停在哪一段就写在原错误里。不把命令行或环境写进错误。
+ * 启动、读协议、等退出、等进程退出后的收尾是四段不同的等待。
+ * 启动在 execFile 返回前结束：成功时 pid 已经有了，还没读到字节也算协议读取。
+ * 回执要等进程退出且输出关闭才解析；取消、超时、起不来停在哪一段就写在原错误里。
+ * 不把命令行或环境写进错误。
  */
 async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> {
   options.signal?.throwIfAborted();
@@ -181,37 +193,52 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
     TreeHelperError.pending = wait;
     remember(wait);
     stop?.addEventListener('abort', onAbort, { once: true });
-    const child = execFile(
-      bin as string,
-      rest,
-      {
-        encoding: 'utf8',
-        timeout: 115_000,
-        maxBuffer: 128 * 1024,
-        ...(stop ? { signal: stop } : {}),
-      },
-      (error, stdout, stderr) => {
-        finish(() => {
-          if (error) {
-            const errno = error as NodeJS.ErrnoException & { killed?: boolean };
-            const exitCode = typeof errno.code === 'number' ? errno.code : wait.exitCode;
-            if (exitCode !== null) wait.exitCode = exitCode;
-            return reject(waitFailure(wait, waitCause(errno, exitCode), stderr, stdout, exitCode));
-          }
-          try {
-            const value: unknown = JSON.parse(stdout);
-            if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('非对象回执');
-            const row = value as Reply;
-            if (row.version !== 1 || typeof row.state !== 'string' || row.state === 'unknown')
-              throw new Error('删树协议版本/状态不完整');
-            resolve(row);
-          } catch (parseError) {
-            reject(new Error(`受管删树回执读失败：${String(parseError)}`));
-          }
+    const startChild = () => {
+      if (settled) return;
+      const child = execFile(
+        bin as string,
+        rest,
+        {
+          encoding: 'utf8',
+          timeout: 115_000,
+          maxBuffer: 128 * 1024,
+          ...(stop ? { signal: stop } : {}),
+        },
+        (error, stdout, stderr) => {
+          finish(() => {
+            if (error) {
+              const errno = error as NodeJS.ErrnoException & { killed?: boolean };
+              const exitCode = typeof errno.code === 'number' ? errno.code : wait.exitCode;
+              if (exitCode !== null) wait.exitCode = exitCode;
+              return reject(waitFailure(wait, waitCause(errno, exitCode), stderr, stdout, exitCode));
+            }
+            try {
+              const value: unknown = JSON.parse(stdout);
+              if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('非对象回执');
+              const row = value as Reply;
+              if (row.version !== 1 || typeof row.state !== 'string' || row.state === 'unknown')
+                throw new Error('删树协议版本/状态不完整');
+              resolve(row);
+            } catch (parseError) {
+              reject(new Error(`受管删树回执读失败：${String(parseError)}`));
+            }
+          });
+        },
+      );
+      // spawn 事件要等下一拍；pid 在 execFile 返回时已经有了。有 pid 还没字节，不能再叫启动。
+      if (typeof child.pid === 'number' && child.pid > 0) wait.spawned = true;
+      watchHelper(child, wait);
+      remember(wait);
+    };
+    if (options.beforeSpawn) {
+      Promise.resolve()
+        .then(() => options.beforeSpawn?.())
+        .then(startChild, () => {
+          finish(() => reject(waitFailure(wait, '失败', '', '', wait.exitCode)));
         });
-      },
-    );
-    if (child) watchHelper(child, wait);
+    } else {
+      startChild();
+    }
   });
 }
 

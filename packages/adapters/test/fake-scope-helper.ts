@@ -129,13 +129,15 @@ function main(): void {
   }
 }
 
-// FLEET_FAKE_SCOPE_HOLD：startup 先不写不退；protocol 只吐半截；exit 写完并关掉标准输出但不退；
-// cleanup 自己先退，留下还握着标准输出的子进程。HOLD_MS 只给 startup，睡完再走原来的动作。
+// FLEET_FAKE_SCOPE_HOLD：silence 进程已经起来，先不写不退（父进程这时是协议读取，不是启动；
+// 启动只在父进程还没创建子进程之前，这段脚本里做不到）。protocol 只吐半截；
+// exit 写完并关掉标准输出但不退；cleanup 自己先退，留下还握着标准输出的子进程。
+// HOLD_MS 只给 silence，睡完再走原来的动作。
 const hold = process.env.FLEET_FAKE_SCOPE_HOLD;
 const holdMs = Number(process.env.FLEET_FAKE_SCOPE_HOLD_MS ?? '0');
-if (hold === 'startup' && holdMs > 0) {
+if (hold === 'silence' && holdMs > 0) {
   setTimeout(main, holdMs);
-} else if (hold === 'startup') {
+} else if (hold === 'silence') {
   keepAlive();
 } else if (hold === 'protocol') {
   process.stdout.write('{');
