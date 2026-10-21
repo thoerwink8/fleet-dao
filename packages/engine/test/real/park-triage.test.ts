@@ -877,4 +877,72 @@ describe('real/park-triage', () => {
     expect(fake.w.signals).toEqual([WF1]);
     expect(fake.w.starts).toEqual([]);
   });
+
+  // 第 3 轮：所有耗时的远端读、写账之后，真正 signal/Start 前必须重读归属，不复用查询前读到的结果
+  it('首次重做：查姿态期间任务转本机，发叫停前重读归属并拒绝，回执写任务没动', async () => {
+    const { fake, d } = await seedRedoRig();
+    const handle = fake.client.workflow.getHandle;
+    fake.client.workflow.getHandle = (id) => {
+      const old = handle(id);
+      return {
+        ...old,
+        query: async () => {
+          const answer = await old.query();
+          await t.db.update(tasks).set({ executor: 'local' });
+          return answer;
+        },
+      };
+    };
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    const out = await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([]);
+    expect(fake.w.starts).toEqual([]);
+    expect(out.acted).toEqual([]);
+    expect(await ledgerPhases()).not.toContain('started');
+  });
+
+  it('接续：读旧代代次期间任务转本机，起新代前重读归属并拒绝，账收口成 given-up', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.finish(WF1);
+    const handle = fake.client.workflow.getHandle;
+    fake.client.workflow.getHandle = (id) => {
+      const old = handle(id);
+      return {
+        ...old,
+        describe: async () => {
+          const answer = await old.describe();
+          if (id === WF1) await t.db.update(tasks).set({ executor: 'local' });
+          return answer;
+        },
+      };
+    };
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(await ledgerPhases()).not.toContain('started');
+  });
+
+  it('首次重做：旧代已终止、第二次读代次期间任务转本机，起新代前重读归属并拒绝', async () => {
+    const { fake, d } = await seedRedoRig();
+    let reads = 0;
+    const handle = fake.client.workflow.getHandle;
+    fake.client.workflow.getHandle = (id) => {
+      const old = handle(id);
+      return {
+        ...old,
+        describe: async () => {
+          const answer = await old.describe();
+          if (id === WF1 && ++reads === 2) await t.db.update(tasks).set({ executor: 'local' });
+          return answer;
+        },
+      };
+    };
+    const wf1 = fake.w.runs.get(WF1);
+    if (!wf1) throw new Error('测试装配缺旧代');
+    wf1.status = 'COMPLETED';
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(await ledgerPhases()).not.toContain('started');
+  });
 });

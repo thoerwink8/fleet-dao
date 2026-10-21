@@ -341,7 +341,6 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         ok: false,
         why: `任务现在的状态是 ${owned.state}，不是停着/已放弃（${workflowId}），没有重做`,
       };
-    const { repo, title } = owned;
     return w.temporal.use(async (client): Promise<CommanderRedoOutcome> => {
       const read = await readGenerations(client, row);
       if (!read.ok) return read;
@@ -375,6 +374,16 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
               // 先记账再叫停：账写不进就不发，回执才能如实写「任务没动」
               await journal({ phase: 'stop-requested', trail });
               ledgered = true;
+              // 前面读代次、查姿态、写账都耗时：真正发叫停前最后一刻再读一次任务归属，不复用开头读到的结果
+              const last = await verifyOwnership(row);
+              if (!last.ok) {
+                if (last.kind === 'mismatch') throw new GateFinalError(last.why);
+                throw new StopUnconfirmedError(`${last.why}（发叫停前最后一次复核，没有发叫停）`);
+              }
+              if (!last.canAct)
+                throw new GateFinalError(
+                  `任务现在的状态是 ${last.state}，不是停着/已放弃，不再叫停（发叫停前最后一次复核，没有发叫停）`,
+                );
               phase = 'stop';
               // 对所有还在跑（已核都停着）的旧代一次发完叫停请求，之后接续只读证、不再补发，
               // 也就不会有「一直等一个根本没请求过叫停的旧代」。每一条都钉住已核的 run。
@@ -422,8 +431,18 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
               generation: trail.fromGeneration + 1,
             });
             ledgered = true;
+            // 写账和前面的远端读都耗时：真正 Start 前最后一刻再读一次任务归属，不复用前面读到的结果
+            const last = await verifyOwnership(row);
+            if (!last.ok) {
+              if (last.kind === 'mismatch') throw new GateFinalError(last.why);
+              throw new StopUnconfirmedError(`${last.why}（起新代前最后一次复核，没有发 Start）`);
+            }
+            if (!last.canAct)
+              throw new GateFinalError(
+                `任务现在的状态是 ${last.state}，不是停着/已放弃，不再起新代（起新代前最后一次复核，没有发 Start）`,
+              );
             phase = 'start';
-            const started = await startGeneration(row, repo, title, id);
+            const started = await startGeneration(row, last.repo, last.title, id);
             if (started === 'already_exists')
               existing = { workflowId: id, generation: trail.fromGeneration + 1 };
             return started;
@@ -435,6 +454,8 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           // 起新代前核到不能再接续的事实：已经叫停过的才有账可收口，什么都没发就是原样失败
           if (!ledgered) return { ok: false, why };
           await journalBestEffort(journal, { phase: 'given-up', why });
+          // 叫停账写了、但发叫停前最后一次复核就被拒：什么都没发出去，回执照实写「任务没动」，不说「叫停已经执行」
+          if (phase === 'idle') return { ok: false, why };
           return { ok: false, why, stage: 'final' };
         }
         if (phase === 'idle') return { ok: false, why };
@@ -477,7 +498,6 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     const owned = await verifyOwnership(row);
     if (!owned.ok)
       return { ok: false, stage: owned.kind === 'mismatch' ? 'final' : 'waiting', why: owned.why };
-    const { repo, title } = owned;
     return w.temporal.use(async (client): Promise<CommanderRedoOutcome> => {
       let gate = await gateOf(client, row, trail);
       // 叫停请求记账后进程崩溃、或部分旧代的信号根本没送到：在同一授权意图内、对账上已核 run 且姿态仍是 parked 的旧代补发叫停。
@@ -507,12 +527,18 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           }
         }
         if (parked.length > 0) {
+          try {
+            await journal({ phase: 'stop-requested', trail });
+          } catch (err) {
+            return { ok: false, stage: 'waiting', why: `接续账没写进，没有补发叫停：${errMessage(err)}` };
+          }
+          // 姿态查询和写账都耗时：真正补发前最后一刻再读一次任务归属，不复用开头读到的结果
           const beforeSignal = await verifyOwnership(row);
           if (!beforeSignal.ok)
             return {
               ok: false,
               stage: beforeSignal.kind === 'mismatch' ? 'final' : 'waiting',
-              why: beforeSignal.why,
+              why: `${beforeSignal.why}（补发叫停前最后一次复核，没有发叫停）`,
             };
           if (!beforeSignal.canAct)
             return {
@@ -520,11 +546,6 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
               stage: 'waiting',
               why: `任务状态已变成 ${beforeSignal.state}，这一轮不补发叫停`,
             };
-          try {
-            await journal({ phase: 'stop-requested', trail });
-          } catch (err) {
-            return { ok: false, stage: 'waiting', why: `接续账没写进，没有补发叫停：${errMessage(err)}` };
-          }
           const failures: string[] = [];
           for (const g of parked) {
             try {
@@ -582,9 +603,23 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
       } catch (err) {
         return { ok: false, stage: 'waiting', why: `接续账没写进，没有起新代：${errMessage(err)}` };
       }
+      // 读代次和写账都耗时：真正 Start 前最后一刻再读一次任务归属，不复用开头读到的结果
+      const last = await verifyOwnership(row);
+      if (!last.ok)
+        return {
+          ok: false,
+          stage: last.kind === 'mismatch' ? 'final' : 'waiting',
+          why: `${last.why}（起新代前最后一次复核，没有发 Start）`,
+        };
+      if (!last.canAct)
+        return {
+          ok: false,
+          stage: 'final',
+          why: `任务现在的状态是 ${last.state}，不是停着/已放弃，不再起新代（起新代前最后一次复核，没有发 Start）`,
+        };
       let started: 'started' | 'already_exists';
       try {
-        started = await startGeneration(row, repo, title, id);
+        started = await startGeneration(row, last.repo, last.title, id);
       } catch (err) {
         const why = errMessage(err);
         await journalBestEffort(journal, { phase: 'start-unconfirmed', why });
