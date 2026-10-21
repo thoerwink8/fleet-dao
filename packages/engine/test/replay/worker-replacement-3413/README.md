@@ -24,4 +24,12 @@
 
 `la-query-split.test.ts` 用最小工作流真跑出历史，再照这份字节的形状切开：本地活动之后问补丁，切开就报同一句 TMPRL1100；本地活动之后不问补丁、或在本地活动之前问，切开也重放得过。`worker-replacement-capture.test.ts` 另钉这份字节的事件 2–9 形状。这是机制，不是修复：`task.ts` 开头 `limitsFor` 回来后 `activitiesFor` 才问补丁，生产代码怎么改归 #3258，这里不动。查询撞上本地活动结果的窗口很窄，单跑难碰上，CI 负载下偶发；生产里驾驶舱查询撞上之后，换工人或驱逐缓存同样会重放对不上。
 
+## 第二份：负载下走得慢（`slow-parked-query.*`）
+
+本机四个测试文件并行（la-query-split、worker-replacement-capture、push-handback、history-diagnostics），原用例在 `wait:first-worker:parked-query` 等满 20 秒，失败取证：workflow `handback-219c330f-2d51-4859-8c87-780843328926`，run `d8500003-6fa1-44b5-8530-cb27b667ff2b`，测试文件为提交 a6c77390 那版（testSha256 `c754d861…`）。186 个事件里没有工作流任务失败或超时，最后一个活动是 implement 的 `selfCheck`，最后查到的 phase 是 implement。现在的代码重放得过。卡法和上面那份不同：`maxCachedWorkflows: 0` 下每个工作流任务、每次查询都整段重放，测试从起头每 50 毫秒查一次，负载下 20 秒走不到停下。`identity.capture` 那份不动，这份另存，不能互相替换。
+
+## 原用例怎么改的
+
+`push-handback.test.ts` 第一个工人先用假世界的 `until` 等「停下」写进假库（`saveTaskState` 的 phase `parked`，不发查询），再照旧 `parked()` 查一次拿凭据。60 秒、20 秒等待、cache0、换工人、业务断言都没变，没加重试或 sleep。这样第一段不再在走向停下的路上查询：上面两种卡法的触发都在这段。查询撞上本地活动结果这个生产问题本身没修（归 #3258），由 `la-query-split.test.ts` 确定钉住，不再靠这条用例偶发撞上。
+
 CI run 39392992046 没留历史；PR #3488 那次（`test (5/8)`，同一处查停点 20 秒超时、phase 停在 brief）日志里若有取证帧，这里也还没解出来。两次都不能断言是这个机制，只是症状一致。

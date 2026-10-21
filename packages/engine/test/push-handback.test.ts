@@ -339,6 +339,15 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
+        // 先等假库写进停下，不发查询；停下之后才查一次拿凭据，停点断言照旧。cache0 的工人每次查询都整段重放，
+        // 从起头就每 50 毫秒查一次有两样毛病：一是查询撞上本地活动结果，core 强开新任务，
+        // 之后重放 TMPRL1100（replay/worker-replacement-3413/，la-query-split.test.ts 钉住，生产侧归 #3258）；
+        // 二是负载下查询的重放和真进度抢工人，20 秒还没走到停下（本机 run d8500003… 停在 implement，无失败事件）。
+        diagnostics.mark('wait:first-worker:parked-state');
+        await w.until(
+          () => w.states.some((s) => s.phase === 'parked'),
+          'permission push park written to fake store',
+        );
         diagnostics.mark('wait:first-worker:parked-query');
         r = request(await parked(h));
         diagnostics.mark('wait:first-worker:handback-update');

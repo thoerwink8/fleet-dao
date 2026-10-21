@@ -196,3 +196,57 @@ describe('#3413 原用例停在查停点的取证', () => {
     );
   });
 });
+
+// 第二份，另一种卡法：本机四个测试文件并行时原用例在同一处（first-worker:parked-query）20 秒超时，失败取证。
+// 测试文件是 a6c77390 那版（testSha256 对得上），还是从起头每 50 毫秒查一次。没有失败、超时事件，
+// 工作流一直在走，只是 cache0 下每个任务和每次查询都整段重放，20 秒只走到 implement 的 selfCheck。
+// 和上面那份不是一个机制，也不替换它。
+describe('#3413 原用例负载下查停点 20 秒超时的失败取证（无失败事件，走得慢）', () => {
+  const SLOW_HISTORY_SHA256 = 'b777f32758f9f171d381a3a77852c1610f631899a54c0aecea3a7bcfbdb94204';
+  const SLOW_DESCRIBE_SHA256 = '77c9d1b1467108474c338bc495ffddd5e82cfa2977af3eb872557eaa469115bb';
+  const SLOW_IDENTITY_SHA256 = '15163c4ab47dbc49cfcd1aae8e5e09d7ca04887838ac69c3015ecc2188141403';
+  const SLOW_WORKFLOW_ID = 'handback-219c330f-2d51-4859-8c87-780843328926';
+  const SLOW_RUN_ID = 'd8500003-6fa1-44b5-8530-cb27b667ff2b';
+
+  it('绑这条 run：186 个事件全无失败或超时，最后在 selfCheck 之后等下一个工作流任务；现在的代码重放得过', async () => {
+    const historyBytes = readFileSync(`${directory}slow-parked-query.history.bin`);
+    const describeBytes = readFileSync(`${directory}slow-parked-query.describe.bin`);
+    const identityBytes = readFileSync(`${directory}slow-parked-query.identity.capture`);
+    expect(sha256(historyBytes)).toBe(SLOW_HISTORY_SHA256);
+    expect(sha256(describeBytes)).toBe(SLOW_DESCRIBE_SHA256);
+    expect(sha256(identityBytes)).toBe(SLOW_IDENTITY_SHA256);
+    expect(JSON.parse(identityBytes.toString('utf8'))).toMatchObject({
+      test: 'same run reconstructs business receipts after worker replacement, then accepts one new request',
+      workflowId: SLOW_WORKFLOW_ID,
+      runId: SLOW_RUN_ID,
+      testSha256: 'c754d8617fc51f8dab4d6e4e84507f23e0dc001987cb34b9f51045aa5f952543',
+      stage: 'wait:first-worker:parked-query',
+      reason: 'test-body-failed',
+      kind: 'history',
+      sha256: SLOW_HISTORY_SHA256,
+    });
+    expect(JSON.parse(describeBytes.toString('utf8'))).toEqual({
+      workflowId: SLOW_WORKFLOW_ID,
+      runId: SLOW_RUN_ID,
+      status: { code: 1, name: 'RUNNING' },
+      historyLength: 186,
+      pendingActivityCount: 0,
+      pendingActivitiesTruncated: false,
+      pendingActivities: [],
+    });
+    const decoded = History.decode(historyBytes);
+    const events = decoded.events ?? [];
+    expect(events).toHaveLength(186);
+    expect(events.some((event) => event.workflowTaskFailedEventAttributes)).toBe(false);
+    expect(events.some((event) => event.workflowTaskTimedOutEventAttributes)).toBe(false);
+    expect(events.some((event) => event.workflowExecutionSignaledEventAttributes)).toBe(false);
+    const scheduled = events.filter((event) => event.activityTaskScheduledEventAttributes);
+    expect(scheduled.at(-1)?.activityTaskScheduledEventAttributes?.activityType?.name).toBe('selfCheck');
+    expect(events.at(-1)?.workflowTaskStartedEventAttributes).toBeTruthy();
+    await Worker.runReplayHistory(
+      { workflowBundle: bundle },
+      JSON.parse(historyToJSON(decoded as unknown as Parameters<typeof historyToJSON>[0])),
+      SLOW_WORKFLOW_ID,
+    );
+  });
+});
