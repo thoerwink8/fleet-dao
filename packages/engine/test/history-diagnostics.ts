@@ -1,4 +1,5 @@
-// 仅 push-handback-contract 全假端口测试启用：保留原 protobuf 字节，失败不伪装成空历史。
+// 合成假端口失败取证：push-handback-contract 全文件，以及 push-handback 的 worker replacement 一条。
+// 保留原 protobuf 字节，失败不伪装成空历史。等待阶段只留固定标签，写进该 run 的帧，不另记可串台的时间线。
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -25,6 +26,8 @@ type Identity = {
   bundleSha256: string;
   testSha256: string;
   ciSha: string;
+  // 捕获当时的固定等待标签。旧帧可以没有；业务正文进不了这个字段。
+  stage?: string;
 };
 type Frame =
   | {
@@ -88,7 +91,8 @@ export function decodeFrames(lines: readonly string[]): {
     Object.values(first.identity).some((v) => typeof v !== 'string' || v.length > 512) ||
     !['test', 'workflowId', 'runId', 'bundleSha256', 'testSha256', 'ciSha'].every(
       (key) => key in first.identity,
-    )
+    ) ||
+    ('stage' in first.identity && !/^[A-Za-z0-9:._-]{1,128}$/.test(first.identity.stage ?? ''))
   ) {
     throw new Error('identity');
   }
@@ -205,7 +209,8 @@ export class SyntheticHistoryDiagnostics {
     ...args: Parameters<TestWorkflowEnvironment['client']['workflow']['start']>
   ): Promise<WorkflowHandleWithFirstExecutionRunId> {
     if (this.finished) throw new Error('diagnostics: test already finished');
-    this.mark('workflow-start');
+    // 调用方已经标了 wait: 时保留该标签，避免 start 自己的标记盖住真正在等的那一步。
+    if (!this.stage.startsWith('wait:')) this.mark('workflow-start');
     const handle = await env.client.workflow.start(...args);
     this.runs.push({
       env,
@@ -231,7 +236,8 @@ export class SyntheticHistoryDiagnostics {
     return this.capture('test-body-failed');
   }
   private async read(reason: string): Promise<void> {
-    const stage = this.stage;
+    // 固定标签才写进帧。不符合的标记改成 unlabeled，避免把业务正文或凭据带进日志。
+    const stage = /^[A-Za-z0-9:._-]{1,128}$/.test(this.stage) ? this.stage : 'unlabeled';
     if (!this.runs.length)
       this.options.output.status({
         outcome: 'unknown',
@@ -250,6 +256,7 @@ export class SyntheticHistoryDiagnostics {
         ciSha: /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA ?? '')
           ? String(process.env.GITHUB_SHA)
           : 'unknown',
+        stage,
       };
       const deadline = Date.now() + 3000;
       // SDK 的 deadline 作用于分页内部的每次真实 RPC，不能用悬空的 Promise.race 冒充取消。
