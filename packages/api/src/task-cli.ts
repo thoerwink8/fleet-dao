@@ -11,8 +11,10 @@ import { continueExhausted, TASK_SIGNAL_NAMES, type TaskState, taskWorkflowId } 
 import { errMessage } from '@fleet-dao/shared/util';
 import { continueSignals } from './continue-signals.ts';
 import type { TaskRedoPort } from './deps.ts';
+import type { HistoricalAuditSource } from './historical-audit-cli.ts';
 import type { Store, TaskSignal, WorkflowControl } from './ports.ts';
 import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableError } from './ports.ts';
+import { correctMerged } from './task-correct-merged.ts';
 
 export class TaskCliError extends Error {
   readonly exitCode: number;
@@ -31,9 +33,12 @@ export const TASK_USAGE =
   '--note 必填，写进操作记录。找不到任务工作流退出码 1，不打印成功。退出码：0 做成了；1 没做成；2 参数不对）' +
   '。体量关口重评：fleet-api task budget-remeasure <owner/仓名> <单号> --head <完整sha> --base <完整sha> --note "<为什么>"' +
   ' 默认只读预检（只重新测量、不放行、不写操作记录）；预检通过后加 --execute --run <完整runId> --park <停点编号>（都取自预检输出）' +
-  '才放行这一份成果；不调用「继续」、不授权后续交付，测不全、超预算、换头换代都保留原停点';
+  '才放行这一份成果；不调用「继续」、不授权后续交付，测不全、超预算、换头换代都保留原停点' +
+  '。已结束却误记 abandoned 的真实已合任务：fleet-api task correct-merged <owner/仓名> <单号> --pr <PR号> --head <完整sha> --merge <完整合并提交sha> --run <原Temporal runId> --note "<为什么>"' +
+  ' 默认只读预检（现读 GitHub PR、Temporal 原 run、库里任务账，不写任何东西）；预检通过后加 --execute --task <任务编号> --seen <摘要>（取自预检输出）' +
+  '才在一个事务里把任务改成 done 并记操作记录；保留原 abandoned 结论、原 run 和 Temporal 历史，不关 issue、不动验收责任，同一请求重复是幂等，换了任何身份或证据都拒绝';
 
-const ACTIONS = ['continue', 'abandon', 'redo', 'budget-remeasure'] as const;
+const ACTIONS = ['continue', 'abandon', 'redo', 'budget-remeasure', 'correct-merged'] as const;
 export type TaskAction = (typeof ACTIONS)[number];
 
 export interface TaskArgs {
@@ -48,10 +53,17 @@ export interface TaskArgs {
   run?: string;
   park?: string;
   execute?: boolean;
+  /** correct-merged 专用：精确 PR 号、真实合并提交、执行时预检打印的任务编号和摘要（--run 是原 Temporal run）。 */
+  pr?: number;
+  merge?: string;
+  task?: string;
+  seen?: string;
 }
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
-const VALUE_FLAGS = ['--head', '--base', '--run', '--park'] as const;
+const TEMPORAL_RUN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UUID = TEMPORAL_RUN;
+const VALUE_FLAGS = ['--head', '--base', '--run', '--park', '--pr', '--merge', '--task', '--seen'] as const;
 type ValueFlag = (typeof VALUE_FLAGS)[number];
 
 /** GitHub 的写法：owner 是字母、数字、连字符，仓名再加 . 和 _。和 dispatch 同一条。 */
@@ -87,21 +99,64 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
       positionals.push(arg);
     }
   }
-  if (positionals.length !== 3) usage('要三个参数：continue、abandon、redo 或 budget-remeasure，仓，单号');
+  if (positionals.length !== 3)
+    usage('要三个参数：continue、abandon、redo、budget-remeasure 或 correct-merged，仓，单号');
   const [action = '', repo = '', num = ''] = positionals;
   if (!ACTIONS.includes(action as TaskAction))
-    usage(`认不出「${action}」：只收 continue、abandon、redo、budget-remeasure`);
+    usage(`认不出「${action}」：只收 continue、abandon、redo、budget-remeasure、correct-merged`);
   const m = REPO_ARG.exec(repo);
   if (!m?.[1] || !m[2]) usage(`认不出仓「${repo}」：要写成 owner/仓名`);
   if (!/^[1-9]\d{0,8}$/.test(num)) usage(`单号「${num}」不是正整数`);
   if (note === undefined || note === '') usage('--note 必填（写进操作记录）');
   if (note.length > MAX_NOTE) usage(`--note 太长（最多 ${MAX_NOTE} 个字）`);
   const base = { action: action as TaskAction, owner: m[1], name: m[2], issueNumber: Number(num), note };
+  if (action === 'correct-merged') {
+    const {
+      '--head': head,
+      '--merge': merge,
+      '--run': run,
+      '--pr': pr,
+      '--task': taskId,
+      '--seen': seen,
+    } = flags;
+    if (flags['--base'] !== undefined || flags['--park'] !== undefined)
+      usage('--base、--park 只给 budget-remeasure 用');
+    if (pr === undefined || !/^[1-9]\d{0,8}$/.test(pr)) usage('--pr 要写精确的 PR 号（正整数）');
+    if (head === undefined || !FULL_SHA.test(head)) usage('--head 要完整 40 位小写 sha（PR 合并时的最终头）');
+    if (merge === undefined || !FULL_SHA.test(merge))
+      usage('--merge 要完整 40 位小写 sha（GitHub 上真实合并提交）');
+    if (run === undefined || !TEMPORAL_RUN.test(run)) usage('--run 要写原 Temporal run 编号（完整 uuid）');
+    if (
+      execute &&
+      (taskId === undefined || !UUID.test(taskId) || seen === undefined || !/^[0-9a-f]{16}$/.test(seen))
+    )
+      usage('--execute 必须同时带预检打印的 --task（任务编号）和 --seen（16 位摘要）');
+    if (!execute && (taskId !== undefined || seen !== undefined)) usage('--task、--seen 只在 --execute 时用');
+    return {
+      ...base,
+      pr: Number(pr),
+      head,
+      merge,
+      run,
+      ...(taskId === undefined ? {} : { task: taskId }),
+      ...(seen === undefined ? {} : { seen }),
+      ...(execute ? { execute: true } : {}),
+    };
+  }
   if (action !== 'budget-remeasure') {
     if (execute || Object.keys(flags).length > 0)
-      usage('--head、--base、--run、--park、--execute 只给 budget-remeasure 用');
+      usage(
+        '--head、--base、--run、--park、--pr、--merge、--task、--seen、--execute 只给 budget-remeasure 或 correct-merged 用',
+      );
     return base;
   }
+  if (
+    flags['--pr'] !== undefined ||
+    flags['--merge'] !== undefined ||
+    flags['--task'] !== undefined ||
+    flags['--seen'] !== undefined
+  )
+    usage('--pr、--merge、--task、--seen 只给 correct-merged 用');
   const { '--head': head, '--base': from, '--run': run, '--park': park } = flags;
   if (head === undefined || !FULL_SHA.test(head)) usage('--head 要完整 40 位小写 sha（精确的成果头）');
   if (from === undefined || !FULL_SHA.test(from)) usage('--base 要完整 40 位小写 sha（固定的测量基线）');
@@ -119,8 +174,13 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
 }
 
 export interface TaskRunDeps {
-  store: Pick<Store, 'findRepoByName' | 'findTaskByIssue' | 'appendAudit'>;
+  store: Pick<
+    Store,
+    'findRepoByName' | 'findTaskByIssue' | 'appendAudit' | 'readMergedCorrection' | 'correctMergedAbandoned'
+  >;
   workflows: WorkflowControl;
+  /** correct-merged 现读 GitHub PR 用（只 GET，和 historical-audit 同一份引擎安装凭据）。没给就拒绝纠正。 */
+  pulls?: HistoricalAuditSource | undefined;
   /** 真装配是 connectTemporal().taskRedo（temporal.ts 的 createTemporalTaskRedo）。没给就拒绝重做，不假装另起。 */
   taskRedo: TaskRedoPort;
   /** 谁跑的（FLEET_OPS_OPERATOR）。写进操作记录，也放进信号的 by。 */
@@ -157,6 +217,11 @@ const OPS_TASK = { kind: 'ops', id: 'ops:task' } as const;
 /** 做完、已叫停、失败：和 views.ts 的 isTaskFinished、驾驶舱按钮同一份终态。挂起（stalled）不在里面。 */
 function isFinished(state: TaskState): boolean {
   return state === 'done' || state === 'stopped' || state === 'failed';
+}
+
+/** 重评、纠正的预检只读：不写操作记录；其余动作和它们的执行，成功失败都记。 */
+function writesAudit(args: TaskArgs): boolean {
+  return (args.action !== 'budget-remeasure' && args.action !== 'correct-merged') || args.execute === true;
 }
 
 interface Recorded {
@@ -207,9 +272,8 @@ export async function runTask(args: TaskArgs, deps: TaskRunDeps): Promise<string
   } catch (err) {
     if (err instanceof TaskCliError) throw err;
     const result = `没查成：${errMessage(err)}`;
-    // 重评预检只读，不写操作记录
-    if (args.action !== 'budget-remeasure' || args.execute === true)
-      await record(deps, args, typed, { ok: false, result }).catch(() => undefined);
+    // 重评、纠正的预检只读，不写操作记录
+    if (writesAudit(args)) await record(deps, args, typed, { ok: false, result }).catch(() => undefined);
     throw new TaskCliError(`没做成：${typed}：${result}`, 1);
   }
 }
@@ -302,8 +366,7 @@ async function budgetRemeasure(
 
 async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise<string> {
   const refuse = async (ref: string, result: string, taskId?: string): Promise<never> => {
-    if (args.action !== 'budget-remeasure' || args.execute === true)
-      await record(deps, args, ref, { ok: false, result, taskId });
+    if (writesAudit(args)) await record(deps, args, ref, { ok: false, result, taskId });
     throw new TaskCliError(`没做成：${ref}：${result}`, 1);
   };
 
@@ -336,6 +399,28 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
   }
 
   if (args.action === 'budget-remeasure') return budgetRemeasure(args, deps, repo, task, ref);
+
+  if (args.action === 'correct-merged') {
+    // 成功时操作记录已由 Store 在改任务的同一事务里写了，这里不再另记；拒绝照常由 refuse 记（预检不记）
+    const outcome = await correctMerged(
+      {
+        repo,
+        task,
+        pr: args.pr as number,
+        head: args.head as string,
+        mergeCommit: args.merge as string,
+        run: args.run as string,
+        execute: args.execute === true,
+        expectTask: args.task,
+        seen: args.seen,
+        note: args.note,
+        operator: deps.operator,
+      },
+      { store: deps.store, workflows: deps.workflows, pulls: deps.pulls },
+    );
+    if (!outcome.ok) return refuse(ref, outcome.result, task.id);
+    return outcome.text;
+  }
 
   const word = args.action === 'continue' ? '继续' : '放弃';
   if (isFinished(task.state)) {

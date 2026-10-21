@@ -290,6 +290,111 @@ export interface HistoricalCheckoutFacts {
   activeRunIds: string[];
 }
 
+/** 已结束且误记 abandoned 的任务，纠正前现读到的 run（只读，不是已合并证明）。 */
+export interface MergedCorrectionRunFact {
+  id: string;
+  segment: string;
+  workflowId?: string | undefined;
+  temporalRunId?: string | undefined;
+  startedAt: string;
+  endedAt?: string | undefined;
+  outcome?: string | undefined;
+}
+
+/** tasks.phase / doing / last_problem / updated_at：纠正的 CAS 快照，库里读不到的列是 null。 */
+export interface MergedCorrectionLedger {
+  phase: string | null;
+  doing: string | null;
+  lastProblem: string | null;
+  updatedAt: string | null;
+}
+
+/** 之前已做过的受管纠正（审计里 action=task.correct-merged、target=task:<id> 的成功行）。 */
+export interface MergedCorrectionPrior {
+  auditId: string;
+  at: string;
+  pr: number | null;
+  head: string | null;
+  mergeCommit: string | null;
+  temporalRunId: string | null;
+  evidenceKey: string | null;
+}
+
+export interface MergedCorrectionFacts {
+  task: Task;
+  ledger: MergedCorrectionLedger;
+  runs: MergedCorrectionRunFact[];
+  /** 还没结束的 run（活会话）。 */
+  activeRunIds: string[];
+  prior?: MergedCorrectionPrior | undefined;
+}
+
+/** 执行纠正的精确身份和预检时看到的 CAS 快照；事务内重读，任何一项变了都 conflict。 */
+export interface MergedCorrectionInput {
+  repoId: string;
+  taskId: string;
+  issueNumber: number;
+  workflowId: string;
+  temporalRunId: string;
+  pr: number;
+  head: string;
+  mergeCommit: string;
+  /** 预检时的任务账：state 必须是 stopped、phase 必须是 abandoned，且 doing/updatedAt/run 集合没变。 */
+  expected: { phase: string; doing: string | null; updatedAt: string | null; runIds: string[] };
+  /** 纠正后的 tasks.doing。 */
+  doing: string;
+  /** 已核事实（GitHub PR、Temporal 终态）的规范化摘要；同一请求重复必须相同。 */
+  evidenceKey: string;
+}
+
+export type MergedCorrectionResult =
+  | { result: 'ok' | 'already_corrected' }
+  | { result: 'not_found' | 'conflict'; why: string };
+
+/** 受管纠正的审计动作和对象；成功行只由 correctMergedAbandoned 在同一事务里写。 */
+export const MERGED_CORRECTION_ACTION = 'task.correct-merged';
+export const mergedCorrectionTarget = (taskId: string): string => `task:${taskId}`;
+
+/** 内存版和 Postgres 版共用：事务内读到的事实对不对得上请求。不写任何东西。 */
+export function judgeMergedCorrection(
+  facts: MergedCorrectionFacts | null,
+  input: MergedCorrectionInput,
+): MergedCorrectionResult {
+  const conflict = (why: string): MergedCorrectionResult => ({ result: 'conflict', why });
+  if (!facts) return { result: 'not_found', why: '库里没有这张任务' };
+  const { task, ledger, runs, activeRunIds, prior } = facts;
+  if (task.id !== input.taskId || task.repoId !== input.repoId || task.issueNumber !== input.issueNumber)
+    return conflict('任务、仓或单号与请求不一致');
+  if (prior) {
+    const same =
+      prior.pr === input.pr &&
+      prior.head === input.head &&
+      prior.mergeCommit === input.mergeCommit &&
+      prior.temporalRunId === input.temporalRunId &&
+      prior.evidenceKey === input.evidenceKey;
+    return same
+      ? { result: 'already_corrected' }
+      : conflict('这张任务已做过受管纠正，PR、head、合并提交、run 或证据与本次请求不同');
+  }
+  if (task.state !== 'stopped' || ledger.phase !== 'abandoned')
+    return conflict(`任务现在是 ${task.state}/${ledger.phase ?? '无阶段'}，不是已结束的 stopped/abandoned`);
+  if (task.executor === 'local' || task.claimedBy !== undefined || task.leaseUntil !== undefined)
+    return conflict('任务被本机领着，不是已结束的引擎任务');
+  if (activeRunIds.length > 0) return conflict(`仍有未结束的会话：${activeRunIds.join('、')}`);
+  const e = input.expected;
+  if (ledger.phase !== e.phase || ledger.doing !== e.doing || ledger.updatedAt !== e.updatedAt)
+    return conflict('任务账与预检时看到的不一样（已被改动），请重新预检');
+  const now = runs.map((r) => r.id).sort();
+  const was = [...e.runIds].sort();
+  if (now.length !== was.length || now.some((id, i) => id !== was[i]))
+    return conflict('任务的 run 集合与预检时不一样（出现了新的运行），请重新预检');
+  if (runs.some((r) => r.workflowId !== undefined && r.workflowId !== input.workflowId))
+    return conflict('任务有别的工作流（换代）的 run，不是同一代');
+  if (runs.some((r) => r.temporalRunId !== undefined && r.temporalRunId !== input.temporalRunId))
+    return conflict('任务有别的 Temporal run，请求的 run 不是它的原 run');
+  return { result: 'ok' };
+}
+
 /**
  * 会话里跑过的一次测试（checkDone 的输入）。passed 为 null 是结果认不出（接了管道、放了后台……，
  * 插头写明了原因），照样列出来：交活核对以最后一次为准，认不出的那一次不能被它前面一次「通过」顶掉。
@@ -477,6 +582,18 @@ export interface OpsStore {
     input: HistoricalCheckoutArchiveInput,
     audit: NewAuditEntry,
   ): Promise<'ok' | 'already_archived' | 'not_found' | 'conflict'>;
+  /** 只读现查任务账、全部 run 和已有的受管纠正；不写任何东西。任务不存在或编号看不懂回 null。 */
+  readMergedCorrection(input: {
+    repoId: string;
+    taskId: string;
+    issueNumber: number;
+  }): Promise<MergedCorrectionFacts | null>;
+  /**
+   * 已结束且误记 abandoned 的真实已合任务：事务内锁任务、重读 run，CAS（stopped + phase=abandoned + 预检快照 + run 集合不变 + 无活 run +
+   * 非本机领单）后把任务改成 done，并和操作记录同一事务。不改旧 run、不动验收责任、不关单。
+   * 同一请求（pr/head/mergeCommit/run/evidenceKey 全同）重复回 already_corrected；任一不同回 conflict。
+   */
+  correctMergedAbandoned(input: MergedCorrectionInput, audit: NewAuditEntry): Promise<MergedCorrectionResult>;
   resolveNotification(
     input: {
       id: string;

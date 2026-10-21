@@ -96,6 +96,13 @@ import type {
   Store,
   User,
 } from './ports.ts';
+import {
+  judgeMergedCorrection,
+  MERGED_CORRECTION_ACTION,
+  type MergedCorrectionFacts,
+  type MergedCorrectionLedger,
+  mergedCorrectionTarget,
+} from './ports.ts';
 import type {
   ExecutionBirthV1,
   ExecutionControl,
@@ -187,6 +194,8 @@ export interface MemoryData {
   users: MemoryUser[];
   repos: RepoRecord[];
   tasks: Task[];
+  /** 库里 tasks 的 phase / doing / last_problem / updated_at（Task 对象里没有），按任务编号；没记的任务读出来全是 null。 */
+  taskLedgers: Map<string, MergedCorrectionLedger>;
   /** 全程模式的分组记录（task_flow_assignments，#2823），每张单最多一行。 */
   flowAssignments: FlowAssignment[];
   subtasks: Subtask[];
@@ -240,6 +249,7 @@ export function emptyData(): MemoryData {
     users: [],
     repos: [],
     tasks: [],
+    taskLedgers: new Map(),
     flowAssignments: [],
     subtasks: [],
     runs: [],
@@ -398,6 +408,61 @@ export function createMemoryStore(
   };
 
   const checkoutRuns = (): HistoricalCheckoutRun[] => [...data.segmentRuns.map(checkoutRunOf)];
+
+  const mergedCorrectionFacts = (input: {
+    repoId: string;
+    taskId: string;
+    issueNumber: number;
+  }): MergedCorrectionFacts | null => {
+    const task = data.tasks.find((t) => t.id === input.taskId);
+    const repo = task && data.repos.find((r) => r.id === task.repoId);
+    if (!task || !repo) return null;
+    const workflowId = taskWorkflowId(repo, task.issueNumber);
+    const owned = data.segmentRuns.filter(
+      (r) => segmentRunMatch(r, { id: task.id, issueNumber: task.issueNumber, workflowId }) !== undefined,
+    );
+    const runs = owned.map((r) => {
+      const run = checkoutRunOf(r);
+      return {
+        id: run.id,
+        segment: run.segment,
+        workflowId: run.workflowId,
+        temporalRunId: run.temporalRunId,
+        startedAt: run.startedAt,
+        endedAt: run.endedAt,
+        outcome: run.outcome,
+      };
+    });
+    const prior = data.audit.find(
+      (a) => a.action === MERGED_CORRECTION_ACTION && a.target === mergedCorrectionTarget(task.id) && a.ok,
+    );
+    const after = (prior?.after ?? {}) as Record<string, unknown>;
+    const str = (v: unknown) => (typeof v === 'string' ? v : null);
+    return {
+      task: { ...task },
+      ledger: data.taskLedgers.get(task.id) ?? {
+        phase: null,
+        doing: null,
+        lastProblem: null,
+        updatedAt: null,
+      },
+      runs,
+      activeRunIds: runs.filter((r) => r.endedAt === undefined).map((r) => r.id),
+      ...(prior
+        ? {
+            prior: {
+              auditId: prior.id,
+              at: prior.at,
+              pr: typeof after.pr === 'number' ? after.pr : null,
+              head: str(after.head),
+              mergeCommit: str(after.mergeCommit),
+              temporalRunId: str(after.temporalRunId),
+              evidenceKey: str(after.evidenceKey),
+            },
+          }
+        : {}),
+    };
+  };
 
   const checkoutFacts = (input: Parameters<Store['readHistoricalCheckout']>[0]): HistoricalCheckoutFacts => {
     const notification = data.notifications.find((n) => n.id === input.notificationId);
@@ -854,6 +919,41 @@ export function createMemoryStore(
       audit(entry);
       changed('notifications', input.notificationId);
       return 'ok';
+    },
+    async readMergedCorrection(input) {
+      return mergedCorrectionFacts(input);
+    },
+    async correctMergedAbandoned(input, entry) {
+      if (!isUuid(input.taskId) || !isUuid(input.repoId)) return { result: 'not_found', why: '编号看不懂' };
+      if (entry.action !== MERGED_CORRECTION_ACTION || entry.target !== mergedCorrectionTarget(input.taskId))
+        return { result: 'conflict', why: '操作记录不是这张任务的受管纠正记录' };
+      if (!entry.ok && entry.error !== undefined)
+        return { result: 'conflict', why: '受管纠正的操作记录必须是成功记录' };
+      const verdict = judgeMergedCorrection(mergedCorrectionFacts(input), input);
+      if (verdict.result !== 'ok') return verdict;
+      checkAudit(entry);
+      const task = data.tasks.find((t) => t.id === input.taskId);
+      if (!task) return { result: 'not_found', why: '库里没有这张任务' };
+      const from = task.state;
+      task.state = 'done';
+      data.taskLedgers.set(task.id, {
+        phase: 'done',
+        doing: input.doing,
+        lastProblem: null,
+        updatedAt: now().toISOString(),
+      });
+      data.stateChanges.push({
+        id: nextId(),
+        entity: 'task',
+        entityId: task.id,
+        taskId: task.id,
+        from,
+        to: 'done',
+        at: now().toISOString(),
+      });
+      audit(entry);
+      changed('tasks', task.id);
+      return { result: 'ok' };
     },
     async resolveNotification({ id, by, expected }, entry) {
       const n = data.notifications.find((x) => x.id === id);
