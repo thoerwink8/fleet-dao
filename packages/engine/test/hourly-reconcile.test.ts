@@ -304,6 +304,80 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     });
   });
 
+  describe('工作树这一步里的子调用见证（卡在哪棵树的哪条命令）', () => {
+    const TREE_STEP = 'worktrees.leftovers.acme_repo.12-abc';
+    const withTree = (over: Partial<HourlyReconcileJobDeps> = {}): Harness => {
+      const base = harness();
+      return harness({
+        listDir: async (dir) => {
+          if (dir === ROOT) return [{ name: 'acme_repo', isDir: true }];
+          if (dir === `${ROOT}/acme_repo`) return [{ name: '12-abc', isDir: true }];
+          throw new Error(`用例没给 ${dir}`);
+        },
+        ownerOf: async () => 'fleet-agent-carpool',
+        alerts: base.deps.alerts,
+        ...over,
+      });
+    };
+
+    it('检查子进程一直不回：最后一笔是它的开始、同一运行编号，没有结束也没有结局（不记成 ok）', async () => {
+      let sawStart!: () => void;
+      const started = new Promise<void>((resolve) => {
+        sawStart = resolve;
+      });
+      let release!: (err: Error) => void;
+      const hung = new Promise<never>((_, reject) => {
+        release = reject;
+      });
+      const h = withTree({ leftovers: () => hung });
+      const originalProgress = h.deps.runs.progress;
+      h.deps.runs.progress = async (id, progress, at) => {
+        await originalProgress?.(id, progress, at);
+        if (progress.step === TREE_STEP && progress.phase === 'start') sawStart();
+      };
+
+      const running = runHourlyReconcileJob(h.deps);
+      await started;
+      expect(h.progressed.at(-1)).toEqual({ id: 7, step: TREE_STEP, phase: 'start' });
+      expect(h.progressed).toContainEqual({ id: 7, step: 'worktrees', phase: 'start' });
+      expect(h.progressed.some((p) => p.step === 'worktrees' && p.phase === 'end')).toBe(false);
+      expect(h.finished).toEqual([]);
+
+      release(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+      const run = await running;
+      expect(h.progressed).toContainEqual({ id: 7, step: TREE_STEP, phase: 'failed' });
+      expect(run.outcome).not.toBe('ok');
+      expect(h.finished[0]?.result).toMatchObject({
+        outcome: 'partial',
+        why: expect.stringContaining('12-abc'),
+      });
+    });
+
+    it('子调用的步骤名都是库里认的写法，并带着相对路径、同一运行编号', async () => {
+      const h = withTree();
+      await runHourlyReconcileJob(h.deps);
+      const subs = h.progressed.filter((p) => p.step.startsWith('worktrees.'));
+      expect(subs.length).toBeGreaterThan(0);
+      for (const p of h.progressed) {
+        expect(p.id).toBe(7);
+        expect(p.step).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+      }
+      expect(subs).toContainEqual({ id: 7, step: TREE_STEP, phase: 'start' });
+      expect(subs).toContainEqual({ id: 7, step: TREE_STEP, phase: 'end' });
+      expect(subs).toContainEqual({ id: 7, step: 'worktrees.owner-of.acme_repo.12-abc', phase: 'end' });
+    });
+
+    it('子调用见证写不进：只记 warn，工作树这一步的结果不变', async () => {
+      const h = withTree();
+      const expected = await runHourlyReconcileJob(withTree().deps);
+      h.deps.runs.progress = async (_id, progress) => {
+        if (progress.step.startsWith('worktrees.')) throw new Error('见证库写不进');
+      };
+      expect(await runHourlyReconcileJob(h.deps)).toEqual(expected);
+      expect(h.logs.some((l) => l.startsWith('warn:') && l.includes('worktrees.leftovers'))).toBe(true);
+    });
+  });
+
   it('根下什么都没有：记 unscanned、写明为什么', async () => {
     const h = harness({ listDir: async () => [] });
     expect(await runHourlyReconcileJob(h.deps)).toMatchObject({ outcome: 'unscanned', scanned: 0, found: 0 });

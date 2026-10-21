@@ -239,7 +239,7 @@ function durationMs(deps: HourlyReconcileJobDeps, started: number): number | und
 async function markStep(
   deps: HourlyReconcileJobDeps,
   runId: number,
-  step: HourlyReconcileStep,
+  step: string,
   phase: StepPhase,
   ms?: number,
 ): Promise<void> {
@@ -264,7 +264,7 @@ async function markStep(
 async function runStep<T>(
   deps: HourlyReconcileJobDeps,
   runId: number,
-  step: HourlyReconcileStep,
+  step: string,
   fn: () => Promise<T>,
 ): Promise<T> {
   await markStep(deps, runId, step, 'start');
@@ -287,6 +287,40 @@ async function skipStep(
   await markStep(deps, runId, step, 'skip');
 }
 
+/**
+ * 工作树这一步里每个会碰外部（子进程、磁盘、库）的调用各留开始/结束/失败的持久见证，步骤名 worktrees.<调用>.<相对根的树>。
+ * 33304 这类只停在 worktrees 开始、看不出卡在哪棵树的哪条命令：最后一笔只有开始的，就是还没回来的那一个。
+ * 只包一层、不改返回值和报错，也不碰 sweepWorktrees 的判据；步骤名只含相对路径（规整成库里认的字符、截到 128）。
+ * 这只补在途证据，不证明原中断根因。
+ */
+export function witnessWorktreeCalls(deps: HourlyReconcileJobDeps, runId: number): HourlyReconcileJobDeps {
+  const name = (op: string, dir?: string): string => {
+    const rel =
+      dir === undefined ? '' : dir.startsWith(`${deps.root}/`) ? dir.slice(deps.root.length + 1) : dir;
+    const tag = rel.replace(/[^A-Za-z0-9._-]+/g, '.').replace(/^\.+/, '');
+    return `worktrees.${op}${tag ? `.${tag}` : ''}`.slice(0, 128);
+  };
+  const wrapped: HourlyReconcileJobDeps = {
+    ...deps,
+    listDir: (dir) => runStep(deps, runId, name('list-dir', dir), () => deps.listDir(dir)),
+    ownerOf: (dir) => runStep(deps, runId, name('owner-of', dir), () => deps.ownerOf(dir)),
+    leftovers: (dir, user, known, scratch) =>
+      runStep(deps, runId, name('leftovers', dir), () => deps.leftovers(dir, user, known, scratch)),
+    remove: (dir) => runStep(deps, runId, name('remove', dir), () => deps.remove(dir)),
+    keepShots: (dir, user, at) =>
+      runStep(deps, runId, name('keep-shots', dir), () => deps.keepShots(dir, user, at)),
+  };
+  const { cleanupNamespace, size, lastSessions, mirrorBytes } = deps;
+  if (cleanupNamespace)
+    wrapped.cleanupNamespace = () => runStep(deps, runId, name('cleanup-namespace'), cleanupNamespace);
+  if (size) wrapped.size = (dir, user) => runStep(deps, runId, name('size', dir), () => size(dir, user));
+  if (lastSessions) wrapped.lastSessions = () => runStep(deps, runId, name('last-sessions'), lastSessions);
+  if (mirrorBytes)
+    wrapped.mirrorBytes = (repo) =>
+      runStep(deps, runId, name('mirror-bytes', `${repo.owner}_${repo.name}`), () => mirrorBytes(repo));
+  return wrapped;
+}
+
 async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<ScheduleResult> {
   // 工作树先跑（它撤的「工作树没收掉」，提醒那部分就不再为它再推）；两部分各列一次没处理的提醒
   let before: AlertRow[] | null = null;
@@ -297,7 +331,9 @@ async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<Sched
       error: errMessage(err),
     });
   }
-  const trees = await runStep(deps, runId, 'worktrees', () => sweepWorktrees(deps, before));
+  const trees = await runStep(deps, runId, 'worktrees', () =>
+    sweepWorktrees(witnessWorktreeCalls(deps, runId), before),
+  );
   const pendingCleanup = deps.pendingCleanup;
   if (pendingCleanup) {
     try {
