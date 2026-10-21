@@ -4,6 +4,10 @@
 // 连上了没回，还是响应来了但慢；这里把请求发出、连上、响应头、结束、关闭的时间和进程自己的资源读数打到构建日志里。
 // 服务端那一头（预览服务和请求在同一个进程里）也看：服务端什么时候收到、什么时候发完或被掐断；请求在路上这段时间里
 // 动态 import（预览中间件头一次载入服务端产物就是一个）用了多久、到关闭还有几个没结束，GC 停了多久，事件循环最长停多久。
+// 服务端事件只按「同一条 TCP 连接」归到客户端请求上：客户端连上时记下这条连接两头的地址和端口，服务端收到请求时拿
+// 它那条连接的对端地址、对端端口、本端地址、本端端口（四样全对）去对；对上的才是这个目标请求在这个服务（即客户端连的那个
+// 预览服务）上的那一头。
+// 同进程里别的本机服务、并发的别的请求、裸 socket 发来的 GET / 都对不上，不记。
 // 本机实测（#3491）：这段时间的大头在服务端载入产物（经 vite、tailwind 装在进程里的模块解析钩子）和事件循环停顿上，
 // 机器忙时从 1 秒涨到 4 秒多；法国那次 10 秒是不是同一回事没有现场数，靠这几行下次分清。
 // 只观察：不改请求、不吞错、不加 error 监听、不包响应的方法、不改任何结果。
@@ -53,11 +57,18 @@ const say = (text) => {
 let seen = 0;
 let worstLag = 0;
 let lagTimer;
-// 「期间」：最近一个目标请求从发出到关闭。下面这几样只在期间里记，关闭时（或进程退出时还没关）打一行
-let win = null;
+// 「期间」：每个目标请求从发出到关闭各是一段。进程级的读数（动态 import、GC、事件循环）记进当时所有还开着的段；
+// 几段叠在一起时那一行写明「是整个进程的读数，不单归这一个」
+const active = new Set();
+// 目标请求的连接：「对端地址|对端端口|本端地址|本端端口」（站在服务端看）→ 那一段。客户端连上时登记，段关闭时撤
+const byConn = new Map();
+// 同一个回环地址可能写成 IPv4 映射的 IPv6（服务端听 :: 时）：去掉前缀再比
+const bare = (addr) => (typeof addr === 'string' && addr.startsWith('::ffff:') ? addr.slice(7) : addr);
+const connKey = (remoteAddr, remotePort, localAddr, localPort) =>
+  `${bare(remoteAddr)}|${remotePort}|${bare(localAddr)}|${localPort}`;
 
 function openWindow(id) {
-  win = {
+  const w = {
     id,
     sent: performance.now(),
     lag: 0,
@@ -68,7 +79,17 @@ function openWindow(id) {
     importLongest: 0,
     pending: new Map(), // 还没结束的动态 import：tracing 的上下文对象 → 开始时间
     server: false,
+    conn: '',
+    overlap: 1, // 这一段里同时开着的段最多几个（含自己）
   };
+  active.add(w);
+  for (const other of active) other.overlap = Math.max(other.overlap, active.size);
+  return w;
+}
+
+function closeWindow(w) {
+  active.delete(w);
+  if (w.conn && byConn.get(w.conn) === w) byConn.delete(w.conn);
 }
 
 function windowLine(w, how) {
@@ -77,10 +98,14 @@ function windowLine(w, how) {
   for (const started of w.pending.values()) waited = Math.max(waited, t - started);
   const left =
     w.pending.size > 0 ? `，${how}还有 ${w.pending.size} 个没结束（最久已等 ${Math.round(waited)}ms）` : '';
+  const shared =
+    w.overlap > 1
+      ? `；期间同时在路上的目标请求最多 ${w.overlap} 个，import、GC、事件循环是整个进程的读数，不单归这一个`
+      : '';
   return (
-    `#${w.id} 期间：${w.server ? '' : '服务端没收到这个请求（或不在本进程），'}动态 import 结束 ${w.importCount} 次，` +
+    `#${w.id} 期间：${w.server ? '' : '本进程的服务端没在这个请求的连接上收到它，'}动态 import 结束 ${w.importCount} 次，` +
     `最长 ${Math.round(w.importLongest)}ms${left}；GC ${w.gcCount} 次，共停 ${Math.round(w.gcMs)}ms，` +
-    `最长 ${Math.round(w.gcLongest)}ms；事件循环最长停 ${Math.round(w.lag)}ms`
+    `最长 ${Math.round(w.gcLongest)}ms；事件循环最长停 ${Math.round(w.lag)}ms${shared}`
   );
 }
 
@@ -91,18 +116,19 @@ function startLagProbe() {
     const t = performance.now();
     const lag = t - last - 100;
     worstLag = Math.max(worstLag, lag);
-    if (win) win.lag = Math.max(win.lag, lag);
+    for (const w of active) w.lag = Math.max(w.lag, lag);
     last = t;
   }, 100);
   lagTimer.unref();
   // GC 停顿：只记次数和毫秒
   try {
     new PerformanceObserver((list) => {
-      if (!win) return;
       for (const e of list.getEntries()) {
-        win.gcCount += 1;
-        win.gcMs += e.duration;
-        win.gcLongest = Math.max(win.gcLongest, e.duration);
+        for (const w of active) {
+          w.gcCount += 1;
+          w.gcMs += e.duration;
+          w.gcLongest = Math.max(w.gcLongest, e.duration);
+        }
       }
     }).observe({ entryTypes: ['gc'] });
   } catch {
@@ -113,20 +139,23 @@ function startLagProbe() {
   try {
     dc.tracingChannel('module.import').subscribe({
       start(ctx) {
-        if (win) win.pending.set(ctx, performance.now());
+        const t = performance.now();
+        for (const w of active) w.pending.set(ctx, t);
       },
       end() {},
       asyncStart() {},
       asyncEnd(ctx) {
-        const w = win;
-        const started = w?.pending.get(ctx);
-        if (started === undefined) return;
-        w.pending.delete(ctx);
-        w.importCount += 1;
-        w.importLongest = Math.max(w.importLongest, performance.now() - started);
+        const t = performance.now();
+        for (const w of active) {
+          const started = w.pending.get(ctx);
+          if (started === undefined) continue;
+          w.pending.delete(ctx);
+          w.importCount += 1;
+          w.importLongest = Math.max(w.importLongest, t - started);
+        }
       },
       error(ctx) {
-        win?.pending.delete(ctx);
+        for (const w of active) w.pending.delete(ctx);
       },
     });
   } catch {
@@ -134,11 +163,12 @@ function startLagProbe() {
   }
 }
 
-// 服务端那一头：预览服务的 http.Server 收到「本机连来的 GET /」，而且这时有目标请求在路上，才记收到、发完、断开
-const LOCAL_SOCKET = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+// 服务端那一头：http.Server 收到 GET /，而且它这条连接正是某个目标请求连上的那一条，才记收到、发完、断开
 function observeServer(req, res) {
-  const w = win;
-  if (!w || req.method !== 'GET' || req.url !== '/' || !LOCAL_SOCKET.has(req.socket?.localAddress)) return;
+  const s = req.socket;
+  if (!s || req.method !== 'GET' || req.url !== '/') return;
+  const w = byConn.get(connKey(s.remoteAddress, s.remotePort, s.localAddress, s.localPort));
+  if (!w || w.server) return;
   const since = () => Math.round(performance.now() - w.sent);
   w.server = true;
   say(`#${w.id} 服务端收到 GET / +${since()}ms`);
@@ -154,13 +184,21 @@ function observeServer(req, res) {
 }
 
 function observe(req, id) {
-  openWindow(id);
-  const w = win;
+  const w = openWindow(id);
   const sent = w.sent;
   const since = () => Math.round(performance.now() - sent);
+  // 客户端这条连接两头的地址、端口记下来，服务端收到请求时按它对（端口不进输出）
+  const bind = (socket) => {
+    if (w.conn || !Number.isInteger(socket.localPort) || !Number.isInteger(socket.remotePort)) return;
+    w.conn = connKey(socket.localAddress, socket.localPort, socket.remoteAddress, socket.remotePort);
+    byConn.set(w.conn, w);
+  };
   req.on('socket', (socket) => {
     say(`#${id} GET / 拿到 socket +${since()}ms`);
+    // 发请求前 socket 已经连上（复用的连接）就当场记；没连上的等 connect——客户端的连接回调先于服务端读到请求
+    if (!socket.connecting) bind(socket);
     socket.on('connect', () => {
+      bind(socket);
       const family =
         socket.remoteFamily === 'IPv4' || socket.remoteFamily === 'IPv6' ? socket.remoteFamily : '未知';
       const address = LOOPBACK.has(socket.remoteAddress) ? socket.remoteAddress : '非回环地址';
@@ -185,8 +223,9 @@ function observe(req, id) {
     // 服务端的「发完 / 断开」可能和客户端关闭同一轮才到：留到下一轮再收期间那一行
     setImmediate(() => {
       try {
+        if (!active.has(w)) return;
         say(windowLine(w, '到关闭'));
-        if (win === w) win = null;
+        closeWindow(w);
       } catch {
         // 同上
       }
@@ -243,7 +282,7 @@ try {
     try {
       if (seen === 0) return;
       // 请求还没关（或关了还没来得及收尾）进程就要退：期间那一行在这里补上，不丢
-      if (win) say(windowLine(win, '进程退出时'));
+      for (const w of active) say(windowLine(w, '进程退出时'));
       const usage = process.resourceUsage();
       const cpuMs = Math.round((usage.userCPUTime + usage.systemCPUTime) / 1000);
       const [l1, l5, l15] = os.loadavg().map((n) => n.toFixed(2));

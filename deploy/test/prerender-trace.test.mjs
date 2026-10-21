@@ -366,7 +366,11 @@ test('超时掐断时服务端还在载入：打出服务端断开没发完、�
     /动态 import 结束 0 次，最长 0ms，(到关闭|进程退出时)还有 1 个没结束（最久已等 (\d+)ms）/,
   );
   assert.ok(m, l.join('\n'));
-  assert.ok(Number(m[2]) >= 250, span);
+  // 已等多久：import 在服务端收到之后才开始，到客户端关闭至少等了「关闭 − 收到」那么久（不按固定毫秒判，机器忙时收到会晚）
+  const at = (re) => Number(l.find((x) => re.test(x))?.match(/\+(\d+)ms/)?.[1]);
+  const received = at(/#1 服务端收到 GET \/ \+\d+ms$/);
+  const closed = at(/#1 关闭 \+\d+ms/);
+  assert.ok(Number(m[2]) > 0 && Number(m[2]) + 2 >= closed - received, `${span}\n${l.join('\n')}`);
 });
 
 /** 用裸 socket 发一个 GET（不经 http.request，探针的客户端那一头看不到），返回状态行 */
@@ -427,4 +431,129 @@ test('目标请求在路上时，服务端收到的带查询串的请求不记�
   const l = lines(r.err);
   assert.equal(l.filter((x) => /服务端收到/.test(x)).length, 1, l.join('\n'));
   assert.equal(l.filter((x) => /服务端发完响应/.test(x)).length, 1, l.join('\n'));
+});
+
+test('同进程两个本机服务、两个目标请求并发：服务端的收到、发完按各自那条连接归位，不串到后发的那个请求上', () => {
+  // #1 连慢服务（回 201，先等 300ms），#2 在 #1 还没回时连快服务（回 202）。按「最近一个目标请求」归的话，
+  // 慢服务的收到、发完会记到 #2 头上；按连接归，#1 只有 201、#2 只有 202
+  const r = run(`
+    import http from 'node:http';
+    const slow = http.createServer((_, res) => setTimeout(() => { res.statusCode = 201; res.end('slow'); }, 300));
+    const fast = http.createServer((_, res) => { res.statusCode = 202; res.end('fast'); });
+    await new Promise((ok) => slow.listen(0, '127.0.0.1', ok));
+    await new Promise((ok) => fast.listen(0, '127.0.0.1', ok));
+    const get = (port) =>
+      new Promise((ok, bad) => {
+        const req = http.request({ hostname: '127.0.0.1', port, path: '/', agent: false }, (res) => {
+          res.resume();
+          res.on('end', () => ok(res.statusCode));
+        });
+        req.on('error', bad);
+        req.end();
+      });
+    const first = get(slow.address().port);
+    await new Promise((ok) => setTimeout(ok, 50)); // #1 已连上、服务端已收到，#2 才发
+    const second = get(fast.address().port);
+    process.stdout.write((await first) + ',' + (await second));
+    slow.close();
+    fast.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, '201,202', '响应原样');
+  const l = lines(r.err);
+  const of = (id) => l.filter((x) => x.startsWith(`[prerender-trace] #${id} 服务端`));
+  assert.equal(of(1).length, 2, l.join('\n'));
+  assert.match(of(1)[0], /#1 服务端收到 GET \/ \+\d+ms$/);
+  assert.match(of(1)[1], /#1 服务端发完响应 201 \+\d+ms$/);
+  assert.equal(of(2).length, 2, l.join('\n'));
+  assert.match(of(2)[0], /#2 服务端收到 GET \/ \+\d+ms$/);
+  assert.match(of(2)[1], /#2 服务端发完响应 202 \+\d+ms$/);
+  assert.ok(!l.some((x) => /#2 服务端发完响应 201/.test(x)), `慢服务的发完不能记到 #2：\n${l.join('\n')}`);
+  // 两段叠着：期间那行写明是整个进程的读数
+  const span1 = l.find((x) => /#1 期间：/.test(x));
+  assert.match(
+    span1 ?? '',
+    /期间同时在路上的目标请求最多 2 个，import、GC、事件循环是整个进程的读数，不单归这一个$/,
+  );
+  const span2 = l.find((x) => /#2 期间：/.test(x));
+  assert.ok(span2 && !/本进程的服务端没在这个请求的连接上收到它/.test(span2), span2);
+});
+
+test('目标请求在路上时，同一个服务收到别人用裸 socket 发来的 GET /：不记到目标请求上', () => {
+  const r = run(`
+    import http from 'node:http';
+    import net from 'node:net';
+    const CRLF = String.fromCharCode(13, 10);
+    ${RAW_GET}
+    let raw = '';
+    let port = 0;
+    let calls = 0;
+    const server = http.createServer(async (_, res) => {
+      calls += 1;
+      if (calls === 1) {
+        // 第一次是目标请求：它还没回时，别人往同一个服务、同一个路径发一个 GET /，回 204
+        raw = await rawGet(port, '/');
+        res.statusCode = 200;
+      } else {
+        res.statusCode = 204;
+      }
+      res.end();
+    });
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    port = server.address().port;
+    await new Promise((ok, bad) => {
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/', agent: false }, (res) => { res.resume(); res.on('end', ok); });
+      req.on('error', bad);
+      req.end();
+    });
+    process.stdout.write(raw);
+    server.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, 'HTTP/1.1 204 No Content');
+  const l = lines(r.err);
+  assert.equal(l.filter((x) => /服务端收到/.test(x)).length, 1, l.join('\n'));
+  assert.ok(
+    l.some((x) => /#1 服务端发完响应 200 /.test(x)),
+    l.join('\n'),
+  );
+  assert.ok(!l.some((x) => /服务端发完响应 204/.test(x)), `裸 socket 那个请求不能记上：\n${l.join('\n')}`);
+});
+
+test('服务听 :: 、客户端连 127.0.0.1（服务端看到 IPv4 映射地址），连接复用发第二个：两个都按连接归上', () => {
+  const r = run(`
+    import http from 'node:http';
+    let n = 0;
+    const server = http.createServer((_, res) => { n += 1; res.statusCode = 200 + n; res.end(); });
+    await new Promise((ok) => server.listen(0, '::', ok));
+    const { port } = server.address();
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const get = () =>
+      new Promise((ok, bad) => {
+        const req = http.request({ hostname: '127.0.0.1', port, path: '/', agent }, (res) => {
+          res.resume();
+          res.on('end', () => ok(res.statusCode));
+        });
+        req.on('error', bad);
+        req.end();
+      });
+    const a = await get();
+    await new Promise((ok) => setTimeout(ok, 20)); // 等 #1 那段收尾、socket 回到空闲池
+    const b = await get();
+    process.stdout.write(a + ',' + b);
+    agent.destroy();
+    server.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, '201,202');
+  const l = lines(r.err);
+  assert.ok(
+    l.some((x) => /#1 服务端发完响应 201 /.test(x)),
+    l.join('\n'),
+  );
+  assert.ok(
+    l.some((x) => /#2 服务端发完响应 202 /.test(x)),
+    `复用的连接（拿到时已连上）也要归上：\n${l.join('\n')}`,
+  );
+  assert.ok(!l.some((x) => /本进程的服务端没在这个请求的连接上收到它/.test(x)), l.join('\n'));
 });
