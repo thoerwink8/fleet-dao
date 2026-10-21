@@ -10,6 +10,8 @@ import {
   boxCount,
   FALLBACK_FILE_MS,
   guessMs,
+  HEAVY_FILES,
+  isHeavy,
   isTestFile,
   listTestFiles,
   MAX_BOXES,
@@ -394,7 +396,10 @@ describe('在真仓上装箱（全跑那一轮）', () => {
       temporal: temporalOf(FILES),
     });
     if (typeof r === 'string') throw new Error(r);
-    const seconds = r.boxes.map((b) => Math.round(b.estMs / 1000));
+    // 重负载多进程文件独占的台（HEAVY_FILES）只有它自己，不进「分得匀不匀」的比较
+    const seconds = r.boxes
+      .filter((b) => !b.label.endsWith('· heavy'))
+      .map((b) => Math.round(b.estMs / 1000));
     // 8 台的合计 = 全部文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按所在包的均值估（guessMs），
     // 和装箱同一个估法。不拿整张表的合计比：表一过期（加了测试文件、删了旧的）两边就差几秒，这条就红（#700 写的
     // 那种比法，主线上新加了测试文件之后改到 conventions 的 PR 全跑时都红在这）。最重的台和最轻的差不过 2 倍（LPT 的效果）。
@@ -427,5 +432,94 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     expect(withTemporal[0]?.files).toContain('packages/engine/test/github-reconcile.test.ts');
     expect(withTemporal[0]?.files).toContain('packages/engine/test/arm-deadline-real.test.ts');
     expect(input.read('packages/engine/test/github-reconcile.test.ts')).toBeDefined();
+  });
+
+  it('重负载多进程文件（#3469）：每个独占一台、台里没有别的文件，台数仍是 8', () => {
+    const r = packTests({
+      files: FILES,
+      universe: FILES,
+      timings: REAL_TIMINGS,
+      temporal: temporalOf(FILES),
+    });
+    if (typeof r === 'string') throw new Error(r);
+    expect(r.boxes).toHaveLength(MAX_BOXES);
+    const heavyBoxes = r.boxes.filter((b) => b.files.some(isHeavy));
+    expect(heavyBoxes).toHaveLength(HEAVY_FILES.size);
+    for (const b of heavyBoxes) {
+      expect(b.files.length).toBe(1);
+      expect(b.pg).toBe(false);
+      expect(b.label).toContain('· heavy');
+    }
+    expect(r.boxes.filter((b) => b.label.includes('· heavy'))).toEqual(heavyBoxes);
+  });
+});
+
+describe('重负载多进程文件单独排台（#3469）', () => {
+  const heavy = 'packages/engine/test/admission-alert-crash.test.ts';
+  const timings = (files: string[]): Timings => ({
+    source: 'test',
+    files: Object.fromEntries(files.map((f) => [f, f === heavy ? 46_000 : 3_000])),
+  });
+
+  it('清单里的文件都真在仓里（挪了名、删了，清单跟着改）、是测试文件', () => {
+    expect(HEAVY_FILES.size).toBeGreaterThan(0);
+    for (const f of HEAVY_FILES) {
+      expect(isTestFile(f), f).toBe(true);
+      expect(FILES, f).toContain(f);
+      expect(needsPg(f), `${f} 不能同时要真 Postgres`).toBe(false);
+    }
+    expect(isHeavy(heavy)).toBe(true);
+    expect(isHeavy('packages/engine/test/admission-alert-spool.test.ts')).toBe(false);
+  });
+
+  it('【故意造出的失败】总量够好几台时，重负载文件也独占一台、别的文件不和它同台', () => {
+    const plain = Array.from({ length: 200 }, (_, i) => `packages/web/src/t${i}.test.ts`);
+    const files = [heavy, ...plain];
+    const r = packTests({ files, universe: files, timings: timings(files), temporal: new Set() });
+    if (typeof r === 'string') throw new Error(r);
+    const box = r.boxes.find((b) => b.files.includes(heavy));
+    expect(box?.files).toEqual([heavy]);
+    expect(box?.label).toMatch(/^\d+\/8 · heavy$/);
+    expect(r.boxes).toHaveLength(8);
+    expect(r.boxes.flatMap((b) => b.files).sort()).toEqual([...files].sort());
+  });
+
+  it('总量只够一台时，重负载文件仍单独一台（不和别的并在一个 vitest 进程里）', () => {
+    const files = [heavy, 'packages/web/src/a.test.ts'];
+    const r = packTests({ files, universe: files, timings: timings(files), temporal: new Set() });
+    if (typeof r === 'string') throw new Error(r);
+    expect(r.boxes.map((b) => b.files)).toEqual([[heavy], ['packages/web/src/a.test.ts']]);
+  });
+
+  it('只有重负载文件时也装得出台', () => {
+    const r = packTests({
+      files: [heavy],
+      universe: [heavy],
+      timings: timings([heavy]),
+      temporal: new Set(),
+    });
+    if (typeof r === 'string') throw new Error(r);
+    expect(r.boxes.map((b) => b.label)).toEqual(['1/1 · heavy']);
+  });
+
+  it('【故意造出的失败】重负载文件被名字或 Temporal 绑进别的文件那一组：分不了台，报出来', () => {
+    const files = [heavy, 'packages/engine/test/x/packages/engine/test/admission-alert-crash.test.ts'];
+    const bySubstring = packTests({
+      files,
+      universe: files,
+      timings: timings(files),
+      temporal: new Set(),
+    });
+    expect(typeof bySubstring).toBe('string');
+    expect(bySubstring as string).toContain('分不了台');
+    const other = 'packages/engine/test/other-real.test.ts';
+    const byTemporal = packTests({
+      files: [heavy, other],
+      universe: [heavy, other],
+      timings: timings([heavy, other]),
+      temporal: new Set([heavy, other]),
+    });
+    expect(typeof byTemporal).toBe('string');
+    expect(byTemporal as string).toContain('分不了台');
   });
 });
