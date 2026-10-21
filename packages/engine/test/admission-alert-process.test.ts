@@ -19,7 +19,9 @@ const input: Extract<AlertRequest, { operation: 'record' }>['observation'] = {
   firstCode: 'deadline',
 };
 const databaseUrl = 'postgres://fixture:fixture@127.0.0.1/fixture';
-const options = (signal = new AbortController().signal, ms = 4000) => ({
+// 默认 20 秒：整段 test:changed 里子进程冷启动能超过 4 秒，期限先到就把协议错误和取消看成 deadline。
+// 真正钉期限的用例自己传入更短的毫秒数。
+const options = (signal = new AbortController().signal, ms = 20000) => ({
   signal,
   deadlineAt: performance.now() + ms,
 });

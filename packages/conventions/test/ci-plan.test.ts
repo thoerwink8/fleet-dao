@@ -489,7 +489,9 @@ describe('要全跑、本机又不全跑时先跑哪些（fallbackUnits，给 te
   });
 });
 
-describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏记一条这里就红）', () => {
+// 全仓测试源码逐文件扫引用。整段 test:changed 磁盘忙时，头一次扫描超过默认 5 秒（本机约 9 秒）。
+// 同步扫完才返回，时限必须盖住做完；同一文件的引用只扫一次，后面几条对账不再重读。
+describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏记一条这里就红）', { timeout: 60_000 }, () => {
   // docs job 每个 PR 都跑的两份：它们读哪都不用记；本文件是扫描器自己（注释里举的例子会被当成读）
   const ALWAYS = new Set([
     'packages/conventions/test/doc-pointers.test.ts',
@@ -524,7 +526,15 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
   const LIT = String.raw`(?:'([^'\n$]*)'|"([^"\n$]*)"|\x60([^\x60\n$]*)\x60)`;
   const val = (m: RegExpMatchArray, i: number) => m[i] ?? m[i + 1] ?? m[i + 2];
   /** 一个测试文件里指向包外、真实存在的路径（仓内相对）。认的写法：'../…' 字面量；repoFile('x')、read('x') 这类以仓根为底的帮手；join(dirname(import.meta), '..', …)、join(REPO, …)。 */
+  const refCache = new Map<string, string[]>();
   function refs(rel: string): string[] {
+    const hit = refCache.get(rel);
+    if (hit) return hit;
+    const found = collectRefs(rel);
+    refCache.set(rel, found);
+    return found;
+  }
+  function collectRefs(rel: string): string[] {
     const text = readFileSync(join(ROOT, rel), 'utf8');
     const dir = posix.dirname(rel);
     const out = new Set<string>();
