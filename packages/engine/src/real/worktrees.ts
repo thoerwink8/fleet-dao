@@ -17,6 +17,7 @@ import {
   type SessionUser,
   type TreeIdentity,
 } from '@fleet-dao/adapters';
+import type { WorktreeRemovalReceipt } from '@fleet-dao/db';
 import type { Repo, StageKind } from '@fleet-dao/shared';
 import { PortError } from '../ports.ts';
 
@@ -118,6 +119,11 @@ export interface HelperWorkTreesOptions {
   sudo?: readonly string[];
   /** uid → 会话用户；不给就读 /etc/passwd。 */
   uids?: Map<number, SessionUser>;
+  /**
+   * 每次受管删树（成没成）都记一条回执（生产写 audit_log，db 的 recordWorktreeRemoval，#3474）。删树的几条路
+   * （小时清扫、任务收树、建树前替换旧树、会话临时目录）都经这里的 remove，原来只有清扫写一行日志，库里查不到删了哪棵。
+   */
+  recordRemoval?: (receipt: WorktreeRemovalReceipt) => Promise<void>;
 }
 
 /** 生产：属主按 stat 看，建、改属主、删都经 fleet-agent-scope（root）。 */
@@ -180,8 +186,26 @@ export function helperWorkTrees(options: HelperWorkTreesOptions = {}): WorkTrees
     },
     async remove(dir, identity) {
       const r = await removeWorktreeDir({ dir, identity, ...helperOpts });
-      if (r.ok) return { gone: r.gone };
-      throw new PortError('REMOVE_FAILED', `删 ${dir} 没成：${r.detail}`, {
+      const { dev, ino, uid } = identity;
+      const receipt = { dir, dev, ino, uid, at: new Date() };
+      if (r.ok) {
+        // 删成了却记不上回执：照实报没成（树已不在，下一轮看到的是 gone），不悄悄当成留了痕
+        try {
+          await options.recordRemoval?.({ ...receipt, ok: true });
+        } catch (error) {
+          throw new PortError('REMOVE_UNRECORDED', `删了 ${dir}，删除回执没记上：${String(error)}`, {
+            retryable: false,
+          });
+        }
+        return { gone: r.gone };
+      }
+      let unrecorded = '';
+      try {
+        await options.recordRemoval?.({ ...receipt, ok: false, error: r.detail });
+      } catch (error) {
+        unrecorded = `（失败回执也没记上：${String(error)}）`;
+      }
+      throw new PortError('REMOVE_FAILED', `删 ${dir} 没成：${r.detail}${unrecorded}`, {
         retryable: r.code !== 'usage',
         details: { exitCode: r.exitCode },
       });
