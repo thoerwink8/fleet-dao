@@ -118,7 +118,7 @@ test.describe('登录', () => {
   test('账密登录成功：拿到会话，主页认得出是谁', async ({ page, login, shot }) => {
     await login();
     await page.goto('/');
-    await expect(page.getByRole('heading', { name: '主页' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '工作台' })).toBeVisible();
     // 右上角账号菜单里写着登录的是谁
     await page.getByRole('button', { name: '我的账号' }).click();
     await expect(page.getByRole('menu')).toContainText('创始人甲');

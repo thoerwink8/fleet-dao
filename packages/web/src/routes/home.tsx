@@ -1,12 +1,13 @@
-// 主页（/）：创始人一打开就看到现在怎样（#2759 在三块之上加了三样）：
-// 0. 一句话：有几件要你定 / 流水线卡在哪一步、谁在修了多久 / 在走；旁边一行额度和本期估算（读不到写「没记」）。
-//    再按仓出卡：本周上线几版、在跑几张、卡住几张、当前里程碑，有问题的排前面。
-// 1. 要你拍的：只放真要他拍的（四类人闸 + 看门狗进来的卡），一条一行；人闸的选项就是按钮，看门狗只写谁在修、开了多久；
-// 2. 在跑的：法国引擎和本机在做的，一件一行：事、谁在做、进度、卡没卡；
-// 3. 上线了的：最近切到法国的版本，一句话说清改了什么，带上它带的 PR。
+// 工作台（/，旧名「主页」；#3509 照 Arco 改版的样板页，样稿 canvas/Main.dc.html）：创始人一打开就看到现在怎样。
+// 从上到下：
+// 0. 数据概览：额度和本期估算两个数（读不到写「没记」「没查成」，不写 0）。
+// 1. 左列：要你拍的（人闸，选项就是按钮）、在跑的任务（法国引擎的单和本机会话，卡住、等你的在前）。
+// 2. 右列：卡住报警（看门狗的卡，谁在修、开了多久，没人接就写没人接）、最近上线、系统状态（流水线、中转、引擎进程）。
+// 3. 项目：一个仓一行（老后端没给写明没给）。
 // 原来的思维导图画布挪到 /board（routes/board.tsx），和别的页一起收进侧栏「更多」。
 // 数据全用现成接口：/home、/notifications、/nodes/sessions、/france/released-commits（components/home/today.ts 文件头）。
-// 选了远程环境（?node=）读那台推来的快照：要你拍的只读、在跑的只列那台的引擎单；本机会话和上线记录是本台的，不顶着远程的名字列。
+// 选了远程环境（?node=）读那台推来的快照：要你拍的只读、在跑的只列那台的引擎单；卡住报警、本机会话和上线记录是本台的，不顶着远程的名字列。
+// 页面只拼 components/layout 的件，不写样式类（design 第三节、lint-design R13–R20）。
 import { brand } from '#brand';
 import {
   isNotFound,
@@ -17,21 +18,25 @@ import {
   useNodeHome,
 } from '../api/client';
 import { FlowModeToggle } from '../components/flow-mode-toggle';
-import { Headline } from '../components/home/headline';
-import { HealthStrip } from '../components/home/health-strip';
 import { MissingEnv } from '../components/home/missing-env';
+import { Overview } from '../components/home/overview';
 import { ProjectCards } from '../components/home/project-cards';
-import { SpendLine } from '../components/home/spend-line';
+import { SystemStatus } from '../components/home/system-status';
 import {
+  AlarmBlock,
   AskBlock,
+  RemoteAlarmBlock,
   RemoteAskBlock,
   RemoteRunBlock,
   RemoteShippedBlock,
   RunBlock,
   ShippedBlock,
 } from '../components/home/today-blocks';
+import { Grid } from '../components/layout/grid';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { Stack } from '../components/layout/stack';
 import { SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
 import { TIME } from '../lib/format';
@@ -39,7 +44,7 @@ import { useSelectedNodeId } from '../lib/node';
 import { useShownError } from '../lib/shown-error';
 
 export function meta() {
-  return [{ title: brand.title('主页') }];
+  return [{ title: brand.title('工作台') }];
 }
 
 /** 本台主页靠推送更新、兜底轮询；远程快照每 30 秒重拉。超过 5 分钟还没再读成，刷新标「数据已过期」。 */
@@ -61,20 +66,33 @@ export default function Home() {
         ? local.data
         : remote.data;
   const machine = nodeName ?? nodeId ?? '';
+  const what = nodeId === null ? '主页' : '这个环境';
   // 首屏一轮发完（经香港到法国每多一轮慢一趟）：本机会话、上线记录和主页、通知一起发，不等主页回来才由区块发
   useLocalSessions();
   useFranceReleasedCommits();
 
+  const missing = nodeId !== null && state.status === 'error' && isNotFound(state.error);
+
+  /**
+   * 主页这份聚合还在读时，依赖它的几块画骨架；没接上的写待实现。
+   * 没读成时这几块不画（没读成和重试只在「数据概览」那一处写一次，不在每块各写一遍，更不画成 0 或空）。
+   */
+  const pending = (title: string) =>
+    state.status === 'error' ? null : (
+      <Section title={title}>
+        {state.status === 'notWired' ? (
+          <NotBuilt notWired={state.notWired} compact />
+        ) : (
+          <LoadingRows rows={3} />
+        )}
+      </Section>
+    );
+
   return (
     <Page
-      title={nodeId === null ? '主页' : `主页 · ${machine}`}
+      title={nodeId === null ? '工作台' : `工作台 · ${machine}`}
       stackActions
-      actions={
-        <>
-          <FlowModeToggle />
-          {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
-        </>
-      }
+      actions={<FlowModeToggle />}
       refresh={{
         variant: 'dot',
         onRefresh: () => void main.refetch(),
@@ -84,44 +102,72 @@ export default function Home() {
         push,
       }}
     >
-      <div data-home className="flex flex-col gap-4 lg:gap-6">
-        {nodeId !== null && remote.node ? (
-          <SnapshotBanner
-            name={remote.node.name}
-            receivedAt={remote.node.receivedAt}
-            reportedAt={remote.node.reportedAt}
-          />
-        ) : null}
-        {state.status === 'data' ? (
-          <>
-            <Headline decisions={state.data.decisions.length} pipeline={state.data.pipeline} />
-            <SpendLine quota={state.data.health.quota} spend={state.data.spend} />
-          </>
-        ) : null}
-        {/* 要你拍的只读通知，不等主页那份聚合：主页没读成也照样能拍 */}
-        {nodeId === null ? <AskBlock /> : null}
-        {nodeId !== null && state.status === 'error' && isNotFound(state.error) ? (
-          <MissingEnv nodeId={nodeId} />
-        ) : state.status === 'loading' ? (
-          <LoadingRows rows={6} />
-        ) : state.status === 'error' ? (
-          <LoadError what={nodeId === null ? '主页' : '这个环境'} error={state.error} onRetry={state.retry} />
-        ) : state.status === 'notWired' ? (
-          <NotBuilt notWired={state.notWired} />
-        ) : nodeId === null ? (
-          <>
-            <ProjectCards projects={state.data.projects} />
-            <RunBlock running={state.data.running} />
-            <ShippedBlock done={state.data.done} />
-          </>
-        ) : (
-          <>
-            <ProjectCards projects={state.data.projects} />
-            <RemoteAskBlock decisions={state.data.decisions} machine={machine} />
-            <RemoteRunBlock running={state.data.running} />
-            <RemoteShippedBlock />
-          </>
-        )}
+      <div data-home>
+        <Stack>
+          {nodeId !== null && remote.node ? (
+            <SnapshotBanner
+              name={remote.node.name}
+              receivedAt={remote.node.receivedAt}
+              reportedAt={remote.node.reportedAt}
+            />
+          ) : null}
+          {missing ? (
+            <MissingEnv nodeId={nodeId} />
+          ) : (
+            <>
+              {state.status === 'data' ? (
+                <Section title="数据概览">
+                  <Overview quota={state.data.health.quota} spend={state.data.spend} />
+                </Section>
+              ) : (
+                <Section title="数据概览">
+                  {state.status === 'error' ? (
+                    <LoadError what={what} error={state.error} onRetry={state.retry} />
+                  ) : state.status === 'notWired' ? (
+                    <NotBuilt notWired={state.notWired} compact />
+                  ) : (
+                    <LoadingRows rows={2} />
+                  )}
+                </Section>
+              )}
+              <Grid preset="main">
+                <Stack>
+                  {/* 要你拍的只读通知，不等主页那份聚合：主页没读成也照样能拍 */}
+                  {nodeId === null ? (
+                    <AskBlock />
+                  ) : state.status === 'data' ? (
+                    <RemoteAskBlock decisions={state.data.decisions} machine={machine} />
+                  ) : (
+                    pending('要你拍的')
+                  )}
+                  {state.status !== 'data' ? (
+                    pending('在跑的任务')
+                  ) : nodeId === null ? (
+                    <RunBlock running={state.data.running} />
+                  ) : (
+                    <RemoteRunBlock running={state.data.running} />
+                  )}
+                </Stack>
+                <Stack>
+                  {nodeId === null ? <AlarmBlock /> : <RemoteAlarmBlock />}
+                  {nodeId === null ? (
+                    <ShippedBlock done={state.status === 'data' ? state.data.done : []} />
+                  ) : (
+                    <RemoteShippedBlock />
+                  )}
+                  {state.status === 'data' ? (
+                    <Section title="系统状态">
+                      <SystemStatus health={state.data.health} pipeline={state.data.pipeline} />
+                    </Section>
+                  ) : (
+                    pending('系统状态')
+                  )}
+                </Stack>
+              </Grid>
+              {state.status === 'data' ? <ProjectCards projects={state.data.projects} /> : null}
+            </>
+          )}
+        </Stack>
       </div>
     </Page>
   );

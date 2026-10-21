@@ -51,9 +51,13 @@ test('【故意造出的失败】主页没读成：仍显示 LoadError', async (
   const api = createMockApi({ live: false });
   api.home = () => Promise.reject(new ApiError(500, 'internal', '后端出错了'));
   renderApp(<HomePage />, { api });
+  // 没读成只在「数据概览」写一次（带重试）；依赖主页聚合的在跑的任务、系统状态不画，更不画成 0 或「正常」
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain('主页没读成');
   expect(alert.textContent).toContain('后端出错了');
   expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+  expect(document.querySelector('[data-home-block="run"]')).toBeNull();
+  expect(screen.queryByText('引擎进程')).toBeNull();
+  expect(document.querySelector('[data-spend-line]')).toBeNull();
   expect(screen.queryByRole('button', { name: /要你拍的/ })).toBeNull();
 });

@@ -118,7 +118,7 @@ export function FilterTabs<Id extends string = string>({
   onChange: (id: Id) => void;
   mode?: 'tabs' | 'toggle';
   /** primary 下划线页签（页面的主筛选）；secondary 没有轨道，只有选中那个有底（同一页里的次级筛选，不和主筛选抢）。 */
-  variant?: 'primary' | 'secondary';
+  variant?: 'primary' | 'secondary' | 'segmented';
   /** 给页签一个 id（`前缀-选项id`），页签对应的面板用 aria-labelledby 指它。 */
   idPrefix?: string;
   className?: string;
@@ -178,7 +178,10 @@ export function FilterTabs<Id extends string = string>({
       className={cn(
         'fade-edges-x scrollbar-thin flex max-w-full overflow-x-auto overflow-y-hidden',
         // primary：下划线页签，底下一道 line（画成内阴影，选中项的 2px 蓝线盖在上面）；secondary：项间 4，没有轨道
-        variant === 'primary' ? 'gap-8 shadow-[inset_0_-1px_0_var(--line)]' : 'gap-1',
+        variant === 'primary' && 'gap-8 shadow-[inset_0_-1px_0_var(--line)]',
+        variant === 'secondary' && 'gap-1',
+        // 分段控件（fd3 `.seg`）：灰底槽，选中的是白底品牌色字；平的，不浮起、不带阴影
+        variant === 'segmented' && 'w-fit gap-1 rounded-sm bg-fill-2 p-0.5',
         className,
       )}
       {...aria}
@@ -213,21 +216,26 @@ export function FilterTabs<Id extends string = string>({
             onKeyDown={onKeyDown}
             className={cn(
               'inline-flex shrink-0 cursor-pointer items-center gap-1.5 text-body whitespace-nowrap transition-colors duration-100 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-hover max-md:min-h-10 max-md:min-w-10 max-md:justify-center',
-              variant === 'primary'
-                ? // Arco 页签（fd3 `.tab`）：40 高、左右 2，底下 2px 线；选中品牌色字 500、品牌色线
-                  cn(
-                    'h-row border-b-2 px-0.5',
-                    selected
-                      ? 'border-brand font-medium text-brand-ink'
-                      : 'border-transparent text-ink-2 hover:text-ink',
-                  )
-                : // 次级筛选：28 高、2 圆角；选中 fill-2 底品牌色字
-                  cn(
+              variant === 'segmented'
+                ? cn(
                     'h-7 rounded-sm px-3',
-                    selected
-                      ? 'bg-fill-2 font-medium text-brand-ink'
-                      : 'text-ink-2 hover:bg-fill-1 hover:text-ink',
-                  ),
+                    selected ? 'bg-card font-medium text-brand-ink' : 'text-ink-2 hover:text-ink',
+                  )
+                : variant === 'primary'
+                  ? // Arco 页签（fd3 `.tab`）：40 高、左右 2，底下 2px 线；选中品牌色字 500、品牌色线
+                    cn(
+                      'h-row border-b-2 px-0.5',
+                      selected
+                        ? 'border-brand font-medium text-brand-ink'
+                        : 'border-transparent text-ink-2 hover:text-ink',
+                    )
+                  : // 次级筛选：28 高、2 圆角；选中 fill-2 底品牌色字
+                    cn(
+                      'h-7 rounded-sm px-3',
+                      selected
+                        ? 'bg-fill-2 font-medium text-brand-ink'
+                        : 'text-ink-2 hover:bg-fill-1 hover:text-ink',
+                    ),
             )}
           >
             {it.tone ? <StatusDot tone={it.tone} className="size-1.5" /> : null}

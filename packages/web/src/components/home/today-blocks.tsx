@@ -1,13 +1,15 @@
-// 主页三块（决定 0093）：要你拍的、在跑的、上线了的，按重要度从上到下，一件事一行。数据怎么挑写在 today.ts 文件头。
-// - 要你拍的：一行写事、要定什么、推荐哪个、为什么，选项就是按钮，点一下就是拍板（和通知中心同一个接口）；
-//   看门狗的卡没有选项，也不给「处理」（报警自己修、自己撤）：一行写谁在修、修了多久、开了多久，右边只留「看看」。
+// 工作台的四块列表（决定 0093，#3509 照 Arco 改版，样稿 canvas/Main.dc.html）：要你拍的、在跑的任务、卡住报警、最近上线。
+// 数据怎么挑写在 today.ts 文件头。页面只拼 components/layout 的件，不写样式。
+// - 要你拍的：只放人闸（decision 级通知）。一行：事、要定什么加多久前、推荐哪个；选项就是按钮，点一下就是拍板（和通知中心同一个接口）。
+//   整块只有最上面一条的推荐项是主按钮（品牌实色），其余都是灰的次按钮；一条超过两个选项，多的收进「更多」。
 //   看远程环境时只读：按钮置灰、写去那台上答。
-// - 在跑的：法国引擎的单和本机会话混在一起排，卡着的、等你的在前；一行写事、谁在做、进度、卡没卡。
+// - 卡住报警（样稿叫「卡住报警」，创始人要的「报警没人接」）：看门狗报进来的卡。不给「处理」（报警自己修、自己撤）：
+//   一行写谁在修、修了多久、开了多久，没人接就写「还没人接」，谁在修没查成照实写；右边只留「看看」。
+// - 在跑的任务：法国引擎的单和本机会话混排，卡着的、等你的在前；表格一行一个状态，原因写在事下面的灰字里。手机上退成列表。
 //   引擎单有 flowMode 时标题旁标「全程」或「三段」；没有这个值不标。
-// - 上线了的：最近 5 次切到法国的提交，一行一句改了什么，带上同一版还带的 PR。
-import { ArrowRight, CheckCheck, CirclePlay, Rocket } from 'lucide-react';
+// - 最近上线：最近 5 次切到法国的提交，带上同一版还带的 PR。
+import { CheckCheck, CirclePlay, Rocket, ShieldCheck } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
 import {
@@ -21,14 +23,20 @@ import type { Notification } from '../../api/types';
 import { decisionToast } from '../../lib/decision-result';
 import { formatAgo, formatDateTime } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
+import { usePhone } from '../../lib/viewport';
 import { FlowModeTag } from '../flow-mode-tag';
+import { Button } from '../layout/button';
 import { EmptyState } from '../layout/empty-state';
-import { List } from '../layout/list';
+import { List, ListRow } from '../layout/list';
 import { LoadError, LoadingRows } from '../layout/load-state';
 import { Notice } from '../layout/notice';
+import { RowMenu, RowMenuItem } from '../layout/row-menu';
 import { Section } from '../layout/section';
-import { StatusBadge } from '../layout/status-badge';
-import { Button } from '../ui/button';
+import { Stack } from '../layout/stack';
+import { LevelDot, StatusBadge } from '../layout/status-badge';
+import { Table, type TableColumn } from '../layout/table';
+import { Tag } from '../layout/tag';
+import { Text } from '../layout/text';
 import {
   type AskItem,
   askItems,
@@ -40,6 +48,7 @@ import {
   type ShippedRow,
   shippedRows,
   sortRunRows,
+  type WatchdogRepairState,
   watchdogRepair,
 } from './today';
 import type { HomeDecision, HomeDone, HomeRunning } from './types';
@@ -47,132 +56,128 @@ import type { HomeDecision, HomeDone, HomeRunning } from './types';
 /** 区块标题：名字加灰色的条数。 */
 function BlockTitle({ name, count }: { name: string; count?: number | undefined }) {
   return (
-    <span className="flex items-baseline gap-2">
+    <>
       {name}
-      {count === undefined ? null : (
-        <span className="num text-meta font-normal text-muted-foreground">{count}</span>
-      )}
-    </span>
+      {count === undefined || count === 0 ? null : <Tag>{count}</Tag>}
+    </>
   );
 }
 
-const rowCls = 'flex flex-col gap-2 px-4 py-3 md:flex-row md:items-center md:gap-4';
+/** 超过一页时区块底下的一行说明：只看了最近一页，不当成只有这些。 */
+function FootNote({ children }: { children: string }) {
+  return (
+    <List>
+      <ListRow
+        summary={
+          <Text size="meta" tone="muted">
+            {children}
+          </Text>
+        }
+      />
+    </List>
+  );
+}
 
 // —— 要你拍的 ——
+
+type Option = NonNullable<Notification['options']>[number];
+
+/** 推荐的在前，其余照后端给的先后。 */
+function orderedOptions(options: readonly Option[]): Option[] {
+  return [...options].sort((a, b) => Number(Boolean(b.recommended)) - Number(Boolean(a.recommended)));
+}
+
+/** 一行直接摆几个选项按钮，多的收进「更多」。 */
+const SHOWN_OPTIONS = 2;
 
 function AskRow({
   item,
   now,
   answering,
-  handlingProblem,
+  lead,
   onAnswer,
 }: {
   item: AskItem;
   now: number;
   /** 正在答的那一条和点的哪一项。 */
   answering: { id: string; optionId: string } | undefined;
-  /** 这一页谁在修没算成：为什么。有了也不拿「还没人接」顶。 */
-  handlingProblem: string | undefined;
+  /** 整块最上面的一条：它的推荐项是整页唯一的主按钮。 */
+  lead: boolean;
   onAnswer: (n: Notification, optionId: string) => void;
 }) {
-  const { n, kind } = item;
+  const { n } = item;
   const { question, pick, why } = askLine(n);
-  const options = n.options ?? [];
+  const options = orderedOptions(n.options ?? []);
   const busy = answering?.id === n.id;
-  const recommendation = pick ? `推荐：${pick}。${why ?? ''}` : null;
   const failed = n.answer?.execution?.ok === false ? n.answer.execution.text : null;
-  const repair = kind === 'watchdog' ? watchdogRepair(n, now, handlingProblem) : null;
+  const shown = options.slice(0, SHOWN_OPTIONS);
+  const more = options.slice(SHOWN_OPTIONS);
   return (
-    <li className={rowCls} data-ask-row={kind}>
-      <div className="min-w-0 flex-1">
-        <p className="flex min-w-0 items-center gap-2 whitespace-nowrap">
-          <StatusBadge
-            tone={kind === 'gate' ? 'human' : 'fail'}
-            variant="dot"
-            label={kind === 'gate' ? '要你拍' : '看门狗'}
-          />
-          <span className="min-w-0 truncate text-body font-medium" title={n.title}>
-            {n.title}
-          </span>
-          <span
-            className="num ml-auto shrink-0 text-meta text-muted-foreground"
-            title={formatDateTime(n.createdAt)}
-          >
+    <ListRow
+      tall
+      wrapTrailing
+      data-ask-row="gate"
+      title={
+        <Text strong title={n.title}>
+          {n.title}
+        </Text>
+      }
+      meta={
+        <>
+          <Text size="meta" tone="muted" block title={formatDateTime(n.createdAt)}>
+            {question !== n.title ? `${question}　` : ''}
             {formatAgo(n.createdAt, now)}
-          </span>
-        </p>
-        {question !== n.title ? (
-          <p className="mt-0.5 truncate text-meta text-muted-foreground" title={question} data-ask-question>
-            {kind === 'gate' ? '要定：' : '怎么了：'}
-            {question}
-          </p>
-        ) : null}
-        {recommendation ? (
-          <p className="mt-0.5 truncate text-meta text-muted-foreground" title={recommendation} data-ask-pick>
-            推荐：<span className="font-medium text-foreground">{pick}</span>。{why}
-          </p>
-        ) : kind === 'gate' ? (
-          <p className="mt-0.5 truncate text-meta text-muted-foreground" data-ask-pick>
-            {NO_OPTIONS_TEXT}
-          </p>
-        ) : null}
-        {repair ? (
-          <p
-            className="mt-0.5 truncate text-meta text-muted-foreground"
-            title={repair.title}
-            data-ask-repair={repair.state}
-          >
-            {repair.who ? (
-              <>
-                <span className="font-medium text-foreground">{repair.who}</span>
-                {repair.text.slice(repair.who.length)}
-              </>
-            ) : (
-              repair.text
-            )}
-          </p>
-        ) : null}
-        {failed ? (
-          // 拍了但系统没做成（#2353）：原因写在这里，再点一次选项就是再拍
-          <p className="mt-0.5 truncate text-meta text-ink-fail" title={failed} data-ask-failed>
-            上次选「{n.answer?.text}」没做成：{failed}
-          </p>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-2" data-ask-actions>
-        {kind === 'gate' && options.length > 0
-          ? options.map((o) => (
+          </Text>
+          {pick ? (
+            <Text size="meta" tone="secondary" block>
+              推荐：{pick}。{why}
+            </Text>
+          ) : (
+            <Text size="meta" tone="muted" block>
+              {NO_OPTIONS_TEXT}
+            </Text>
+          )}
+          {failed ? (
+            // 拍了但系统没做成（#2353）：原因写在这里，再点一次选项就是再拍
+            <Text size="meta" tone="danger" block title={failed}>
+              上次选「{n.answer?.text}」没做成：{failed}
+            </Text>
+          ) : null}
+        </>
+      }
+      trailing={
+        <Stack direction="horizontal" gap="sm" align="center">
+          {options.length === 0 ? (
+            <Button size="sm" href="/notifications?level=decision">
+              去回复
+            </Button>
+          ) : (
+            shown.map((o, i) => (
               <Button
                 key={o.id}
                 size="sm"
-                variant={o.recommended ? 'brand' : 'outline'}
+                variant={lead && i === 0 && o.recommended ? 'primary' : 'secondary'}
                 title={o.detail}
                 loading={busy && answering?.optionId === o.id}
-                disabled={busy && answering?.optionId !== o.id}
+                {...(busy && answering?.optionId !== o.id ? { disabledReason: '正在记上一个选择' } : {})}
                 onClick={() => onAnswer(n, o.id)}
               >
                 {o.label}
               </Button>
             ))
-          : null}
-        {kind === 'gate' && options.length === 0 ? (
-          <Button asChild size="sm" variant="outline">
-            <Link to="/notifications?level=decision">
-              去回复
-              <ArrowRight aria-hidden />
-            </Link>
-          </Button>
-        ) : null}
-        {kind === 'watchdog' ? (
-          <Button asChild size="sm" variant="ghost">
-            <Link to={n.link ?? '/notifications'}>
-              看看
-              <ArrowRight aria-hidden />
-            </Link>
-          </Button>
-        ) : null}
-      </div>
-    </li>
+          )}
+          {more.length > 0 ? (
+            <RowMenu label={`更多选项：${n.title}`} title="还有别的选项" reveal={false}>
+              {more.map((o) => (
+                <RowMenuItem key={o.id} disabled={busy} onSelect={() => onAnswer(n, o.id)}>
+                  {o.label}
+                </RowMenuItem>
+              ))}
+            </RowMenu>
+          ) : null}
+        </Stack>
+      }
+    />
   );
 }
 
@@ -181,7 +186,7 @@ export function AskBlock() {
   const now = useNow();
   const q = useNotifications('open');
   const answer = useAnswerNotification();
-  const items = q.data ? askItems(q.data.items) : [];
+  const items = q.data ? askItems(q.data.items).filter((i) => i.kind === 'gate') : [];
   const onAnswer = (n: Notification, optionId: string) =>
     answer.mutate(
       { id: n.id, body: { optionId } },
@@ -198,51 +203,43 @@ export function AskBlock() {
     answer.isPending && answer.variables && 'optionId' in answer.variables.body
       ? { id: answer.variables.id, optionId: String(answer.variables.body.optionId) }
       : undefined;
+  const list = q.data !== undefined && items.length > 0;
   return (
     <Section
-      flush
-      {...(items.length > 0 ? { tone: 'human' as const } : {})}
+      flush={list}
       data-home-block="ask"
       title={<BlockTitle name="要你拍的" count={q.data ? items.length : undefined} />}
       actions={
-        <Button asChild size="sm" variant="ghost">
-          <Link to="/notifications">通知中心</Link>
+        <Button variant="text" size="sm" href="/notifications">
+          全部通知
         </Button>
       }
     >
       {q.error ? (
-        <div className="p-4">
-          <LoadError what="要你拍的" error={q.error} onRetry={() => void q.refetch()} />
-        </div>
+        <LoadError what="要你拍的" error={q.error} onRetry={() => void q.refetch()} />
       ) : !q.data ? (
-        <div className="p-4">
-          <LoadingRows rows={2} />
-        </div>
+        <LoadingRows rows={2} />
       ) : items.length === 0 ? (
-        <EmptyState size="inline" icon={CheckCheck} title="没有要你拍的" />
+        <EmptyState icon={CheckCheck} title="没有要你拍的" />
       ) : (
-        <List>
-          {items.map((it) => (
-            <AskRow
-              key={it.n.id}
-              item={it}
-              now={now}
-              answering={answering}
-              handlingProblem={q.data.handlingProblem}
-              onAnswer={onAnswer}
-            />
-          ))}
-        </List>
+        <>
+          <List>
+            {items.map((it, i) => (
+              <AskRow
+                key={it.n.id}
+                item={it}
+                now={now}
+                answering={answering}
+                lead={i === 0}
+                onAnswer={onAnswer}
+              />
+            ))}
+          </List>
+          {q.data.nextCursor ? (
+            <FootNote>{`待处理的通知超过 ${q.data.items.length} 条，这里只看了最近的；去通知中心看全`}</FootNote>
+          ) : null}
+        </>
       )}
-      {q.data?.nextCursor ? (
-        // 通知超过一页：这里只看了最近一页，照实说，不当成只有这些
-        <p className="border-t px-4 py-2 text-meta text-muted-foreground" data-ask-more>
-          待处理的通知超过 {q.data.items.length} 条，这里只看了最近的；
-          <Link to="/notifications" className="underline underline-offset-2">
-            去通知中心看全
-          </Link>
-        </p>
-      ) : null}
     </Section>
   );
 }
@@ -250,35 +247,45 @@ export function AskBlock() {
 /** 看远程环境的快照：只读，答要去那台上答。 */
 export function RemoteAskBlock({ decisions, machine }: { decisions: HomeDecision[]; machine: string }) {
   const now = useNow();
+  const reason = `要去${machine}那台上答`;
   return (
-    <Section flush data-home-block="ask" title={<BlockTitle name="要你拍的" count={decisions.length} />}>
+    <Section
+      flush={decisions.length > 0}
+      data-home-block="ask"
+      title={<BlockTitle name="要你拍的" count={decisions.length} />}
+    >
       {decisions.length === 0 ? (
-        <EmptyState size="inline" icon={CheckCheck} title="没有要你拍的" />
+        <EmptyState icon={CheckCheck} title="没有要你拍的" />
       ) : (
         <List>
           {decisions.map((d) => (
-            <li key={d.id} className={rowCls} data-ask-row="gate">
-              <div className="min-w-0 flex-1">
-                <p className="flex min-w-0 items-center gap-2 whitespace-nowrap">
-                  <StatusBadge tone="human" variant="dot" label="要你拍" />
-                  <span className="min-w-0 truncate text-body font-medium" title={d.title}>
-                    {d.title}
-                  </span>
-                  <span className="num ml-auto shrink-0 text-meta text-muted-foreground">
+            <ListRow
+              key={d.id}
+              tall
+              wrapTrailing
+              data-ask-row="gate"
+              title={
+                <Text strong title={d.title}>
+                  {d.title}
+                </Text>
+              }
+              meta={
+                <>
+                  <Text size="meta" tone="muted" block>
+                    {d.context ? `${d.context}　` : ''}
                     {formatAgo(d.since, now)}
-                  </span>
-                </p>
-                {d.context ? (
-                  <p className="mt-0.5 truncate text-meta text-muted-foreground">{d.context}</p>
-                ) : null}
-              </div>
-              <div className="flex shrink-0 flex-col items-start gap-1 md:items-end">
-                <Button size="sm" variant="outline" disabled data-remote-disabled>
+                  </Text>
+                  <Text size="meta" tone="muted" block>
+                    {reason}
+                  </Text>
+                </>
+              }
+              trailing={
+                <Button size="sm" disabledReason={reason}>
                   去答
                 </Button>
-                <span className="text-meta text-muted-foreground">要去{machine}那台上答</span>
-              </div>
-            </li>
+              }
+            />
           ))}
         </List>
       )}
@@ -286,58 +293,223 @@ export function RemoteAskBlock({ decisions, machine }: { decisions: HomeDecision
   );
 }
 
-// —— 在跑的 ——
+// —— 卡住报警 ——
 
-function RunLine({ row }: { row: RunRow }) {
-  const body = (
-    <>
-      <div className="min-w-0 flex-1">
-        <p className="flex min-w-0 items-center gap-2">
-          <span className="min-w-0 truncate text-body font-medium" title={row.what}>
-            {row.what}
-          </span>
-          <FlowModeTag mode={row.flowMode} fallback={row.flowFallback} />
-        </p>
-        <p className="truncate text-meta text-muted-foreground" title={`${row.who} · ${row.progress}`}>
-          {row.who} · {row.progress}
-        </p>
-        {row.why ? (
-          <p className="truncate text-meta text-muted-foreground" title={row.why} data-run-why>
-            {row.why}
-          </p>
-        ) : null}
-      </div>
-      <StatusBadge tone={row.tone} label={row.stuck} className="self-start md:self-center" />
-    </>
-  );
-  const cls = 'flex items-start gap-3 px-4 py-3 md:items-center';
+const REPAIR_LEVEL = {
+  fixing: 'processing',
+  waiting: 'warning',
+  unknown: 'default',
+} as const satisfies Record<WatchdogRepairState, 'processing' | 'warning' | 'default'>;
+
+/** 本台：看门狗报进来的卡。没有「处理」，写谁在修、修了多久、开了多久。 */
+export function AlarmBlock() {
+  const now = useNow();
+  const q = useNotifications('open');
+  const items = q.data ? askItems(q.data.items).filter((i) => i.kind === 'watchdog') : [];
+  const list = q.data !== undefined && items.length > 0;
   return (
-    <li data-run-row={row.source} data-tone={row.tone}>
-      {row.href && !row.external ? (
-        <Link to={row.href} className={`${cls} hover:bg-accent`}>
-          {body}
-        </Link>
+    <Section
+      flush={list}
+      data-home-block="alarm"
+      title={<BlockTitle name="卡住报警" count={q.data ? items.length : undefined} />}
+      actions={
+        <Button variant="text" size="sm" href="/notifications">
+          去处理
+        </Button>
+      }
+    >
+      {q.error ? (
+        <LoadError what="卡住报警" error={q.error} onRetry={() => void q.refetch()} />
+      ) : !q.data ? (
+        <LoadingRows rows={2} />
+      ) : items.length === 0 ? (
+        <EmptyState icon={ShieldCheck} title="没有卡住报警" />
       ) : (
-        <div className={cls}>{body}</div>
+        <List>
+          {items.map(({ n }) => {
+            const repair = watchdogRepair(n, now, q.data?.handlingProblem);
+            return (
+              <ListRow
+                key={n.id}
+                tall
+                data-ask-row="watchdog"
+                title={
+                  <Text strong title={n.title}>
+                    {n.title}
+                  </Text>
+                }
+                meta={
+                  <>
+                    <Text size="meta" tone="muted" block title={askLine(n).question}>
+                      {askLine(n).question}
+                    </Text>
+                    <span data-ask-repair={repair.state} title={repair.title}>
+                      <Stack direction="horizontal" gap="sm" align="center">
+                        <LevelDot level={REPAIR_LEVEL[repair.state]} />
+                        <Text size="meta" tone="secondary">
+                          {repair.text}
+                        </Text>
+                      </Stack>
+                    </span>
+                  </>
+                }
+                trailing={
+                  <Button
+                    variant="text"
+                    size="sm"
+                    href={n.link ?? '/notifications'}
+                    aria-label={`看看 ${n.title}`}
+                  >
+                    看看
+                  </Button>
+                }
+              />
+            );
+          })}
+        </List>
       )}
-    </li>
+    </Section>
   );
 }
 
-function RunList({ rows, extra }: { rows: RunRow[]; extra?: ReactNode }) {
+// —— 在跑的任务 ——
+
+/** 事下面的灰字：谁在做、进度，不是「没卡」「等你」这类状态标签已经说了的话。 */
+function runSub(row: RunRow): string {
+  const covered = new Set(['没卡', '卡住了', '等你']);
+  return [row.who, row.progress, covered.has(row.stuck) ? null : row.stuck].filter(Boolean).join(' · ');
+}
+
+function RunTitle({ row }: { row: RunRow }) {
+  return (
+    <Stack direction="horizontal" gap="sm" align="center">
+      <Text strong truncate title={row.what}>
+        {row.what}
+      </Text>
+      <FlowModeTag mode={row.flowMode} fallback={row.flowFallback} />
+    </Stack>
+  );
+}
+
+function RunDetail({ row }: { row: RunRow }) {
   return (
     <>
-      {rows.length === 0 ? (
-        <EmptyState size="inline" icon={CirclePlay} title="现在没有在跑的单" />
-      ) : (
-        <List>
-          {sortRunRows(rows).map((r) => (
-            <RunLine key={r.key} row={r} />
-          ))}
-        </List>
-      )}
-      {extra}
+      <Text size="meta" tone="muted" block title={`${row.who} · ${row.progress}`}>
+        {runSub(row)}
+      </Text>
+      {row.why ? (
+        <span data-run-why>
+          <Text size="meta" tone="secondary" block title={row.why}>
+            {row.why}
+          </Text>
+        </span>
+      ) : null}
     </>
+  );
+}
+
+function RunLink({ row }: { row: RunRow }) {
+  // 看远程快照时站内详情读的是本台的库、对不上，不给链接
+  if (!row.href || row.external) return null;
+  return (
+    <Button variant="text" size="xs" href={row.href} aria-label={`查看 ${row.what}`}>
+      查看
+    </Button>
+  );
+}
+
+const RUN_COLUMNS: TableColumn<RunRow>[] = [
+  {
+    key: 'what',
+    title: '任务',
+    render: (_, row) => (
+      <span data-run-row={row.source} data-tone={row.tone}>
+        <RunTitle row={row} />
+        <RunDetail row={row} />
+      </span>
+    ),
+  },
+  { key: 'tone', title: '状态', render: (_, row) => <StatusBadge status={`tone:${row.tone}`} /> },
+  { key: 'href', title: '操作', render: (_, row) => <RunLink row={row} /> },
+];
+
+function RunRows({ rows }: { rows: RunRow[] }) {
+  const phone = usePhone();
+  const sorted = sortRunRows(rows);
+  if (phone) {
+    return (
+      <List>
+        {sorted.map((row) => (
+          <ListRow
+            key={row.key}
+            tall
+            wrapTrailing
+            data-run-row={row.source}
+            data-tone={row.tone}
+            title={<RunTitle row={row} />}
+            meta={<RunDetail row={row} />}
+            trailing={
+              <Stack direction="horizontal" gap="sm" align="center">
+                <StatusBadge status={`tone:${row.tone}`} />
+                <RunLink row={row} />
+              </Stack>
+            }
+          />
+        ))}
+      </List>
+    );
+  }
+  return <Table caption="在跑的任务" columns={RUN_COLUMNS} rows={sorted} rowKey="key" />;
+}
+
+function RunSection({
+  count,
+  extra,
+  rows,
+  all,
+}: {
+  count: number;
+  extra?: ReactNode;
+  rows: RunRow[];
+  /** 本台：给「全部任务」和「提需求」的入口；看远程快照时站内的任务页读的是本台的库，不给。 */
+  all: boolean;
+}) {
+  const has = rows.length > 0;
+  return (
+    <Section
+      flush={has}
+      data-home-block="run"
+      title={<BlockTitle name="在跑的任务" count={count} />}
+      actions={
+        all ? (
+          <Button variant="text" size="sm" href="/tasks">
+            全部任务
+          </Button>
+        ) : undefined
+      }
+    >
+      {has ? (
+        <>
+          <RunRows rows={rows} />
+          {extra}
+        </>
+      ) : (
+        <>
+          <EmptyState
+            icon={CirclePlay}
+            title="现在没有在跑的单"
+            action={
+              all ? (
+                <Button size="sm" href="/intake">
+                  提需求
+                </Button>
+              ) : undefined
+            }
+          />
+          {extra}
+        </>
+      )}
+    </Section>
   );
 }
 
@@ -345,57 +517,41 @@ function RunList({ rows, extra }: { rows: RunRow[]; extra?: ReactNode }) {
 export function RunBlock({ running }: { running: HomeRunning[] }) {
   const now = useNow();
   const local = useLocalSessions();
-  const nodes = local.data?.nodes ?? [];
-  const machineOf = (id: string) => nodes.find((n) => n.id === id)?.machine ?? undefined;
+  // 读不到本机会话时找不到机器名，退回环境编号（localWhoOf 的老写法）；读失败在区块底另写，不在这里当成空
+  const machineOf = (id: string) => local.data?.nodes.find((n) => n.id === id)?.machine ?? undefined;
   const engine = running.map((r) => engineRow(r, now, { href: r.link, external: false }, machineOf));
   const lr = local.data ? localRows(local.data, now) : null;
   const rows = [...engine, ...(lr?.kind === 'rows' ? lr.rows : [])];
   const extra = local.error ? (
-    <div className="border-t p-4">
-      <LoadError what="本机会话" error={local.error} onRetry={() => void local.refetch()} />
-    </div>
+    <List>
+      <ListRow
+        summary={<LoadError what="本机会话" error={local.error} onRetry={() => void local.refetch()} />}
+      />
+    </List>
   ) : lr?.kind === 'rows' && lr.silent.length > 0 ? (
-    <p
-      className="border-t px-4 py-2 text-meta text-muted-foreground"
-      data-run-local="silent"
-      title={lr.silent.map((s) => `${s.machine}：${s.why}`).join('；')}
-    >
-      本机会话没上报（在做什么看不到，不当成没在做）：
-      {lr.silent.map((s) => `${s.machine}${s.never ? '一次都没收到' : '上次收到的已过期'}`).join('；')}
-    </p>
+    <span data-run-local="silent" title={lr.silent.map((s) => `${s.machine}：${s.why}`).join('；')}>
+      <FootNote>
+        {`本机会话没上报（在做什么看不到，不当成没在做）：${lr.silent
+          .map((s) => `${s.machine}${s.never ? '一次都没收到' : '上次收到的已过期'}`)
+          .join('；')}`}
+      </FootNote>
+    </span>
   ) : lr?.kind === 'notWired' ? (
-    <p className="border-t px-4 py-2 text-meta text-muted-foreground" data-run-local="notWired">
-      本机会话没接上：{lr.why}
-    </p>
+    <span data-run-local="notWired">
+      <FootNote>{`本机会话没接上：${lr.why}`}</FootNote>
+    </span>
   ) : null;
-  return (
-    <Section
-      flush
-      data-home-block="run"
-      title={<BlockTitle name="在跑的" count={rows.length} />}
-      actions={
-        <Button asChild size="sm" variant="ghost">
-          <Link to="/tasks">全部任务</Link>
-        </Button>
-      }
-    >
-      <RunList rows={rows} extra={extra} />
-    </Section>
-  );
+  return <RunSection count={rows.length} rows={rows} extra={extra} all />;
 }
 
 /** 看远程环境的快照：那台的引擎单，只读（站内详情读的是本台的库，不给链接）。本机会话只在本台看。 */
 export function RemoteRunBlock({ running }: { running: HomeRunning[] }) {
   const now = useNow();
   const rows = running.map((r) => engineRow(r, now, { href: r.link, external: true }));
-  return (
-    <Section flush data-home-block="run" title={<BlockTitle name="在跑的" count={rows.length} />}>
-      <RunList rows={rows} />
-    </Section>
-  );
+  return <RunSection count={rows.length} rows={rows} all={false} />;
 }
 
-// —— 上线了的 ——
+// —— 最近上线 ——
 
 function prHref(repo: string | null, n: number): string | undefined {
   if (!repo) return undefined;
@@ -404,23 +560,16 @@ function prHref(repo: string | null, n: number): string | undefined {
   return brand.repoLink({ owner: repo.slice(0, cut), name: repo.slice(cut + 1) }, 'pull', n);
 }
 
-function PrLink({ repo, n, title }: { repo: string | null; n: number; title?: string | undefined }) {
+function PrLink({ repo, n }: { repo: string | null; n: number }) {
   const href = prHref(repo, n);
-  const label = `#${n}`;
   return href ? (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      title={title}
-      className="num underline underline-offset-2"
-    >
-      {label}
-    </a>
+    <Button variant="text" size="xs" href={href} external>
+      #{n}
+    </Button>
   ) : (
-    <span className="num" title={title}>
-      {label}
-    </span>
+    <Text mono tone="muted">
+      #{n}
+    </Text>
   );
 }
 
@@ -438,39 +587,50 @@ function carriedText(row: ShippedRow): string {
 function ShippedLine({ row, now }: { row: ShippedRow; now: number }) {
   const carried = carriedText(row);
   return (
-    <li className="px-4 py-3" data-shipped-row={row.event}>
-      <p className="flex min-w-0 items-center gap-2 whitespace-nowrap">
-        {row.what !== null ? (
-          <span className="min-w-0 truncate text-body font-medium" title={row.what}>
+    <ListRow
+      tall
+      data-shipped-row={row.event}
+      title={
+        row.what !== null ? (
+          <Text strong title={row.what}>
             {row.what}
-          </span>
+          </Text>
         ) : (
-          <span className="min-w-0 truncate text-body text-ink-stall" title={row.whatWhy ?? ''}>
+          <Text tone="warning" title={row.whatWhy ?? ''}>
             标题没查成：{row.whatWhy}
+          </Text>
+        )
+      }
+      meta={
+        <>
+          <Stack direction="horizontal" gap="sm" align="center" wrap>
+            {row.pr ? (
+              <PrLink repo={row.pr.repo} n={row.pr.number} />
+            ) : (
+              <Text size="meta" tone="muted">
+                不是 PR 合进来的
+              </Text>
+            )}
+            <Text size="meta" tone="muted" mono>
+              {row.short}
+            </Text>
+            <Text size="meta" tone="muted" title={formatDateTime(row.at)}>
+              {formatAgo(row.at, now)}
+            </Text>
+          </Stack>
+          <span data-shipped-carried>
+            <Text size="meta" tone="muted" block title={carried}>
+              {carried}
+            </Text>
           </span>
-        )}
-        {row.event !== 'release' ? (
-          <StatusBadge
-            tone="stall"
-            variant="outline"
-            icon={false}
-            label={row.event === 'rollback' ? '回滚' : '自动回滚'}
-          />
-        ) : null}
-        <span className="num ml-auto shrink-0 text-meta text-muted-foreground" title={formatDateTime(row.at)}>
-          {formatAgo(row.at, now)}
-        </span>
-      </p>
-      <p className="mt-0.5 flex min-w-0 items-center gap-1.5 whitespace-nowrap text-meta text-muted-foreground">
-        {row.pr ? <PrLink repo={row.pr.repo} n={row.pr.number} /> : <span>不是 PR 合进来的</span>}
-        <span aria-hidden>·</span>
-        <span className="font-mono">{row.short}</span>
-        <span aria-hidden>·</span>
-        <span className="min-w-0 truncate" title={carried} data-shipped-carried>
-          {carried}
-        </span>
-      </p>
-    </li>
+        </>
+      }
+      trailing={
+        row.event !== 'release' ? (
+          <Tag tone="warning">{row.event === 'rollback' ? '回滚' : '自动回滚'}</Tag>
+        ) : null
+      }
+    />
   );
 }
 
@@ -481,29 +641,23 @@ export function ShippedBlock({ done }: { done: HomeDone[] }) {
   const rows = q.data?.state === 'ok' ? shippedRows(q.data.commits, done) : [];
   return (
     <Section
-      flush
+      flush={rows.length > 0}
       data-home-block="shipped"
-      title={<BlockTitle name="上线了的" count={q.data?.state === 'ok' ? rows.length : undefined} />}
+      title={<BlockTitle name="最近上线" />}
       actions={
-        <Button asChild size="sm" variant="ghost">
-          <Link to="/changelog">更新日志</Link>
+        <Button variant="text" size="sm" href="/changelog">
+          更新日志
         </Button>
       }
     >
       {q.error ? (
-        <div className="p-4">
-          <LoadError what="上线记录" error={q.error} onRetry={() => void q.refetch()} />
-        </div>
+        <LoadError what="上线记录" error={q.error} onRetry={() => void q.refetch()} />
       ) : !q.data ? (
-        <div className="p-4">
-          <LoadingRows rows={2} />
-        </div>
+        <LoadingRows rows={2} />
       ) : q.data.state === 'unreadable' ? (
-        <div className="p-4">
-          <Notice tone="stall">上线记录没查成：{q.data.why}</Notice>
-        </div>
+        <Notice tone="stall">上线记录没查成：{q.data.why}</Notice>
       ) : rows.length === 0 ? (
-        <EmptyState size="inline" icon={Rocket} title="法国的发布历史里还没有发布记录" />
+        <EmptyState icon={Rocket} title="法国的发布历史里还没有发布记录" />
       ) : (
         <List>
           {rows.map((r) => (
@@ -518,8 +672,17 @@ export function ShippedBlock({ done }: { done: HomeDone[] }) {
 /** 看远程环境：上线记录是法国这台的发布历史，不顶着远程环境的名字列。 */
 export function RemoteShippedBlock() {
   return (
-    <Section flush data-home-block="shipped" title={<BlockTitle name="上线了的" />}>
+    <Section flush data-home-block="shipped" title={<BlockTitle name="最近上线" />}>
       <EmptyState size="inline" icon={Rocket} title="上线记录只在本台看" hint="切回本台再看。" />
+    </Section>
+  );
+}
+
+/** 看远程环境：看门狗的卡是本台通知里的，不顶着远程环境的名字列。 */
+export function RemoteAlarmBlock() {
+  return (
+    <Section flush data-home-block="alarm" title={<BlockTitle name="卡住报警" />}>
+      <EmptyState size="inline" icon={ShieldCheck} title="卡住报警只在本台看" hint="切回本台再看。" />
     </Section>
   );
 }

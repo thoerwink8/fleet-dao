@@ -101,4 +101,24 @@ describe('FilterTabs', () => {
     expect(screen.getByRole('button', { name: /在跑/ }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('button', { name: /全部/ }).getAttribute('aria-pressed')).toBe('false');
   });
+
+  test('segmented：平的分段控件（样稿 .seg）——灰底槽、选中白底品牌色字，不浮起、不带阴影和描边', () => {
+    render(
+      <FilterTabs
+        mode="toggle"
+        variant="segmented"
+        aria-label="三步法或全程"
+        items={items}
+        value="run"
+        onChange={() => {}}
+      />,
+    );
+    const group = screen.getByRole('group');
+    expect(group.className).toContain('bg-fill-2');
+    expect(group.className).not.toMatch(/shadow|border/);
+    const on = screen.getByRole('button', { name: /在跑/ });
+    expect(on.className).toContain('bg-card');
+    expect(on.className).toContain('text-brand-ink');
+    expect(screen.getByRole('button', { name: /全部/ }).className).not.toContain('bg-card');
+  });
 });

@@ -52,10 +52,6 @@
       "R13": 1,
       "R14": 3
     },
-    "src/components/flow-mode-toggle.tsx": {
-      "R13": 12,
-      "R14": 1
-    },
     "src/components/gateway-health-link.tsx": {
       "R13": 4
     },
@@ -101,9 +97,6 @@
     "src/components/home/done-card.tsx": {
       "R13": 25
     },
-    "src/components/home/headline.tsx": {
-      "R13": 2
-    },
     "src/components/home/health-strip.tsx": {
       "R13": 12,
       "R14": 1,
@@ -124,14 +117,6 @@
       "R13": 30,
       "R15": 1
     },
-    "src/components/home/missing-env.tsx": {
-      "R13": 1,
-      "R14": 1
-    },
-    "src/components/home/project-cards.tsx": {
-      "R13": 10,
-      "R17": 1
-    },
     "src/components/home/running-board.tsx": {
       "R13": 2,
       "R14": 1
@@ -139,15 +124,6 @@
     "src/components/home/running-card.tsx": {
       "R13": 28,
       "R20": 4
-    },
-    "src/components/home/spend-line.tsx": {
-      "R13": 7
-    },
-    "src/components/home/today-blocks.tsx": {
-      "R13": 96,
-      "R14": 1,
-      "R19": 1,
-      "R20": 8
     },
     "src/components/intake/draft-panel.tsx": {
       "R13": 94,
@@ -423,9 +399,6 @@
       "R17": 1,
       "R19": 1,
       "R20": 10
-    },
-    "src/routes/home.tsx": {
-      "R13": 2
     },
     "src/routes/intake.tsx": {
       "R13": 5,

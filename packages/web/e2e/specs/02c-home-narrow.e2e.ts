@@ -1,4 +1,5 @@
-// 首页窄屏页头（#2969）：320 / 360 / 390 上流程开关、状态、刷新不重叠、不裁切、不横滚；宽屏仍和标题同一行。
+// 工作台页头窄屏（#2969，#3509 改版后）：320 / 360 / 390 上流程开关和刷新不重叠、不裁切、不横滚，手机上在标题下面；宽屏仍和标题同一行。
+// 健康条不再挤在页头：额度在「数据概览」，流水线、中转、引擎进程在「系统状态」；手机上「要你拍的」「在跑的任务」行尾不被截断。
 // 组件测试没有版面，框在这里量。
 import type { Page } from '@playwright/test';
 import { expect, test } from '../support/fixtures.ts';
@@ -10,28 +11,19 @@ type HeaderLayout = {
   overflowDoc: number;
   overflowMain: number;
   switchScroll: number;
-  tabsScroll: number;
   sw: Box | null;
-  health: Box | null;
   refresh: Box | null;
   title: Box | null;
-  headline: Box | null;
   choices: { name: string; h: number; w: number; hit: boolean }[];
-  hitHealth: boolean;
   hitRefresh: boolean;
   insideSwitch: boolean;
-  insideHealth: boolean;
   insideRefresh: boolean;
-  overlapsSwitchHealth: boolean;
   overlapsSwitchRefresh: boolean;
-  overlapsHealthRefresh: boolean;
   switchBelowTitle: boolean;
-  statusBelowSwitch: boolean;
-  refreshBelowSwitch: boolean;
-  headlineBelow: boolean;
   sameRow: boolean;
-  healthH: number;
   refreshH: number;
+  /** 超出屏幕的行尾元素（状态、按钮、链接）。 */
+  clippedTrailing: string[];
 };
 
 // 字符串送进浏览器：写在函数里的类型注解会被原样带过去，浏览器解析不了。
@@ -68,11 +60,9 @@ const LAYOUT_JS = `(() => {
       );
     };
     const sw = document.querySelector('[data-flow-mode-switch]');
-    const health = document.querySelector('[data-health-strip]');
     const refreshBtn = document.querySelector('[data-refresh-bar] button');
     const refresh = document.querySelector('[data-refresh-bar]');
     const title = document.querySelector('[data-page-titlebar]');
-    const headline = document.querySelector('[data-home-headline]');
     const tabs = sw?.querySelector('[role="group"]');
     const choices = [...(sw?.querySelectorAll('button') ?? [])].map((el) => ({
       name: el.textContent ?? '',
@@ -81,41 +71,36 @@ const LAYOUT_JS = `(() => {
       hit: hit(el),
     }));
     const swBox = box(sw);
-    const healthBox = box(health);
     const refreshBox = box(refresh);
     const titleBox = box(title);
-    const headlineBox = box(headline);
+    // 行尾的状态、按钮、时间：整个落在屏幕里、没被省略号截断
+    const clipped = [...document.querySelectorAll('[data-home] [data-status], [data-home] [data-home-block] a, [data-home] [data-home-block] button')]
+      .filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && (r.right > window.innerWidth + 1 || r.left < -1);
+      })
+      .map((el) => (el.textContent ?? '').slice(0, 30));
     return {
       vw: window.innerWidth,
       overflowDoc: document.documentElement.scrollWidth - window.innerWidth,
       overflowMain: main ? main.scrollWidth - main.clientWidth : -1,
-      switchScroll: sw instanceof HTMLElement ? sw.scrollWidth - sw.clientWidth : -1,
-      tabsScroll: tabs instanceof HTMLElement ? tabs.scrollWidth - tabs.clientWidth : -1,
+      switchScroll: tabs instanceof HTMLElement ? tabs.scrollWidth - tabs.clientWidth : -1,
       sw: swBox,
-      health: healthBox,
       refresh: refreshBox,
       title: titleBox,
-      headline: headlineBox,
       choices,
-      hitHealth: hit(health),
       hitRefresh: hit(refreshBtn),
       insideSwitch: inside(swBox),
-      insideHealth: inside(healthBox),
       insideRefresh: inside(refreshBox),
-      overlapsSwitchHealth: overlaps(swBox, healthBox),
       overlapsSwitchRefresh: overlaps(swBox, refreshBox),
-      overlapsHealthRefresh: overlaps(healthBox, refreshBox),
       switchBelowTitle: Boolean(swBox && titleBox && swBox.top >= titleBox.bottom - 1),
-      statusBelowSwitch: Boolean(healthBox && swBox && healthBox.top >= swBox.bottom - 1),
-      refreshBelowSwitch: Boolean(refreshBox && swBox && refreshBox.top >= swBox.bottom - 1),
-      headlineBelow: Boolean(!headlineBox || (swBox && headlineBox.top >= swBox.bottom - 1)),
       sameRow: Boolean(
         swBox &&
           titleBox &&
           Math.abs(swBox.top + swBox.height / 2 - (titleBox.top + titleBox.height / 2)) < 24,
       ),
-      healthH: health instanceof HTMLElement ? health.getBoundingClientRect().height : 0,
       refreshH: refreshBtn instanceof HTMLElement ? refreshBtn.getBoundingClientRect().height : 0,
+      clippedTrailing: clipped,
     };
   })()`;
 
@@ -137,20 +122,16 @@ function settledKey(raw: string): string {
   return JSON.stringify({
     ...m,
     sw: b(m.sw),
-    health: b(m.health),
     refresh: b(m.refresh),
     title: b(m.title),
-    headline: b(m.headline),
     choices: m.choices.map((c) => ({ ...c, h: r(c.h), w: r(c.w) })),
-    healthH: r(m.healthH),
     refreshH: r(m.refreshH),
   });
 }
 
 /**
- * 等版面落定再量（#3433）。条已经可见，只说明节点在，不说明字宽和健康条的摊开/收起落定了。
- * 字体晚到会改字宽；健康条按量到的宽度在「三格摊开」和「状态按钮」之间切，切完之前量就会叠在一起。
- * 页头进场 fd-rise 只有 0.28s。在跑的状态点是无限循环，等「所有动画停」会一直等到超时。
+ * 等版面落定再量（#3433）。字体晚到会改字宽；页头进场 fd-rise 只有 0.28s。
+ * 在跑的状态点是无限循环，等「所有动画停」会一直等到超时。
  * 这里只等字体、fd-rise，再等页头盒子连续三次（间隔 100ms）不变。断言没放宽。
  */
 async function layout(page: Page): Promise<HeaderLayout> {
@@ -191,33 +172,24 @@ async function layout(page: Page): Promise<HeaderLayout> {
   return JSON.parse(lastRaw) as HeaderLayout;
 }
 
-test.describe('首页页头窄屏', () => {
+test.describe('工作台页头窄屏', () => {
   test.beforeEach(async ({ login }) => login());
 
-  test('320、360、390：开关、状态、刷新不重叠、不裁切、不横滚，都能点', async ({ page }) => {
+  test('320、360、390：开关和刷新不重叠、不裁切、不横滚，都能点；开关在标题下面', async ({ page }) => {
     for (const width of [320, 360, 390]) {
       await page.setViewportSize({ width, height: 844 });
       await page.goto('/');
-      await expect(page.getByRole('heading', { level: 1, name: '主页' })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1, name: '工作台' })).toBeVisible();
       await expect(page.locator('[data-flow-mode-current]')).not.toHaveText('正在读流程模式');
-      await expect(page.locator('[data-health-strip]')).toBeVisible();
-      await expect(page.locator('[data-home-headline]')).toBeVisible();
+      await expect(page.locator('[data-spend-line]')).toBeVisible();
       const m = await layout(page);
       expect(m.overflowDoc, `${width} 整页横滚`).toBeLessThanOrEqual(1);
       expect(m.overflowMain, `${width} 正文横滚`).toBeLessThanOrEqual(1);
       expect(m.switchScroll, `${width} 开关被裁`).toBeLessThanOrEqual(1);
-      expect(m.tabsScroll, `${width} 选择条横滑`).toBeLessThanOrEqual(1);
       expect(m.insideSwitch, `${width} 开关在正文里`).toBe(true);
-      expect(m.insideHealth, `${width} 状态在正文里`).toBe(true);
       expect(m.insideRefresh, `${width} 刷新在正文里`).toBe(true);
-      expect(m.overlapsSwitchHealth, `${width} 开关和状态重叠`).toBe(false);
       expect(m.overlapsSwitchRefresh, `${width} 开关和刷新重叠`).toBe(false);
-      expect(m.overlapsHealthRefresh, `${width} 状态和刷新重叠`).toBe(false);
       expect(m.switchBelowTitle, `${width} 开关应在标题下面`).toBe(true);
-      expect(m.statusBelowSwitch, `${width} 状态应在开关下面`).toBe(true);
-      expect(m.refreshBelowSwitch, `${width} 刷新应在开关下面`).toBe(true);
-      expect(m.headlineBelow, `${width} 一句话应在开关下面`).toBe(true);
-      expect(m.hitHealth, `${width} 状态被挡住`).toBe(true);
       expect(m.hitRefresh, `${width} 刷新被挡住`).toBe(true);
       expect(m.choices.length, `${width} 两个选择`).toBe(2);
       for (const c of m.choices) {
@@ -225,23 +197,21 @@ test.describe('首页页头窄屏', () => {
         expect(c.h, `${width} ${c.name} 高`).toBeGreaterThanOrEqual(40);
         expect(c.w, `${width} ${c.name} 宽`).toBeGreaterThanOrEqual(40);
       }
-      expect(m.healthH, `${width} 状态高`).toBeGreaterThanOrEqual(40);
       expect(m.refreshH, `${width} 刷新高`).toBeGreaterThanOrEqual(40);
+      // 手机上列表行尾（状态、按钮）整个落在屏幕里，不被挤出去、不被截断
+      expect(m.clippedTrailing, `${width} 行尾超出屏幕`).toEqual([]);
     }
   });
 
-  test('宽屏：开关和标题同一行，也不和状态、刷新重叠', async ({ page }) => {
+  test('宽屏：开关和标题同一行，也不和刷新重叠', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('[data-flow-mode-current]')).not.toHaveText('正在读流程模式');
-    await expect(page.locator('[data-health-strip]')).toBeVisible();
+    await expect(page.locator('[data-spend-line]')).toBeVisible();
     const m = await layout(page);
     expect(m.overflowMain, '正文横滚').toBeLessThanOrEqual(1);
     expect(m.sameRow, '开关应和标题同一行').toBe(true);
     expect(m.switchBelowTitle, '宽屏不应把开关整块挤到标题下面').toBe(false);
-    expect(m.overlapsSwitchHealth, '开关和状态重叠').toBe(false);
     expect(m.overlapsSwitchRefresh, '开关和刷新重叠').toBe(false);
-    expect(m.overlapsHealthRefresh, '状态和刷新重叠').toBe(false);
-    expect(m.hitHealth).toBe(true);
     expect(m.hitRefresh).toBe(true);
   });
 });
