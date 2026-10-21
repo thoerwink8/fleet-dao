@@ -1,4 +1,4 @@
-// pnpm check 的入口：biome + tsc -b + 改到的测试 + 卫生检查，四样都跑完再判红；--all 才全量 vitest run（判法见 ../check.ts）。
+// pnpm check 的入口：biome + tsc -b + 改到的测试 + 卫生检查 + 方案索引核对，五样都跑完再判红；--all 才全量 vitest run（判法见 ../check.ts）。
 //   pnpm check [--all]
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -36,6 +36,13 @@ const code = check({
           notRunCodes: [2, 3],
         },
     { step: node('卫生检查', 'packages/hygiene/src/bin/check.ts', []) },
+    // specs:index --check：1 = 头部不对或索引没重新生成，2 = 读不到 specs/（没查成）。
+    {
+      step: node('方案索引（pnpm specs:index --check）', 'packages/conventions/src/bin/specs-index.ts', [
+        '--check',
+      ]),
+      notRunCodes: [2],
+    },
   ],
   now: () => Date.now(),
   out: (l) => console.log(l),

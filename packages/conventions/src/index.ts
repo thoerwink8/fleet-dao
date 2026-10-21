@@ -237,6 +237,16 @@ export {
 } from './progress.ts';
 export { declaredQueryAxes, extractQueryAxes, queryAxisProblems, resolveQueryAxes } from './query-axis.ts';
 export { fsRepo, type RepoView } from './repo.ts';
+// 方案索引由各方案目录主文件的头部生成（bin/specs-index.ts）。
+export {
+  checkSpecsIndex,
+  generateSpecsIndex,
+  readSpecs,
+  renderSpecsIndex,
+  type SpecEntry,
+  type SpecStatus,
+  type SpecsProblem,
+} from './specs-index.ts';
 export {
   type ChangedFile,
   matchesStandardPath,
