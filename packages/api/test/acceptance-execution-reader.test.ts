@@ -463,12 +463,28 @@ describe('私有验收原 execution reader', () => {
         ),
       ).toEqual(['', 'next', 'tail-0']);
     });
-    it('允许空尾页带进展token再接空尾页，最多两个空尾页', async () => {
-      expect((await withTail(page([], 'tail-1'), page([])).reader.read(id)).kind).toBe('observed');
-      expect(await withTail(page([], 'tail-1'), page([], 'tail-2'), page([])).reader.read(id)).toEqual({
-        kind: 'unknown',
-        code: 'limit',
-      });
+    it('终态后三个以上带进展token的空尾页，token耗尽即收尾 → observed（无固定空页上限，#3502）', async () => {
+      const f = withTail(page([], 'tail-1'), page([], 'tail-2'), page([], 'tail-3'), page([]));
+      const r = await f.reader.read(id);
+      expect(r.kind).toBe('observed');
+      if (r.kind !== 'observed') return;
+      expect(r.stats.pages).toBe(6);
+      expect(f.history).toHaveBeenCalledTimes(6);
+    });
+    it('终态前的合法空中间页（带进展token）后接完整历史 → observed（#3502）', async () => {
+      const f = fixture();
+      f.pages[0]!.nextPageToken = Buffer.from('next');
+      f.pages.splice(1, 0, page([], 'middle'));
+      const r = await f.reader.read(id);
+      expect(r.kind).toBe('observed');
+      if (r.kind !== 'observed') return;
+      expect(r.stats.pages).toBe(3);
+      expect(r.proof.closeEvent).toBe('8');
+    });
+    it('首页空页（有进展token）后接完整历史 → observed', async () => {
+      const f = fixture();
+      f.pages.unshift(page([], 'first'));
+      expect((await f.reader.read(id)).kind).toBe('observed');
     });
     it.each([
       ['终态后出现新事件', () => withTail(page([signal(9)]))],
@@ -506,11 +522,41 @@ describe('私有验收原 execution reader', () => {
       ],
       ['空尾页token超长', () => withTail(page([], 'x'.repeat(ACCEPTANCE_HISTORY_LIMITS.tokenBytes + 1)))],
       [
-        '终态前的空页',
+        '终态前的空页token循环',
         () => {
           const f = fixture();
-          f.pages.splice(1, 0, page([], 'mid'));
           f.pages[0]!.nextPageToken = Buffer.from('next');
+          f.pages.splice(1, 0, page([], 'next'));
+          return f;
+        },
+      ],
+      [
+        '终态前的空页带rawHistory',
+        () => {
+          const f = fixture();
+          f.pages[0]!.nextPageToken = Buffer.from('next');
+          f.pages.splice(1, 0, page([], 'middle'));
+          f.pages[1]!.rawHistory = [{ data: Buffer.from('raw') }];
+          return f;
+        },
+      ],
+      [
+        '终态前的空页archived',
+        () => {
+          const f = fixture();
+          f.pages[0]!.nextPageToken = Buffer.from('next');
+          f.pages.splice(1, 0, page([], 'middle'));
+          f.pages[1]!.archived = true;
+          return f;
+        },
+      ],
+      [
+        '终态前的空页后事件缺号',
+        () => {
+          const f = fixture();
+          f.pages[0]!.nextPageToken = Buffer.from('next');
+          f.pages.splice(1, 0, page([], 'middle'));
+          f.events[4]!.eventId = temporal.api.history.v1.HistoryEvent.fromObject({ eventId: '999' }).eventId;
           return f;
         },
       ],
@@ -564,7 +610,7 @@ describe('私有验收原 execution reader', () => {
         );
       expect((await f.reader.read(id)).kind).toBe('unknown');
     });
-    it('空尾页仍计入总页数预算：256页后停止', async () => {
+    it('连续进展token空尾页耗尽原总页数预算 → unknown limit，真实读取计数为 pages+1', async () => {
       const f = fixture();
       f.pages[1]!.nextPageToken = Buffer.from('tail-0');
       let n = 0;
@@ -574,9 +620,33 @@ describe('私有验收原 execution reader', () => {
         if (i === 1) return f.pages[1]!;
         return page([], `tail-${i}`);
       });
+      expect(await f.reader.read(id)).toEqual({ kind: 'unknown', code: 'limit' });
+      // 预算本身未变：第 256 页仍可读，第 257 页响应到达即拒绝。
+      expect(ACCEPTANCE_HISTORY_LIMITS.pages).toBe(256);
+      expect(n).toBe(ACCEPTANCE_HISTORY_LIMITS.pages + 1);
+      expect(f.history).toHaveBeenCalledTimes(n);
+    });
+    it('终态前连续进展token空页耗尽原总页数预算 → unknown limit', async () => {
+      const f = fixture();
+      let n = 0;
+      f.history.mockImplementation(async () => {
+        const i = n++;
+        return i === 0 ? f.pages[0]! : page([], `mid-${i}`);
+      });
+      f.pages[0]!.nextPageToken = Buffer.from('first');
+      expect(await f.reader.read(id)).toEqual({ kind: 'unknown', code: 'limit' });
+      expect(n).toBe(ACCEPTANCE_HISTORY_LIMITS.pages + 1);
+    });
+    it('恰好用满原总页数256页（含大量空页）仍 observed', async () => {
+      const f = fixture();
+      const empties = Array.from({ length: ACCEPTANCE_HISTORY_LIMITS.pages - 2 }, (_, i) =>
+        page([], `mid-${i}`),
+      );
+      f.pages[0]!.nextPageToken = Buffer.from('first');
+      f.pages.splice(1, 0, ...empties);
       const r = await f.reader.read(id);
-      expect(r.kind).toBe('unknown');
-      expect(n).toBeLessThanOrEqual(ACCEPTANCE_HISTORY_LIMITS.pages);
+      expect(r.kind).toBe('observed');
+      if (r.kind === 'observed') expect(r.stats.pages).toBe(ACCEPTANCE_HISTORY_LIMITS.pages);
     });
   });
   it('无关binary/null结果不必解码，不能靠notes碰巧命中建立B来源', async () => {
