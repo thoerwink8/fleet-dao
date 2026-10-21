@@ -1391,6 +1391,32 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     expect(gitClean(restored, ['rev-parse', 'HEAD^{commit}']).trim()).toMatch(/^[0-9a-f]{40}$/);
   });
 
+  it('浅克隆里有未提交文件：保全入口在采集前拒绝，不留回执、不删原树', async () => {
+    const origin = join(root, 'shallow-origin');
+    mkdirSync(origin);
+    git(origin, 'init', '-q', '-b', 'main');
+    for (const n of [1, 2, 3]) {
+      writeFileSync(join(origin, 'a.txt'), `v${n}\n`);
+      git(origin, 'add', '.');
+      git(origin, 'commit', '-q', '-m', `c${n}`);
+    }
+    const t = tree('acme_web/12-shallow');
+    rmSync(t.dir, { recursive: true, force: true });
+    git(root, 'clone', '-q', '--depth=1', `file://${origin}`, t.dir);
+    expect(git(t.dir, 'rev-parse', '--is-shallow-repository').trim()).toBe('true');
+    writeFileSync(join(t.dir, 'dirty.txt'), 'dirty\n');
+    const removed: string[] = [];
+    await expect(
+      preserveThenRemove(t, archive, gate(), undefined, async () => {
+        removed.push(t.dir);
+        return { gone: false };
+      }),
+    ).rejects.toThrow(/浅仓不能自包含保全，保留原树/);
+    expect(removed).toEqual([]);
+    expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
+    for (const name of archives()) expect(existsSync(join(archive, name, 'receipt.json'))).toBe(false);
+  });
+
   it('多行 MERGE_HEAD 引用的提交进对象包，独立解包后还能 cat-file', async () => {
     const t = tree('acme_web/12-merge');
     dirtyFile(t);
