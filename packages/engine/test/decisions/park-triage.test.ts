@@ -2,8 +2,7 @@
 // 留给人只认三种理由类别；白名单外的裁决不放行；额度超预算按空转判，不按钱；老历史的停法从提醒正文认。
 import { describe, expect, it } from 'vitest';
 import {
-  ACCEPTANCE_LEAVE_KINDS,
-  acceptanceLeaveIsFounderOnly,
+  type AcceptanceFounderFact,
   allowedActions,
   COMMANDER_ACTIONS,
   type CommanderAction,
@@ -16,6 +15,7 @@ import {
   RUNTIME_RULES,
   type TriageKind,
   triageKindOf,
+  trustedFounderFact,
 } from '../../src/decisions/park-triage.ts';
 import { judgeSpin, type SpinRound } from '../../src/decisions/spin.ts';
 import { PARK_CODE_NO_ROUTE, PARK_CODE_ROUTE_SWITCH } from '../../src/task-contract.ts';
@@ -393,34 +393,31 @@ describe('验收责任裁决白名单', () => {
     ).toEqual({ ok: false, why: 'PR 没有合并回执，不能结清验收责任' });
   });
 
-  it('创始人责任只认结构化 founder-only 加非空说明：自由文本、只读受限、认不出的声明都不是（#3497）', () => {
-    const leave = { ...base, action: 'leave', reason: '证据仍缺' };
-    const founder = '只有创始人能提供：线下合同签章确认';
-    expect(acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'founder-only', humanOnly: founder })).toBe(
-      true,
-    );
-    expect(ACCEPTANCE_LEAVE_KINDS).toEqual(['founder-only', 'read-unavailable']);
-    // 说明里再像「只有创始人」也不算：没声明、声明读不到、声明认不出、说明为空
-    expect(acceptanceLeaveIsFounderOnly({ ...leave, humanOnly: founder })).toBe(false);
-    expect(
-      acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'read-unavailable', humanOnly: founder }),
-    ).toBe(false);
-    expect(acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'Founder-Only', humanOnly: founder })).toBe(
-      false,
-    );
-    expect(acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'founder-only', humanOnly: '  ' })).toBe(
-      false,
-    );
-    expect(acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'founder-only' })).toBe(false);
-    // 不是 leave 的裁决不可能是创始人责任
-    expect(
-      acceptanceLeaveIsFounderOnly({
-        ...base,
-        action: 'settle',
-        evidence: '有证据',
-        leaveKind: 'founder-only',
-        humanOnly: founder,
-      }),
-    ).toBe(false);
+  it('创始人证据只认引擎可信来源的精确事实：身份差一项、种类不认、说明空或超长、同责任多条，都不算（#3497）', () => {
+    const duty = source({ id: 7, generation: 2, prNumber: 99, head: 'a'.repeat(40) });
+    const fact = (over: Partial<AcceptanceFounderFact> = {}): AcceptanceFounderFact => ({
+      dutyId: 7,
+      generation: 2,
+      prNumber: 99,
+      head: 'a'.repeat(40),
+      kind: 'founder-decision',
+      what: '线下合同签章确认',
+      ...over,
+    });
+    expect(trustedFounderFact(duty, [fact()])).toEqual(fact());
+    expect(trustedFounderFact(duty, [fact({ dutyId: 8 }), fact()])).toEqual(fact());
+    // 没有事实（受限模型自述不是事实）
+    expect(trustedFounderFact(duty, [])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ dutyId: 8 })])).toBeUndefined();
+    // 身份精确：代次、PR、head 差一项都不认
+    expect(trustedFounderFact(duty, [fact({ generation: 1 })])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ prNumber: 100 })])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ head: 'b'.repeat(40) })])).toBeUndefined();
+    // 种类认不出、说明为空、说明超长
+    expect(trustedFounderFact(duty, [fact({ kind: 'model-said' as never })])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ what: '  ' })])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ what: 'x'.repeat(301) })])).toBeUndefined();
+    // 同一责任有不止一条：不猜
+    expect(trustedFounderFact(duty, [fact(), fact({ what: '另一条' })])).toBeUndefined();
   });
 });

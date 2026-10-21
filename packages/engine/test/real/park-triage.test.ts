@@ -465,42 +465,75 @@ describe('real/park-triage', () => {
       const second = await triageParkedTasks(d);
       expect(second.candidates).toBe(1);
       expect(sessions.n).toBe(2);
-      // 试满：记账后不再起会话，责任仍 open，提醒如实写试满
+      // 第 3 次（预算用满）：仍记账，提醒如实写已试满
       await triageParkedTasks(d);
       expect(sessions.n).toBe(3);
-      expect(await retryRows()).toHaveLength(2);
-      expect((await noticeOf(task.id))?.body).toContain('试满');
-      expect((await triageParkedTasks(d)).candidates).toBe(0);
-      expect(sessions.n).toBe(3);
+      expect(await retryRows()).toHaveLength(3);
+      expect((await noticeOf(task.id))?.body).toContain('已试满');
+      // 之后每一轮：不再起会话，但未核实责任带着真实原因（来自持久审计账）仍每轮报出来
+      for (let i = 0; i < 2; i++) {
+        const after = await triageParkedTasks(d);
+        expect(after.candidates).toBe(0);
+        expect(sessions.n).toBe(3);
+        expect(after.problems).toEqual([expect.stringContaining('PR 没有合并回执')]);
+        expect(after.problems[0]).toContain('验收责任仍未核实');
+      }
+      expect(await retryRows()).toHaveLength(3);
       expect((await dutyOf(oldDuty.id))?.settledAt).toBeNull();
+      expect((await noticeOf(task.id))?.level).toBe('alert');
     });
 
-    it('只有创始人能提供的证据（结构化 founder-only）才发「要你拍」，不记重试、不重复起会话', async () => {
+    it('只有引擎可信来源证明的创始人证据才发「要你拍」，不记重试、不重复起会话', async () => {
       const { task, oldDuty } = await seedOldHeadOpen();
       const sessions = { n: 0 };
-      const d = liveAcceptance(
-        fence([
-          verdictOf(oldDuty, { action: 'leave', leaveKind: 'founder-only', humanOnly: '线下合同签章确认' }),
-        ]),
-        sessions,
-      );
+      const d = {
+        ...liveAcceptance(
+          fence([verdictOf(oldDuty, { action: 'leave', humanOnly: '模型自述的缺口' })]),
+          sessions,
+        ),
+        acceptanceFounderFacts: async () => [
+          {
+            dutyId: oldDuty.id,
+            generation: oldDuty.generation,
+            prNumber: oldDuty.prNumber,
+            head: oldDuty.head,
+            kind: 'founder-decision' as const,
+            what: '线下合同签章确认',
+          },
+        ],
+      };
       const out = await triageParkedTasks(d);
       expect(out.left).toHaveLength(1);
       expect(await noticeOf(task.id)).toMatchObject({ level: 'decision', decisionReason: 'human-only' });
+      expect((await noticeOf(task.id))?.body).toContain('线下合同签章确认');
+      expect((await noticeOf(task.id))?.body).not.toContain('模型自述的缺口');
       expect(await retryRows()).toHaveLength(0);
-      expect((await triageParkedTasks(d)).candidates).toBe(0);
+      // 真实操作记录里有这条转人的 commander.act（workflowId 是认领键）：之后每轮是「有结论」，不重复起会话也不重复报
+      const leaveActs = (await t.db.select().from(auditLog)).filter(
+        (a) => a.action === COMMANDER_AUDIT_ACT && (a.after as { action?: string }).action === 'leave',
+      );
+      expect(leaveActs).toHaveLength(1);
+      expect(leaveActs[0]?.after).toMatchObject({
+        workflowId: `acceptance:${task.id}:8:${HEAD}`,
+        parkSeq: 0,
+        dutyId: oldDuty.id,
+      });
+      const again = await triageParkedTasks(d);
+      expect(again.candidates).toBe(0);
+      expect(again.problems).toEqual([]);
       expect(sessions.n).toBe(1);
       expect((await dutyOf(oldDuty.id))?.settledAt).toBeNull();
     });
 
-    it('只读会话声明读不到法国 journal/库/Temporal：保留机读缺口和重试，不当创始人证据', async () => {
+    it('真装配没有创始人证据来源：模型自称受限读不到证据、甚至自加 founder-only，都只留机读缺口并重试，不转人', async () => {
       const { task, oldDuty } = await seedOldHeadOpen();
+      expect(deps().acceptanceFounderFacts).toBeUndefined();
       const d = liveAcceptance(
         fence([
           verdictOf(oldDuty, {
             action: 'leave',
-            leaveKind: 'read-unavailable',
-            humanOnly: '只读会话拿不到法国 journal、数据库和 Temporal',
+            leaveKind: 'founder-only',
+            humanOnly: '受限会话不能访问 Temporal/journal，请人帮忙',
           }),
         ]),
         { n: 0 },
@@ -508,8 +541,10 @@ describe('real/park-triage', () => {
       const out = await triageParkedTasks(d);
       expect(out.left).toEqual([]);
       expect(out.retrying).toHaveLength(1);
-      expect(await noticeOf(task.id)).toMatchObject({ level: 'alert', decisionReason: null });
-      expect((await noticeOf(task.id))?.body).toContain('读取能力');
+      const notice = await noticeOf(task.id);
+      expect(notice).toMatchObject({ level: 'alert', decisionReason: null, decisionOptions: null });
+      expect(notice?.body).toContain('没有可信事实证明只有创始人能提供');
+      expect(notice?.body).toContain('模型自述（引擎未证实）');
       expect(await retryRows()).toHaveLength(1);
     });
 
