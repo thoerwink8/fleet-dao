@@ -22,6 +22,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 ## 测试
 
+- 时间跳跃用例先 `pnpm test:temporal-server` 显式准备固定 Java test-server，再走 `support.ts` 的 `createEnv()`；录重放夹具和单跑 evolution 同样先准备。缺失/坏缓存不在业务测试内下载，每个用例仍独立起停；与下面的真实 CLI 准备分开。
 - `npx vitest run packages/engine/test/<文件>`。不要 Postgres（用到库的跑在 PGlite 上）。
 - 法国工具链 `/bin/sh` 和目录 chmod 权限测试在 Linux 跑真端口；Windows 用明示的命令/阶段错误夹具验证装配与失败分类，不代表引擎支持 Windows 生产宿主。Git 归档检出在两种系统都跑真实 git/tar，归档名相对私有 scratch，避免 GNU tar 把 Windows 盘符当远端。
 - Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；真服务端先用 `pnpm temporal:install` 按 `deploy/france.sh` 固定版本准备本机 CLI，或用 `pnpm test:temporal --cli <绝对路径>` 登记已安装 CLI、设 `FLEET_TEST_TEMPORAL_CLI`，版本须一致。正规选测和创建入口都核路径/版本，不隐式下载；SDK 创建阶段只报 `start-or-connect`，内部细分状态未知。
