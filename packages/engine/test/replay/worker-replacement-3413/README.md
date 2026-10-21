@@ -50,4 +50,11 @@ Actions 日志在这台机器上是 HTTP 403，注解里也没有 `FLEET_SYNTHET
 
 所以接下来只能靠下一次 CI 复现时的取证。现在这条用例接着 `SyntheticHistoryDiagnostics`，在 Actions 里（`GITHUB_ACTIONS=true`，用默认输出的 `DiagnosticOutput()`）每次 watchdog/失败取证另打一条 `::warning title=FLEET_SYNTHETIC_HISTORY_V1::` 公开注解，内容是 test、workflowId、runId、固定阶段标签、reason、`ciSha`（`GITHUB_SHA`）、testSha256、bundleSha256，以及所取字节的长度和 SHA-256。读不成就写 unknown 和错误码，不带 hash。帧仍只进日志，注解不带 protobuf、describe 正文或业务文字；每文件最多 8 条；通过的用例不出注解。`history-diagnostics.test.ts` 钉住这些。下次 CI 再红，注解上的 runId 和 sha256 就能跟日志帧、runner 上的 `_tmp/synthetic-history` 对上，不用读日志也知道停在哪一步、是哪个 run。
 
+PR #3412 的公开评论也写了同一件事（这台机器上没有那份 root 本机保存的原日志，下面只是转述，不是我核过的字节）：
+
+- [2026-10-20 08:30:23Z](https://github.com/thoerwink8/fleet-dao/pull/3412#issuecomment-6286829597)：job 118528847472 的 worker replacement 用例同为 60000ms 超时，「没取得其真实 history，不能套用上面的 run 或根因」。上面说的有真实 history 的 run `c89489a5-…` 是 job 118528847602（合同台，park-kind）的。
+- [08:33:47Z](https://github.com/thoerwink8/fleet-dao/pull/3412#issuecomment-6286888369)：写到 root 保存了原 CI 日志（240337 字节，SHA-256 `ac463c08…`）并核了父提交，没说是哪台 job，也没说里面有本用例的帧。
+
+所以任何人拿到的原件里本用例都没有 workflow/run，这份 README 不拿合成夹具、本机 watchdog 的 `6385a827…`、`d8500003…`，或 job 118528847602 的 `c89489a5…` 来顶。若 root 那份日志里有本用例的 `FLEET_SYNTHETIC_HISTORY` 帧，补法是把帧原样存进本目录并加测试核 SHA-256，不改上面已有的字节。
+
 查询撞上未交本地活动结果的生产修复仍归 #3258。
