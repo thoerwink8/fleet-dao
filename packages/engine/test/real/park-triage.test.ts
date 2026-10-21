@@ -532,240 +532,260 @@ describe('real/park-triage', () => {
     };
   }
 
-  it('叫停在现有 60 秒窗口内未终态：先记下未确认，标准调度在迟到终态后续起恰好一个新代', async () => {
-    const task = await seedTask();
-    const before = await t.db.select().from(tasks);
-    const world = clockedTemporal();
-    let firstSleep: { signals: number; starts: number; why: string | undefined } | null = null;
-    world.setOnSleep(async () => {
-      if (firstSleep) return;
-      const rows = await redoFollows();
-      firstSleep = { signals: world.signals.length, starts: world.starts.length, why: rows.at(-1)?.why };
-    });
-    const sessions: unknown[] = [];
-    const began = world.now().getTime();
-    const first = await triageParkedTasks(schedule(world, task.id, sessions, true));
-    expect(ABANDON_WAIT_MS).toBe(60_000);
-    expect(world.now().getTime() - began).toBe(60_000);
-    expect(world.slept()).toBe(60_000);
-    expect(firstSleep).toEqual({
-      signals: 1,
-      starts: 0,
-      why: `叫停 ${GEN1} 已发送，终态未确认`,
-    });
-    expect(world.signals).toEqual([{ id: GEN1, reason: '指挥官判重做：先叫停停住的上一代' }]);
-    expect(world.starts).toHaveLength(0);
-    expect(sessions).toHaveLength(1);
-    expect(first.acted).toEqual([]);
-    const waiting = await commanderNotice();
-    expect(waiting?.body).toContain('叫停已发送、终态未确认');
-    expect(waiting?.body).toContain(TIMEOUT_WHY);
-    expect(waiting?.body).not.toContain('任务没动');
-    expect(waiting?.body).not.toContain('新代已确认启动');
-    expect((await redoFollows()).at(-1)).toMatchObject({
-      phase: 'stop_sent_unconfirmed',
-      why: TIMEOUT_WHY,
-      runId: 'run-1',
-    });
+  it(
+    '叫停在现有 60 秒窗口内未终态：先记下未确认，标准调度在迟到终态后续起恰好一个新代',
+    async () => {
+      const task = await seedTask();
+      const before = await t.db.select().from(tasks);
+      const world = clockedTemporal();
+      let firstSleep: { signals: number; starts: number; why: string | undefined } | null = null;
+      world.setOnSleep(async () => {
+        if (firstSleep) return;
+        const rows = await redoFollows();
+        firstSleep = { signals: world.signals.length, starts: world.starts.length, why: rows.at(-1)?.why };
+      });
+      const sessions: unknown[] = [];
+      const began = world.now().getTime();
+      const first = await triageParkedTasks(schedule(world, task.id, sessions, true));
+      expect(ABANDON_WAIT_MS).toBe(60_000);
+      expect(world.now().getTime() - began).toBe(60_000);
+      expect(world.slept()).toBe(60_000);
+      expect(firstSleep).toEqual({
+        signals: 1,
+        starts: 0,
+        why: `叫停 ${GEN1} 已发送，终态未确认`,
+      });
+      expect(world.signals).toEqual([{ id: GEN1, reason: '指挥官判重做：先叫停停住的上一代' }]);
+      expect(world.starts).toHaveLength(0);
+      expect(sessions).toHaveLength(1);
+      expect(first.acted).toEqual([]);
+      const waiting = await commanderNotice();
+      expect(waiting?.body).toContain('叫停已发送、终态未确认');
+      expect(waiting?.body).toContain(TIMEOUT_WHY);
+      expect(waiting?.body).not.toContain('任务没动');
+      expect(waiting?.body).not.toContain('新代已确认启动');
+      expect((await redoFollows()).at(-1)).toMatchObject({
+        phase: 'stop_sent_unconfirmed',
+        why: TIMEOUT_WHY,
+        runId: 'run-1',
+      });
 
-    world.resetSlept();
-    const duplicateSessions: unknown[] = [];
-    const still = await triageParkedTasks(schedule(world, task.id, duplicateSessions, true));
-    expect(world.slept()).toBe(0);
-    expect(world.starts).toHaveLength(0);
-    expect(world.signals).toHaveLength(1);
-    expect(duplicateSessions).toHaveLength(0);
-    expect(still.acted).toEqual([]);
-    expect((await commanderNotice())?.body).toContain(TIMEOUT_WHY);
-    expect((await commanderNotice())?.body).not.toContain('任务没动');
+      world.resetSlept();
+      const duplicateSessions: unknown[] = [];
+      const still = await triageParkedTasks(schedule(world, task.id, duplicateSessions, true));
+      expect(world.slept()).toBe(0);
+      expect(world.starts).toHaveLength(0);
+      expect(world.signals).toHaveLength(1);
+      expect(duplicateSessions).toHaveLength(0);
+      expect(still.acted).toEqual([]);
+      expect((await commanderNotice())?.body).toContain(TIMEOUT_WHY);
+      expect((await commanderNotice())?.body).not.toContain('任务没动');
 
-    const restartedSessions: unknown[] = [];
-    const gen1 = world.execs.get(GEN1);
-    if (!gen1) throw new Error('上一代不在假 Temporal 里');
-    gen1.status = 'TERMINATED';
-    const restarted = await triageParkedTasks(schedule(world, task.id, restartedSessions, false));
-    expect(restartedSessions).toHaveLength(0);
-    expect(world.slept()).toBe(0);
-    expect(world.signals).toHaveLength(1);
-    expect(world.starts).toHaveLength(1);
-    expect(world.starts[0]).toMatchObject({
-      workflowId: GEN2,
-      workflowIdConflictPolicy: 'FAIL',
-      workflowIdReusePolicy: 'REJECT_DUPLICATE',
-      args: [expect.objectContaining({ issueNumber: 7, title: '给登录页加验证码', taskId: task.id })],
-    });
-    expect(restarted.acted).toEqual([{ ref: 'acme/app#7', action: 'redo', source: 'verdict' }]);
-    const follows = await redoFollows();
-    expect(follows.some((row) => row.phase === 'old_terminal_pending_start')).toBe(true);
-    expect(follows.at(-1)).toMatchObject({ phase: 'started', why: TIMEOUT_WHY, ok: true, runId: 'run-1' });
-    const done = await commanderNotice();
-    expect(done?.level).toBe('daily');
-    expect(done?.body).toContain('新代已确认启动');
-    expect(done?.body).toContain(GEN2);
-    expect(done?.body).toContain(`先前的失败仍在：${TIMEOUT_WHY}`);
-    expect(done?.body).not.toContain('任务没动');
+      const restartedSessions: unknown[] = [];
+      const gen1 = world.execs.get(GEN1);
+      if (!gen1) throw new Error('上一代不在假 Temporal 里');
+      gen1.status = 'TERMINATED';
+      const restarted = await triageParkedTasks(schedule(world, task.id, restartedSessions, false));
+      expect(restartedSessions).toHaveLength(0);
+      expect(world.slept()).toBe(0);
+      expect(world.signals).toHaveLength(1);
+      expect(world.starts).toHaveLength(1);
+      expect(world.starts[0]).toMatchObject({
+        workflowId: GEN2,
+        workflowIdConflictPolicy: 'FAIL',
+        workflowIdReusePolicy: 'REJECT_DUPLICATE',
+        args: [expect.objectContaining({ issueNumber: 7, title: '给登录页加验证码', taskId: task.id })],
+      });
+      expect(restarted.acted).toEqual([{ ref: 'acme/app#7', action: 'redo', source: 'verdict' }]);
+      const follows = await redoFollows();
+      expect(follows.some((row) => row.phase === 'old_terminal_pending_start')).toBe(true);
+      expect(follows.at(-1)).toMatchObject({ phase: 'started', why: TIMEOUT_WHY, ok: true, runId: 'run-1' });
+      const done = await commanderNotice();
+      expect(done?.level).toBe('daily');
+      expect(done?.body).toContain('新代已确认启动');
+      expect(done?.body).toContain(GEN2);
+      expect(done?.body).toContain(`先前的失败仍在：${TIMEOUT_WHY}`);
+      expect(done?.body).not.toContain('任务没动');
 
-    const thirdSessions: unknown[] = [];
-    const third = await triageParkedTasks(schedule(world, task.id, thirdSessions, false));
-    expect(third.acted).toEqual([]);
-    expect(thirdSessions).toHaveLength(0);
-    expect(world.starts).toHaveLength(1);
-    expect(world.signals).toHaveLength(1);
-    expect(await t.db.select().from(tasks)).toEqual(before);
-  });
+      const thirdSessions: unknown[] = [];
+      const third = await triageParkedTasks(schedule(world, task.id, thirdSessions, false));
+      expect(third.acted).toEqual([]);
+      expect(thirdSessions).toHaveLength(0);
+      expect(world.starts).toHaveLength(1);
+      expect(world.signals).toHaveLength(1);
+      expect(await t.db.select().from(tasks)).toEqual(before);
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 
-  it('窗口内旧代先到终态：同一次调用就另起，虚拟时间远小于 60 秒', async () => {
-    const task = await seedTask();
-    const world = clockedTemporal();
-    world.setTerminalAfter(3);
-    const sessions: unknown[] = [];
-    const began = world.now().getTime();
-    const out = await triageParkedTasks(schedule(world, task.id, sessions, true));
-    expect(world.now().getTime() - began).toBe(200);
-    expect(world.slept()).toBe(200);
-    expect(world.signals).toHaveLength(1);
-    expect(world.starts).toHaveLength(1);
-    expect(out.acted).toEqual([{ ref: 'acme/app#7', action: 'redo', source: 'verdict' }]);
-    expect((await commanderNotice())?.body).toContain('新代已确认启动');
-    expect((await commanderNotice())?.body).not.toContain('任务没动');
-    const again: unknown[] = [];
-    await triageParkedTasks(schedule(world, task.id, again, false));
-    expect(world.starts).toHaveLength(1);
-    expect(again).toHaveLength(0);
-  });
+  it(
+    '窗口内旧代先到终态：同一次调用就另起，虚拟时间远小于 60 秒',
+    async () => {
+      const task = await seedTask();
+      const world = clockedTemporal();
+      world.setTerminalAfter(3);
+      const sessions: unknown[] = [];
+      const began = world.now().getTime();
+      const out = await triageParkedTasks(schedule(world, task.id, sessions, true));
+      expect(world.now().getTime() - began).toBe(200);
+      expect(world.slept()).toBe(200);
+      expect(world.signals).toHaveLength(1);
+      expect(world.starts).toHaveLength(1);
+      expect(out.acted).toEqual([{ ref: 'acme/app#7', action: 'redo', source: 'verdict' }]);
+      expect((await commanderNotice())?.body).toContain('新代已确认启动');
+      expect((await commanderNotice())?.body).not.toContain('任务没动');
+      const again: unknown[] = [];
+      await triageParkedTasks(schedule(world, task.id, again, false));
+      expect(world.starts).toHaveLength(1);
+      expect(again).toHaveLength(0);
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 
-  it('等待中执行身份变了，或 describe 失败：不把未知当成终态，不另起', async () => {
-    const swappedTask = await seedTask();
-    const swapped = clockedTemporal();
-    swapped.setSwapRunAfter(3);
-    const swappedSessions: unknown[] = [];
-    await triageParkedTasks(schedule(swapped, swappedTask.id, swappedSessions, true));
-    expect(swapped.slept()).toBe(200);
-    expect(swapped.starts).toHaveLength(0);
-    expect(swapped.signals).toHaveLength(1);
-    const swappedNotice = await commanderNotice();
-    expect(swappedNotice?.body).toContain('执行身份变了');
-    expect(swappedNotice?.body).toContain('run-1');
-    expect(swappedNotice?.body).toContain('run-other');
-    expect(swappedNotice?.body).toContain('叫停已发送、终态未确认');
-    expect(swappedNotice?.body).not.toContain('新代已确认启动');
-    expect(swappedNotice?.body).not.toContain('任务没动');
+  it(
+    '等待中执行身份变了，或 describe 失败：不把未知当成终态，不另起',
+    async () => {
+      const swappedTask = await seedTask();
+      const swapped = clockedTemporal();
+      swapped.setSwapRunAfter(3);
+      const swappedSessions: unknown[] = [];
+      await triageParkedTasks(schedule(swapped, swappedTask.id, swappedSessions, true));
+      expect(swapped.slept()).toBe(200);
+      expect(swapped.starts).toHaveLength(0);
+      expect(swapped.signals).toHaveLength(1);
+      const swappedNotice = await commanderNotice();
+      expect(swappedNotice?.body).toContain('执行身份变了');
+      expect(swappedNotice?.body).toContain('run-1');
+      expect(swappedNotice?.body).toContain('run-other');
+      expect(swappedNotice?.body).toContain('叫停已发送、终态未确认');
+      expect(swappedNotice?.body).not.toContain('新代已确认启动');
+      expect(swappedNotice?.body).not.toContain('任务没动');
 
-    await resetTestDb(t);
-    await registerScheduledJobs(t.db, [PARK_TRIAGE_JOB]);
-    const unknownTask = await seedTask();
-    const unknown = clockedTemporal();
-    unknown.setFailGen1After(2);
-    const began = unknown.now().getTime();
-    const unknownSessions: unknown[] = [];
-    const missed = await triageParkedTasks(schedule(unknown, unknownTask.id, unknownSessions, true));
-    expect(unknown.now().getTime() - began).toBe(60_000);
-    expect(unknown.starts).toHaveLength(0);
-    expect(unknown.signals).toHaveLength(1);
-    expect(missed.acted).toEqual([]);
-    const unknownNotice = await commanderNotice();
-    expect(unknownNotice?.body).toContain(TIMEOUT_WHY);
-    expect(unknownNotice?.body).toContain('叫停已发送、终态未确认');
-    expect(unknownNotice?.body).not.toContain('新代已确认启动');
-    expect(unknownNotice?.body).not.toContain('任务没动');
-  });
+      await resetTestDb(t);
+      await registerScheduledJobs(t.db, [PARK_TRIAGE_JOB]);
+      const unknownTask = await seedTask();
+      const unknown = clockedTemporal();
+      unknown.setFailGen1After(2);
+      const began = unknown.now().getTime();
+      const unknownSessions: unknown[] = [];
+      const missed = await triageParkedTasks(schedule(unknown, unknownTask.id, unknownSessions, true));
+      expect(unknown.now().getTime() - began).toBe(60_000);
+      expect(unknown.starts).toHaveLength(0);
+      expect(unknown.signals).toHaveLength(1);
+      expect(missed.acted).toEqual([]);
+      const unknownNotice = await commanderNotice();
+      expect(unknownNotice?.body).toContain(TIMEOUT_WHY);
+      expect(unknownNotice?.body).toContain('叫停已发送、终态未确认');
+      expect(unknownNotice?.body).not.toContain('新代已确认启动');
+      expect(unknownNotice?.body).not.toContain('任务没动');
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 
-  it('迟到之后仍在跑、查不到、身份变了或新代已在：接续拒绝且不再叫停', async () => {
-    const task = await seedTask();
-    const world = clockedTemporal();
-    const sessions: unknown[] = [];
-    await triageParkedTasks(schedule(world, task.id, sessions, true));
-    expect(world.slept()).toBe(60_000);
-    world.resetSlept();
+  it(
+    '迟到之后仍在跑、查不到、身份变了或新代已在：接续拒绝且不再叫停',
+    async () => {
+      const task = await seedTask();
+      const world = clockedTemporal();
+      const sessions: unknown[] = [];
+      await triageParkedTasks(schedule(world, task.id, sessions, true));
+      expect(world.slept()).toBe(60_000);
+      world.resetSlept();
 
-    const runningSessions: unknown[] = [];
-    const running = await triageParkedTasks(schedule(world, task.id, runningSessions, false));
-    expect(world.slept()).toBe(0);
-    expect(world.starts).toHaveLength(0);
-    expect(world.signals).toHaveLength(1);
-    expect(running.left[0]?.why).toContain('叫停已发送、终态未确认');
-    expect(running.left[0]?.why).toContain(TIMEOUT_WHY);
-    expect(running.acted).toEqual([]);
+      const runningSessions: unknown[] = [];
+      const running = await triageParkedTasks(schedule(world, task.id, runningSessions, false));
+      expect(world.slept()).toBe(0);
+      expect(world.starts).toHaveLength(0);
+      expect(world.signals).toHaveLength(1);
+      expect(running.left[0]?.why).toContain('叫停已发送、终态未确认');
+      expect(running.left[0]?.why).toContain(TIMEOUT_WHY);
+      expect(running.acted).toEqual([]);
 
-    world.failDescribe.add(GEN1);
-    const missedSessions: unknown[] = [];
-    const missed = await triageParkedTasks(schedule(world, task.id, missedSessions, false));
-    expect(missed.problems.join('\n')).toContain('查不到上一代是不是还在跑');
-    expect(missed.left[0]?.why).not.toContain('新代已确认启动');
-    expect(world.starts).toHaveLength(0);
-    expect(world.signals).toHaveLength(1);
-    world.failDescribe.delete(GEN1);
+      world.failDescribe.add(GEN1);
+      const missedSessions: unknown[] = [];
+      const missed = await triageParkedTasks(schedule(world, task.id, missedSessions, false));
+      expect(missed.problems.join('\n')).toContain('查不到上一代是不是还在跑');
+      expect(missed.left[0]?.why).not.toContain('新代已确认启动');
+      expect(world.starts).toHaveLength(0);
+      expect(world.signals).toHaveLength(1);
+      world.failDescribe.delete(GEN1);
 
-    const gen1 = world.execs.get(GEN1);
-    if (!gen1) throw new Error('上一代不在假 Temporal 里');
-    gen1.runId = 'run-other';
-    gen1.status = 'TERMINATED';
-    const changedSessions: unknown[] = [];
-    const changed = await triageParkedTasks(schedule(world, task.id, changedSessions, false));
-    expect(changed.left[0]?.why).toContain('执行身份变了');
-    expect(changed.left[0]?.why).toContain('run-1');
-    expect(changed.left[0]?.why).toContain('run-other');
-    expect(changed.left[0]?.why).toContain(`原失败：${TIMEOUT_WHY}`);
-    expect(world.starts).toHaveLength(0);
-    expect(world.signals).toHaveLength(1);
-    // 身份变了不会再变回来：下一轮不再沿这条意图另起，提醒留着。
-    gen1.runId = 'run-1';
-    const afterChangedSessions: unknown[] = [];
-    const afterChanged = await triageParkedTasks(schedule(world, task.id, afterChangedSessions, false));
-    expect(afterChanged.acted).toEqual([]);
-    expect(afterChangedSessions).toHaveLength(0);
-    expect(world.starts).toHaveLength(0);
-    expect(world.signals).toHaveLength(1);
-    expect((await commanderNotice())?.body).toContain('执行身份变了');
+      const gen1 = world.execs.get(GEN1);
+      if (!gen1) throw new Error('上一代不在假 Temporal 里');
+      gen1.runId = 'run-other';
+      gen1.status = 'TERMINATED';
+      const changedSessions: unknown[] = [];
+      const changed = await triageParkedTasks(schedule(world, task.id, changedSessions, false));
+      expect(changed.left[0]?.why).toContain('执行身份变了');
+      expect(changed.left[0]?.why).toContain('run-1');
+      expect(changed.left[0]?.why).toContain('run-other');
+      expect(changed.left[0]?.why).toContain(`原失败：${TIMEOUT_WHY}`);
+      expect(world.starts).toHaveLength(0);
+      expect(world.signals).toHaveLength(1);
+      // 身份变了不会再变回来：下一轮不再沿这条意图另起，提醒留着。
+      gen1.runId = 'run-1';
+      const afterChangedSessions: unknown[] = [];
+      const afterChanged = await triageParkedTasks(schedule(world, task.id, afterChangedSessions, false));
+      expect(afterChanged.acted).toEqual([]);
+      expect(afterChangedSessions).toHaveLength(0);
+      expect(world.starts).toHaveLength(0);
+      expect(world.signals).toHaveLength(1);
+      expect((await commanderNotice())?.body).toContain('执行身份变了');
 
-    await resetTestDb(t);
-    await registerScheduledJobs(t.db, [PARK_TRIAGE_JOB]);
-    const occupiedTask = await seedTask();
-    const occupiedWorld = clockedTemporal();
-    await triageParkedTasks(schedule(occupiedWorld, occupiedTask.id, [], true));
-    const occupiedGen1 = occupiedWorld.execs.get(GEN1);
-    if (!occupiedGen1) throw new Error('上一代不在假 Temporal 里');
-    occupiedGen1.status = 'TERMINATED';
-    occupiedWorld.execs.set(GEN2, { runId: 'run-x', status: 'RUNNING' });
-    const occupiedSessions: unknown[] = [];
-    const occupied = await triageParkedTasks(
-      schedule(occupiedWorld, occupiedTask.id, occupiedSessions, false),
-    );
-    expect(occupied.left[0]?.why).toContain('旧代已终态、新代启动失败');
-    expect(occupied.left[0]?.why).toContain('已经有记录');
-    expect(occupied.left[0]?.why).toContain(`原失败：${TIMEOUT_WHY}`);
-    expect(occupied.left[0]?.why).not.toContain('新代已确认启动');
-    expect(occupiedWorld.starts).toHaveLength(0);
-    expect(occupiedWorld.signals).toHaveLength(1);
-    expect(runningSessions).toHaveLength(0);
-    expect(missedSessions).toHaveLength(0);
-    expect(changedSessions).toHaveLength(0);
-    expect(occupiedSessions).toHaveLength(0);
-  });
+      await resetTestDb(t);
+      await registerScheduledJobs(t.db, [PARK_TRIAGE_JOB]);
+      const occupiedTask = await seedTask();
+      const occupiedWorld = clockedTemporal();
+      await triageParkedTasks(schedule(occupiedWorld, occupiedTask.id, [], true));
+      const occupiedGen1 = occupiedWorld.execs.get(GEN1);
+      if (!occupiedGen1) throw new Error('上一代不在假 Temporal 里');
+      occupiedGen1.status = 'TERMINATED';
+      occupiedWorld.execs.set(GEN2, { runId: 'run-x', status: 'RUNNING' });
+      const occupiedSessions: unknown[] = [];
+      const occupied = await triageParkedTasks(
+        schedule(occupiedWorld, occupiedTask.id, occupiedSessions, false),
+      );
+      expect(occupied.left[0]?.why).toContain('旧代已终态、新代启动失败');
+      expect(occupied.left[0]?.why).toContain('已经有记录');
+      expect(occupied.left[0]?.why).toContain(`原失败：${TIMEOUT_WHY}`);
+      expect(occupied.left[0]?.why).not.toContain('新代已确认启动');
+      expect(occupiedWorld.starts).toHaveLength(0);
+      expect(occupiedWorld.signals).toHaveLength(1);
+      expect(runningSessions).toHaveLength(0);
+      expect(missedSessions).toHaveLength(0);
+      expect(changedSessions).toHaveLength(0);
+      expect(occupiedSessions).toHaveLength(0);
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 
-  it('新代请求已提交但 describe 没确认到执行：不算重做完成，下一轮也不再起一次', async () => {
-    const task = await seedTask();
-    const world = clockedTemporal();
-    world.setTerminalAfter(3);
-    world.setConfirmFails(true);
-    const sessions: unknown[] = [];
-    const first = await triageParkedTasks(schedule(world, task.id, sessions, true));
-    expect(world.starts).toHaveLength(1);
-    expect(first.acted).toEqual([]);
-    const notice = await commanderNotice();
-    expect(notice?.body).toContain('旧代已终态、新代启动失败');
-    expect(notice?.body).toContain(`新代 ${GEN2} 没有确认到执行，不算重做完成`);
-    expect(notice?.body).not.toContain('新代已确认启动');
-    expect(notice?.body).not.toContain('任务没动');
-    expect((await redoFollows()).some((row) => row.phase === 'old_terminal_pending_start')).toBe(true);
+  it(
+    '新代请求已提交但 describe 没确认到执行：不算重做完成，下一轮也不再起一次',
+    async () => {
+      const task = await seedTask();
+      const world = clockedTemporal();
+      world.setTerminalAfter(3);
+      world.setConfirmFails(true);
+      const sessions: unknown[] = [];
+      const first = await triageParkedTasks(schedule(world, task.id, sessions, true));
+      expect(world.starts).toHaveLength(1);
+      expect(first.acted).toEqual([]);
+      const notice = await commanderNotice();
+      expect(notice?.body).toContain('旧代已终态、新代启动失败');
+      expect(notice?.body).toContain(`新代 ${GEN2} 没有确认到执行，不算重做完成`);
+      expect(notice?.body).not.toContain('新代已确认启动');
+      expect(notice?.body).not.toContain('任务没动');
+      expect((await redoFollows()).some((row) => row.phase === 'old_terminal_pending_start')).toBe(true);
 
-    const again: unknown[] = [];
-    const second = await triageParkedTasks(schedule(world, task.id, again, false));
-    expect(world.starts).toHaveLength(1);
-    expect(world.signals).toHaveLength(1);
-    expect(second.acted).toEqual([]);
-    expect(again).toHaveLength(0);
-    expect((await commanderNotice())?.body).toContain('已经有记录');
-    expect((await commanderNotice())?.body).not.toContain('新代已确认启动');
-  });
+      const again: unknown[] = [];
+      const second = await triageParkedTasks(schedule(world, task.id, again, false));
+      expect(world.starts).toHaveLength(1);
+      expect(world.signals).toHaveLength(1);
+      expect(second.acted).toEqual([]);
+      expect(again).toHaveLength(0);
+      expect((await commanderNotice())?.body).toContain('已经有记录');
+      expect((await commanderNotice())?.body).not.toContain('新代已确认启动');
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 });
