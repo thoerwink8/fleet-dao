@@ -1,74 +1,59 @@
-// 指标卡：大号数字（无衬线、等宽数字）+ 白话标签。StatGrid 把一排指标卡摆齐。
-import type { LucideIcon } from 'lucide-react';
+// 指标（#3509，照 Arco Pro，样稿 canvas/fd3.css `.kpis` `.kpi`）：一个标签（12px ink-2）加一个数字（24/600，等宽数字），
+// 可带单位。不带图标、不带彩色圆底、不带说明、不可点（创始人拍的减法）；数字只在异常时上色（超标、出错红，停滞橙）。
+// StatGrid 把一排指标摆成一行，指标之间一道竖线；放在区块（Section）里，自己不画卡片。
 import type { ReactNode } from 'react';
-import { Link } from 'react-router';
 import { cn } from '../../lib/utils';
-import { inkClass, type LayoutTone } from './tone';
+import { anomalyInkClass, type LayoutTone } from './tone';
 
 export function Stat({
   label,
   value,
-  hint,
-  icon: Icon,
-  to,
+  unit,
   tone,
   className,
-  wrapHint,
 }: {
   label: string;
   value: ReactNode;
-  hint?: ReactNode;
-  icon?: LucideIcon | undefined;
-  to?: string | undefined;
-  /** 数字的状态色（出问题的数字标红、标黄）。 */
+  /** 数字后面的小号单位（「个」「%」）。 */
+  unit?: ReactNode;
+  /** 数字的状态：只有异常上色（fail 红；stall、doubt 橙），别的照正文色。 */
   tone?: LayoutTone | undefined;
   className?: string | undefined;
-  /** 说明折行显示。不传则单行省略。 */
-  wrapHint?: boolean | undefined;
 }) {
-  const body = (
-    <>
-      <div className="flex items-center justify-between text-meta text-muted-foreground">
-        <span>{label}</span>
-        {Icon ? <Icon className="size-4" aria-hidden /> : null}
-      </div>
-      <div className={cn('num mt-2 text-display', tone && inkClass[tone])}>{value}</div>
-      {hint ? (
-        <div className={cn('mt-2 text-meta text-muted-foreground', wrapHint ? 'break-words' : 'truncate')}>
-          {hint}
-        </div>
-      ) : null}
-    </>
-  );
-  const cls = cn(
-    'block rounded-lg border bg-card p-4 shadow-card transition-colors duration-100 hover:border-border-strong',
-    className,
-  );
-  return to ? (
-    <Link to={to} data-tone={tone} className={cls}>
-      {body}
-    </Link>
-  ) : (
-    <div data-tone={tone} className={cls}>
-      {body}
+  return (
+    <div
+      data-tone={tone}
+      data-stat
+      className={cn(
+        'flex min-w-0 flex-1 flex-col gap-1 border-l border-line px-6 py-1 first:border-l-0 first:pl-1',
+        // 手机上两个一行，不画竖线
+        'max-md:basis-5/12 max-md:border-l-0 max-md:px-1 max-md:py-2',
+        className,
+      )}
+    >
+      <span className="text-meta text-ink-2">{label}</span>
+      <span className={cn('num flex items-baseline gap-1 text-display text-ink', anomalyInkClass(tone))}>
+        <span>{value}</span>
+        {unit ? <span className="text-meta font-normal text-ink-3">{unit}</span> : null}
+      </span>
     </div>
   );
 }
 
-const COLS = {
-  2: 'grid-cols-2',
-  3: 'grid-cols-2 lg:grid-cols-3',
-  4: 'grid-cols-2 lg:grid-cols-4',
-} as const;
-
+/** 一排指标：桌面（md 起）一行平分、不折行；手机两个一行。 */
 export function StatGrid({
   cols = 4,
   children,
   className,
 }: {
+  /** 几个指标（旧参数）。一行平分不靠它算，只写在 data-cols 上。 */
   cols?: 2 | 3 | 4;
   children: ReactNode;
   className?: string;
 }) {
-  return <div className={cn('grid gap-3', COLS[cols], className)}>{children}</div>;
+  return (
+    <div data-cols={cols} className={cn('flex flex-wrap items-stretch md:flex-nowrap', className)}>
+      {children}
+    </div>
+  );
 }

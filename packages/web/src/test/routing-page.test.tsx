@@ -86,7 +86,7 @@ describe('路由页：每一层现在活着吗', () => {
     expect(screen.getAllByText('实际派 GPT 5.6 luna')).toHaveLength(1);
     // 标题块（#1914 第 4、5 轮）：用途名单独一行比页标题小一档；结论短话 15 正文字重、同一行跟结论标签；细节灰字在下面
     const hero = document.querySelector('[data-purpose-hero]') as HTMLElement;
-    expect(within(hero).getByRole('heading', { level: 2 }).className).toContain('text-subtitle');
+    expect(within(hero).getByRole('heading', { level: 2 }).className).toContain('text-title');
     const conclusion = within(hero).getByText('实际派 GPT 5.6 luna').closest('p') as HTMLElement;
     expect(conclusion.className).toEqual(expect.stringContaining('text-heading font-normal'));
     expect(conclusion.querySelector('[data-variant]')?.textContent).toContain('派得出去');

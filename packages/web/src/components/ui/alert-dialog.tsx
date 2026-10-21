@@ -15,6 +15,10 @@ import {
 import { cn } from '../../lib/utils';
 
 import { Button } from './button';
+import { maskMotion, popMotion, popSurface } from './styles';
+
+// 外观（#3509，照 Arco，样稿 canvas/fd3.css `.mask` `.modal`）：和 dialog.tsx 同一套——mask 遮罩，框宽 480、内边距 24，
+// 卡片底、浮层阴影、4 圆角、无描边，标题 16/500 左对齐，按钮靠右；进 200 出 100。
 
 /**
  * 确认框的忙态（#2009，docs/design/驾驶舱界面.md「会发写请求的按钮」）：确定键传 onConfirm（返回 Promise）。
@@ -111,10 +115,7 @@ function AlertDialogOverlay({
   return (
     <AlertDialogPrimitive.Overlay
       data-slot="alert-dialog-overlay"
-      className={cn(
-        'fixed inset-0 z-50 bg-scrim data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0',
-        className,
-      )}
+      className={cn(maskMotion, className)}
       {...props}
     />
   );
@@ -134,7 +135,9 @@ function AlertDialogContent({
         data-slot="alert-dialog-content"
         data-size={size}
         className={cn(
-          'group/alert-dialog-content fixed top-1/2 left-1/2 z-50 grid w-full max-w-dialog -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border bg-background p-6 shadow-modal duration-200 data-[size=sm]:max-w-xs data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[size=default]:sm:max-w-lg',
+          'group/alert-dialog-content fixed top-1/2 left-1/2 z-50 grid w-full max-w-dialog -translate-x-1/2 -translate-y-1/2 gap-4 p-6 data-[size=sm]:max-w-xs data-[size=default]:sm:max-w-120',
+          popSurface,
+          popMotion,
           className,
         )}
         {...props}
@@ -148,7 +151,7 @@ function AlertDialogHeader({ className, ...props }: React.ComponentProps<'div'>)
     <div
       data-slot="alert-dialog-header"
       className={cn(
-        'grid grid-rows-stack place-items-center gap-1.5 text-center has-data-[slot=alert-dialog-media]:grid-rows-media has-data-[slot=alert-dialog-media]:gap-x-6 sm:group-data-[size=default]/alert-dialog-content:place-items-start sm:group-data-[size=default]/alert-dialog-content:text-left sm:group-data-[size=default]/alert-dialog-content:has-data-[slot=alert-dialog-media]:grid-rows-stack',
+        'grid grid-rows-stack place-items-start gap-2 text-left has-data-[slot=alert-dialog-media]:grid-rows-media has-data-[slot=alert-dialog-media]:gap-x-6 sm:group-data-[size=default]/alert-dialog-content:has-data-[slot=alert-dialog-media]:grid-rows-stack',
         className,
       )}
       {...props}
@@ -170,7 +173,7 @@ function AlertDialogError({ message }: { message: string }) {
       tabIndex={-1}
       data-slot="alert-dialog-error"
       // 只是读屏和焦点的落点，不是能点的控件：不画聚焦圈
-      className="rounded-md bg-st-fail-soft px-3 py-2 text-body text-ink-fail outline-none"
+      className="rounded-sm bg-fail-1 px-4 py-2 text-body text-fail-ink outline-none"
     >
       没成功：{message}
     </p>
@@ -199,7 +202,7 @@ function AlertDialogTitle({ className, ...props }: React.ComponentProps<typeof A
     <AlertDialogPrimitive.Title
       data-slot="alert-dialog-title"
       className={cn(
-        'text-heading font-semibold sm:group-data-[size=default]/alert-dialog-content:group-has-data-[slot=alert-dialog-media]/alert-dialog-content:col-start-2',
+        'text-heading text-ink sm:group-data-[size=default]/alert-dialog-content:group-has-data-[slot=alert-dialog-media]/alert-dialog-content:col-start-2',
         className,
       )}
       {...props}
@@ -214,7 +217,7 @@ function AlertDialogDescription({
   return (
     <AlertDialogPrimitive.Description
       data-slot="alert-dialog-description"
-      className={cn('text-body text-muted-foreground', className)}
+      className={cn('text-body text-ink-2', className)}
       {...props}
     />
   );
@@ -225,7 +228,7 @@ function AlertDialogMedia({ className, ...props }: React.ComponentProps<'div'>) 
     <div
       data-slot="alert-dialog-media"
       className={cn(
-        "mb-2 inline-flex size-16 items-center justify-center rounded-md bg-muted sm:group-data-[size=default]/alert-dialog-content:row-span-2 *:[svg:not([class*='size-'])]:size-8",
+        "mb-2 inline-flex size-12 items-center justify-center rounded-full bg-fill-2 text-ink-3 sm:group-data-[size=default]/alert-dialog-content:row-span-2 *:[svg:not([class*='size-'])]:size-6",
         className,
       )}
       {...props}
@@ -326,7 +329,8 @@ function AlertDialogAction({
 
 function AlertDialogCancel({
   className,
-  variant = 'outline',
+  // 「先不」照 Arco 对话框：灰底次按钮（fd3 `.modal-foot` 里的 `.btn.secondary`）
+  variant = 'secondary',
   size = 'default',
   onClick,
   ...props

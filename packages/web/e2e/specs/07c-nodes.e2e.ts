@@ -272,7 +272,8 @@ test.describe('看板多机', () => {
     const longest = details.items.reduce((m, item) => Math.max(m, item.text.length), 0);
     expect(longest, `${g.vw} 长状态消息还在`).toBeGreaterThanOrEqual(16);
     for (const item of details.items) {
-      expect(item.font, `${g.vw} 状态说明字号「${item.text}」`).toBeGreaterThanOrEqual(14);
+      // 辅助说明用 text-meta：Arco 一套里中文最小 12（docs/design/驾驶舱界面.md 2.2 节，#3509），原来的 14 是旧档位
+      expect(item.font, `${g.vw} 状态说明字号「${item.text}」`).toBeGreaterThanOrEqual(12);
       expect(item.overlaps, `${g.vw} 状态说明盖住标题「${item.text}」`).toBe(false);
       expect(item.inside, `${g.vw} 状态说明超出屏幕「${item.text}」`).toBe(true);
     }

@@ -1,6 +1,6 @@
 import { type QuotaWindowKind, quotaWindowName, SETTING_SCHEMAS } from '@fleet-dao/shared';
 import type { LucideIcon } from 'lucide-react';
-import { BellRing, Check, FolderGit2, Info, KeyRound, Palette, SlidersHorizontal } from 'lucide-react';
+import { BellRing, FolderGit2, Info, KeyRound, Palette, SlidersHorizontal } from 'lucide-react';
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import type { z } from 'zod';
@@ -23,23 +23,19 @@ import { EngineMasterRelation } from '../components/engine-master';
 import { FlowModeSetting } from '../components/flow-mode-setting';
 import { EmptyState } from '../components/layout/empty-state';
 import { FieldGroup, FieldRow } from '../components/layout/field-row';
-import { FilterTabs } from '../components/layout/filter-tabs';
 import { KeyValue } from '../components/layout/key-value';
 import { List, RowDetail } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { DescriptionHint, Page } from '../components/layout/page';
 import { SaveButton } from '../components/layout/save-button';
 import { Section } from '../components/layout/section';
-import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
 import { PwaStatus } from '../components/pwa-status';
 import { RepoCiPolicyControl } from '../components/repo-ci-policy';
 import { useRepo } from '../components/repo-context';
 import { RepoRow } from '../components/repo-groom';
 import { RepoImportSection } from '../components/repo-import';
-import { ModeSwitch } from '../components/shell/topbar';
 import { useTheme } from '../components/theme-provider';
-import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Switch } from '../components/ui/switch';
@@ -54,14 +50,7 @@ import {
   reserveSource,
   UNLIMITED_WORD,
 } from '../lib/reserve';
-import { isMine, TONES, toneLabel } from '../lib/status';
-import { type DensityPref, PALETTES } from '../lib/theme';
-import { cn } from '../lib/utils';
-
-const DENSITY_ITEMS: { id: DensityPref; label: string }[] = [
-  { id: 'comfortable', label: '标准' },
-  { id: 'compact', label: '紧凑' },
-];
+import { isMine } from '../lib/status';
 
 /** 设置行里的「谁改的」：去 user: 前缀，方便和 /me、操作记录对上。 */
 function settingActorId(raw: string): string {
@@ -621,7 +610,7 @@ export default function Settings() {
           <p>
             仓库开关、运行设置、提醒存在后端：保存时带上你看到的版本号，别人先改了会提示你刷新再改；改了写进操作记录。
           </p>
-          <p>外观（深浅、密度、主题色、减少动效）只存在这台浏览器里。</p>
+          <p>外观只有「减少动效」一项，只存在这台浏览器里；亮暗跟随系统。</p>
           <p>
             仓库一行：「开启 / 关闭」管这个仓「让 AI
             接活」，「整理」叫指挥官现在整理待办；点仓名展开整理记录。CI
@@ -772,73 +761,9 @@ export default function Settings() {
             id="look"
             icon={Palette}
             title="外观"
-            description="多套主题色，每套都有深浅两版；切换即时生效，下次打开还是它。"
+            description="主题只有一套，亮暗跟随系统。这里只剩减少动效，存在这台浏览器里。"
           >
             <FieldGroup>
-              <FieldRow label="深浅">
-                <div className="w-full max-w-xs">
-                  <ModeSwitch />
-                </div>
-              </FieldRow>
-              <FieldRow label="密度" hint="紧凑把控件、行和区块的留白收小一档，字号不变；手机上不生效。">
-                <FilterTabs
-                  mode="toggle"
-                  aria-label="密度"
-                  items={DENSITY_ITEMS}
-                  value={theme.pref.density}
-                  onChange={theme.setDensity}
-                />
-              </FieldRow>
-              <FieldRow label="主题色">
-                {/* 一行小色块 + 名字的单选；每个色块按它自己那套主题上色。 */}
-                <div role="radiogroup" aria-label="主题色" className="flex flex-wrap gap-2">
-                  {PALETTES.map((p) => {
-                    const active = theme.pref.palette === p.id;
-                    return (
-                      <Button
-                        key={p.id}
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        role="radio"
-                        aria-checked={active}
-                        aria-label={`主题色：${p.name}`}
-                        title={p.blurb}
-                        onClick={() => theme.setPalette(p.id)}
-                        className={cn(
-                          'gap-2 px-2 text-meta hover:border-border-strong',
-                          active && 'border-foreground bg-muted dark:bg-muted',
-                        )}
-                      >
-                        <span
-                          data-palette={p.id}
-                          data-mode={theme.resolvedMode}
-                          className="flex items-center gap-0.5 rounded-md border bg-background p-1"
-                          aria-hidden
-                        >
-                          <span className="size-2.5 rounded-full bg-brand" />
-                          <span className="size-2.5 rounded-full bg-muted-foreground" />
-                          <span className="size-2.5 rounded-full bg-st-done" />
-                          <span className="size-2.5 rounded-full bg-st-fail" />
-                        </span>
-                        <span className="font-medium">{p.name}</span>
-                        <span className="num text-meta text-muted-foreground">{p.en}</span>
-                        {active ? <Check className="size-3.5" aria-hidden /> : null}
-                      </Button>
-                    );
-                  })}
-                </div>
-              </FieldRow>
-              <FieldRow label="状态色" hint="看板上颜色只表达状态。当前主题下的七种状态色。">
-                <div className="flex flex-wrap gap-x-4 gap-y-1">
-                  {TONES.map((t) => (
-                    <span key={t} className="inline-flex items-center gap-1.5 text-meta">
-                      <StatusDot tone={t} />
-                      {toneLabel[t]}
-                    </span>
-                  ))}
-                </div>
-              </FieldRow>
               <FieldRow label="减少动效" hint="在跑的卡片不再呼吸、进度条不再扫光">
                 <Switch
                   checked={theme.pref.motion === 'reduced'}

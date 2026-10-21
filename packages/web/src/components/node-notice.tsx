@@ -60,7 +60,7 @@ export function OnlyLocalNotice() {
         }
       >
         现在选的是{nodeName}。额度、路由、定时任务、设置、操作记录、任务详情这些页面读的是{local}自己的库，
-        {nodeName}的请去那台上看；能看{nodeName}的只有主页、法国页和资源页。
+        {nodeName}的请去那台上看；这一页只在本台有；能看{nodeName}的只有工作台、法国页和资源页。
       </Notice>
     </div>
   );
@@ -89,7 +89,7 @@ export function SnapshotBanner({
           ? `下面是它最后一次报的样子，不是现在的；要看现在的请去${name}那台上看。`
           : `数据是它自己推来的快照，这里的按钮都不能用；要操作请去${name}那台上做。`}
         {reportedAt && f === 'fresh' ? (
-          <span className="ml-2 text-meta text-muted-foreground">它的钟 {formatDateTime(reportedAt)}</span>
+          <span className="ml-2 text-meta text-ink-3">它的钟 {formatDateTime(reportedAt)}</span>
         ) : null}
       </Notice>
     </div>

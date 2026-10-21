@@ -12,33 +12,55 @@ import {
   useRef,
 } from 'react';
 import { cn } from '../../lib/utils';
+import { focusRing } from './styles';
+
+/**
+ * 按钮（#3509，照 Arco，样稿 canvas/fd3.css `.btn`）：2 圆角、字重 400、悬停只换底色（100ms）。
+ * 五种：primary 品牌实色（一页最多一个）、secondary 灰底（最常用）、outline 品牌色描边、text 品牌色字、danger 红。
+ * 另留两个旧名：ghost 透明底灰字（图标按钮、行尾「⋯」），link 品牌色字不留内边距。
+ * 旧名对到新样子：default、brand → primary；destructive → danger。
+ * 尺寸：xs 24、sm 28、md（default）32、lg 36；手机上至少 40 高（手指点得准）。
+ * 禁用（disabled 或 aria-disabled 且不在忙）：fill-1 底、ink-3 字、not-allowed 光标；忙态（aria-busy）保留原色、转圈。
+ */
+const PRIMARY = 'bg-brand text-on-brand hover:bg-brand-hover active:bg-brand-active';
+const DANGER =
+  'bg-fail-1 text-fail-ink hover:bg-[color-mix(in_srgb,var(--fail)_18%,var(--card))] active:bg-[color-mix(in_srgb,var(--fail)_24%,var(--card))]';
+const DISABLED =
+  'disabled:cursor-not-allowed disabled:border-transparent disabled:bg-fill-1 disabled:text-ink-3 aria-disabled:not-aria-busy:cursor-not-allowed aria-disabled:not-aria-busy:border-transparent aria-disabled:not-aria-busy:bg-fill-1 aria-disabled:not-aria-busy:text-ink-3';
 
 const buttonVariants = cva(
-  "inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-body font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-focus focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-busy:cursor-progress aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  `inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-sm border border-transparent text-body font-normal whitespace-nowrap transition-colors duration-100 ease-arco ${focusRing} ${DISABLED} aria-busy:cursor-progress aria-invalid:border-fail [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4`,
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground hover:bg-primary/90',
-        brand: 'bg-brand text-brand-foreground hover:bg-brand/90',
-        destructive:
-          'bg-destructive text-destructive-foreground hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40',
+        primary: PRIMARY,
+        default: PRIMARY,
+        brand: PRIMARY,
+        secondary: 'bg-fill-2 text-ink-2 hover:bg-fill-3 hover:text-ink',
         outline:
-          'border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-accent dark:hover:bg-selected',
-        secondary: 'bg-secondary text-secondary-foreground hover:bg-secondary/80',
-        ghost: 'hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50',
-        link: 'text-primary underline-offset-4 hover:underline',
+          'border-brand bg-transparent text-brand-ink hover:border-brand-hover hover:text-link-hover active:border-brand-active',
+        text: 'bg-transparent text-brand-ink hover:bg-fill-2 hover:text-link-hover',
+        danger: DANGER,
+        destructive: DANGER,
+        ghost: 'bg-transparent text-ink-2 hover:bg-fill-2 hover:text-ink',
+        link: 'h-auto! bg-transparent px-0! text-brand-ink underline-offset-4 hover:text-link-hover hover:underline',
       },
       size: {
-        default: 'h-control px-4 py-1.5 has-[>svg]:px-3 max-md:min-h-10',
-        xs: "h-6 max-md:min-h-10 gap-1 rounded-md px-2 text-meta has-[>svg]:px-1.5 [&_svg:not([class*='size-'])]:size-3",
-        sm: 'h-control max-md:min-h-10 gap-1.5 rounded-md px-3 has-[>svg]:px-2.5',
-        lg: 'h-row rounded-md px-6 has-[>svg]:px-4',
+        md: 'h-control px-4 max-md:min-h-10',
+        default: 'h-control px-4 max-md:min-h-10',
+        sm: 'h-7 px-3 max-md:min-h-10',
+        xs: "h-6 gap-1 px-2 text-meta max-md:min-h-10 [&_svg:not([class*='size-'])]:size-3.5",
+        lg: 'h-9 px-5',
         icon: 'size-control max-md:min-h-10 max-md:min-w-10',
-        'icon-xs': "size-6 max-md:min-h-10 max-md:min-w-10 rounded-md [&_svg:not([class*='size-'])]:size-3",
-        'icon-sm': 'size-control max-md:min-h-10 max-md:min-w-10',
-        'icon-lg': 'size-row',
+        'icon-xs': "size-6 max-md:min-h-10 max-md:min-w-10 [&_svg:not([class*='size-'])]:size-3.5",
+        'icon-sm': 'size-7 max-md:min-h-10 max-md:min-w-10',
+        'icon-lg': 'size-9',
       },
     },
+    compoundVariants: [
+      // 文字按钮左右只留 8（fd3 `.btn.text`），不像实底按钮那样留 16。
+      { variant: 'text', size: ['md', 'default', 'sm', 'xs'], className: 'px-2' },
+    ],
     defaultVariants: {
       variant: 'default',
       size: 'default',

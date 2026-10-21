@@ -228,10 +228,9 @@ describe('选了远程环境：其余页', () => {
     expect(screen.queryByText('设置页本体')).toBeNull();
   });
 
-  test('侧栏换页不丢选择：在主页点「环境」，网址还带 ?node=wsl', async () => {
+  test('左菜单换页不丢选择：在工作台看「法国」，网址还带 ?node=wsl', async () => {
     await mount(apiFor('fresh'), '/?node=wsl');
-    // 主页以外的页收在侧栏「更多」里（决定 0093）：先点开
-    fireEvent.click(await screen.findByRole('button', { name: /更多/ }));
+    // 法国在左菜单「运维」组里常驻（#3509）
     const link = (await screen.findAllByRole('link', { name: /^法国/ })).find((a) =>
       a.getAttribute('href')?.startsWith('/france'),
     ) as HTMLElement;

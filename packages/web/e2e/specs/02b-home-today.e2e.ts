@@ -50,15 +50,21 @@ test.describe('主页三块', () => {
     await shot(page, '02b-主页三块');
   });
 
-  test('导航降级：侧栏只常驻主页，画布和别的页在「更多」里', async ({ page }, info) => {
-    test.skip((page.viewportSize()?.width ?? 1920) < 768, '手机走底部导航的「更多」抽屉');
-    void info;
+  test('左菜单：八项常驻（工作台、通知、任务、提需求、法国、路由、额度、设置），没有「更多」和「画布」；画布在法国名下', async ({
+    page,
+  }) => {
+    test.skip((page.viewportSize()?.width ?? 1920) < 768, '手机走底部导航的「更多」菜单');
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: '主导航' });
-    await expect(nav.getByRole('link', { name: '主页' })).toBeVisible();
+    for (const label of ['工作台', '通知', '任务', '提需求', '法国', '路由', '额度', '设置']) {
+      await expect(nav.getByRole('link', { name: label })).toBeVisible();
+    }
+    await expect(nav.getByRole('link', { name: '工作台' })).toHaveAttribute('aria-current', 'page');
     await expect(nav.getByRole('link', { name: '画布' })).toHaveCount(0);
-    await nav.getByRole('button', { name: /更多/ }).click();
-    await nav.getByRole('link', { name: '画布' }).click();
+    await expect(nav.getByRole('button', { name: /更多/ })).toHaveCount(0);
+    // 画布不进菜单，地址还在：打开时菜单亮它挂靠的「法国」
+    await page.goto('/board');
     await expect(page).toHaveURL(/\/board$/);
+    await expect(nav.getByRole('link', { name: '法国' })).toHaveAttribute('aria-current', 'page');
   });
 });

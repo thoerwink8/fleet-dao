@@ -187,7 +187,7 @@ export function RequestList(p: ListProps) {
             <ArrowLeft />
           </Button>
         ) : null}
-        <h2 className={cn('min-w-0 flex-1 truncate', p.phone ? 'text-subtitle' : 'text-heading')}>
+        <h2 className={cn('min-w-0 flex-1 truncate', p.phone ? 'text-title' : 'text-heading')}>
           {VIEW_TITLE[p.view]}
         </h2>
         {p.view !== 'deleted' ? (

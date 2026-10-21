@@ -139,7 +139,7 @@ export function SchedulesHero({ jobs, now }: { jobs: readonly JobView[]; now: nu
   return (
     <header data-job-summary data-schedules-hero className="flex min-w-0 flex-col pt-1">
       <div className="mb-3 flex min-w-0 items-baseline gap-2 whitespace-nowrap">
-        <p className="truncate text-subtitle">
+        <p className="truncate text-title">
           <span className="num">{jobs.length}</span> 个定时任务
         </p>
         <span className="min-w-0 truncate text-meta text-muted-foreground">

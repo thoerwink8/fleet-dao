@@ -20,7 +20,6 @@ import {
 import type { Model, RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EFFORT_HINT } from '../lib/efforts';
 import { WINDOW_MIN_ROWS, windowRange } from '../lib/list-window';
-import { scaledPx, useRootScale } from '../lib/root-scale';
 import { purposeLabel } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { Notice } from './layout/notice';
@@ -111,10 +110,9 @@ function AddCandidateList({
   onPick: (modelId: string) => void;
 }) {
   const [scrollTop, setScrollTop] = useState(0);
-  // 设计值乘根字号倍数（桌面 125%，#1937），行里 rem 写的字和按钮放大了，行框跟着放大
-  const scale = useRootScale();
-  const rowHeight = scaledPx(ADD_ROW_HEIGHT, scale);
-  const listHeight = scaledPx(ADD_LIST_HEIGHT, scale);
+  // 根字号不放大（1rem = 16px），设计值就是像素
+  const rowHeight = ADD_ROW_HEIGHT;
+  const listHeight = ADD_LIST_HEIGHT;
   const total = rows.length * rowHeight;
   const range = windowRange({
     count: rows.length,

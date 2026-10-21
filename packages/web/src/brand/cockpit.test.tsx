@@ -7,7 +7,7 @@ import { brand } from '#brand';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import { BUILTIN_TERMS, scanText } from '../build/scan';
-import { SidebarNav } from '../components/shell/sidebar';
+import { Topbar } from '../components/shell/topbar';
 import { HydrateFallback } from '../root';
 import LoginPage from '../routes/login';
 import { renderApp } from '../test/harness';
@@ -60,7 +60,8 @@ describe('正式驾驶舱：看得见的名字不带仓名', () => {
   });
 
   test('左上角只写一行「驾驶舱」', () => {
-    renderApp(<SidebarNav />);
+    // 标志从侧栏挪到了顶栏左边（#3509，Arco Pro 外壳）
+    renderApp(<Topbar onSearch={() => {}} />);
     expect(screen.getByText('驾驶舱').parentElement?.textContent).toBe('驾驶舱');
   });
 

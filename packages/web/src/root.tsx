@@ -20,7 +20,7 @@ import { THEME_BOOT_SCRIPT } from './lib/theme';
 
 export function Layout({ children }: { children: ReactNode }) {
   return (
-    <html lang="zh-CN" data-palette="graphite" data-mode="dark" suppressHydrationWarning>
+    <html lang="zh-CN" suppressHydrationWarning>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -30,8 +30,10 @@ export function Layout({ children }: { children: ReactNode }) {
         {/* 装成 APP（#2050）：manifest 在 public/，service worker 见 lib/pwa/register.ts */}
         <link rel="manifest" href="/manifest.webmanifest" />
         <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-        <meta name="theme-color" content="#15161a" />
-        {/* biome-ignore lint/security/noDangerouslySetInnerHtml: 固定的主题启动脚本，不含任何外部输入；要在首次绘制前挂上主题，避免闪色。 */}
+        {/* 浏览器顶栏色跟着页面底（app.css 的 --page），亮暗跟随系统 */}
+        <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f3f5" />
+        <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#17171a" />
+        {/* biome-ignore lint/security/noDangerouslySetInnerHtml: 固定的启动脚本，不含任何外部输入；要在首次绘制前挂上「减少动效」，免得先动一下再停。 */}
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} />
         <Meta />
         <Links />

@@ -129,7 +129,7 @@ function SummaryName({ pool, w }: { pool: PoolView; w?: QuotaWindowView }) {
 
 /**
  * 顶上的结论块：这一页最该看的一句——现在先用哪个池的哪个窗；没有要抢着用的，就说哪个快用完；都没有就说够用。
- * 三行：池名（text-subtitle）、一句结论加状态、灰字补充（还有几个快用完、几个读数过期、几个要人处理）。每行都不折。
+ * 三行：池名（text-title）、一句结论加状态、灰字补充（还有几个快用完、几个读数过期、几个要人处理）。每行都不折。
  */
 function QuotaHero({
   pools,
@@ -183,7 +183,7 @@ function QuotaHero({
   return (
     // 三行、每行都不折（照路由页用途标题块，#1914）：放不下截断，整句在悬停里；状态标签不让位
     <header data-quota-hero className="flex min-w-0 flex-col pt-2">
-      <h2 className="mb-3 truncate whitespace-nowrap text-subtitle" title={name}>
+      <h2 className="mb-3 truncate whitespace-nowrap text-title" title={name}>
         {name}
       </h2>
       <p

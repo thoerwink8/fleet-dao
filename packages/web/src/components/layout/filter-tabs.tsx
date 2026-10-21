@@ -1,5 +1,7 @@
 // 筛选标签条：唯一一种筛选样式（规范第七节）。任务、通知、操作记录共用（#1820）。
-// - 灰底轨道，选中用 selected 令牌（前景 10%），不再用白底反显；次级筛选（variant="secondary"）没有轨道；手机上每个标签至少 40 高，手指点得准；电脑上比控件高少 4（标准 28，紧凑 24）。
+// - #3509 照 Arco（样稿 canvas/fd3.css `.tabs` `.tab` `.tab-count`）：主筛选是下划线页签——40 高、项间 32、底下一道 line，
+//   选中品牌色字 500 加 2px 品牌色线，计数是灰底小圆角（选中时 brand-1 底）；
+//   次级筛选（variant="secondary"）没有轨道，28 高、选中 fill-2 底品牌色字。手机上每个标签至少 40 高，手指点得准。
 // - 标签多于一屏时横向滑动，还有内容没滑出来的那一端渐隐，提示「这边还能滑」。
 // - 默认是页签（role=tab，aria-selected）；mode="toggle" 是一组按钮（aria-pressed），页签之外的「选一个级别」用。
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
@@ -62,7 +64,7 @@ export function FilterTabGroups<Id extends string = string>({
           className={cn('flex shrink-0 flex-nowrap items-center gap-x-2', i > 0 && 'border-l pl-3')}
         >
           {g.heading ? (
-            <span className="shrink-0 text-meta text-muted-foreground" data-tab-group-heading>
+            <span className="shrink-0 text-meta text-ink-3" data-tab-group-heading>
               {g.heading}
             </span>
           ) : null}
@@ -90,7 +92,7 @@ export function FilterTabNote({ label, detail }: { label: string; detail: string
     <span
       data-tab-note
       title={`${label}：${detail}`}
-      className="inline-flex h-[calc(var(--spacing-control)-0.25rem)] shrink-0 cursor-help items-center px-3 text-body whitespace-nowrap text-muted-foreground max-md:min-h-10"
+      className="inline-flex h-7 shrink-0 cursor-help items-center px-3 text-body whitespace-nowrap text-ink-3 max-md:min-h-10"
     >
       {label}
       <span className="sr-only">：{detail}</span>
@@ -115,7 +117,7 @@ export function FilterTabs<Id extends string = string>({
   value: Id | undefined;
   onChange: (id: Id) => void;
   mode?: 'tabs' | 'toggle';
-  /** primary 灰底轨道（页面的主筛选）；secondary 没有轨道，只有选中那个有底（同一页里的次级筛选，不和主筛选抢）。 */
+  /** primary 下划线页签（页面的主筛选）；secondary 没有轨道，只有选中那个有底（同一页里的次级筛选，不和主筛选抢）。 */
   variant?: 'primary' | 'secondary';
   /** 给页签一个 id（`前缀-选项id`），页签对应的面板用 aria-labelledby 指它。 */
   idPrefix?: string;
@@ -174,14 +176,27 @@ export function FilterTabs<Id extends string = string>({
         } as CSSProperties
       }
       className={cn(
-        'fade-edges-x scrollbar-thin flex max-w-full overflow-x-auto',
-        variant === 'primary' ? 'rounded-lg bg-muted p-1' : 'gap-1',
+        'fade-edges-x scrollbar-thin flex max-w-full overflow-x-auto overflow-y-hidden',
+        // primary：下划线页签，底下一道 line（画成内阴影，选中项的 2px 蓝线盖在上面）；secondary：项间 4，没有轨道
+        variant === 'primary' ? 'gap-8 shadow-[inset_0_-1px_0_var(--line)]' : 'gap-1',
         className,
       )}
       {...aria}
     >
       {items.map((it) => {
         const selected = it.id === value;
+        const count =
+          it.count !== undefined ? (
+            <span
+              data-tab-count
+              className={cn(
+                'num inline-block h-4.5 min-w-5 rounded-full px-1.5 text-center text-meta font-normal',
+                selected && variant === 'primary' ? 'bg-brand-1 text-brand-ink' : 'bg-fill-2 text-ink-2',
+              )}
+            >
+              {it.count ?? '—'}
+            </span>
+          ) : null;
         return (
           <button
             key={it.id}
@@ -197,19 +212,27 @@ export function FilterTabs<Id extends string = string>({
             onClick={() => onChange(it.id)}
             onKeyDown={onKeyDown}
             className={cn(
-              'inline-flex h-[calc(var(--spacing-control)-0.25rem)] shrink-0 items-center gap-1.5 rounded-md px-3 text-body whitespace-nowrap transition-colors duration-100 outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-10 max-md:min-w-10 max-md:justify-center',
-              selected
-                ? 'bg-selected font-medium text-foreground'
-                : variant === 'primary'
-                  ? 'text-muted-foreground hover:text-foreground'
-                  : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+              'inline-flex shrink-0 cursor-pointer items-center gap-1.5 text-body whitespace-nowrap transition-colors duration-100 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-hover max-md:min-h-10 max-md:min-w-10 max-md:justify-center',
+              variant === 'primary'
+                ? // Arco 页签（fd3 `.tab`）：40 高、左右 2，底下 2px 线；选中品牌色字 500、品牌色线
+                  cn(
+                    'h-row border-b-2 px-0.5',
+                    selected
+                      ? 'border-brand font-medium text-brand-ink'
+                      : 'border-transparent text-ink-2 hover:text-ink',
+                  )
+                : // 次级筛选：28 高、2 圆角；选中 fill-2 底品牌色字
+                  cn(
+                    'h-7 rounded-sm px-3',
+                    selected
+                      ? 'bg-fill-2 font-medium text-brand-ink'
+                      : 'text-ink-2 hover:bg-fill-1 hover:text-ink',
+                  ),
             )}
           >
             {it.tone ? <StatusDot tone={it.tone} className="size-1.5" /> : null}
             {it.label}
-            {it.count !== undefined ? (
-              <span className="num text-meta text-muted-foreground">{it.count ?? '—'}</span>
-            ) : null}
+            {count}
           </button>
         );
       })}

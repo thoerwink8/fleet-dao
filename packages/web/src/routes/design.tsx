@@ -1,9 +1,12 @@
 // 设计陈列页（#1848，规范 docs/design/驾驶舱界面.md）：只在 dev:mock 构建里有。
 // 每个版式组件、基础件的各种状态，亮色和暗色各一屏；最后一张表是对比度现算（读浏览器算好的颜色，不抄表）。
 // 改了令牌或组件，先看这一页再看别的页；截图脚本固定截它。
-import { CircleDashed, Inbox, Pause, Plus } from 'lucide-react';
+import { Inbox, Pause, Plus } from 'lucide-react';
 import { useLayoutEffect, useRef, useState } from 'react';
 import { Code } from '../components/layout/code';
+import { ConfirmDialog } from '../components/layout/confirm-dialog';
+import { Descriptions } from '../components/layout/descriptions';
+import { Drawer } from '../components/layout/drawer';
 import { EmptyState } from '../components/layout/empty-state';
 import { FieldGroup, FieldRow } from '../components/layout/field-row';
 import { FilterTabs } from '../components/layout/filter-tabs';
@@ -17,6 +20,7 @@ import { Page } from '../components/layout/page';
 import { SaveButton } from '../components/layout/save-button';
 import { SearchInput } from '../components/layout/search-input';
 import { Section, SectionGrid } from '../components/layout/section';
+import { Stack } from '../components/layout/stack';
 import { Stat, StatGrid } from '../components/layout/stat';
 import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
@@ -45,8 +49,8 @@ import { Textarea } from '../components/ui/textarea';
 import { ToggleGroup, ToggleGroupItem } from '../components/ui/toggle-group';
 import { contrastRatio, over, parseColor } from '../lib/color-ratio';
 import { toneLabel } from '../lib/status';
-import type { DensityPref } from '../lib/theme';
 import { cn } from '../lib/utils';
+import { ComponentsGallery } from './design-components';
 
 const TONE_WORD: Record<LayoutTone, string> = { ...toneLabel, doubt: '疑似换模型' };
 
@@ -188,7 +192,7 @@ function ContrastTable() {
   );
 }
 
-// ---------- 一整屏陈列（亮、暗各渲染一份） ----------
+// ---------- 一整屏陈列（当前的亮或暗） ----------
 
 /** 确认框忙态的样板（#2009）：点确定后等 2.5 秒，按选的结果成功关上或失败留着写原因。 */
 function ConfirmBusyDemo() {
@@ -224,6 +228,81 @@ function ConfirmBusyDemo() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+/** 「组件」一节里确认框、抽屉的触发键（业务层摆不了按钮，由这里传进去）：确认框成功 / 失败 / 危险，抽屉三档宽。 */
+function OverlayDemos() {
+  const [drawer, setDrawer] = useState<null | 'sm' | 'md' | 'lg'>(null);
+  const [danger, setDanger] = useState(false);
+  return (
+    <Stack gap="md">
+      <Stack direction="horizontal" gap="sm" wrap>
+        <ConfirmDialog
+          trigger={
+            <Button variant="outline" size="sm">
+              确认框：会成功
+            </Button>
+          }
+          title="发布到法国？"
+          description="样板：点「确定」等 2.5 秒，成功关上。"
+          onConfirm={() => new Promise<void>((r) => setTimeout(r, 2500))}
+        />
+        <ConfirmDialog
+          trigger={
+            <Button variant="outline" size="sm">
+              确认框：会失败
+            </Button>
+          }
+          title="发布到法国？"
+          description="样板：点「确定」等 2.5 秒，失败留在原处写原因。"
+          onConfirm={async () => {
+            await new Promise((r) => setTimeout(r, 2500));
+            throw new Error('主线头已经不是 2005b290a 了，刷新后再发');
+          }}
+        />
+        <Button variant="danger" size="sm" onClick={() => setDanger(true)}>
+          危险确认框
+        </Button>
+        <ConfirmDialog
+          open={danger}
+          onOpenChange={setDanger}
+          danger
+          title="叫停这个任务？"
+          description="叫停后不能接着做，要重新开单。"
+          confirmText="叫停"
+          onConfirm={() => {}}
+        />
+      </Stack>
+      <Stack direction="horizontal" gap="sm" wrap>
+        {(['sm', 'md', 'lg'] as const).map((w) => (
+          <Button key={w} variant="outline" size="sm" onClick={() => setDrawer(w)}>
+            抽屉 {w}
+          </Button>
+        ))}
+        <Drawer
+          open={drawer !== null}
+          onOpenChange={(o) => !o && setDrawer(null)}
+          title="任务详情"
+          description="从右边滑进来，按 Esc 或点遮罩关闭。"
+          width={drawer ?? 'md'}
+          footer={
+            <Button variant="secondary" size="sm" onClick={() => setDrawer(null)}>
+              关闭
+            </Button>
+          }
+        >
+          <Descriptions
+            columns={1}
+            items={[
+              { label: '编号', value: 't-12', mono: true },
+              { label: '状态', value: <StatusBadge status="task:running" /> },
+              { label: '耗时', value: { ok: false, reason: '还没结束' } },
+            ]}
+          />
+        </Drawer>
+      </Stack>
+    </Stack>
   );
 }
 
@@ -354,10 +433,10 @@ function Gallery({ mode }: { mode: 'light' | 'dark' }) {
 
       <Section title="指标 Stat">
         <StatGrid cols={4}>
-          <Stat label="在跑" value="3" icon={CircleDashed} hint="最近 1 小时起的" />
-          <Stat label="排队" value="12" tone="stall" hint="比昨天多 4 个" />
-          <Stat label="失败" value="1" tone="fail" />
-          <Stat label="完成" value="40" tone="done" to="/tasks" hint="可点进去" />
+          <Stat label="在跑" value="3" unit="个" />
+          <Stat label="排队" value="12" unit="个" tone="stall" />
+          <Stat label="失败" value="1" unit="个" tone="fail" />
+          <Stat label="完成" value="40" unit="个" tone="done" />
         </StatGrid>
       </Section>
 
@@ -567,6 +646,18 @@ function Gallery({ mode }: { mode: 'light' | 'dark' }) {
         </Table>
       </Section>
 
+      <ComponentsGallery
+        overlays={<OverlayDemos />}
+        input={({ id, placeholder, defaultValue, invalid }) => (
+          <Input
+            {...(id ? { id } : {})}
+            {...(placeholder ? { placeholder } : {})}
+            {...(defaultValue ? { defaultValue } : {})}
+            {...(invalid ? { 'aria-invalid': true } : {})}
+          />
+        )}
+      />
+
       <Section
         title="对比度（浏览器现算）"
         description="文字色对各种底色，WCAG 要求正文至少 4.5。红字是不达标。"
@@ -577,39 +668,16 @@ function Gallery({ mode }: { mode: 'light' | 'dark' }) {
   );
 }
 
-const DENSITY_ITEMS: { id: DensityPref; label: string }[] = [
-  { id: 'comfortable', label: '标准' },
-  { id: 'compact', label: '紧凑' },
-];
-
 export default function DesignGallery() {
-  const { pref, setDensity } = useTheme();
+  // 主题只有一套，亮暗跟随系统（#3509）：陈列页只画当前这一种，看另一种就切系统的深浅色。
+  const { resolvedMode } = useTheme();
   return (
     <Page
       title="设计陈列"
-      description="每个组件的各种状态，亮色和暗色各一屏，右上角切标准和紧凑密度。只在 dev:mock 里有。"
-      actions={
-        <FilterTabs
-          mode="toggle"
-          aria-label="密度"
-          items={DENSITY_ITEMS}
-          value={pref.density}
-          onChange={setDensity}
-        />
-      }
+      description="每个组件的各种状态。亮暗跟随系统，切系统深浅色看另一种。只在 dev:mock 里有。"
     >
-      <div className="grid gap-6 2xl:grid-cols-2">
-        {(['light', 'dark'] as const).map((mode) => (
-          <div
-            key={mode}
-            data-palette="graphite"
-            data-mode={mode}
-            data-gallery={mode}
-            className="min-w-0 rounded-lg bg-background p-4 text-foreground ring-1 ring-border"
-          >
-            <Gallery mode={mode} />
-          </div>
-        ))}
+      <div data-gallery={resolvedMode} className="min-w-0 rounded-md bg-page p-4 text-ink ring-1 ring-line">
+        <Gallery mode={resolvedMode} />
       </div>
     </Page>
   );
