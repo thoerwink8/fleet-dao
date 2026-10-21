@@ -1,8 +1,53 @@
-// 状态标签：点或图标 + 字，颜色只是辅助，意思靠字和图标传（规范第五节第 6 条）。合并了原来的 StatusChip。
+// 状态标签（#3509，样子照 canvas/fd3.css 的 .badge .dot / .tag orange|red）。
+// 主用法：<StatusBadge status="task:running" />，中文和颜色等级都从状态字典（src/theme/status-dict.ts）取，页面不传 tone、label。
+// 等级决定样子：success、processing、default 画圆点加字；warning、error 默认画橙、红底标签（颜色只给异常）；
+// 表格状态列里挤的时候传 variant="dot"，warning、error 也只画圆点加字。意思靠字传，颜色只是辅助。
+import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
-import { badgeShape, iconOf, inkClass, type LayoutTone, lineClass, softClass, solidClass } from './tone';
+import { type Level, type StatusKey, statusEntry } from '../../theme/status-dict';
+import { badgeShape, inkClass, type LayoutTone, solidClass } from './tone';
 
-/** 小圆点；在跑的会一圈圈往外扩。 */
+/** 小圆点（6px）：按等级上色；进行中带一圈浅蓝晕。只画点，字由旁边写。 */
+const DOT: Record<Level, string> = {
+  processing: 'bg-brand ring-3 ring-brand-1',
+  success: 'bg-success',
+  warning: 'bg-warn',
+  error: 'bg-fail',
+  default: 'bg-ink-3',
+};
+
+/** 带底色的标签：只有橙、红两种（灰标签是 Tag）。 */
+const TAG: Partial<Record<Level, string>> = {
+  warning: 'bg-warn-1 text-warn-ink',
+  error: 'bg-fail-1 text-fail-ink',
+};
+
+export function LevelDot({ level }: { level: Level }) {
+  return (
+    <span
+      aria-hidden
+      data-level={level}
+      className={cn('inline-block size-1.5 shrink-0 rounded-full', DOT[level])}
+    />
+  );
+}
+
+/** 旧的八个 tone 对到新的五个等级（对照见 app.css 文件头）。 */
+const TONE_LEVEL: Record<LayoutTone, Level> = {
+  run: 'processing',
+  done: 'success',
+  stall: 'warning',
+  doubt: 'warning',
+  fail: 'error',
+  wait: 'default',
+  human: 'default',
+  stop: 'default',
+};
+
+/**
+ * 旧的小圆点：按 tone 上色，在跑的会一圈圈往外扩。
+ * @deprecated 老页面还在用，迁页时换成 <StatusBadge status=…>（它自己画点），然后删这个。
+ */
 export function StatusDot({ tone, className }: { tone: LayoutTone; className?: string }) {
   return (
     <span
@@ -19,50 +64,61 @@ export function StatusDot({ tone, className }: { tone: LayoutTone; className?: s
   );
 }
 
+/** @deprecated 只给旧的 tone/label 写法用。 */
 export type StatusBadgeVariant = 'soft' | 'outline' | 'dot';
 
-export function StatusBadge({
-  tone,
-  label,
-  variant = 'soft',
-  icon = true,
-  className,
-  title,
-}: {
+interface LegacyProps {
+  status?: undefined;
+  /** @deprecated 改用 status（状态从字典取）。 */
   tone: LayoutTone;
+  /** @deprecated 改用 status（中文从字典取）。 */
   label: string;
-  /** soft 淡底（默认）；outline 描边；dot 只有点和字，没有底（挤在一行里时用）。 */
+  /** @deprecated warning、error 自动画底色标签，其余画点加字；要全画点传 dot。 */
   variant?: StatusBadgeVariant;
-  /** 是否画图标（soft、outline）。关掉就只剩字；在跑的用呼吸点。 */
+  /** @deprecated 不再画图标，意思靠字。 */
   icon?: boolean;
+  /** @deprecated 页面不写样式。 */
   className?: string;
-  /** 悬停说明。写在胶囊自己身上，不再外包一层，目录行里第一层 span 仍是这颗带 data-tone 的胶囊。 */
+  /** 悬停说明。写在标签自己身上，不再外包一层。 */
   title?: string;
-}) {
-  const Icon = iconOf(tone);
+}
+
+interface DictProps {
+  /** 状态字典的键，如 `task:running`。后端来的原始值先过 toStatus(domain, raw)。 */
+  status: StatusKey;
+  /** auto（默认）：warning、error 画橙、红底标签，其余画点加字；dot：一律只画点加字（表格状态列）。 */
+  variant?: 'auto' | 'dot';
+  /** 悬停说明（认不出的状态把原值放这里）。 */
+  title?: string;
+  tone?: undefined;
+  label?: undefined;
+  icon?: undefined;
+  className?: undefined;
+}
+
+export type StatusBadgeProps = DictProps | LegacyProps;
+
+export function StatusBadge(props: StatusBadgeProps): ReactNode {
+  const legacy = props.status === undefined;
+  const level: Level = legacy ? TONE_LEVEL[props.tone] : statusEntry(props.status).level;
+  const label = legacy ? props.label : statusEntry(props.status).label;
+  const dotOnly = props.variant === 'dot';
+  const tag = !dotOnly && TAG[level] !== undefined;
   return (
     <span
-      data-tone={tone}
-      data-variant={variant}
-      {...(title !== undefined ? { title } : {})}
+      data-level={level}
+      {...(legacy
+        ? { 'data-tone': props.tone, 'data-variant': props.variant ?? 'soft' }
+        : { 'data-status': props.status })}
+      {...(props.title !== undefined ? { title: props.title } : {})}
       className={cn(
-        badgeShape,
-        'gap-1',
-        variant === 'soft' && cn(softClass[tone], inkClass[tone]),
-        variant === 'outline' && cn('border', lineClass[tone], inkClass[tone]),
-        variant === 'dot' && 'px-0 text-foreground',
-        className,
+        tag
+          ? cn(badgeShape, TAG[level])
+          : 'inline-flex shrink-0 items-center gap-2 text-body whitespace-nowrap text-ink',
+        legacy && props.className,
       )}
     >
-      {variant === 'dot' ? (
-        <StatusDot tone={tone} />
-      ) : icon ? (
-        tone === 'run' ? (
-          <StatusDot tone="run" className="mx-0.5 size-1.5" />
-        ) : (
-          <Icon className="size-3" aria-hidden />
-        )
-      ) : null}
+      {tag ? null : <LevelDot level={level} />}
       {label}
     </span>
   );

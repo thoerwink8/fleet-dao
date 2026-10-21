@@ -4,19 +4,25 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { Toggle as TogglePrimitive } from 'radix-ui';
 import type * as React from 'react';
 import { cn } from '../../lib/utils';
+import { focusRing } from './styles';
 
+/**
+ * 按下 / 松开的单个筛选钮（#3509，照 Arco 的可选标签）：平时透明底灰字、悬停 fill-2；按下品牌浅底（brand-1）品牌色字。
+ * outline 多一道 line 描边。尺寸同按钮：sm 28、默认 32、lg 36；手机上至少 40 高。
+ * 放进 ToggleGroup 时样子由分段控件（toggle-group.tsx）接管。
+ */
 const toggleVariants = cva(
-  "inline-flex items-center justify-center gap-2 rounded-md text-body font-medium whitespace-nowrap transition-[color,box-shadow] outline-none hover:bg-muted hover:text-muted-foreground focus-visible:border-ring focus-visible:ring-focus focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 data-[state=on]:bg-accent data-[state=on]:text-accent-foreground dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  `inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-sm border border-transparent text-body font-normal whitespace-nowrap text-ink-2 transition-colors duration-100 ease-arco ${focusRing} hover:bg-fill-2 hover:text-ink disabled:cursor-not-allowed disabled:bg-transparent disabled:text-ink-3 data-[state=on]:bg-brand-1 data-[state=on]:text-brand-ink [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4`,
   {
     variants: {
       variant: {
         default: 'bg-transparent',
-        outline: 'border border-input bg-transparent shadow-xs hover:bg-accent hover:text-accent-foreground',
+        outline: 'border-line bg-transparent data-[state=on]:border-brand',
       },
       size: {
-        default: 'h-control min-w-control px-2 max-md:min-h-10',
-        sm: 'h-[calc(var(--spacing-control)-0.25rem)] min-w-[calc(var(--spacing-control)-0.25rem)] px-1.5 max-md:min-h-10',
-        lg: 'h-row min-w-row px-2.5',
+        default: 'h-control min-w-control px-3 max-md:min-h-10',
+        sm: 'h-7 min-w-7 px-3 max-md:min-h-10',
+        lg: 'h-9 min-w-9 px-4',
       },
     },
     defaultVariants: {

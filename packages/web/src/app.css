@@ -1,21 +1,138 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "./theme/palettes.generated.css";
 
 /*
- * 主题 = 主题色 × 深浅。<html data-palette="…" data-mode="light|dark">，切换只改这两个属性。
- * 每套主题只写 13 个种子基色（底、侧栏、卡片、浮层、字、品牌色 + 7 个状态色，见 theme/palettes.ts），校准值由 scripts/gen-palettes.ts 算好写进 theme/palettes.generated.css；其余由下面的
- * [data-palette] 规则用 color-mix 就地派生——设置页的预览卡片也挂这两个属性，所以能在同一页里同时显示多套。
- * 颜色约定：界面框架只用品牌色和黑白灰；七个状态色只用来表达状态，不做装饰。
+ * 驾驶舱的设计令牌（#3509：整体改成字节 Arco Design / Arco Pro 的 B 端控制台样子）。
+ * 规范在 docs/design/驾驶舱界面.md 第一、二节；改这里的令牌，同一个 PR 改那份文档。
  *
- * 规范在 docs/design/驾驶舱界面.md（#1844）：令牌表、组件用法、检查规则。改这里的令牌，同一个 PR 改那份文档。
- * 令牌分三层：主题基色（theme/palettes.ts 的 13 个种子）→ 语义令牌（本文件第一个 @theme）→ 版式组件内部用。
- * 页面只用语义令牌；某一页要的专用尺寸放第二个 @theme「版式常量」。scripts/lint-design.ts 守着（src/test/lint-design.test.ts）。
+ * 主题只有一套，分亮、暗两种，暗色跟随系统（prefers-color-scheme），没有切换开关。
+ * 原来的 8 套主题色、深浅切换、标准/紧凑密度都删了：一件事只有一种样子，页面不用为每套主题各验一遍。
+ * 色值只写在下面两块令牌里（亮色 :root、暗色 @media 里的 :root），来源是设计稿 canvas/fd3.css 第 2、3 行，原样搬来。
+ * 令牌块以外不许出现 #hex、rgb()、hsl()；字色不许用填充色（--brand、--success、--warn、--fail），要用 *-ink。
+ * 两条都由 src/theme/contrast.test.ts 守，它也按 WCAG 算 25 对「字色 × 底色」，亮暗都要 ≥4.5:1。
+ *
+ * 用色规矩：
+ * - 蓝字一律 text-brand-ink；brand、success、warn、fail 只给填充（底、边、圆点、进度条）。
+ * - 颜色只给异常：带底色的标签只有灰（fill-2）、橙（warn-1）、红（fail-1）三种；分类、计数、正常不上色。
+ *
+ * ---------- 旧名 → 新名（迁移期的别名，没迁的老页面照样能看；新写的代码只用新名） ----------
+ *   background → page                  foreground、card-foreground、popover-foreground、accent-foreground、secondary-foreground → ink
+ *   panel、popover → card               muted → fill-1          accent、secondary → fill-2          selected → brand-1
+ *   muted-foreground → ink-3            border → line           border-strong、input → line-2      ring → brand
+ *   primary → brand                     primary-foreground、brand-foreground、destructive-foreground → on-brand
+ *   destructive → badge（深红底配白字 ≥4.5:1；fail 的 #F53F3F 配白字不够）               scrim → mask
+ *   shadow-card、shadow-xs → 无阴影      shadow-overlay、shadow-modal → shadow-pop          抽屉 → shadow-pop-side
+ *   ease-out、ease-in-out → ease-arco    text-subtitle → text-title（已删，用到的地方改了）
+ *
+ * ---------- 八个状态 tone → 新色（按 understand/status-dict.json 的 level 对） ----------
+ *   tone   含义         level        实色 st-*     淡底 st-*-soft   描边 st-*-line   字 ink-*
+ *   run    在跑         processing   brand         brand-1          brand            brand-ink
+ *   done   完成         success      success       success-1        success          success-ink
+ *   stall  停滞         warning      warn          warn-1           warn             warn-ink
+ *   doubt  疑似换模型   warning      warn          warn-1           warn             warn-ink
+ *   fail   失败         error        fail          fail-1           fail             fail-ink
+ *   wait   在等         default      ink-3（灰）   fill-2           line-2           ink-3
+ *   human  等你         default      ink-3（灰）   fill-2           line-2           ink-3
+ *   stop   叫停         default      ink-3（灰）   fill-2           line-2           ink-3
+ *
+ * 令牌分两层：语义令牌（第一个 @theme）给组件和页面用；某一页的专用尺寸放第二个 @theme「版式常量」。
+ * scripts/lint-design.ts 守着类名（src/test/lint-design.test.ts）。
  */
 
-@custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
+@custom-variant dark (@media (prefers-color-scheme: dark));
 
-/* ---------- 语义令牌（规范第六节） ---------- */
+/* ---------- 令牌：亮色（canvas/fd3.css 第 2 行） ---------- */
+:root {
+  color-scheme: light dark;
+  --page: #f2f3f5;
+  --card: #ffffff;
+  --fill-1: #f7f8fa;
+  --fill-2: #f2f3f5;
+  --fill-3: #e5e6eb;
+  --line: #e5e6eb;
+  --line-2: #c9cdd4;
+  --ink: #1d2129;
+  --ink-2: #4e5969;
+  --ink-3: #5f6b7a;
+  --brand: #165dff;
+  --brand-hover: #4080ff;
+  --brand-active: #0e42d2;
+  --brand-1: #e8f3ff;
+  --brand-ink: #165dff;
+  --link-hover: #0e42d2;
+  --on-brand: #ffffff;
+  --success: #00b42a;
+  --success-1: #e8ffea;
+  --success-ink: #008026;
+  --warn: #ff7d00;
+  --warn-1: #fff7e8;
+  --warn-ink: #a64500;
+  --fail: #f53f3f;
+  --fail-1: #ffece8;
+  --fail-ink: #cb272d;
+  --badge: #cb272d;
+  --pop: 0 4px 10px rgba(0, 0, 0, 0.1);
+  --pop-side: -6px 0 16px rgba(0, 0, 0, 0.06);
+  --mask: rgba(29, 33, 41, 0.45);
+}
+
+/* ---------- 令牌：暗色（canvas/fd3.css 第 3 行），跟随系统 ---------- */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #17171a;
+    --card: #232324;
+    --fill-1: #2a2a2b;
+    --fill-2: #2e2e30;
+    --fill-3: #373739;
+    --line: #333335;
+    --line-2: #484849;
+    --ink: #f6f6f6;
+    --ink-2: #c5c5c5;
+    --ink-3: #9e9ea0;
+    --brand: #165dff;
+    --brand-hover: #4080ff;
+    --brand-active: #0e42d2;
+    --brand-1: #1b2a48;
+    --brand-ink: #689fff;
+    --link-hover: #94bfff;
+    --on-brand: #ffffff;
+    --success: #27c346;
+    --success-1: #1b3424;
+    --success-ink: #4fd36a;
+    --warn: #ff9626;
+    --warn-1: #3a2a17;
+    --warn-ink: #ffb065;
+    --fail: #f76965;
+    --fail-1: #3d2120;
+    --fail-ink: #fb9a96;
+    --badge: #cb272d;
+    --pop: 0 4px 10px rgba(0, 0, 0, 0.4);
+    --pop-side: -6px 0 16px rgba(0, 0, 0, 0.3);
+    --mask: rgba(0, 0, 0, 0.6);
+  }
+}
+
+/*
+ * ---------- 旧的裸变量名：别名 ----------
+ * 少数地方在 TS 里直接写 var(--…)（logo 的 SVG、画布连线的颜色、画布状态色），先指到新令牌，迁到新名后删。
+ */
+:root {
+  --bg: var(--page);
+  --fg: var(--ink);
+  --border: var(--line);
+  --border-strong: var(--line-2);
+  --grid: var(--line);
+  --st-run: var(--brand);
+  --st-wait: var(--ink-3);
+  --st-human: var(--ink-3);
+  --st-stall: var(--warn);
+  --st-fail: var(--fail);
+  --st-done: var(--success);
+  --st-stop: var(--ink-3);
+  --st-doubt: var(--warn);
+}
+
+/* ---------- 语义令牌（规范第二节） ---------- */
 @theme inline {
   /* Tailwind 默认色板（red-500、white、black……）整个不生成：颜色只许用下面这些语义名。 */
   --color-*: initial;
@@ -24,168 +141,192 @@
   --radius-*: initial;
   --shadow-*: initial;
 
+  /* 字体（canvas/fd3.css 的 --font、--mono）：Inter 加苹方 / 思源黑体 / 微软雅黑；等宽 JetBrains Mono。 */
   --font-sans:
-    "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
-    "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
-  --font-mono:
-    "JetBrains Mono Variable", ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "PingFang SC",
-    "Microsoft YaHei", monospace;
+    "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Noto Sans SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", Consolas, "SF Mono", ui-monospace, monospace;
 
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  /* 颜色：值在上面两块令牌里，类名 bg-fill-2、text-ink-3、border-line、text-brand-ink 这样用。 */
+  --color-page: var(--page);
   --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  /* 选中行的底（前景 10%），比悬停的 accent（7%）深一档。 */
-  --color-selected: var(--selected);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  /* 对话框、抽屉后面的遮罩。 */
-  --color-scrim: var(--scrim);
-  --color-border: var(--border);
-  --color-border-strong: var(--border-strong);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --color-panel: var(--panel);
+  --color-fill-1: var(--fill-1);
+  --color-fill-2: var(--fill-2);
+  --color-fill-3: var(--fill-3);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
   --color-brand: var(--brand);
-  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-active: var(--brand-active);
+  --color-brand-1: var(--brand-1);
+  --color-brand-ink: var(--brand-ink);
+  --color-link-hover: var(--link-hover);
+  --color-on-brand: var(--on-brand);
+  --color-success: var(--success);
+  --color-success-1: var(--success-1);
+  --color-success-ink: var(--success-ink);
+  --color-warn: var(--warn);
+  --color-warn-1: var(--warn-1);
+  --color-warn-ink: var(--warn-ink);
+  --color-fail: var(--fail);
+  --color-fail-1: var(--fail-1);
+  --color-fail-ink: var(--fail-ink);
+  --color-badge: var(--badge);
+  --color-mask: var(--mask);
 
-  --color-st-run: var(--st-run);
-  --color-st-wait: var(--st-wait);
-  --color-st-human: var(--st-human);
-  --color-st-stall: var(--st-stall);
-  --color-st-fail: var(--st-fail);
-  --color-st-done: var(--st-done);
-  --color-st-stop: var(--st-stop);
-  /* 疑似换模型（#1638）：黄多红少调成橙，跟着每套主题走，不另配一套色。 */
-  --color-st-doubt: var(--st-doubt);
-  /* 状态淡底（实色 12%）和状态描边（实色 40%）：替掉页里随手写的 bg-st-fail/5、/10、/14 和 border-st-fail/40、/55。 */
-  --color-st-run-soft: color-mix(in oklab, var(--st-run) 12%, transparent);
-  --color-st-wait-soft: color-mix(in oklab, var(--st-wait) 12%, transparent);
-  --color-st-human-soft: color-mix(in oklab, var(--st-human) 12%, transparent);
-  --color-st-stall-soft: color-mix(in oklab, var(--st-stall) 12%, transparent);
-  --color-st-fail-soft: color-mix(in oklab, var(--st-fail) 12%, transparent);
-  --color-st-done-soft: color-mix(in oklab, var(--st-done) 12%, transparent);
-  --color-st-stop-soft: color-mix(in oklab, var(--st-stop) 12%, transparent);
-  --color-st-doubt-soft: color-mix(in oklab, var(--st-doubt) 12%, transparent);
-  --color-st-run-line: color-mix(in oklab, var(--st-run) 40%, transparent);
-  --color-st-wait-line: color-mix(in oklab, var(--st-wait) 40%, transparent);
-  --color-st-human-line: color-mix(in oklab, var(--st-human) 40%, transparent);
-  --color-st-stall-line: color-mix(in oklab, var(--st-stall) 40%, transparent);
-  --color-st-fail-line: color-mix(in oklab, var(--st-fail) 40%, transparent);
-  --color-st-done-line: color-mix(in oklab, var(--st-done) 40%, transparent);
-  --color-st-stop-line: color-mix(in oklab, var(--st-stop) 40%, transparent);
-  --color-st-doubt-line: color-mix(in oklab, var(--st-doubt) 40%, transparent);
-  /* 状态色的字：text-ink-*（色块、边框、圆点仍用 st-*）。 */
-  --color-ink-run: var(--st-run-ink);
-  --color-ink-wait: var(--st-wait-ink);
-  --color-ink-human: var(--st-human-ink);
-  --color-ink-stall: var(--st-stall-ink);
-  --color-ink-fail: var(--st-fail-ink);
-  --color-ink-done: var(--st-done-ink);
-  --color-ink-stop: var(--st-stop-ink);
-  --color-ink-doubt: color-mix(in oklab, var(--st-stall-ink) 62%, var(--st-fail-ink));
+  /* 旧名的别名（对照表在文件头）。新写的代码不用。 */
+  --color-background: var(--page);
+  --color-foreground: var(--ink);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--card);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--brand);
+  --color-primary-foreground: var(--on-brand);
+  --color-secondary: var(--fill-2);
+  --color-secondary-foreground: var(--ink);
+  --color-muted: var(--fill-1);
+  --color-muted-foreground: var(--ink-3);
+  --color-accent: var(--fill-2);
+  --color-accent-foreground: var(--ink);
+  --color-selected: var(--brand-1);
+  --color-destructive: var(--badge);
+  --color-destructive-foreground: var(--on-brand);
+  --color-scrim: var(--mask);
+  --color-border: var(--line);
+  --color-border-strong: var(--line-2);
+  --color-input: var(--line-2);
+  --color-ring: var(--brand);
+  --color-panel: var(--card);
+  --color-brand-foreground: var(--on-brand);
+
+  /* 状态 tone 的旧名（对照表在文件头）：实色 st-*、淡底 st-*-soft、描边 st-*-line、字 ink-*。 */
+  --color-st-run: var(--brand);
+  --color-st-wait: var(--ink-3);
+  --color-st-human: var(--ink-3);
+  --color-st-stall: var(--warn);
+  --color-st-fail: var(--fail);
+  --color-st-done: var(--success);
+  --color-st-stop: var(--ink-3);
+  --color-st-doubt: var(--warn);
+  --color-st-run-soft: var(--brand-1);
+  --color-st-wait-soft: var(--fill-2);
+  --color-st-human-soft: var(--fill-2);
+  --color-st-stall-soft: var(--warn-1);
+  --color-st-fail-soft: var(--fail-1);
+  --color-st-done-soft: var(--success-1);
+  --color-st-stop-soft: var(--fill-2);
+  --color-st-doubt-soft: var(--warn-1);
+  --color-st-run-line: var(--brand);
+  --color-st-wait-line: var(--line-2);
+  --color-st-human-line: var(--line-2);
+  --color-st-stall-line: var(--warn);
+  --color-st-fail-line: var(--fail);
+  --color-st-done-line: var(--success);
+  --color-st-stop-line: var(--line-2);
+  --color-st-doubt-line: var(--warn);
+  --color-ink-run: var(--brand-ink);
+  --color-ink-wait: var(--ink-3);
+  --color-ink-human: var(--ink-3);
+  --color-ink-stall: var(--warn-ink);
+  --color-ink-fail: var(--fail-ink);
+  --color-ink-done: var(--success-ink);
+  --color-ink-stop: var(--ink-3);
+  --color-ink-doubt: var(--warn-ink);
 
   /*
-   * 字号六档（规范 6.2）：字号和行高绑在一起，页面不再另配 leading-数字。中文最小 12px（画布节点例外）。
-   * body、heading、subtitle、title、display 读 --fs-* 变量（和密度令牌同一套写法）：手机（<48rem）的值在下面「字号」块的 :root，桌面（≥48rem）的字阶在同一块的媒体查询里覆盖（#1882）。meta、canvas 两组一样，直接写值。
-   * 都写 rem：桌面根字号放大到 125%（下面「根字号」一节，#1937），桌面实际像素是 rem 值 × 20，手机 × 16。下面的值是手机档：
-   * meta 12/16：时间戳、表头、计数、标签里的字、辅助说明。
-   * body 14/20：默认。列表行、表格、卡片正文、按钮、输入、菜单、段落（段落另加 leading-relaxed）。
-   * heading 16/24：区块、卡片、抽屉、对话框标题。
-   * title 20/28：页面标题。
-   * display 28/32：指标大数字（配 tabular-nums）。
-   * canvas 11/14：只给主页画布（components/home/board/）用，画布随缩放放大。
+   * 字号五档加等宽一档（Arco）：字号和行高、字重绑在一起，页面不另配 leading-数字。手机和桌面同一套。
+   * 都写 rem，根字号不放大（1rem = 16px），下面就是像素：
+   * meta 12/20：时间戳、表头、计数、标签里的字、辅助说明（中文最小 12）。
+   * body 14/22：默认。列表行、表格、正文、按钮、输入、菜单。
+   * heading 16/24（500）：卡片、抽屉、对话框标题。
+   * title 20/28（600）：页面标题。
+   * display 24/32（600）：只给指标数字（配 tabular-nums）。
+   * mono 13/20：等宽的编号、提交号、代码。
+   * canvas 11/14：只给画布（components/home/board/）用，画布随缩放放大。
    */
   --text-meta: 0.75rem;
-  --text-meta--line-height: 1rem;
-  --text-body: var(--fs-body);
-  --text-body--line-height: var(--fs-body-lh);
-  --text-heading: var(--fs-heading);
-  --text-heading--line-height: var(--fs-heading-lh);
-  --text-heading--font-weight: 600;
-  /* subtitle：一页最多一处的主标题块（路由页的用途名，#1914），比页标题小一档、比区块标题大一档。 */
-  --text-subtitle: var(--fs-subtitle);
-  --text-subtitle--line-height: var(--fs-subtitle-lh);
-  --text-subtitle--font-weight: 600;
-  --text-title: var(--fs-title);
-  --text-title--line-height: var(--fs-title-lh);
+  --text-meta--line-height: 1.25rem;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.375rem;
+  --text-heading: 1rem;
+  --text-heading--line-height: 1.5rem;
+  --text-heading--font-weight: 500;
+  --text-title: 1.25rem;
+  --text-title--line-height: 1.75rem;
   --text-title--font-weight: 600;
-  --text-title--letter-spacing: -0.01em;
-  --text-display: var(--fs-display);
-  --text-display--line-height: var(--fs-display-lh);
+  --text-display: 1.5rem;
+  --text-display--line-height: 2rem;
   --text-display--font-weight: 600;
+  --text-mono: 0.8125rem;
+  --text-mono--line-height: 1.25rem;
   --text-canvas: 0.6875rem;
   --text-canvas--line-height: 0.875rem;
 
-  /* 圆角：控件 md、卡片和弹层 lg、标签 sm、圆点和胶囊 full（规范 6.4）。只有这四档，其余（xl、2 等）已删。 */
-  --radius-sm: calc(var(--radius) - 0.25rem);
-  --radius-md: calc(var(--radius) - 0.125rem);
-  --radius-lg: var(--radius);
+  /* 圆角（Arco）：sm 2 按钮、输入、标签、菜单项、格子；md 4 卡片、浮层、对话框；lg 8 少用；full 头像、圆点、角标。 */
+  --radius-sm: 0.125rem;
+  --radius-md: 0.25rem;
+  --radius-lg: 0.5rem;
 
   /*
-   * 阴影只表示「浮起」（规范 6.5）：
-   * xs 描边按钮、输入；card 区块和卡片（亮色一根下边线加一点影，暗色没有，靠边框）；
-   * overlay 浮层、菜单、下拉、提示、画布浮动工具条；modal 对话框、抽屉。
-   * 另三个是特效：选中行竖线、品牌色圈（额度热）、状态色光圈（完成时一闪）。
+   * 阴影：卡片没有阴影，靠浅灰底上的白卡片分层。只有两种：
+   * pop 下拉、气泡、对话框；pop-side 抽屉。
+   * card、xs、overlay、modal 是旧名的别名（card、xs 无阴影）。
+   * 另三个是特效：选中行竖线、品牌色圈（额度热）、完成一闪。
    */
-  --shadow-xs: 0 1px 2px 0 color-mix(in oklab, var(--shadow-color) 40%, transparent);
-  --shadow-card: var(--elev-card);
-  --shadow-overlay: 0 8px 24px -12px var(--shadow-color), 0 0 0 1px var(--border);
-  --shadow-modal: 0 24px 48px -16px var(--shadow-color);
-  /* 先后列表里选中的那一行：左边一道竖线，不是整行加框。 */
-  --shadow-row-selected: inset 3px 0 0 var(--foreground);
+  --shadow-pop: var(--pop);
+  --shadow-pop-side: var(--pop-side);
+  --shadow-card: 0 0 transparent;
+  --shadow-xs: 0 0 transparent;
+  --shadow-overlay: var(--pop);
+  --shadow-modal: var(--pop);
+  --shadow-row-selected: inset 3px 0 0 var(--brand);
   --shadow-brand-ring: 0 0 0 1px var(--brand);
-  --shadow-done-pop: 0 0 0 4px color-mix(in oklab, var(--st-done) 30%, transparent);
+  --shadow-done-pop: 0 0 0 4px color-mix(in oklab, var(--success) 30%, transparent);
 
   /*
-   * 动效（规范 6.6）：时长只用三档——悬停变色 100、展开收起 200、抽屉进出 300。
-   * ease-out 进入、展开（和画布排版过渡同一条）；ease-in-out 来回切换。
+   * 动效（Arco）：时长三档，悬停 100、展开和浮层 200、抽屉和进度 300；缓动一条 ease-arco。
+   * 数和 src/theme/motion.ts 一样（motion.test.ts 核对）。ease-out、ease-in-out 是旧名，指到同一条。
+   * transition-colors 这类不写时长的过渡默认 100、ease-arco。
    */
   --transition-duration-100: 100ms;
   --transition-duration-200: 200ms;
   --transition-duration-300: 300ms;
-  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-arco: cubic-bezier(0.34, 0.69, 0.1, 1);
+  --ease-out: cubic-bezier(0.34, 0.69, 0.1, 1);
+  --ease-in-out: cubic-bezier(0.34, 0.69, 0.1, 1);
+  --default-transition-duration: 100ms;
+  --default-transition-timing-function: cubic-bezier(0.34, 0.69, 0.1, 1);
 
   /*
-   * 组件令牌（规范 2.7，学 Ant Design 的组件令牌和紧凑算法）：只给会随密度变的五个尺寸起名。
-   * 值在下面「密度」一节，标准一组、紧凑一组，切 <html data-density> 整站一起变。
+   * 组件令牌（只有一套，Arco 数值）：控件高 32、行高 40、两行的行 48、卡片内边距 20、区块间距 16、区块内间距 12。
    * 只许 components/layout/、components/ui/ 用（lint-design R10）：页面要的是版式组件，不是自己量尺寸。
    * 名字放 --spacing-* 下：h-*、p-*、gap-* 都认它。
    */
-  --spacing-control: var(--control-h);
-  --spacing-row: var(--row-h);
-  /* 两行的行（名字一行加一行小字，路由页的模型行、路由行，#1914）：标准 48、紧凑 40。 */
-  --spacing-row-tall: var(--row-tall-h);
-  --spacing-section: var(--section-p);
-  --spacing-section-gap: var(--section-gap);
-  --spacing-stack: var(--stack-gap);
+  --spacing-control: 2rem;
+  --spacing-row: 2.5rem;
+  --spacing-row-tall: 3rem;
+  --spacing-section: 1.25rem;
+  --spacing-section-gap: 1rem;
+  --spacing-stack: 0.75rem;
 }
 
 /*
  * ---------- 版式常量 ----------
- * 某一页、某一块要的专用尺寸（41 个）。不是设计档位，别的页别拿来当间距用；写明哪页用、依据是什么。
+ * 某一页、某一块要的专用尺寸。不是设计档位，别的页别拿来当间距用；写明哪页用、依据是什么。
  * 名字放在 Tailwind 工具类认的命名空间下（h-* 认 --height/--spacing，max-w 认 --container……），src/test/theme-tokens.test.ts 钉住。
  */
 @theme inline {
   /*
-   * 专用尺寸：顶栏高、侧栏宽（展开/收起/小屏抽屉）。改这里，整站的壳一起变。
+   * 专用尺寸：顶栏高 60、左菜单宽 220（Arco Pro），收起和小屏抽屉的宽。改这里，整站的壳一起变。
    * 必须放在 --spacing-* 下：Tailwind v4 的 h-* 只认 --height/--spacing、w-* 只认 --width/--spacing/--container，
    * 先前写成 --size-* 时 h-topbar、w-sidebar 整个不生效（顶栏塌成 33px、侧栏按字宽缩）。src/test/theme-tokens.test.ts 钉住。
    */
-  /* 尺寸一律写 rem（#1937）：桌面根字号放大时整站的壳一起放大。括号里是 16px 根字号下的像素。 */
-  --spacing-topbar: 3.25rem; /* 52 */
-  --spacing-sidebar: 14.5rem; /* 232 */
+  /* 尺寸一律写 rem（用户在浏览器调大默认字号时整站一起变）。括号里是像素（1rem = 16px）。 */
+  --spacing-topbar: 3.75rem; /* 60 */
+  --spacing-sidebar: 13.75rem; /* 220 */
   --spacing-sidebar-collapsed: 3.75rem; /* 60 */
   --spacing-sidebar-sheet: 16.25rem; /* 260 */
   /* 主页右侧抽屉（要你拍的 / 做完的）宽 22.5rem（360px）；≥1920 时停靠成一列、其余浮在画布上。 */
@@ -227,7 +368,7 @@
    * 页面最大宽按宽屏铺满定（1920 屏去掉侧栏约 1690 宽，整块用上）；只在 2560 这类超宽屏上才封顶，免得一行字拉得太长。
    */
   --container-cockpit: 115rem; /* 1840 */
-  --container-chat: 38rem; /* 760（桌面根字号 20px 下 38rem = 760px）：提需求页对话居中一列的最大宽（宽屏两边留白是为了可读） */
+  --container-chat: 38rem; /* 608：提需求页对话居中一列的最大宽（宽屏两边留白是为了可读） */
   --container-settings-row: 6rem; /* 96 */
   /* 设置页左侧页内导航宽（lg 以上）。 */
   --container-settings-nav: 11rem; /* 176 */
@@ -259,203 +400,37 @@
 }
 
 /*
- * ---------- 根字号：桌面整体放大到 125%（#1937） ----------
- * 依据是实测：创始人 2026-10-12 在 Windows、Chrome、100% 系统缩放的 1x 屏（1568–1920 宽）上看，
- * 照 macOS 定的 13px 正文偏小（macOS 的 13pt 在视网膜屏上观感大，搬到 1x 屏上小一圈，中文尤其），浏览器缩放 125% 刚好。
- * 所以桌面（md，48rem 起）把根字号放大到 125%：字号、控件高、行高、间距、顶栏侧栏宽、抽屉宽都写 rem，跟着等比放大，
- * 默认就是 125% 的观感，不用再手动缩放。手机（<48rem）不放大：正文 14、可点区 40 已经够。
- * 1 rem 在桌面是 20px、手机是 16px。字号表、密度表写的是 16px 根字号下的「设计值」，桌面实际像素 × 1.25。
- * @media 里的 rem 按浏览器初始字号（16px）算，不随这里变：断点仍是 768 / 1024 / 1280 / 1536 像素。
- * 所以 1024–1366 宽的布局比浏览器缩放 125% 时挤（浏览器缩放会把断点一起往下推）；五个宽度的截图见 PR。
- * JS 里按像素算的尺寸（定高行、窗口高、抽屉宽）乘 lib/root-scale.ts 的 rootScale()，它读的就是这里的根字号。
- * 写成 100% 的倍数：用户在浏览器里把默认字号调大，也照样跟着放大。
+ * 根字号不放大（#3509）：照 Arco 原样，1rem = 16px，浏览器 100% 下正文 14px、顶栏 60、菜单 220，手机桌面一样。
+ * 理由：创始人 10-22 拍「字节怎么做我们就怎么做」。原来桌面放大到 125%（#1937）的那层整个删了，JS 里的定高行、窗口高、抽屉宽直接用设计值。
  */
-:root {
-  --root-scale: 1;
-}
-@media (width >= 48rem) {
-  :root {
-    --root-scale: 1.25;
-  }
-}
-html {
-  font-size: calc(100% * var(--root-scale));
-}
-
-/*
- * ---------- 字号：两组值（#1882） ----------
- * 第一个 @theme 是 inline，类名直接读这里的 --fs-*（和密度令牌同一套写法）。
- * 手机（<48rem）：正文 14 起，可点区 40 不变。
- * 桌面（md，48rem 起）：字阶取 macOS 内置文字样式的比例（Body 13/16、Title 3 15/20、Title 1 22/26、Large Title 26/32），
- * 再乘上面根字号的 1.25：实际正文 16.25/20、区块标题 18.75/25、页标题 27.5/35、小字 15/20。
- * meta 两组都是 0.75rem / 1rem：中文最小 12（手机 12、桌面 15），行高不低于 16。页标题行高取 28：单行标题给汉字留足上下空。
- */
-:root {
-  --fs-body: 0.875rem;
-  --fs-body-lh: 1.25rem;
-  --fs-heading: 1rem;
-  --fs-heading-lh: 1.5rem;
-  --fs-subtitle: 1.125rem;
-  --fs-subtitle-lh: 1.5rem;
-  --fs-title: 1.25rem;
-  --fs-title-lh: 1.75rem;
-  --fs-display: 1.75rem;
-  --fs-display-lh: 2rem;
-}
-@media (width >= 48rem) {
-  :root {
-    --fs-body: 0.8125rem;
-    --fs-body-lh: 1rem;
-    --fs-heading: 0.9375rem;
-    --fs-heading-lh: 1.25rem;
-    --fs-subtitle: 1.25rem;
-    --fs-subtitle-lh: 1.625rem;
-    --fs-title: 1.375rem;
-    --fs-title-lh: 1.75rem;
-    --fs-display: 1.625rem;
-    --fs-display-lh: 2rem;
-  }
-}
-
-/*
- * ---------- 密度：组件令牌的取值 ----------
- * 标准 32 / 40 / 16 / 24 / 12（控件高、行高、区块内边距、区块间距、区块内间距），紧凑 28 / 32 / 12 / 16 / 8：都是 16px 根字号下的设计值，写成 rem。
- * 桌面根字号放大到 125%（#1937），实际像素 × 1.25：标准 40 / 50 / 20 / 30 / 15，紧凑 35 / 40 / 15 / 20 / 10。
- * 紧凑只在桌面（md，48rem）起生效：手机上 40 的可点区（#1820）照旧，所以 390 宽两种密度完全一样。
- * 字号不跟着缩（字号看宽度，不看密度），紧凑只收框的高度和留白，不收字。
- * 写在 :root 而不是 [data-palette]：预览卡、陈列页这类嵌套的 data-palette 会继承外层的密度，不会被重置回标准。
- * 任何一棵子树挂 data-density 就按它自己的来（comfortable 也列在这里，用来在紧凑的页面里放一块标准的）。
- */
-:root,
-[data-density="comfortable"] {
-  --control-h: 2rem;
-  --row-h: 2.5rem;
-  --row-tall-h: 3rem;
-  --section-p: 1rem;
-  --section-gap: 1.5rem;
-  --stack-gap: 0.75rem;
-}
-@media (width >= 48rem) {
-  [data-density="compact"] {
-    --control-h: 1.75rem;
-    --row-h: 2rem;
-    --row-tall-h: 2.5rem;
-    --section-p: 0.75rem;
-    --section-gap: 1rem;
-    --stack-gap: 0.5rem;
-  }
-}
-
-/* ---------- 派生色：所有主题共用一套算法 ---------- */
-[data-palette] {
-  color-scheme: light;
-  --radius: 0.625rem;
-  --background: var(--bg);
-  --foreground: var(--fg);
-  --card: var(--surface);
-  --card-foreground: var(--fg);
-  --popover: var(--elev);
-  --popover-foreground: var(--fg);
-  --primary: var(--fg);
-  --primary-foreground: var(--bg);
-  --secondary: color-mix(in oklab, var(--fg) 7%, var(--surface));
-  --secondary-foreground: var(--fg);
-  --muted: color-mix(in oklab, var(--fg) 5%, var(--surface));
-  /*
-   * 下面四个按每套主题校准，份量由脚本算好写在生成文件各自的块里（--muted-ink、--input-ink、--ring-ink、--destructive-foreground），
-   * 由 src/lib/contrast.test.ts 逐套验（WCAG 2.2 AA）：
-   * 次要文字在页面底、卡片、浮层、muted、侧栏上都 ≥ 4.5:1；控件边框对卡片、聚焦圈对页面底 ≥ 3:1；危险按钮的字 ≥ 4.5:1。
-   * 新加主题不给这几个值，颜色算不出来，闸也会红。
-   */
-  --muted-foreground: color-mix(in oklab, var(--fg) var(--muted-ink), var(--bg));
-  --accent: color-mix(in oklab, var(--fg) 7%, transparent);
-  --accent-foreground: var(--fg);
-  --selected: color-mix(in oklab, var(--fg) 10%, transparent);
-  /* 危险按钮的底用状态红的墨色：亮色下比实色深一点、暗色下浅一点，白字或深字都能到 4.5:1。 */
-  --destructive: var(--st-fail-ink);
-  --scrim: color-mix(in oklab, #000 50%, transparent);
-  --border: color-mix(in oklab, var(--fg) 11%, transparent);
-  --border-strong: color-mix(in oklab, var(--fg) 20%, transparent);
-  --input: color-mix(in oklab, var(--fg) var(--input-ink), transparent);
-  --ring: color-mix(in oklab, var(--brand) var(--ring-ink), transparent);
-  --canvas: var(--bg);
-  --grid: color-mix(in oklab, var(--fg) 13%, transparent);
-  --shadow-color: color-mix(in oklab, #000 14%, transparent);
-  /* 亮色卡片只有一根下边线，没有模糊投影（规范第一节第 5 条）。 */
-  --elev-card: 0 1px 0 var(--border);
-  --st-doubt: color-mix(in oklab, var(--st-stall) 62%, var(--st-fail));
-  /*
-   * 状态色当字用时的「墨色」：往前景色里混一点，保证 11px 小字在卡片、页面底、浮层、侧栏、muted，
-   * 以及叠在它们上面的同色淡底（最深 15%）上都 ≥ 4.5:1。
-   * 每套主题需要混多少（--ink-*）由脚本算好写在生成文件里，没写就不混；色块、圆点、进度条仍用原来的状态色。
-   * 对比度由 src/lib/contrast.test.ts 逐套逐色验，新加主题不够就红。
-   */
-  --ink-run: 100%;
-  --ink-wait: 100%;
-  --ink-human: 100%;
-  --ink-stall: 100%;
-  --ink-fail: 100%;
-  --ink-done: 100%;
-  --ink-stop: 100%;
-  --st-run-ink: color-mix(in oklab, var(--st-run) var(--ink-run), var(--fg));
-  --st-wait-ink: color-mix(in oklab, var(--st-wait) var(--ink-wait), var(--fg));
-  --st-human-ink: color-mix(in oklab, var(--st-human) var(--ink-human), var(--fg));
-  --st-stall-ink: color-mix(in oklab, var(--st-stall) var(--ink-stall), var(--fg));
-  --st-fail-ink: color-mix(in oklab, var(--st-fail) var(--ink-fail), var(--fg));
-  --st-done-ink: color-mix(in oklab, var(--st-done) var(--ink-done), var(--fg));
-  --st-stop-ink: color-mix(in oklab, var(--st-stop) var(--ink-stop), var(--fg));
-  color: var(--foreground);
-}
-[data-mode="dark"] {
-  color-scheme: dark;
-  --shadow-color: color-mix(in oklab, #000 45%, transparent);
-  --grid: color-mix(in oklab, var(--fg) 11%, transparent);
-  --scrim: color-mix(in oklab, #000 60%, transparent);
-  /* 暗色下卡片不加影，靠边框分层。 */
-  --elev-card: none;
-}
-
-/* ---------- 16 套主题的基色和校准值：见 theme/palettes.generated.css（生成文件，种子在 theme/palettes.ts） ---------- */
 
 /* ---------- 基础 ---------- */
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-line outline-brand/50;
   }
   html,
   body {
     height: 100%;
   }
   body {
-    @apply bg-background text-foreground font-sans antialiased;
-    font-feature-settings: "cv11", "ss01";
-    text-rendering: optimizeLegibility;
+    @apply bg-page text-body text-ink font-sans antialiased;
+    font-variant-numeric: tabular-nums;
   }
   ::selection {
     background: color-mix(in oklab, var(--brand) 28%, transparent);
   }
-  /* 会话里「在会话里找」的命中（#3277，CSS 自定义高亮，components/run-transcript.tsx）：全部命中淡黄，当前这一个深一档。 */
+  /* 会话里「在会话里找」的命中（#3277，CSS 自定义高亮，components/run-transcript.tsx）：全部命中淡橙，当前这一个深一档。 */
   ::highlight(transcript-find) {
-    background-color: var(--color-st-stall-soft);
+    background-color: var(--warn-1);
   }
   ::highlight(transcript-find-now) {
-    background-color: var(--color-st-stall-line);
+    background-color: color-mix(in oklab, var(--warn) 40%, transparent);
   }
 }
 
 /*
- * 切换主题的那一帧关掉过渡，免得几百个元素一起慢慢变色。
- * 不用 !important：Tailwind 的工具类都在 @layer 里，这里的未分层规则天然压过它们。
- */
-:root[data-theme-swap],
-:root[data-theme-swap] *,
-:root[data-theme-swap] *::before,
-:root[data-theme-swap] *::after {
-  transition: none;
-}
-
-/*
- * 数字、耗时、额度：无衬线字体的等宽数字（Inter 的 tabular-nums），中文和数字混排不再忽宽忽窄（规范第五节第 2 条）。
+ * 数字、耗时、额度：无衬线字体的等宽数字（Inter 的 tabular-nums），中文和数字混排不再忽宽忽窄。
  * 等宽字体（font-mono）只给编号、提交号、路由号、模型 id、代码，且只在 components/layout/code.tsx 里用。
  */
 @utility num {
@@ -465,6 +440,7 @@ html {
 /*
  * 横向滑动条两端的渐隐提示（components/layout/filter-tabs.tsx）：哪一端还有内容没滑出来，哪一端就渐隐。
  * 渐隐宽度由组件按「这一端还有没有」设到 --fade-start / --fade-end，没有的一端设 0。
+ * 遮罩只看不透明度，用哪个不透明的颜色都一样，这里借 --ink。
  */
 @utility fade-edges-x {
   --fade-start: 0px;
@@ -472,15 +448,15 @@ html {
   -webkit-mask-image: linear-gradient(
     to right,
     transparent,
-    #000 var(--fade-start),
-    #000 calc(100% - var(--fade-end)),
+    var(--ink) var(--fade-start),
+    var(--ink) calc(100% - var(--fade-end)),
     transparent
   );
   mask-image: linear-gradient(
     to right,
     transparent,
-    #000 var(--fade-start),
-    #000 calc(100% - var(--fade-end)),
+    var(--ink) var(--fade-start),
+    var(--ink) calc(100% - var(--fade-end)),
     transparent
   );
 }
@@ -488,13 +464,13 @@ html {
 /* 细滚动条 */
 @utility scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-color: var(--line-2) transparent;
 }
 
 /*
  * 额度页账号池（#1805）：一个池一行，各窗口一格（一行字加一根细进度条）。
  * 容器够宽（53.875rem，16px 根字号下 862px 起）时窗口按类排成对齐的列、表头显示；窄了每个池变一张卡，窗口两列排、格内自带窗口名，不横向滚动。
- * 容器查询里写 var() 不会生效，所以这里写同一个数。写 rem：容器查询的 rem 按实际根字号算，桌面根字号放大时门槛跟着放大（#1937）。列数由行上的 --quota-kinds 给。
+ * 容器查询里写 var() 不会生效，所以这里写同一个数。写 rem：容器查询的 rem 按实际根字号算。列数由行上的 --quota-kinds 给。
  */
 .quota-matrix {
   container-type: inline-size;
@@ -650,7 +626,7 @@ html {
 
 /* 放在 components 层：工具类（absolute 之类）要能覆盖这里的 position。 */
 @layer components {
-  /* 卡片内侧一圈状态色的光，透明度一呼一吸。卡片本身是 relative + overflow-hidden，光画在里面。 */
+  /* 卡片内侧一圈进行中的蓝光，透明度一呼一吸。卡片本身是 relative + overflow-hidden，光画在里面。 */
   .fd-live::after {
     content: "";
     position: absolute;
@@ -658,8 +634,8 @@ html {
     border-radius: inherit;
     pointer-events: none;
     box-shadow:
-      inset 0 0 0 1px color-mix(in oklab, var(--st-run) 80%, transparent),
-      inset 0 0 22px 2px color-mix(in oklab, var(--st-run) 26%, transparent);
+      inset 0 0 0 1px color-mix(in oklab, var(--brand) 80%, transparent),
+      inset 0 0 22px 2px color-mix(in oklab, var(--brand) 26%, transparent);
     opacity: 0;
     will-change: opacity;
     animation: fd-breathe 2.4s ease-in-out infinite;
@@ -668,16 +644,19 @@ html {
     position: relative;
     overflow: hidden;
   }
+  /* 扫光借卡片底色：亮色是白光，暗色是淡灰光。 */
   .fd-sweep::after {
     content: "";
     position: absolute;
     inset: 0;
     width: 40%;
-    background: linear-gradient(90deg, transparent, color-mix(in oklab, #fff 45%, transparent), transparent);
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklab, var(--card) 45%, transparent),
+      transparent
+    );
     animation: fd-sweep 1.8s ease-in-out infinite;
-  }
-  [data-mode="dark"] .fd-sweep::after {
-    background: linear-gradient(90deg, transparent, color-mix(in oklab, #fff 28%, transparent), transparent);
   }
   /* 在跑的小圆点往外扩一圈：扩的是一个同色的伪元素（缩放 + 淡出），不改阴影。 */
   .fd-dot-live {
@@ -693,7 +672,7 @@ html {
     animation: fd-pulse-dot 1.8s ease-out infinite;
   }
   .fd-rise {
-    animation: fd-rise 0.28s ease-out both;
+    animation: fd-rise 0.2s cubic-bezier(0.34, 0.69, 0.1, 1) both;
   }
 }
 
@@ -727,20 +706,18 @@ html {
   clip-path: none;
   white-space: normal;
   pointer-events: auto;
-  border-radius: var(--radius);
-  background: var(--primary);
-  color: var(--primary-foreground);
+  border-radius: var(--radius-sm);
+  background: var(--brand);
+  color: var(--on-brand);
   font-size: var(--text-body);
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.2;
-  box-shadow:
-    0 10px 28px -12px var(--shadow-color),
-    0 0 0 1px color-mix(in oklab, var(--foreground) 12%, transparent);
-  outline: 2px solid var(--ring);
+  box-shadow: var(--pop);
+  outline: 2px solid var(--brand);
   outline-offset: 3px;
 }
 .skip-target:focus {
-  outline: 2px solid var(--ring);
+  outline: 2px solid var(--brand);
   outline-offset: -2px;
 }
 
@@ -760,7 +737,7 @@ html {
     justify-content: flex-end;
     width: 100%;
     max-width: 100%;
-    gap: var(--stack-gap);
+    gap: var(--spacing-stack);
   }
   [data-actions-layout="stack"] [data-flow-mode-switch] {
     flex: 0 0 100%;
@@ -789,18 +766,18 @@ html {
   }
 }
 
-/* ---------- 看板画布（React Flow）跟随主题 ---------- */
+/* ---------- 看板画布（React Flow）跟随亮暗 ---------- */
 .react-flow {
-  --xy-background-color: var(--canvas);
-  --xy-edge-stroke: var(--border-strong);
+  --xy-background-color: var(--page);
+  --xy-edge-stroke: var(--line-2);
   --xy-edge-stroke-width: 1.5;
-  --xy-edge-stroke-selected: var(--fg);
-  --xy-minimap-background-color: color-mix(in oklab, var(--surface) 92%, transparent);
-  --xy-minimap-mask-background-color: color-mix(in oklab, var(--bg) 62%, transparent);
-  --xy-minimap-mask-stroke-color: var(--border-strong);
+  --xy-edge-stroke-selected: var(--ink);
+  --xy-minimap-background-color: color-mix(in oklab, var(--card) 92%, transparent);
+  --xy-minimap-mask-background-color: color-mix(in oklab, var(--page) 62%, transparent);
+  --xy-minimap-mask-stroke-color: var(--line-2);
   --xy-minimap-mask-stroke-width: 1;
   --xy-attribution-background-color: transparent;
-  --xy-node-border-radius: var(--radius-lg);
+  --xy-node-border-radius: var(--radius-md);
 }
 .react-flow__node {
   cursor: pointer;
@@ -809,10 +786,10 @@ html {
   outline: none;
 }
 .react-flow__minimap {
-  border-radius: 10px;
-  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
   overflow: hidden;
-  box-shadow: 0 8px 24px -12px var(--shadow-color);
+  box-shadow: var(--pop);
 }
 .react-flow__attribution {
   background: transparent;
@@ -820,16 +797,16 @@ html {
   opacity: 0.45;
 }
 .react-flow__attribution a {
-  color: var(--muted-foreground);
+  color: var(--ink-3);
 }
 /* 重新排版时卡片滑到新位置，而不是瞬移。 */
 .fd-board-ready .react-flow__node {
-  transition: transform 0.38s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: transform 0.3s cubic-bezier(0.34, 0.69, 0.1, 1);
 }
 .react-flow__edge-path {
   transition:
-    stroke 0.2s ease,
-    opacity 0.2s ease;
+    stroke 0.2s cubic-bezier(0.34, 0.69, 0.1, 1),
+    opacity 0.2s cubic-bezier(0.34, 0.69, 0.1, 1);
 }
 .react-flow__handle {
   opacity: 0;
@@ -837,7 +814,7 @@ html {
 }
 /*
  * 减少动效：设置页的开关（data-motion="reduced"）或系统设置，任一个开着都停。
- * 看板上的连线流动、重新排版时卡片滑动也算动效，一起停（连线在代码里也不再标 animated，这里兜底）。
+ * 悬停变色、展开、浮层、抽屉的过渡一起停（时长归零，状态照样切）；在跑的呼吸、扫光、扩圈、连线流动、重新排版的滑动也停。
  */
 @media (prefers-reduced-motion: reduce) {
   .fd-live::after,
@@ -850,6 +827,11 @@ html {
   :root .fd-board-ready .react-flow__node {
     transition: none;
   }
+  :root *,
+  :root *::before,
+  :root *::after {
+    transition-duration: 0s;
+  }
 }
 :root[data-motion="reduced"] .fd-live::after,
 :root[data-motion="reduced"] .fd-sweep::after,
@@ -860,4 +842,9 @@ html {
 }
 :root[data-motion="reduced"] .fd-board-ready .react-flow__node {
   transition: none;
+}
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  transition-duration: 0s;
 }

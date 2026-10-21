@@ -156,7 +156,7 @@ function ChangelogHero({ commits, now }: { commits: Commits; now: number }) {
   return (
     <header data-changelog-hero className="flex min-w-0 flex-col pt-1">
       <div className="mb-3 flex min-w-0 items-baseline gap-2 whitespace-nowrap">
-        <p className="min-w-0 truncate text-subtitle" title={name}>
+        <p className="min-w-0 truncate text-title" title={name}>
           {name}
         </p>
         <span className="shrink-0 font-mono text-meta text-muted-foreground max-md:hidden">

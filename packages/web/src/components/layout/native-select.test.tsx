@@ -29,7 +29,8 @@ describe('NativeSelect', () => {
     );
     const cls = screen.getByRole('combobox').className;
     expect(cls).toContain('h-control');
-    expect(cls).toContain('rounded-md');
+    expect(cls).toContain('rounded-sm');
+    expect(cls).toContain('bg-fill-2');
     expect(cls).toContain('max-md:min-h-10');
     expect(cls).toContain('max-md:text-heading');
   });

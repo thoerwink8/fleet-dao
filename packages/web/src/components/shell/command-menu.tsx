@@ -1,9 +1,7 @@
-import { FolderGit2, Moon, Palette, Sun } from 'lucide-react';
+import { FolderGit2 } from 'lucide-react';
 import { useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router';
-import { PALETTES } from '../../lib/theme';
 import { useRepo } from '../repo-context';
-import { useTheme } from '../theme-provider';
 import {
   CommandDialog,
   CommandEmpty,
@@ -13,14 +11,13 @@ import {
   CommandList,
   CommandSeparator,
 } from '../ui/command';
-import { NAV } from './nav';
+import { NAV, NAV_SOON } from './nav';
 
-/** ⌘K：跳页面、切仓、切主题。 */
+/** ⌘K：跳页面（不进菜单的页也都在这里搜得到）、切仓。（主题只有一套、亮暗跟随系统，#3509 起没有切主题。） */
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { repos, setRepoId } = useRepo();
-  const theme = useTheme();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -43,25 +40,28 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
       <CommandInput placeholder="输入页面名、操作…" />
       <CommandList className="max-h-command-list">
         <CommandEmpty>没找到</CommandEmpty>
-        <CommandGroup heading="跳转">
-          {NAV.flatMap((g) => g.items).map((item) => {
-            const Icon = item.icon;
-            return (
-              <CommandItem
-                key={item.to}
-                value={`${item.label} ${item.hint}`}
-                onSelect={() => run(() => navigate(item.to))}
-              >
-                <Icon />
-                {item.label}
-                <span className="truncate text-meta text-muted-foreground">{item.hint}</span>
-              </CommandItem>
-            );
-          })}
-        </CommandGroup>
-        <CommandSeparator />
+        {/* 菜单里的八项和不进菜单的页（定时任务、资源、发布记录、操作记录、渠道状态、画布）都在这里，还没做的账单在最后 */}
+        {[...NAV, { group: '还没做', items: NAV_SOON }].map((g) => (
+          <CommandGroup key={g.group} heading={g.group}>
+            {g.items.map((item) => {
+              const Icon = item.icon;
+              return (
+                <CommandItem
+                  key={item.to}
+                  value={`${item.label} ${item.to} ${item.hint}`}
+                  onSelect={() => run(() => navigate(item.to))}
+                >
+                  <Icon />
+                  <span className="shrink-0">{item.label}</span>
+                  <span className="min-w-0 truncate text-meta text-ink-3">{item.hint}</span>
+                </CommandItem>
+              );
+            })}
+          </CommandGroup>
+        ))}
         {repos.length ? (
           <>
+            <CommandSeparator />
             <CommandGroup heading="当前仓">
               {repos.map((r) => (
                 <CommandItem
@@ -79,26 +79,8 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
                 </CommandItem>
               ))}
             </CommandGroup>
-            <CommandSeparator />
           </>
         ) : null}
-        <CommandGroup heading="外观">
-          <CommandItem value="切换深浅色 深色 浅色 夜间" onSelect={() => run(theme.toggleMode)}>
-            {theme.resolvedMode === 'dark' ? <Sun /> : <Moon />}
-            切到{theme.resolvedMode === 'dark' ? '浅色' : '深色'}
-          </CommandItem>
-          {PALETTES.map((p) => (
-            <CommandItem
-              key={p.id}
-              value={`主题色 ${p.name} ${p.en}`}
-              onSelect={() => run(() => theme.setPalette(p.id))}
-            >
-              <Palette />
-              主题色：{p.name}
-              <span className="num text-meta text-muted-foreground">{p.en}</span>
-            </CommandItem>
-          ))}
-        </CommandGroup>
       </CommandList>
     </CommandDialog>
   );

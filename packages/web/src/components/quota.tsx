@@ -37,7 +37,7 @@ export function QuotaBar({ util, className }: { util: number | undefined; classN
   return (
     <div className={cn('h-1.5 w-full overflow-hidden rounded-full bg-selected', className)}>
       <div
-        className={cn('h-full rounded-full transition-[width] duration-700', quotaTone(pct))}
+        className={cn('h-full rounded-full transition-[width] duration-300', quotaTone(pct))}
         style={{ width: `${Math.max(2, pct * 100)}%` }}
       />
     </div>

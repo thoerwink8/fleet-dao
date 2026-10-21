@@ -1,4 +1,6 @@
 // 页面外框：页头标题行（标题左、操作和刷新右，同一行垂直居中），下面最多一行说明，长说明收成 ⓘ（#1820、#1897）；所有页同一最大宽。
+// #3509 照 Arco Pro（样稿 canvas/fd3.css `.crumb` `.page-head`）：面包屑 14px ink-2、24 高、下 12；标题 20/600；说明一行 ink-3；
+// 页头和正文之间 16；内容区上 16、左右 20、下 32。
 import { Info } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
@@ -26,12 +28,12 @@ export function DescriptionHint({
           aria-label={label}
           title={label}
           data-description-hint
-          className="inline-grid size-8 shrink-0 place-items-center align-middle max-md:size-10 rounded-full text-muted-foreground hover:text-foreground"
+          className="ml-1 inline-grid size-7 shrink-0 cursor-pointer place-items-center rounded-sm align-middle text-ink-3 transition-colors duration-100 hover:bg-fill-2 hover:text-ink max-md:size-10"
         >
           <Info className="size-4" aria-hidden />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-auto max-w-sm text-body text-muted-foreground">
+      <PopoverContent align="start" className="w-auto max-w-sm text-body text-ink-2">
         {children}
       </PopoverContent>
     </Popover>
@@ -91,12 +93,17 @@ export function Page({
     <div
       data-page-width="full"
       className={cn(
-        'fd-rise mx-auto w-full max-w-cockpit px-4 pt-5 pb-16 sm:px-6 lg:px-8 lg:pt-6',
+        // 内容区的边（Arco Pro `.content`）：上 16、左右 20、下 32；手机左右 16。
+        'fd-rise mx-auto w-full max-w-cockpit px-5 pt-4 pb-8 max-md:px-4',
         className,
       )}
     >
       {breadcrumb ? (
-        <nav aria-label="位置" data-page-breadcrumb className="mb-2 text-meta text-muted-foreground">
+        <nav
+          aria-label="位置"
+          data-page-breadcrumb
+          className="mb-3 flex min-h-6 flex-wrap items-center gap-2 text-body text-ink-2 [&_a]:text-ink-2 [&_a:hover]:text-brand-ink"
+        >
           {breadcrumb}
         </nav>
       ) : null}
@@ -107,7 +114,7 @@ export function Page({
           操作区可以缩，健康条放不下就收成「状态」按钮，不能再把这一列挤成逐词三行。 */}
       <header
         className={cn(
-          'mb-section-gap flex flex-wrap items-start justify-between gap-x-stack gap-y-2 max-md:mb-4 lg:flex-nowrap',
+          'mb-section-gap flex flex-wrap items-start justify-between gap-x-6 gap-y-2 lg:flex-nowrap',
           // 手机上标题自己一行，操作区在下面占满宽（具体怎么排在 app.css 的 data-actions-layout=stack）
           stackActions && 'max-md:flex-col max-md:items-stretch max-md:gap-3',
         )}
@@ -116,15 +123,15 @@ export function Page({
         <div
           className={cn(
             'min-w-0 grow basis-52 lg:flex-1',
-            // 18rem：桌面根字号 1.25 下约 360px，盖住「主页 · 演练 WSL」一行的字宽。只在 lg，手机仍按内容行宽。
+            // 18rem（288px）：盖住「主页 · 演练 WSL」一行的字宽。只在 lg，手机仍按内容行宽。
             stackActions && 'max-md:w-full max-md:grow-0 max-md:basis-auto lg:min-w-72',
           )}
           data-page-titlebar
         >
-          <h1 className="inline align-middle text-title">{title}</h1>
+          <h1 className="inline align-middle text-title text-ink">{title}</h1>
           {hint}
           {description && !fold ? (
-            <div className="mt-1 max-w-3xl text-body text-muted-foreground" data-page-description>
+            <div className="mt-1 max-w-3xl text-body text-ink-3" data-page-description>
               {description}
             </div>
           ) : null}
@@ -147,7 +154,7 @@ export function Page({
           </div>
         ) : null}
       </header>
-      {tabs ? <div className="mb-section">{tabs}</div> : null}
+      {tabs ? <div className="mb-4">{tabs}</div> : null}
       {children}
     </div>
   );

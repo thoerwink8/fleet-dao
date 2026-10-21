@@ -6,6 +6,10 @@ import type * as React from 'react';
 import { cn } from '../../lib/utils';
 
 import { Button } from './button';
+import { focusRing, maskMotion, popMotion, popSurface } from './styles';
+
+// 对话框（#3509，照 Arco，样稿 canvas/fd3.css `.mask` `.modal`）：mask 遮罩；框宽 480、内边距 24、项间 16，
+// 卡片底、浮层阴影、4 圆角、无描边；标题 16/500；进 200 出 100（淡入加 0.96→1 缩放）。
 
 function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />;
@@ -25,14 +29,7 @@ function DialogClose({ ...props }: React.ComponentProps<typeof DialogPrimitive.C
 
 function DialogOverlay({ className, ...props }: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
   return (
-    <DialogPrimitive.Overlay
-      data-slot="dialog-overlay"
-      className={cn(
-        'fixed inset-0 z-50 bg-scrim data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0',
-        className,
-      )}
-      {...props}
-    />
+    <DialogPrimitive.Overlay data-slot="dialog-overlay" className={cn(maskMotion, className)} {...props} />
   );
 }
 
@@ -50,7 +47,9 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-dialog -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border bg-background p-6 shadow-modal duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg',
+          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-dialog -translate-x-1/2 -translate-y-1/2 gap-4 p-6 outline-none sm:max-w-120',
+          popSurface,
+          popMotion,
           className,
         )}
         {...props}
@@ -59,7 +58,10 @@ function DialogContent({
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
-            className="absolute top-4 right-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+            className={cn(
+              'absolute top-5 right-5 grid size-7 cursor-pointer place-items-center rounded-sm text-ink-3 transition-colors duration-100 hover:bg-fill-2 hover:text-ink max-md:size-10 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*="size-"])]:size-4',
+              focusRing,
+            )}
           >
             <XIcon />
             <span className="sr-only">关闭</span>
@@ -74,7 +76,7 @@ function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn('flex flex-col gap-2 text-center sm:text-left', className)}
+      className={cn('flex flex-col gap-2 pr-8 text-left', className)}
       {...props}
     />
   );
@@ -97,7 +99,7 @@ function DialogFooter({
       {children}
       {showCloseButton && (
         <DialogPrimitive.Close asChild>
-          <Button variant="outline">关闭</Button>
+          <Button variant="secondary">关闭</Button>
         </DialogPrimitive.Close>
       )}
     </div>
@@ -108,7 +110,7 @@ function DialogTitle({ className, ...props }: React.ComponentProps<typeof Dialog
   return (
     <DialogPrimitive.Title
       data-slot="dialog-title"
-      className={cn('text-heading leading-none font-semibold', className)}
+      className={cn('text-heading text-ink', className)}
       {...props}
     />
   );
@@ -121,7 +123,7 @@ function DialogDescription({
   return (
     <DialogPrimitive.Description
       data-slot="dialog-description"
-      className={cn('text-body text-muted-foreground', className)}
+      className={cn('text-body text-ink-2', className)}
       {...props}
     />
   );

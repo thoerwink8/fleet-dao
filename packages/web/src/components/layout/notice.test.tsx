@@ -24,6 +24,23 @@ describe('Notice', () => {
     expect(screen.getByRole('status')).toBeTruthy();
   });
 
+  test('只有三种外观（#3509 照 Arco Alert）：fail 红底、stall 橙底、info 和 done 蓝底；字一律正文色', () => {
+    const want = {
+      fail: ['error', 'bg-fail-1'],
+      stall: ['warning', 'bg-warn-1'],
+      info: ['info', 'bg-brand-1'],
+      done: ['info', 'bg-brand-1'],
+    };
+    for (const [tone, [look, bg]] of Object.entries(want)) {
+      render(<Notice tone={tone as NoticeTone}>说明</Notice>);
+      const el = screen.getByText('说明').closest('[data-tone]') as HTMLElement;
+      expect(el.dataset.look).toBe(look);
+      expect(el.className).toContain(bg);
+      expect(el.className).toContain('text-ink');
+      cleanup();
+    }
+  });
+
   test('标题、正文、右侧操作都渲染', () => {
     render(
       <Notice tone="fail" title="没读成" action={<button type="button">重试</button>}>

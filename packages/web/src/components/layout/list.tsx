@@ -1,5 +1,6 @@
 // 列表和列表行（参照 shadcn Item）。合并了原来的 ExpandRow：expandable 的行整行是一个按钮（aria-expanded），点一下才展开明细。
-// 行高取行高令牌（标准 40、紧凑 32），手机 44；左边的竖线（rail）标出问题行。
+// 行高取行高令牌（40；两行的 48），手机 44；左边的竖线（rail）标出问题行。
+// #3509 照 Arco（样稿 canvas/fd3.css `.list` `.list-item` `tr.detail`）：行间一道 line，能点的行悬停 fill-1，选中 brand-1，展开的明细 fill-1 底。
 // 上下内边距 = (行高 − 一行正文 20px) / 2：单行行正好是行高，两行的行跟着行高一起收。
 import { ChevronRight } from 'lucide-react';
 import { type ComponentProps, type ReactNode, useId, useState } from 'react';
@@ -8,17 +9,17 @@ import { cn } from '../../lib/utils';
 import { type LayoutTone, solidClass } from './tone';
 
 export function List({ divided = true, className, ...rest }: { divided?: boolean } & ComponentProps<'ul'>) {
-  return <ul className={cn(divided && 'divide-y divide-border', className)} {...rest} />;
+  return <ul className={cn(divided && 'divide-y divide-line', className)} {...rest} />;
 }
 
 const rowBase =
-  'flex w-full items-center gap-stack px-section text-left outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11';
+  'flex w-full items-center gap-stack px-section text-left text-ink outline-none transition-colors duration-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-hover max-md:min-h-11';
 /** 一行的行高：单行取 h-row；两行（名字一行加一行小字）取 row-tall，和 RowFrame tall 一样。 */
 const rowHeight = {
   single: 'min-h-row py-[calc((var(--spacing-row)-1.25rem)/2)]',
   tall: 'min-h-row-tall py-1.5',
 } as const;
-const rowHover = 'hover:bg-accent';
+const rowHover = 'cursor-pointer hover:bg-fill-1';
 
 /**
  * 一行的外框，给自己管 li 的列表（拖动排序的先后列表）用：行高、左右内边距、元素间距取同一组令牌，和 ListRow 一样高。
@@ -130,16 +131,13 @@ export function ListRow({
   const rowClass = cn(
     rowBase,
     tall ? rowHeight.tall : rowHeight.single,
-    selected && 'bg-selected',
     (expandable || href || onClick) && rowHover,
+    // 选中照 Arco（fd3 `.pick.on`、`tr.sel`）：只换 brand-1 底，不另画竖线
+    selected && 'bg-brand-1 hover:bg-brand-1',
   );
   const detail = details ?? children;
   return (
-    <li
-      data-selected={selected || undefined}
-      className={cn('relative', selected && 'shadow-row-selected', className)}
-      {...rest}
-    >
+    <li data-selected={selected || undefined} className={cn('relative', className)} {...rest}>
       {rail ? (
         <span
           aria-hidden
@@ -159,14 +157,14 @@ export function ListRow({
             {body}
             <ChevronRight
               className={cn(
-                'size-4 shrink-0 text-muted-foreground transition-transform duration-200',
+                'size-4 shrink-0 text-ink-3 transition-transform duration-200 ease-arco',
                 open && 'rotate-90',
               )}
               aria-hidden
             />
           </button>
           {open ? (
-            <div id={bodyId} className="border-t bg-muted px-section py-stack">
+            <div id={bodyId} className="bg-fill-1 px-section py-stack">
               {detail}
             </div>
           ) : null}

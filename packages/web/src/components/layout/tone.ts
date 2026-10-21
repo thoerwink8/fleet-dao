@@ -17,11 +17,40 @@ export const LAYOUT_TONES: readonly LayoutTone[] = [
 ];
 
 /**
- * StatusBadge 和 Tag 共用的外形：同一个字高（h-5）、内边距（px-1.5）、字号字重、圆角（rounded-sm）。
+ * StatusBadge 和 Tag 共用的外形（#3509，照 Arco，样稿 canvas/fd3.css `.tag`）：24 高、左右 8、12px 500、2 圆角。
  * 两者只在「管什么」上分工，不在形状上分（规范第六节「StatusBadge 与 Tag 的分工」）。
  */
 export const badgeShape =
-  'inline-flex h-5 shrink-0 items-center rounded-sm px-1.5 text-meta font-medium whitespace-nowrap';
+  'inline-flex h-6 shrink-0 items-center gap-1 rounded-sm px-2 text-meta font-medium whitespace-nowrap';
+
+/**
+ * 颜色只给异常（#3509）：带底色的标签只有三种——灰（default）、橙（warning）、红（error）。
+ * 八种状态 tone 落到这三种：停滞、疑似换模型 → 橙；失败 → 红；在跑、完成、在等、等你、叫停 → 灰。
+ */
+export type TagLook = 'default' | 'warning' | 'error';
+
+export function tagLookOf(tone: LayoutTone): TagLook {
+  if (tone === 'fail') return 'error';
+  if (tone === 'stall' || tone === 'doubt') return 'warning';
+  return 'default';
+}
+
+/** 三种标签外观的底色和字色（fd3 `.tag` `.tag.orange` `.tag.red`）。 */
+export const tagLookClass: Record<TagLook, string> = {
+  default: 'bg-fill-2 text-ink-2',
+  warning: 'bg-warn-1 text-warn-ink',
+  error: 'bg-fail-1 text-fail-ink',
+};
+
+/**
+ * 数字、值的颜色也只给异常：超标、出错标红（fail-ink），停滞、疑似换模型标橙（warn-ink），别的照正文色。
+ * 指标卡（Stat）、键值（KeyValue）用它，不再把「完成」「在跑」的数字涂成绿、蓝。
+ */
+export function anomalyInkClass(tone: LayoutTone | undefined): string | undefined {
+  if (tone === 'fail') return 'text-fail-ink';
+  if (tone === 'stall' || tone === 'doubt') return 'text-warn-ink';
+  return undefined;
+}
 
 /** 状态文字（≥4.5:1 的墨色）。 */
 export const inkClass: Record<LayoutTone, string> = {

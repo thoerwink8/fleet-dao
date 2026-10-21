@@ -25,7 +25,6 @@ import {
   WINDOW_MIN_ROWS,
   windowRange,
 } from '../lib/list-window';
-import { readRootScale, scaledPx } from '../lib/root-scale';
 import { modelKind } from '../lib/route-kinds';
 import { countsText, type KindCounts } from '../lib/route-state';
 import { purposeLabel, routeTitle } from '../lib/routing';
@@ -81,9 +80,9 @@ export function revealOnMobile(id: string) {
   document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
-/** 现在的行高（像素）：设计值乘根字号倍数（桌面 125%，#1937），和 CSS 里 rem 写的行内容一起放大。调用方已按 MOBILE_MQ 重画。 */
+/** 现在的行高（像素）：根字号不放大（1rem = 16px，#3509 照 Arco），设计值就是像素。调用方已按 MOBILE_MQ 重画。 */
 function rowHeightNow(mobile: boolean): number {
-  return scaledPx(mobile ? MOBILE_ROW_HEIGHT : ROW_HEIGHT, readRootScale());
+  return mobile ? MOBILE_ROW_HEIGHT : ROW_HEIGHT;
 }
 
 /**
@@ -214,8 +213,8 @@ export function WindowedRows<T>({
       </div>
     );
   }
-  // 窗口高和行高同一个倍数（和 CSS 的 h-routing-window 一样跟根字号放大）
-  const listHeight = scaledPx(LIST_HEIGHT, readRootScale());
+  // 窗口高和 CSS 的 h-routing-window 同一个数
+  const listHeight = LIST_HEIGHT;
   const range = windowRange({ count: items.length, rowHeight, height: listHeight, scrollTop });
   return (
     <div

@@ -4,9 +4,14 @@ import type { VariantProps } from 'class-variance-authority';
 import { ToggleGroup as ToggleGroupPrimitive } from 'radix-ui';
 import * as React from 'react';
 import { cn } from '../../lib/utils';
+import { focusRing } from './styles';
+import type { toggleVariants } from './toggle';
 
-import { toggleVariants } from './toggle';
-
+/**
+ * 分段控件（#3509，照 Arco，样稿 canvas/fd3.css `.seg`）：fill-2 底的槽、内边距 2、项间 4；
+ * 选中项白底（card）品牌色字 500，没选的灰字。整条默认 32 高（项 28），sm 28 高（项 24）。
+ * variant、spacing 是旧参数：样子只有这一种，参数留着不报错。
+ */
 const ToggleGroupContext = React.createContext<
   VariantProps<typeof toggleVariants> & {
     spacing?: number;
@@ -16,6 +21,12 @@ const ToggleGroupContext = React.createContext<
   variant: 'default',
   spacing: 0,
 });
+
+const ITEM_SIZE = {
+  default: 'h-7 max-md:min-h-9',
+  sm: 'h-6 max-md:min-h-9',
+  lg: 'h-8',
+} as const;
 
 function ToggleGroup({
   className,
@@ -34,9 +45,8 @@ function ToggleGroup({
       data-variant={variant}
       data-size={size}
       data-spacing={spacing}
-      style={{ '--gap': spacing } as React.CSSProperties}
       className={cn(
-        'group/toggle-group flex w-fit items-center gap-[--spacing(var(--gap))] rounded-md data-[spacing=default]:data-[variant=outline]:shadow-xs',
+        'group/toggle-group inline-flex w-fit items-center gap-1 rounded-sm bg-fill-2 p-0.5',
         className,
       )}
       {...props}
@@ -54,20 +64,18 @@ function ToggleGroupItem({
   ...props
 }: React.ComponentProps<typeof ToggleGroupPrimitive.Item> & VariantProps<typeof toggleVariants>) {
   const context = React.useContext(ToggleGroupContext);
+  const s = context.size || size || 'default';
 
   return (
     <ToggleGroupPrimitive.Item
       data-slot="toggle-group-item"
       data-variant={context.variant || variant}
-      data-size={context.size || size}
+      data-size={s}
       data-spacing={context.spacing}
       className={cn(
-        toggleVariants({
-          variant: context.variant || variant,
-          size: context.size || size,
-        }),
-        'w-auto min-w-0 shrink-0 px-3 focus:z-10 focus-visible:z-10',
-        'data-[spacing=0]:rounded-none data-[spacing=0]:shadow-none data-[spacing=0]:first:rounded-l-md data-[spacing=0]:last:rounded-r-md data-[spacing=0]:data-[variant=outline]:border-l-0 data-[spacing=0]:data-[variant=outline]:first:border-l',
+        'inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-sm px-3 text-body whitespace-nowrap text-ink-2 transition-colors duration-100 ease-arco hover:text-ink focus-visible:z-10 disabled:cursor-not-allowed disabled:text-ink-3 data-[state=on]:bg-card data-[state=on]:font-medium data-[state=on]:text-brand-ink [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*=size-])]:size-4',
+        focusRing,
+        ITEM_SIZE[s],
         className,
       )}
       {...props}

@@ -182,6 +182,8 @@ describe('推送断了：顶栏照实说，手机上也看得见', () => {
     const indicator = text.closest('[role="status"]') as HTMLElement;
     expect(indicator.className).not.toMatch(/(^|\s)hidden(\s|$)/);
     act(() => report?.('open'));
-    expect(await screen.findByText('实时')).toBeTruthy();
+    // #3509：连着时只给读屏一句，顶栏不占位置（颜色和字只给异常）
+    expect(await screen.findByText('实时推送连着')).toBeTruthy();
+    expect(screen.queryByText('推送断了')).toBeNull();
   });
 });

@@ -10,26 +10,18 @@ import {
 import { useMediaQuery } from '../lib/hooks';
 import {
   applyTheme,
-  type DensityPref,
-  type ModePref,
   type MotionPref,
-  type PaletteId,
   type ResolvedMode,
   readThemePref,
-  resolveMode,
   saveThemePref,
   type ThemePref,
 } from '../lib/theme';
 
 interface ThemeApi {
   pref: ThemePref;
+  /** 亮暗跟随系统（#3509 起没有切换开关），这里只读出来给 sonner 这类要传 theme 的第三方件。 */
   resolvedMode: ResolvedMode;
-  setPalette(p: PaletteId): void;
-  setMode(m: ModePref): void;
   setMotion(m: MotionPref): void;
-  setDensity(d: DensityPref): void;
-  /** 深浅互换（⌘K 与快捷键用）。 */
-  toggleMode(): void;
 }
 
 const ThemeContext = createContext<ThemeApi | null>(null);
@@ -37,32 +29,19 @@ const ThemeContext = createContext<ThemeApi | null>(null);
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [pref, setPref] = useState<ThemePref>(readThemePref);
   const systemDark = useMediaQuery('(prefers-color-scheme: dark)');
-  const resolvedMode = resolveMode(pref.mode, systemDark);
+  const resolvedMode: ResolvedMode = systemDark ? 'dark' : 'light';
 
   useLayoutEffect(() => {
-    applyTheme(pref, systemDark);
-  }, [pref, systemDark]);
+    applyTheme(pref);
+  }, [pref]);
 
-  const update = useCallback((patch: Partial<ThemePref>) => {
-    setPref((prev) => {
-      const next = { ...prev, ...patch };
-      saveThemePref(next);
-      return next;
-    });
+  const setMotion = useCallback((motion: MotionPref) => {
+    const next = { motion };
+    saveThemePref(next);
+    setPref(next);
   }, []);
 
-  const api = useMemo<ThemeApi>(
-    () => ({
-      pref,
-      resolvedMode,
-      setPalette: (palette) => update({ palette }),
-      setMode: (mode) => update({ mode }),
-      setMotion: (motion) => update({ motion }),
-      setDensity: (density) => update({ density }),
-      toggleMode: () => update({ mode: resolvedMode === 'dark' ? 'light' : 'dark' }),
-    }),
-    [pref, resolvedMode, update],
-  );
+  const api = useMemo<ThemeApi>(() => ({ pref, resolvedMode, setMotion }), [pref, resolvedMode, setMotion]);
 
   return <ThemeContext value={api}>{children}</ThemeContext>;
 }

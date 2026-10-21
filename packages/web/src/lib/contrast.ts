@@ -1,6 +1,5 @@
 // 颜色算法：oklab 混色、sRGB 叠色、WCAG 相对亮度和对比度。
-// 生成主题的脚本（theme/derive.ts）和对比度测试（contrast.test.ts）共用这一份，
-// 两边算出来的数不可能因为各写一遍而对不上。不读页面，纯函数。
+// 令牌的对比度测试（theme/contrast.test.ts）用它算 app.css 两块令牌。不读页面，纯函数。
 
 export type Rgb = [number, number, number];
 

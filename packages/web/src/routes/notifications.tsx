@@ -549,7 +549,7 @@ function PendingHero({ counts }: { counts: { decision: number; alert: number; da
   const rule = `要你拍的和卡住的，处理了就从这里消失。${counts.daily > 0 ? `日报 ${counts.daily} 条看一眼就行。` : ''}`;
   return (
     <header data-testid="pending-rule" className="mb-6 flex min-w-0 flex-col">
-      <h2 className="truncate text-subtitle whitespace-nowrap">
+      <h2 className="truncate text-title whitespace-nowrap">
         待处理 <span className="num">{pending}</span> 条
       </h2>
       {pending > 0 ? (

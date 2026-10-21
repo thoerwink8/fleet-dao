@@ -51,10 +51,12 @@ describe('#1910 片 7', () => {
     expect(dispatch.parentElement).toBe(groom?.parentElement);
   });
 
-  test('StatusBadge 和 Tag 用同一套外形（badgeShape：h-5、px-1.5、rounded-sm），不再全圆', () => {
+  test('带底色的 StatusBadge 和 Tag 用同一套外形（badgeShape：h-6、px-2、rounded-sm），不再全圆', () => {
+    // #3509：颜色只给异常，只有 warning/error 画底色标签；正常状态画圆点加字，不是标签
     render(
       <>
-        <StatusBadge tone="done" label="状态" />
+        <StatusBadge tone="fail" label="状态" />
+        <StatusBadge tone="done" label="完成" />
         <Tag>标签</Tag>
       </>,
     );
@@ -64,5 +66,7 @@ describe('#1910 片 7', () => {
     }
     expect(badgeShape).toContain('rounded-sm');
     expect(screen.getByText('状态').className).not.toContain('rounded-full');
+    expect(screen.getByText('完成').className).not.toContain('rounded-full');
+    expect(screen.getByText('完成').querySelector('[data-level="success"]')).toBeTruthy();
   });
 });

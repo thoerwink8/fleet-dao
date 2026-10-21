@@ -230,15 +230,18 @@ describe('设置页字段行和页内导航（#1805）', () => {
   });
 });
 
-describe('设置页主题色卡的英文名', () => {
-  test('Graphite、Tokyo Night 不带省略号截断', async () => {
+describe('设置页外观只剩减少动效（#3509：主题只有一套，亮暗跟随系统）', () => {
+  test('外观一节没有主题色、深浅、密度，只有「减少动效」开关', async () => {
     renderApp(<SettingsPage />, { route: '/settings' });
-    const tokyo = await screen.findByText('Tokyo Night');
-    const graphite = screen.getByText('Graphite');
-    for (const el of [tokyo, graphite]) {
-      expect(el.className.split(/\s+/)).not.toContain('truncate');
-      expect(el.className.split(/\s+/)).not.toContain('text-ellipsis');
-    }
+    const look = await waitFor(() => {
+      const el = document.getElementById('look');
+      expect(el).toBeTruthy();
+      return el as HTMLElement;
+    });
+    expect(within(look).getByRole('switch', { name: '减少动效' })).toBeTruthy();
+    expect(within(look).queryByRole('radiogroup')).toBeNull();
+    expect(within(look).queryByText('Tokyo Night')).toBeNull();
+    expect(within(look).queryByText('密度')).toBeNull();
   });
 });
 

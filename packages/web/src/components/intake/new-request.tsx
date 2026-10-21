@@ -81,7 +81,7 @@ export function NewRequest({
             </Notice>
           ) : null}
           <div>
-            <p className="text-subtitle">想做什么？</p>
+            <p className="text-title">想做什么？</p>
             <p className="mt-1 text-body text-muted-foreground">
               先说一句，大白话就行。指挥官会接着问，把它聊成一张写全四节的单子。
             </p>

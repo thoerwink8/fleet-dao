@@ -60,7 +60,6 @@ import {
 import { formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
 import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
-import { readRootScale, scaledPx } from '../lib/root-scale';
 import { modelKind } from '../lib/route-kinds';
 import {
   countByVerdict,
@@ -382,7 +381,7 @@ function PurposeHero({ purpose: p }: { purpose: RoutingLayerPurpose }) {
     // （短话放不下就截断、标签不挤走）；灰字补充一行（放不下截断，整句在悬停里）。
     <header data-purpose-hero className="flex min-w-0 flex-col pt-2">
       <div className="mb-3 flex min-w-0 items-baseline gap-2 whitespace-nowrap">
-        <h2 className="truncate text-subtitle">{purposeLabel(p.purpose)}</h2>
+        <h2 className="truncate text-title">{purposeLabel(p.purpose)}</h2>
         <span className="shrink-0 text-meta text-muted-foreground">{p.purpose}</span>
       </div>
       {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
@@ -583,12 +582,11 @@ function ModelPriority({
   const why =
     edit.disabledWhy ?? (filtering ? '正在筛选，只显示了一部分：清掉搜索和「只看已开启」再调先后' : null);
   // 不超过 50 个：按内容高度、随页面滚（不设内部滚动）；超过 50 个才开窗口（定高行、只画看得见的）
-  // 行高、窗口高是 16px 根字号下的设计值，乘根字号倍数（桌面 125%，#1937）才和 rem 写的行内容对得上
-  const scale = readRootScale();
+  // 行高、窗口高是设计值；根字号不放大（1rem = 16px），设计值就是像素
   const viewport = long
     ? mobile
-      ? { height: scaledPx(LIST_HEIGHT, scale), rowHeight: scaledPx(MOBILE_ROW_HEIGHT, scale) }
-      : { height: scaledPx(ORDER_LIST_HEIGHT, scale), rowHeight: scaledPx(ORDER_ROW_HEIGHT, scale) }
+      ? { height: LIST_HEIGHT, rowHeight: MOBILE_ROW_HEIGHT }
+      : { height: ORDER_LIST_HEIGHT, rowHeight: ORDER_ROW_HEIGHT }
     : undefined;
   return (
     <Section
