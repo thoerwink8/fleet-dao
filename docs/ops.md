@@ -14,7 +14,7 @@
 | 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端、经隧道探法国 healthz |
 | 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
-| 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
+| 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停）；`daihuo.service`（程序 `/opt/daihuo`、数据 `/var/lib/daihuo`）；两个 systemd 定时任务：`reclaude-refill-collector.timer`（每分钟，程序 `/opt/reclaude-refill`、数据 `/var/lib/reclaude-refill`）、`mirasim-radar-collector.timer`（每 5 分钟，程序 `/opt/mirasim-radar`、数据 `/var/lib/mirasim-radar`） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
 两机之间走 WireGuard 隧道 `10.99.0.0/24`：香港 `10.99.0.1` 是服务端；法国 `10.99.0.2` 是客户端，主动连、每 25 秒保活，所以法国不用开任何入站端口。
 
@@ -325,7 +325,14 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | 自动发布 | `fleet-auto-release.service`、`fleet-release-request.service`、`fleet-cli-upgrade.service` | `/usr/local/lib/fleet-dao`、`/var/lib/fleet-dao/cli-upgrade` |
 | 发布版本 | 没有进程 | `/srv/fleet-dao-releases`、`/srv/fleet-dao` |
 | self-proxy | `self-proxy-direct.service`、`self-proxy-exit.service` | 不归本仓管 |
-| MiraQuota 同步 | `miraquota-sync.service` | 不归本仓管 |
+| MiraQuota 同步 | `miraquota-sync.service` | `/opt/miraquota`（不归本仓管） |
+| daihuo | `daihuo.service` | `/opt/daihuo`、`/var/lib/daihuo`（不归本仓管；后者归 daihuo 用户、750，后端读不到时写「没读到」带原因） |
+| reclaude-refill | `reclaude-refill-collector.service`、`reclaude-refill-collector.timer` | `/opt/reclaude-refill`、`/var/lib/reclaude-refill`（不归本仓管；定时任务，每分钟跑一次，跑完进程就没了，CPU、内存看「近 24 小时」） |
+| mirasim-radar | `mirasim-radar-collector.service`、`mirasim-radar-collector.timer` | `/opt/mirasim-radar`、`/var/lib/mirasim-radar`（不归本仓管；定时任务，每 5 分钟跑一次，同上） |
+
+采样器还列 `/etc/systemd/system/*.timer` 兜底：定时器本身和同名 `.service` 都没登记、也不在 `vps-apps.ts` 的 `SYSTEM_TIMERS`（系统自带定时器：apt-daily、fstrim、logrotate 等，每个写了为什么不算）里的，资源页也出一行「没登记」。定时任务的「近 24 小时」用量（跑了几次、CPU 秒数、单次峰值内存）由 root 采集器从 journal 读，没给时页面写「近 24 小时用量没给」，不画 0。
+
+表里没有、`vps-apps.ts` 的 `SYSTEM_SERVICES`（系统自带服务，每个写了为什么不算）也没有的在跑服务，采样器每 5 秒扫 `system.slice` 兜底：资源页在最后单独列一行标「没登记」，照样给 CPU、内存，磁盘写没登记目录；要么在 `vps-apps.ts` 登记，要么写进 `SYSTEM_SERVICES`。
 
 <!-- vps-apps:end -->
 
