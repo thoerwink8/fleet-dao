@@ -556,6 +556,8 @@ const { PGlite } = (await import(pathToFileURL(dbRequire.resolve('@electric-sql/
  */
 describe('巡查脚本：定时任务最近结局，partial 要报、恢复要有真实 ok（#3513）', () => {
   let db: InstanceType<typeof PGlite>;
+  // PGlite 冷启动是 WASM initdb。agents_test 一个文件一个进程、几十个一起起时，默认钩子 10 秒不够
+  // （CI：Hook timed out in 10000ms，栈在这个 beforeAll）。同 packages/db 的 TEST_DB_TIMEOUT_MS：忙时比一两秒久。
   beforeAll(async () => {
     db = new PGlite();
     await db.exec(`
@@ -571,10 +573,10 @@ describe('巡查脚本：定时任务最近结局，partial 要报、恢复要�
         check ((ended_at is null) = (outcome is null)),
         check (outcome is null or outcome = 'ok' or why is not null)
       );`);
-  });
+  }, 60_000);
   afterAll(async () => {
     await db.close();
-  });
+  }, 60_000);
   beforeEach(async () => {
     await db.exec('truncate schedule_runs restart identity; truncate scheduled_jobs cascade;');
   });
