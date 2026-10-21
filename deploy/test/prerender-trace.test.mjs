@@ -280,3 +280,151 @@ test('走 http.get（命名导出 get）的本机 GET / 也看得到，响应原
     l.join('\n'),
   );
 });
+
+// 服务端处理里先动态 import 一个慢模块（顶层 await 等 300ms），模拟预览中间件头一次载入服务端产物
+const SLOW_IMPORT = 'data:text/javascript,await new Promise((ok) => setTimeout(ok, 300)); export default 1;';
+// 永远等不完的模块：模拟载入服务端产物卡住，客户端 10 秒（这里 300ms）掐断时它还没结束
+const STUCK_IMPORT = 'data:text/javascript,await new Promise(() => {}); export default 1;';
+
+test('服务端那一头和期间：收到、发完响应、动态 import 用时、GC、事件循环停顿各打一行，响应原样', () => {
+  const r = run(`
+    import http from 'node:http';
+    const server = http.createServer(async (_, res) => {
+      await import(${JSON.stringify(SLOW_IMPORT)});
+      res.end('shell');
+    });
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    const { port } = server.address();
+    const body = await new Promise((ok, bad) => {
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/', agent: false }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => ok(Buffer.concat(chunks).toString()));
+      });
+      req.on('error', bad);
+      req.end();
+    });
+    process.stdout.write('body=' + body);
+    server.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, 'body=shell');
+  const l = lines(r.err);
+  assert.ok(
+    l.some((x) => /^\[prerender-trace\] #1 服务端收到 GET \/ \+\d+ms$/.test(x)),
+    l.join('\n'),
+  );
+  assert.ok(
+    l.some((x) => /^\[prerender-trace\] #1 服务端发完响应 200 \+\d+ms$/.test(x)),
+    l.join('\n'),
+  );
+  const span = l.find((x) => /#1 期间：/.test(x));
+  assert.ok(span, l.join('\n'));
+  const m = span.match(
+    /#1 期间：动态 import 结束 1 次，最长 (\d+)ms；GC \d+ 次，共停 \d+ms，最长 \d+ms；事件循环最长停 \d+ms$/,
+  );
+  assert.ok(m, span);
+  assert.ok(Number(m[1]) >= 250, `慢 import 至少等了 300ms：${span}`);
+  assert.ok(!r.err.includes('data:'), '不打 import 的地址');
+});
+
+test('超时掐断时服务端还在载入：打出服务端断开没发完、期间还有 1 个 import 没结束和已等多久，调用方的错不变', () => {
+  const r = run(`
+    import http from 'node:http';
+    const server = http.createServer(async (_, res) => {
+      await import(${JSON.stringify(STUCK_IMPORT)});
+      res.end('never');
+    });
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    const { port } = server.address();
+    const signal = AbortSignal.timeout(300);
+    const seen = await new Promise((ok) => {
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/', agent: false }, () => ok('response?'));
+      req.on('error', (e) => ok('error=' + e.message));
+      signal.addEventListener('abort', () => req.destroy(signal.reason), { once: true });
+      req.end();
+    });
+    process.stdout.write(seen);
+    server.close();
+    server.closeAllConnections();
+    process.exitCode = 3;
+  `);
+  assert.equal(r.code, 3, `探针不改退出码：${r.err}`);
+  assert.equal(r.out, 'error=The operation was aborted due to timeout');
+  const l = lines(r.err);
+  assert.ok(
+    l.some((x) => /#1 服务端收到 GET \/ \+\d+ms$/.test(x)),
+    l.join('\n'),
+  );
+  assert.ok(
+    l.some((x) => /#1 服务端：连接断了，响应还没发完 \+\d+ms$/.test(x)),
+    l.join('\n'),
+  );
+  assert.ok(!l.some((x) => /服务端发完响应/.test(x)), l.join('\n'));
+  const span = l.find((x) => /#1 期间：/.test(x));
+  const m = span?.match(
+    /动态 import 结束 0 次，最长 0ms，(到关闭|进程退出时)还有 1 个没结束（最久已等 (\d+)ms）/,
+  );
+  assert.ok(m, l.join('\n'));
+  assert.ok(Number(m[2]) >= 250, span);
+});
+
+/** 用裸 socket 发一个 GET（不经 http.request，探针的客户端那一头看不到），返回状态行 */
+const RAW_GET = `
+  const rawGet = (port, path) =>
+    new Promise((ok, bad) => {
+      const s = net.connect(port, '127.0.0.1', () => s.end('GET ' + path + ' HTTP/1.1' + CRLF + 'Host: x' + CRLF + 'Connection: close' + CRLF + CRLF));
+      let got = '';
+      s.on('data', (c) => (got += c));
+      s.on('end', () => ok(got.split(CRLF)[0]));
+      s.on('error', bad);
+    });
+`;
+
+test('只当服务端、没发过目标请求的进程：本机连来的 GET / 也一个字都不打', () => {
+  const r = run(`
+    import http from 'node:http';
+    import net from 'node:net';
+    const CRLF = String.fromCharCode(13, 10);
+    ${RAW_GET}
+    const server = http.createServer((_, res) => res.end('x'));
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    const { port } = server.address();
+    process.stdout.write(await rawGet(port, '/'));
+    server.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, 'HTTP/1.1 200 OK');
+  assert.deepEqual(lines(r.err), []);
+});
+
+test('目标请求在路上时，服务端收到的带查询串的请求不记、不外泄', () => {
+  const r = run(`
+    import http from 'node:http';
+    import net from 'node:net';
+    const CRLF = String.fromCharCode(13, 10);
+    ${RAW_GET}
+    let raw = '';
+    let port = 0;
+    const server = http.createServer(async (req, res) => {
+      // 目标请求在路上：这时用裸 socket 发一个带查询串的 GET，服务端收到它不能打
+      if (req.url === '/') raw = await rawGet(port, '/?SYNTHETIC_QUERY_MARKER=1');
+      res.end('x');
+    });
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    port = server.address().port;
+    await new Promise((ok, bad) => {
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/', agent: false }, (res) => { res.resume(); res.on('end', ok); });
+      req.on('error', bad);
+      req.end();
+    });
+    process.stdout.write(raw);
+    server.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, 'HTTP/1.1 200 OK');
+  assert.ok(!r.err.includes('SYNTHETIC_QUERY_MARKER'), r.err);
+  const l = lines(r.err);
+  assert.equal(l.filter((x) => /服务端收到/.test(x)).length, 1, l.join('\n'));
+  assert.equal(l.filter((x) => /服务端发完响应/.test(x)).length, 1, l.join('\n'));
+});

@@ -74,6 +74,14 @@ if ! grep -aq '^\[prerender-trace\] #1 响应头 200 ' "$TMP/web.log"; then
   echo "没过：前端构建带着预渲染探针，却没看到预渲染请求拿到 200 响应头的那一行（探针失灵，或预渲染不再经 node:http 发请求）" >&2
   exit 1
 fi
+# 服务端那一头和「期间」那行也要出声（#3491）：超时时靠它们分清卡在收请求、载入服务端产物还是渲染；预览服务换了写法看不到，在这里红
+for want in '#1 服务端收到 GET / ' '#1 服务端发完响应 200 ' '#1 期间：'; do
+  if ! grep -aqF "[prerender-trace] $want" "$TMP/web.log"; then
+    grep -a '^\[prerender-trace\]' "$TMP/web.log" >&2
+    echo "没过：前端构建带着预渲染探针，却没看到「$want」那一行（预览服务不再经 node:http 的 Server 收请求，或探针失灵）" >&2
+    exit 1
+  fi
+done
 if grep -aq 'Recreating ' "$TMP/web.log"; then
   grep -a 'Recreating ' "$TMP/web.log" >&2
   echo "没过：构建前 pnpm 把依赖重装了一遍（设置和装的时候不一致），法国上布局会变" >&2
