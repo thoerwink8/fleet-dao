@@ -102,6 +102,40 @@ export function recordWorktreeCleanupRequest(
   });
 }
 
+/** 受管删树一次（fleet-agent-scope remove）的回执：成没成都记，按树名、dev/ino 查得到（#3474）。 */
+export interface WorktreeRemovalReceipt {
+  dir: string;
+  dev: string;
+  ino: string;
+  uid: string;
+  ok: boolean;
+  /** 没成时帮手怎么说的（必填）；成了不写。 */
+  error?: string;
+  at: Date;
+}
+
+/**
+ * 记一条受管删树回执：target 是 worktree:<树的完整路径>，after 带树名、dev、ino、uid。不用 target=worktrees，
+ * 那是一键清理的请求流（foldCleanupRequests 现算），掺进去会被当成清理请求的一步。写不进原样抛。
+ */
+export function recordWorktreeRemoval(db: Db, input: WorktreeRemovalReceipt): Promise<void> {
+  return recordEngineAudit(db, {
+    action: 'worktree.remove',
+    target: `worktree:${input.dir}`,
+    actorId: WORKTREE_ENGINE_ACTOR,
+    after: {
+      dir: input.dir,
+      tree: input.dir.slice(input.dir.lastIndexOf('/') + 1),
+      dev: input.dev,
+      ino: input.ino,
+      uid: input.uid,
+    },
+    ok: input.ok,
+    ...(input.ok ? {} : { error: input.error?.trim() || '受管删树没成（帮手没说为什么）' }),
+    at: input.at,
+  });
+}
+
 /**
  * 每个目录里最近一次会话的时刻：收场了取收场时刻，没收场取起的时刻（runs 按 worktree_path 取最新）。
  * 清单上写「最近一次会话多久前」：判这棵树多久没人动过，比看目录的修改时间准（在树里改文件不动树根那一层）。
