@@ -88,7 +88,7 @@ async function pgStore() {
   return createPgStore(testDb.db, { now: () => NOW });
 }
 
-async function inputFor(store: Pick<Store, 'readHistoricalCheckout'>) {
+async function inputFor(store: Pick<Store, 'readHistoricalCheckout'>, temporalRunId = TEMPORAL_RUN_ID) {
   const facts = await store.readHistoricalCheckout({
     notificationId: NOTIFICATION_ID,
     dedupeKey: `cold-verify:checkout:${WORKFLOW_ID}`,
@@ -97,7 +97,7 @@ async function inputFor(store: Pick<Store, 'readHistoricalCheckout'>) {
     issueNumber: 13,
     workflowId: WORKFLOW_ID,
     runId: RUN_ID,
-    temporalRunId: TEMPORAL_RUN_ID,
+    temporalRunId,
     pr: 39,
     head: HEAD,
   });
@@ -120,7 +120,7 @@ async function inputFor(store: Pick<Store, 'readHistoricalCheckout'>) {
     issueNumber: 13,
     workflowId: WORKFLOW_ID,
     runId: RUN_ID,
-    temporalRunId: TEMPORAL_RUN_ID,
+    temporalRunId,
     runSegment: facts.run.segment,
     runStartedAt: facts.run.startedAt,
     runEndedAt,
@@ -252,12 +252,70 @@ describe('checkout-history 私有 CLI（真实 Postgres Store）', () => {
     expect(await audits(store)).toEqual([]);
   });
 
-  it('原 verify 段成功收场、或通知只是相似不是受管格式：预检和 archive 都拒，什么都不写', async () => {
+  it('#3067 真实形状（outcome=done、temporal_run_id 为空、报警早于 run 起点 46ms）：预检可归档，--archive 写出归档记录', async () => {
+    await testDb.db
+      .update(runs)
+      .set({
+        outcome: 'done',
+        failureReason: null,
+        temporalRunId: null,
+        startedAt: new Date('2026-10-19T03:10:00.046Z'),
+        endedAt: new Date('2026-10-19T03:40:00.000Z'),
+      })
+      .where(eq(runs.id, RUN_ID));
+    const input = await inputFor(store, '');
+    expect(input).toMatchObject({
+      temporalRunId: '',
+      runOutcome: 'done',
+      raisedAt: '2026-10-19T03:10:00.000Z',
+      runStartedAt: '2026-10-19T03:10:00.046Z',
+    });
+    const preflight = await cli(store, [], JSON.stringify(input));
+    expect(preflight.code).toBe(0);
+    expect(preflight.json).toMatchObject({ mode: 'preflight', activeRunIds: [] });
+    expect((await notificationOf(store))?.resolvedAt).toBeUndefined();
+    expect(await audits(store)).toEqual([]);
+
+    const archived = await cli(store, ['--archive'], JSON.stringify(input));
+    expect(archived.code).toBe(0);
+    expect(archived.json).toMatchObject({ mode: 'archive', result: 'ok', conclusion: 'historical_unproven' });
+    expect(await notificationOf(store)).toMatchObject({ resolvedBy: 'ops:checkout-history', body: BODY });
+    const [record, ...rest] = await audits(store);
+    expect(rest).toEqual([]);
+    expect(record).toMatchObject({
+      action: 'notification.checkout_history_archive',
+      actor: { kind: 'ops', id: 'ops:checkout-history' },
+      ok: true,
+      before: { workflowId: WORKFLOW_ID, runId: RUN_ID, temporalRunId: '' },
+      after: {
+        notificationBody: BODY,
+        originalTitle: '冷验收放不进 PR 头的完整检出（从镜像 git archive）',
+        runOutcome: 'done',
+        runStartedAt: '2026-10-19T03:10:00.046Z',
+        runFailureReason: null,
+        temporalRunId: '',
+        operator: 'founder',
+        conclusion: 'historical_unproven',
+        evidence: input.evidence,
+        gaps: input.gaps,
+        responsibility: input.responsibility,
+      },
+    });
+    expect((await cli(store, ['--archive'], JSON.stringify(input))).json).toMatchObject({
+      result: 'already_archived',
+    });
+    expect(await audits(store)).toHaveLength(1);
+  });
+
+  it('没进到放检出那一步的原 verify 段（admission_blocked）、或通知只是相似不是受管格式：预检和 archive 都拒，什么都不写', async () => {
     const input = await inputFor(store);
-    await testDb.db.update(runs).set({ outcome: 'done', failureReason: null }).where(eq(runs.id, RUN_ID));
-    const done = { ...input, runOutcome: 'done' };
-    expect((await cli(store, [], JSON.stringify(done))).code).toBe(1);
-    expect((await cli(store, ['--archive'], JSON.stringify(done))).code).toBe(1);
+    await testDb.db
+      .update(runs)
+      .set({ outcome: 'admission_blocked', failureReason: null })
+      .where(eq(runs.id, RUN_ID));
+    const blocked = { ...input, runOutcome: 'admission_blocked' };
+    expect((await cli(store, [], JSON.stringify(blocked))).code).toBe(1);
+    expect((await cli(store, ['--archive'], JSON.stringify(blocked))).code).toBe(1);
     await testDb.db
       .update(runs)
       .set({ outcome: 'failed', failureReason: '缺对象' })

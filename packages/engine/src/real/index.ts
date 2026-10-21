@@ -43,6 +43,7 @@ import {
   recordPrHeadFiles,
   recordRouteProbeDone,
   recordRouteProbeStart,
+  recordWorktreeRemoval,
   resolveAlertIfUnchangedSince,
   routeProbeAuditRows,
   scheduleHealth,
@@ -898,7 +899,11 @@ export function realPortsFromEnv(
     locker: pgLocker(db),
     env: gitNetworkEnv(env as Record<string, string | undefined>, config.sessionProxy),
   });
-  const trees = helperWorkTrees({ root: config.workRoot });
+  // 每次受管删树都在 audit_log 留一条含树名、dev/ino 的回执（#3474）
+  const trees = helperWorkTrees({
+    root: config.workRoot,
+    recordRemoval: (receipt) => recordWorktreeRemoval(db, receipt),
+  });
   const { claudeCommand, cursorCommand, grokCommand } = agentCommands(config);
   // 单子归类（#448）问的是判断题配置（issue-kind），走 issue-kind-jev.ts；起来时在 registerJobs 里登记。
   // 错误分流、停滞预判没有工作流再问，引擎不再登记、不再问。
