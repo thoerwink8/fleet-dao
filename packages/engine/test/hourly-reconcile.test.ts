@@ -365,6 +365,8 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
       expect(subs).toContainEqual({ id: 7, step: TREE_STEP, phase: 'start' });
       expect(subs).toContainEqual({ id: 7, step: TREE_STEP, phase: 'end' });
       expect(subs).toContainEqual({ id: 7, step: 'worktrees.owner-of.acme_repo.12-abc', phase: 'end' });
+      // 子调用只进持久见证，控制台步骤轨迹不跟着变
+      expect(h.logs.some((l) => l.includes('worktrees.'))).toBe(false);
     });
 
     it('子调用见证写不进：只记 warn，工作树这一步的结果不变', async () => {

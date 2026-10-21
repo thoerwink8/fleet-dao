@@ -242,6 +242,7 @@ async function markStep(
   step: string,
   phase: StepPhase,
   ms?: number,
+  persistOnly = false,
 ): Promise<void> {
   // 见证只是诊断：写不进不能让这一步（或它真正的报错）变样，记一条日志；这一行的见证停在上一笔，不假装更新过
   try {
@@ -254,6 +255,8 @@ async function markStep(
       error: errMessage(err),
     });
   }
+  // 工作树里的子调用只写持久见证：控制台那条步骤轨迹（上面的必经步骤）保持原样，不被每棵树每条命令灌满
+  if (persistOnly) return;
   const word =
     phase === 'start' ? '开始' : phase === 'end' ? '结束' : phase === 'failed' ? '失败' : '缺省跳过';
   const fields: Record<string, unknown> = { runId, step, phase };
@@ -266,15 +269,23 @@ async function runStep<T>(
   runId: number,
   step: string,
   fn: () => Promise<T>,
+  persistOnly = false,
 ): Promise<T> {
-  await markStep(deps, runId, step, 'start');
+  await markStep(deps, runId, step, 'start', undefined, persistOnly);
   const started = deps.now().getTime();
   try {
     const value = await fn();
-    await markStep(deps, runId, step, returnedFailure(value) ? 'failed' : 'end', durationMs(deps, started));
+    await markStep(
+      deps,
+      runId,
+      step,
+      returnedFailure(value) ? 'failed' : 'end',
+      durationMs(deps, started),
+      persistOnly,
+    );
     return value;
   } catch (err) {
-    await markStep(deps, runId, step, 'failed', durationMs(deps, started));
+    await markStep(deps, runId, step, 'failed', durationMs(deps, started), persistOnly);
     throw err;
   }
 }
@@ -300,24 +311,24 @@ export function witnessWorktreeCalls(deps: HourlyReconcileJobDeps, runId: number
     const tag = rel.replace(/[^A-Za-z0-9._-]+/g, '.').replace(/^\.+/, '');
     return `worktrees.${op}${tag ? `.${tag}` : ''}`.slice(0, 128);
   };
+  // 只写持久见证（schedule_runs），不进控制台步骤轨迹
+  const witness = <T>(step: string, fn: () => Promise<T>): Promise<T> => runStep(deps, runId, step, fn, true);
   const wrapped: HourlyReconcileJobDeps = {
     ...deps,
-    listDir: (dir) => runStep(deps, runId, name('list-dir', dir), () => deps.listDir(dir)),
-    ownerOf: (dir) => runStep(deps, runId, name('owner-of', dir), () => deps.ownerOf(dir)),
+    listDir: (dir) => witness(name('list-dir', dir), () => deps.listDir(dir)),
+    ownerOf: (dir) => witness(name('owner-of', dir), () => deps.ownerOf(dir)),
     leftovers: (dir, user, known, scratch) =>
-      runStep(deps, runId, name('leftovers', dir), () => deps.leftovers(dir, user, known, scratch)),
-    remove: (dir) => runStep(deps, runId, name('remove', dir), () => deps.remove(dir)),
-    keepShots: (dir, user, at) =>
-      runStep(deps, runId, name('keep-shots', dir), () => deps.keepShots(dir, user, at)),
+      witness(name('leftovers', dir), () => deps.leftovers(dir, user, known, scratch)),
+    remove: (dir) => witness(name('remove', dir), () => deps.remove(dir)),
+    keepShots: (dir, user, at) => witness(name('keep-shots', dir), () => deps.keepShots(dir, user, at)),
   };
   const { cleanupNamespace, size, lastSessions, mirrorBytes } = deps;
-  if (cleanupNamespace)
-    wrapped.cleanupNamespace = () => runStep(deps, runId, name('cleanup-namespace'), cleanupNamespace);
-  if (size) wrapped.size = (dir, user) => runStep(deps, runId, name('size', dir), () => size(dir, user));
-  if (lastSessions) wrapped.lastSessions = () => runStep(deps, runId, name('last-sessions'), lastSessions);
+  if (cleanupNamespace) wrapped.cleanupNamespace = () => witness(name('cleanup-namespace'), cleanupNamespace);
+  if (size) wrapped.size = (dir, user) => witness(name('size', dir), () => size(dir, user));
+  if (lastSessions) wrapped.lastSessions = () => witness(name('last-sessions'), lastSessions);
   if (mirrorBytes)
     wrapped.mirrorBytes = (repo) =>
-      runStep(deps, runId, name('mirror-bytes', `${repo.owner}_${repo.name}`), () => mirrorBytes(repo));
+      witness(name('mirror-bytes', `${repo.owner}_${repo.name}`), () => mirrorBytes(repo));
   return wrapped;
 }
 
