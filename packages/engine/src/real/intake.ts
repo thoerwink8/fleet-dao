@@ -22,6 +22,8 @@ import {
   extendLocalLease,
   finishScheduleRun,
   firstTaskCreatedSince,
+  insertAlertOnce,
+  intakeTaskRow,
   intakeWorkloadSince,
   listIntakeRepos,
   mergedPrForIssue,
@@ -193,6 +195,16 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
         }));
       },
+      // 法国接不了、单子留给本机（本机租约到期不退回，或本机退回来的单被准入挡住）：报给本机，同一个 key 只报一次（人处理掉了不重开）
+      async notifyLocal({ repo, issueNumber, key, title, body }) {
+        await insertAlertOnce(w.db, {
+          dedupeKey: `local-kept:${repo.owner}/${repo.name}#${issueNumber}:${key}`,
+          level: 'alert',
+          taskId: null,
+          title,
+          body,
+        });
+      },
       toolchainReady: w.toolchainReady ?? missingToolchain,
       standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
@@ -246,7 +258,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
       plan: (repo, issueNumber) =>
         w.gh.readIssuePlan({ repo: { owner: repo.owner, name: repo.name }, issueNumber }),
       async issueTask(repo, issueNumber) {
-        return taskStateByIssue(w.db, repo.id, issueNumber);
+        return intakeTaskRow(w.db, repo.id, issueNumber);
       },
       async taskGenerations(repo, issueNumber) {
         const read = await readTaskGenerations(
@@ -257,7 +269,8 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
               const described = await client.connection.withDeadline(Date.now() + startTimeoutMs, () =>
                 client.workflow.getHandle(workflowId).describe(),
               );
-              return { life: generationLife(described.status.name), record: null };
+              // 结束的时刻（Temporal 的 closeTime）跟着这一代的记录走：判「重新派」要最后一代什么时候结束
+              return { life: generationLife(described.status.name), record: described.closeTime ?? null };
             } catch (err) {
               if (err instanceof WorkflowNotFoundError) return { life: 'missing' };
               return { life: 'unknown' };
@@ -265,7 +278,12 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           },
         );
         if (!read.ok) return { ok: false, why: read.why };
-        return { ok: true, lives: read.generations.map((g) => g.life) };
+        const last = read.generations.at(-1);
+        return {
+          ok: true,
+          lives: read.generations.map((g) => g.life),
+          lastEndedAt: last?.life === 'terminated' && last.record instanceof Date ? last.record : null,
+        };
       },
       async openPrClaims(repo) {
         // openPulls 翻不完、读不到都抛：拉单这张单这一轮不拉，记没查成
@@ -371,7 +389,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           });
         }
       },
-      async start({ repo, issueNumber, title, body, author, tier }) {
+      async start({ repo, issueNumber, title, body, author, tier, generation }) {
         const member = memberFor(await usersOnce(), author);
         // 驾驶舱「提需求」开的单是「引擎」机器人开的，GitHub 上的作者认不出是谁（母单 #2047 第 B 片）：
         // 提出人以开单那一刻写进库的 requested_by 为准（按正文末尾「来自驾驶舱 需求 N」找）。只认自家机器人开的单。
@@ -437,7 +455,8 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           await client.connection.withDeadline(Date.now() + startTimeoutMs, () =>
             client.workflow.start(WORKFLOW_TYPES.task, {
               taskQueue,
-              workflowId: taskWorkflowId(repo, issueNumber),
+              // 退回法国队列后没人接的单（重新派）起下一代 :rN+1；其余都是第一代
+              workflowId: taskWorkflowId(repo, issueNumber, generation),
               args: [input],
               workflowIdConflictPolicy: 'FAIL',
               workflowIdReusePolicy: 'REJECT_DUPLICATE',

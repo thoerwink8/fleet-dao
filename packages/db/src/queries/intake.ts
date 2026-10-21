@@ -1,9 +1,16 @@
 // 引擎拉单（#632 S2-2、S2-4b-3；packages/engine/src/jobs/intake.ts）要从库里读的两样：受管的仓（带「让 AI 接活」开关）、
 // 一张单有没有任务行、在什么状态。任务行的创建走 api 的 pg-store（createTaskFromIssue：和操作记录同一事务，按仓加单号唯一）。
-import { type CiPolicy, ciPolicyOf, parseRepoProfile, type TaskState } from '@fleet-dao/shared';
+import {
+  type CiPolicy,
+  ciPolicyOf,
+  parseRepoProfile,
+  type TaskExecutor,
+  type TaskState,
+} from '@fleet-dao/shared';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, repos, tasks } from '../schema/index.ts';
+import { lastLocalReturnAt } from './local-claims.ts';
 
 export interface IntakeRepoRow {
   id: string;
@@ -53,6 +60,25 @@ export async function taskStateByIssue(
     .from(tasks)
     .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, issueNumber)));
   return row ?? null;
+}
+
+/**
+ * 拉单判「派出过没有」要的任务行：编号、状态、执行方，加上最近一次退回法国队列的时刻（只有 stopped + engine 的行才去操作记录里找，
+ * 别的行不可能是「退回后没人接」，不多读；从没退回过是 null）。
+ */
+export async function intakeTaskRow(
+  db: Db,
+  repoId: string,
+  issueNumber: number,
+): Promise<{ id: string; state: TaskState; executor: TaskExecutor; returnedAt: Date | null } | null> {
+  const [row] = await db
+    .select({ id: tasks.id, state: tasks.state, executor: tasks.executor })
+    .from(tasks)
+    .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, issueNumber)));
+  if (!row) return null;
+  const returnedAt =
+    row.state === 'stopped' && row.executor === 'engine' ? await lastLocalReturnAt(db, row.id) : null;
+  return { ...row, returnedAt };
 }
 
 /** 一个仓的档案原文，连同认它要用的几样（fleet-api project show / set-profile 读写的就是这些）。 */
