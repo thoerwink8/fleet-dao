@@ -198,9 +198,7 @@ describe('每个上线项目一行', () => {
       resources({
         apps: {
           ...base.apps,
-          items: [
-            app('missing', idle, { scheduled: true }),
-          ],
+          items: [app('missing', idle, { scheduled: true })],
         },
       }),
       [],
