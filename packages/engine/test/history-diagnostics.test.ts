@@ -53,6 +53,16 @@ describe('bounded original history transport', () => {
       expect(() => decodeFrames(frames.map(serialize))).toThrow();
     },
   );
+  it('rejects a stage that is not a fixed label instead of treating the frame as bound', () => {
+    const frames = encodeFrames(
+      'history',
+      { ...identity, stage: '修正写入工作流文件的交付' },
+      randomBytes(32),
+    );
+    expect(() => decodeFrames(frames)).toThrow('identity');
+    const blank = encodeFrames('history', { ...identity, stage: '' }, randomBytes(32));
+    expect(() => decodeFrames(blank)).toThrow('identity');
+  });
   it('rejects oversized capture and gzip expansion before returning bytes', () => {
     expect(() => encodeFrames('history', identity, Buffer.alloc(HISTORY_LIMIT + 1))).toThrow('byte-limit');
     const frames = encodeFrames('history', identity, Buffer.alloc(HISTORY_LIMIT)).map(parse);
@@ -327,6 +337,46 @@ describe('local watchdog and owned worker cleanup', () => {
     );
     expect(lines.map(parse).some((frame) => frame.type === 'begin')).toBe(false);
   });
+  it('binds each scope stage inside that run frame and drops unsafe stage text', async () => {
+    const left = await fixture(true);
+    const right = await fixture(true);
+    const business = '修正写入工作流文件的交付';
+    left.scope.mark('wait:replacement:reconstruct-update');
+    right.scope.mark(business);
+    left.stop();
+    right.stop();
+    await left.scope.finish();
+    await right.scope.finish();
+    const historyOf = (lines: string[]) => {
+      const frames = lines.filter((line) => parse(line).type !== 'status');
+      const end = frames.findIndex((line) => parse(line).type === 'end');
+      return decodeFrames(frames.slice(0, end + 1));
+    };
+    const leftHistory = historyOf(left.lines);
+    const rightHistory = historyOf(right.lines);
+    expect(leftHistory.identity).toMatchObject({
+      workflowId: 'workflow',
+      runId: 'exact-run',
+      stage: 'wait:replacement:reconstruct-update',
+    });
+    expect(leftHistory.bytes).toEqual(left.raw);
+    expect(rightHistory.identity.stage).toBe('unlabeled');
+    expect(rightHistory.bytes).toEqual(right.raw);
+    const labels = (lines: string[]) =>
+      lines.map(parse).flatMap((frame) => {
+        const values = [frame.stage, frame.identity?.stage];
+        return values.filter((value): value is string => typeof value === 'string');
+      });
+    expect(labels(left.lines)).toContain('wait:replacement:reconstruct-update');
+    expect(labels(left.lines)).not.toContain('unlabeled');
+    expect(labels(right.lines)).toContain('unlabeled');
+    expect(labels(right.lines)).not.toContain('wait:replacement:reconstruct-update');
+    expect(left.lines.join('\n')).not.toContain(business);
+    expect(right.lines.join('\n')).not.toContain(business);
+    for (const dir of await readdir(right.root)) {
+      expect(await readFile(join(right.root, dir, 'identity.json'), 'utf8')).not.toContain(business);
+    }
+  });
   it('adds no reads, artifacts or output to a normal fast test', async () => {
     vi.useFakeTimers();
     const f = await fixture();
@@ -353,16 +403,41 @@ describe('local watchdog and owned worker cleanup', () => {
     expect(f.withDeadline).toHaveBeenCalledTimes(2);
     const deadlines = f.withDeadline.mock.calls.map(([deadline]) => deadline);
     expect(deadlines[0]).toBe(deadlines[1]);
-    const histories = f.lines.filter((line) => parse(line).type !== 'status');
-    const historyEnd = histories.findIndex((line) => parse(line).type === 'end');
-    expect(decodeFrames(histories.slice(0, historyEnd + 1)).bytes).toEqual(f.raw);
-    expect(f.lines.join('\n')).toContain('final-preflight-entered');
+    const frames = f.lines.filter((line) => parse(line).type !== 'status');
+    const ends = frames.flatMap((line, index) => (parse(line).type === 'end' ? [index] : []));
+    expect(ends).toHaveLength(2);
+    const historyEnd = ends[0];
+    const describeEnd = ends[1];
+    if (historyEnd === undefined || describeEnd === undefined) throw new Error('frames');
+    const history = decodeFrames(frames.slice(0, historyEnd + 1));
+    const described = decodeFrames(frames.slice(historyEnd + 1, describeEnd + 1));
+    expect(history.bytes).toEqual(f.raw);
+    expect(history.kind).toBe('history');
+    expect(described.kind).toBe('describe');
+    for (const decoded of [history, described]) {
+      expect(decoded.identity).toMatchObject({
+        workflowId: 'workflow',
+        runId: 'exact-run',
+        stage: 'final-preflight-entered',
+      });
+    }
+    expect(f.lines.map(parse)).toContainEqual(
+      expect.objectContaining({
+        outcome: 'captured',
+        kind: 'history',
+        runId: 'exact-run',
+        stage: 'final-preflight-entered',
+      }),
+    );
     expect(f.lines.join('\n')).not.toContain('must not appear');
     const dirs = await readdir(f.root);
     expect(dirs).toHaveLength(2);
     for (const dir of dirs) {
       const saved = JSON.parse(await readFile(join(f.root, dir, 'identity.json'), 'utf8'));
-      if (saved.kind === 'history') expect(await readFile(join(f.root, dir, 'history.bin'))).toEqual(f.raw);
+      if (saved.kind === 'history') {
+        expect(saved).toMatchObject({ runId: 'exact-run', stage: 'final-preflight-entered' });
+        expect(await readFile(join(f.root, dir, 'history.bin'))).toEqual(f.raw);
+      }
     }
   });
   it('waits for the actual worker Promise before teardown and deduplicates manual finally/afterEach', async () => {

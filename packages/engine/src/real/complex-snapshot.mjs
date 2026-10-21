@@ -76,6 +76,9 @@ function gitEnv() {
     'GIT_ALTERNATE_OBJECT_DIRECTORIES',
     'GIT_INDEX_FILE',
     'GIT_NAMESPACE',
+    // 浅边界文件在真实 common-dir 里；继承来的这两个变量能让浅仓读成完整仓，或让完整仓读成浅仓。
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
   ]) {
     delete env[key];
   }
@@ -754,6 +757,16 @@ function rejectSplitIndex(cwd) {
   }
 }
 
+// v3 不保留 shallow 边界：浅仓的对象闭包不完整，只会晚到独立恢复才缺对象。采集前就拒绝，不支持浅历史保全。
+// 读不到、命令失败、输出认不出都当失败，不把空输出或 0 当完整仓。
+function rejectShallow(cwd) {
+  const probe = spawnSync(gitBin, ['rev-parse', '--is-shallow-repository'], { cwd, env: gitEnv() });
+  if (probe.error || probe.status !== 0) fail('浅仓判定没看成，保留原树');
+  const answer = probe.stdout.toString('utf8').trim();
+  if (answer === 'true') fail('浅仓不能自包含保全，保留原树');
+  if (answer !== 'false') fail('浅仓判定认不出，保留原树');
+}
+
 function readIndexBytes(cwd) {
   rejectSplitIndex(cwd);
   const format = git(['rev-parse', '--show-object-format'], cwd).toString('utf8').trim();
@@ -793,6 +806,7 @@ function collect(cwd, keepBytes) {
   CLOSED.clear();
   metadataRead = 0;
   visitedPaths = 0;
+  rejectShallow(cwd);
   const blobs = keepBytes ? new Map() : null;
   const head = git(['rev-parse', 'HEAD'], cwd).toString('utf8').trim();
   if (!/^[0-9a-f]{40}$/.test(head)) fail(`HEAD 认不出：${head}`);
@@ -1175,27 +1189,57 @@ async function receiveFrame(root) {
 }
 
 // 在交给Git之前逐对象验证解压预算。丢弃解压块，不持有对象或整个PACK。
+// 单次调用私有的顺序预读：一个固定 64KiB 缓冲从起始 offset 往后读，缓冲读空才再读，所以文件字节只读一遍，
+// 读取量随包长而不随对象数放大。对象头逐字节和 zlib 输入共用这一个缓冲，zlib 没消费的字节留在里面给下一个对象。
+// 缓冲交给 zlib 的那段在异步 write 结束前不会被再读进缓冲覆盖：只有缓冲读空才重读，而读空发生在调用方
+// 等完 write、按 bytesWritten 推进之后。
+const PACK_READ_WINDOW = 64 * 1024;
+
+function packReader(fd, start) {
+  const buffer = Buffer.alloc(PACK_READ_WINDOW);
+  let begin = 0;
+  let end = 0;
+  let next = start;
+  const fill = (message) => {
+    if (begin < end) return;
+    const length = readSync(fd, buffer, 0, buffer.length, next);
+    if (!length) fail(message);
+    begin = 0;
+    end = length;
+    next += length;
+  };
+  return {
+    // 下一个未消费字节在文件里的位置。
+    offset: () => next - (end - begin),
+    byte(message) {
+      fill(message);
+      return buffer[begin++];
+    },
+    // 未消费字节的视图；缓冲读空时先续读，文件到头就按 message 拒绝。
+    pending(message) {
+      fill(message);
+      return buffer.subarray(begin, end);
+    },
+    consume(count) {
+      if (!Number.isSafeInteger(count) || count < 0 || count > end - begin) fail('对象压缩流消费量异常');
+      begin += count;
+    },
+  };
+}
+
 async function validatePackedBudget(component, expectedCount, initialOffset = 0, exact = true) {
   const fd = safeOpenFile(component.path);
   const before = fstatSync(fd);
-  let offset = initialOffset;
-  const byte = () => {
-    const value = Buffer.alloc(1);
-    if (readSync(fd, value, 0, 1, offset++) !== 1) fail('对象包头截断');
-    return value[0];
-  };
+  const reader = packReader(fd, initialOffset);
+  const byte = () => reader.byte('对象包头截断');
   try {
     const header = Buffer.alloc(12);
-    if (
-      readSync(fd, header, 0, 12, initialOffset) !== 12 ||
-      header.toString('ascii', 0, 4) !== 'PACK' ||
-      ![2, 3].includes(header.readUInt32BE(4))
-    )
+    for (let n = 0; n < header.length; n += 1) header[n] = reader.byte('对象包头非法');
+    if (header.toString('ascii', 0, 4) !== 'PACK' || ![2, 3].includes(header.readUInt32BE(4)))
       fail('对象包头非法');
     const count = header.readUInt32BE(8);
     if (count > MAX_OBJECTS || (exact ? count !== expectedCount : count > expectedCount))
       fail('对象包数量不符或越界');
-    offset = initialOffset + 12;
     let expanded = 0;
     let inflatedTotal = 0;
     for (let index = 0; index < count; index += 1) {
@@ -1220,16 +1264,23 @@ async function validatePackedBudget(component, expectedCount, initialOffset = 0,
         } while (value & 128);
       }
       if (type === 7) for (let n = 0; n < 20; n += 1) byte();
-      const inflater = createInflate({ chunkSize: 64 * 1024 });
+      // 输出块不必比对象本身大（多留 1 字节好发现多出来的输出）；zlib 最小块 64 字节。
+      const inflater = createInflate({ chunkSize: Math.min(PACK_READ_WINDOW, Math.max(64, size + 1)) });
       let ended = false;
       let error;
       let output = 0;
       let prefix = Buffer.alloc(0);
+      let settle;
+      const settled = new Promise((resolve) => {
+        settle = resolve;
+      });
       inflater.on('end', () => {
         ended = true;
+        settle();
       });
       inflater.on('error', (cause) => {
         error = cause;
+        settle();
       });
       inflater.on('data', (chunk) => {
         output += chunk.length;
@@ -1238,21 +1289,24 @@ async function validatePackedBudget(component, expectedCount, initialOffset = 0,
         if (output > size || output > MAX_OBJECT_BYTES || inflatedTotal > MAX_TOTAL)
           inflater.destroy(new Error('对象实际解压越界'));
       });
-      const start = offset;
-      let supplied = 0;
       try {
         while (!ended && !error) {
-          const buffer = Buffer.alloc(64 * 1024);
-          const length = readSync(fd, buffer, 0, buffer.length, start + supplied);
-          if (!length) fail('对象压缩流截断');
-          supplied += length;
-          await new Promise((resolve, reject) =>
-            inflater.write(buffer.subarray(0, length), (cause) => (cause ? reject(cause) : resolve())),
+          const chunk = reader.pending('对象压缩流截断');
+          const consumed = inflater.bytesWritten;
+          // 坏流时 zlib 只发 error、不调 write 回调：error / end 也算这一次写完（它们都在 zlib 处理完这块输入之后才发）。
+          const written = new Promise((resolve, reject) =>
+            inflater.write(chunk, (cause) => (cause ? reject(cause) : resolve())),
           );
+          written.catch(() => {});
+          await Promise.race([written, settled]);
+          if (error) break;
+          const used = inflater.bytesWritten - consumed;
+          reader.consume(used);
+          // zlib 没吃完这块输入就是流结束了；结束事件晚一拍到，等它，别把没吃的字节当成下一块输入。
+          if (used < chunk.length) await settled;
         }
         if (error) throw error;
         if (output !== size || !ended) fail('对象解压长度不符');
-        offset = start + inflater.bytesWritten;
       } finally {
         inflater.destroy();
       }
@@ -1278,7 +1332,8 @@ async function validatePackedBudget(component, expectedCount, initialOffset = 0,
       expanded += actual;
       if (expanded > MAX_TOTAL) fail('对象解压总量超过 1GiB');
     }
-    if (offset + 20 !== component.length || !sameFile(before, fstatSync(fd))) fail('对象包尾部或身份不符');
+    if (reader.offset() + 20 !== component.length || !sameFile(before, fstatSync(fd)))
+      fail('对象包尾部或身份不符');
   } finally {
     closeSync(fd);
   }
