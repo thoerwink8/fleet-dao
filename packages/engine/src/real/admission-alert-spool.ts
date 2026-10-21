@@ -40,6 +40,20 @@ export const ALERT_SPOOL_LIMITS = Object.freeze({
 });
 const NAME = 'pending.sqlite';
 const APP_ID = 0x46444131;
+const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
+// 本进程上次成功提交后、在写锁内读到的主库身份。只用于跳过未变更文件的逐行规范解码。
+type SpoolStamp = { path: string; dev: number; ino: number; size: number; counter: number };
+let committedStamp: SpoolStamp | undefined;
+const sameStamp = (a: SpoolStamp | undefined, b: SpoolStamp) =>
+  !!a &&
+  a.path === b.path &&
+  a.dev === b.dev &&
+  a.ino === b.ino &&
+  a.size === b.size &&
+  a.counter === b.counter;
+const dropStamp = () => {
+  committedStamp = undefined;
+};
 const TABLE_SQL =
   'CREATE TABLE pending (key TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, record_hash TEXT NOT NULL) STRICT';
 const fail = (code: AlertUnknownCode): never => {
@@ -62,6 +76,8 @@ function errorCode(error: unknown): AlertUnknownCode {
   return 'io';
 }
 const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.uid === b.uid;
+// 父目录 fsync 只为把新叶目录项落盘。同一进程、同一叶路径、同一父 inode 成功一次后不必再做。
+const syncedLeafParents = new Set<string>();
 
 class PrivatePath {
   readonly path: string;
@@ -97,9 +113,15 @@ class PrivatePath {
           )
             fail('private_path');
           if (!same(s, lstatSync(next))) fail('private_path');
-          // 叶目录首次创建/重试都同步父目录。EXTRA不替代这一步。
+          // EXTRA 只同步叶目录，不替代父目录这一次。没记成功的重试仍会再同步。
           const parent = this.anchors[this.anchors.length - 2];
-          if (leaf && parent) fsyncSync(parent.fd);
+          if (leaf && parent) {
+            const key = `${path}\0${parent.initial.dev}:${parent.initial.ino}`;
+            if (!syncedLeafParents.has(key)) {
+              fsyncSync(parent.fd);
+              syncedLeafParents.add(key);
+            }
+          }
         } catch (e) {
           if (e instanceof SpoolError) throw e;
           fail('private_path');
@@ -223,6 +245,21 @@ class PrivatePath {
       closeSync(fd);
     }
   }
+  // 文件头偏移 24 的变更计数随每次真实提交加一；空事务不加。调用时须已挡住其他写入。
+  mainStamp(): SpoolStamp {
+    this.check();
+    const fd = openSync(join(this.path, NAME), constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const s = fstatSync(fd);
+      if (!s.isFile() || (this.dbIdentity && !same(this.dbIdentity, s))) fail('private_path');
+      const buf = Buffer.alloc(100);
+      if (readSync(fd, buf, 0, buf.length, 0) < 100 || !buf.subarray(0, 16).equals(SQLITE_MAGIC))
+        fail('corrupt');
+      return { path: this.path, dev: s.dev, ino: s.ino, size: s.size, counter: buf.readUInt32BE(24) };
+    } finally {
+      closeSync(fd);
+    }
+  }
   sync(): void {
     const leaf = this.anchors[this.anchors.length - 1];
     if (!leaf) throw new SpoolError('private_path');
@@ -271,13 +308,39 @@ class Spool {
         d.exec('COMMIT');
         this.path.sync();
       }
-      this.validate();
+      // 逐行解码只在 record/peek/transfer 的事务里做。打开时再做一遍会让 256 次提交各多一次整库检查。
     } catch (e) {
+      dropStamp();
       this.close();
       throw e;
     }
   }
-  private validate(): void {
+  private dataVersion(): number {
+    const value = (this.db as DatabaseSync).prepare('PRAGMA data_version').get()?.data_version;
+    if (typeof value === 'number') return value;
+    return fail('io');
+  }
+  // 自己的提交不改变 data_version。刷新快照前若它变了，说明别的连接已经提交，不能记下刚读到的头。
+  private rememberCommitted(seen: number): void {
+    const d = this.db as DatabaseSync;
+    d.exec('BEGIN IMMEDIATE');
+    try {
+      if (this.dataVersion() !== seen) {
+        dropStamp();
+        return;
+      }
+      committedStamp = this.path.mainStamp();
+    } catch {
+      dropStamp();
+    } finally {
+      try {
+        d.exec('ROLLBACK');
+      } catch {
+        dropStamp();
+      }
+    }
+  }
+  private validate(decodeRows: boolean): void {
     const d = this.db as DatabaseSync;
     this.path.check();
     if (
@@ -297,6 +360,21 @@ class Spool {
     )
       fail('corrupt');
     if (d.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') fail('corrupt');
+    if (!decodeRows) {
+      const bounds = d
+        .prepare(
+          'SELECT count(*) AS n,coalesce(sum(length(CAST(payload AS BLOB))),0) AS bytes,coalesce(max(length(CAST(payload AS BLOB))),0) AS widest FROM pending',
+        )
+        .get();
+      if (
+        !bounds ||
+        (bounds.n as number) > ALERT_SPOOL_LIMITS.rows ||
+        (bounds.bytes as number) > ALERT_SPOOL_LIMITS.payloadBytes ||
+        (bounds.widest as number) > 4096
+      )
+        fail('capacity');
+      return;
+    }
     const rows = d.prepare('SELECT key,payload,record_hash FROM pending').all();
     if (rows.length > ALERT_SPOOL_LIMITS.rows) fail('capacity');
     let bytes = 0;
@@ -327,32 +405,39 @@ class Spool {
     const key = admissionAlertKey(o.identity);
     const d = this.db as DatabaseSync;
     d.exec('BEGIN IMMEDIATE');
+    let seen = 0;
+    let outcome: AlertOutcome;
     try {
-      this.validate();
+      seen = this.dataVersion();
+      this.validate(!sameStamp(committedStamp, this.path.mainStamp()));
       const row = d.prepare('SELECT key,payload,record_hash FROM pending WHERE key=?').get(key);
       if (row) {
         if (admissionAlertIdentityJson(this.decode(row).identity) !== admissionAlertIdentityJson(o.identity))
           fail('corrupt');
         d.exec('COMMIT');
         this.path.check();
-        return { kind: 'spooled', key, recordHash: row.record_hash as string };
+        outcome = { kind: 'spooled', key, recordHash: row.record_hash as string };
+      } else {
+        const total = d
+          .prepare(
+            'SELECT count(*) AS n,coalesce(sum(length(CAST(payload AS BLOB))),0) AS bytes FROM pending',
+          )
+          .get();
+        const payload = admissionAlertJson(o),
+          recordHash = admissionAlertRecordHash(o);
+        if (
+          !total ||
+          (total.n as number) >= 256 ||
+          (total.bytes as number) + Buffer.byteLength(payload) > 1024 * 1024
+        )
+          fail('capacity');
+        d.prepare('INSERT INTO pending(key,payload,record_hash) VALUES(?,?,?)').run(key, payload, recordHash);
+        d.exec('COMMIT');
+        this.path.check();
+        outcome = { kind: 'spooled', key, recordHash };
       }
-      const total = d
-        .prepare('SELECT count(*) AS n,coalesce(sum(length(CAST(payload AS BLOB))),0) AS bytes FROM pending')
-        .get();
-      const payload = admissionAlertJson(o),
-        recordHash = admissionAlertRecordHash(o);
-      if (
-        !total ||
-        (total.n as number) >= 256 ||
-        (total.bytes as number) + Buffer.byteLength(payload) > 1024 * 1024
-      )
-        fail('capacity');
-      d.prepare('INSERT INTO pending(key,payload,record_hash) VALUES(?,?,?)').run(key, payload, recordHash);
-      d.exec('COMMIT');
-      this.path.check();
-      return { kind: 'spooled', key, recordHash };
     } catch (e) {
+      dropStamp();
       try {
         d.exec('ROLLBACK');
       } catch {
@@ -360,20 +445,30 @@ class Spool {
       }
       throw e;
     }
+    try {
+      this.rememberCommitted(seen);
+    } catch {
+      dropStamp();
+    }
+    return outcome;
   }
   peek(): { key: string; recordHash: string; observation: AdmissionAlertObservation } | undefined {
     const d = this.db as DatabaseSync;
     // 读事务在PG连接前结束，不跨网络持写事务/读锁。
     d.exec('BEGIN');
     try {
-      this.validate();
+      this.dataVersion();
+      const decodeRows = !sameStamp(committedStamp, this.path.mainStamp());
+      this.validate(decodeRows);
       const row = d.prepare('SELECT key,payload,record_hash FROM pending ORDER BY key LIMIT 1').get();
       const result = row
         ? { key: row.key as string, recordHash: row.record_hash as string, observation: this.decode(row) }
         : undefined;
+      if (decodeRows) committedStamp = this.path.mainStamp();
       d.exec('COMMIT');
       return result;
     } catch (e) {
+      dropStamp();
       try {
         d.exec('ROLLBACK');
       } catch {
@@ -409,18 +504,26 @@ class Spool {
     if (performance.now() >= deadlineAt) return { kind: 'unknown', code: 'deadline' };
     const d = this.db as DatabaseSync;
     d.exec('BEGIN IMMEDIATE');
+    let seen = 0;
     try {
-      this.validate();
+      seen = this.dataVersion();
+      this.validate(!sameStamp(committedStamp, this.path.mainStamp()));
       d.prepare('DELETE FROM pending WHERE key=? AND record_hash=?').run(row.key, row.recordHash);
       d.exec('COMMIT');
       this.path.check();
     } catch (e) {
+      dropStamp();
       try {
         d.exec('ROLLBACK');
       } catch {
         /* 保留pending/PG责任并集 */
       }
       throw e;
+    }
+    try {
+      this.rememberCommitted(seen);
+    } catch {
+      dropStamp();
     }
     return {
       kind: 'transferred',

@@ -1,7 +1,16 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  type Stats,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -208,54 +217,149 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(count()).toBe(256);
   }, 15000);
   it('256个近DTO上界记录的COMMIT边界：主库和journal峰值在固定字节界内', () => {
-    const original = DatabaseSync.prototype.exec;
+    const originalExec = DatabaseSync.prototype.exec;
+    const originalPrepare = DatabaseSync.prototype.prepare;
+    const started = performance.now();
     let mainPeak = 0,
       journalPeak = 0,
       blocksPeak = 0,
-      observed = 0;
+      observed = 0,
+      fullScans = 0,
+      commitSlice = 0;
+    const diag = {
+      stage: 'setup',
+      index: -1,
+      commit: 'unknown' as 'unknown' | 'before' | 'after',
+      mainBytes: 'unknown' as number | 'unknown',
+      journalBytes: 'unknown' as number | 'unknown',
+      blocks: 'unknown' as number | 'unknown',
+      recordMs: 0,
+      commitMs: 0,
+      slowestIndex: -1,
+      slowestRecordMs: 0,
+      slowestCommitMs: 0,
+    };
+    let emitted = false;
+    const emit = () => {
+      if (emitted) return;
+      emitted = true;
+      // 只在失败或原 15 秒用尽时留下合成阶段；成功不写。读不到的采样是 unknown，不是 0。
+      console.error(
+        `SPOOL_COMMIT_DIAG=${JSON.stringify({
+          stage: diag.stage,
+          index: diag.index,
+          commit: diag.commit,
+          mainBytes: diag.mainBytes,
+          journalBytes: diag.journalBytes,
+          blocks: diag.blocks,
+          observed,
+          fullScans,
+          recordMs: Math.round(diag.recordMs),
+          commitMs: Math.round(diag.commitMs),
+          slowest:
+            diag.slowestIndex < 0
+              ? 'unknown'
+              : {
+                  index: diag.slowestIndex,
+                  recordMs: Math.round(diag.slowestRecordMs),
+                  commitMs: Math.round(diag.slowestCommitMs),
+                },
+          elapsedMs: Math.round(performance.now() - started),
+        })}`,
+      );
+    };
     const sample = () => {
       if (!existsSync(path)) return;
-      for (const name of readdirSync(path))
-        expect(['pending.sqlite', 'pending.sqlite-journal']).toContain(name);
-      const db = join(path, 'pending.sqlite'),
-        journal = `${db}-journal`;
-      const main = existsSync(db) ? statSync(db) : undefined;
-      const rollback = existsSync(journal) ? statSync(journal) : undefined;
-      mainPeak = Math.max(mainPeak, main?.size ?? 0);
-      journalPeak = Math.max(journalPeak, rollback?.size ?? 0);
-      blocksPeak = Math.max(blocksPeak, ((main?.blocks ?? 0) + (rollback?.blocks ?? 0)) * 512);
+      let main: Stats | undefined;
+      let rollback: Stats | undefined;
+      for (const name of readdirSync(path)) {
+        if (name !== 'pending.sqlite' && name !== 'pending.sqlite-journal')
+          throw new Error(`未受管spool文件:${name}`);
+        try {
+          const st = statSync(join(path, name));
+          if (name === 'pending.sqlite') main = st;
+          else rollback = st;
+        } catch (error) {
+          // 活跃 DELETE journal 可在目录列举和 stat 之间消失。
+          if (name.endsWith('-journal') && (error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw error;
+        }
+      }
+      const mainBytes = main?.size ?? 0;
+      const journalBytes = rollback?.size ?? 0;
+      const blocks = ((main?.blocks ?? 0) + (rollback?.blocks ?? 0)) * 512;
+      mainPeak = Math.max(mainPeak, mainBytes);
+      journalPeak = Math.max(journalPeak, journalBytes);
+      blocksPeak = Math.max(blocksPeak, blocks);
+      diag.mainBytes = mainBytes;
+      diag.journalBytes = journalBytes;
+      diag.blocks = blocks;
       observed++;
     };
+    DatabaseSync.prototype.prepare = function (sql: string) {
+      if (sql === 'SELECT key,payload,record_hash FROM pending') fullScans += 1;
+      return originalPrepare.call(this, sql);
+    };
     DatabaseSync.prototype.exec = function (sql: string) {
-      if (sql === 'COMMIT') sample();
-      const result = original.call(this, sql);
-      if (sql === 'COMMIT') sample();
-      return result;
+      if (sql !== 'COMMIT') return originalExec.call(this, sql);
+      diag.stage = 'commit';
+      diag.commit = 'before';
+      sample();
+      const mark = performance.now();
+      try {
+        return originalExec.call(this, sql);
+      } finally {
+        commitSlice += performance.now() - mark;
+        diag.commit = 'after';
+        diag.stage = 'after-commit';
+        sample();
+      }
     };
     try {
       for (let n = 0; n < 256; n++) {
+        diag.stage = 'record';
+        diag.index = n;
+        diag.commit = 'unknown';
+        commitSlice = 0;
+        const mark = performance.now();
         const o = observation();
         o.identity.namespace = '\u0001'.repeat(300);
         o.identity.workflowId = '\u0002'.repeat(300);
         expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+        const recordMs = performance.now() - mark;
+        diag.recordMs += recordMs;
+        diag.commitMs += commitSlice;
+        if (recordMs >= diag.slowestRecordMs) {
+          diag.slowestRecordMs = recordMs;
+          diag.slowestCommitMs = commitSlice;
+          diag.slowestIndex = n;
+        }
       }
+      diag.stage = 'assert';
+      expect(count()).toBe(256);
+      expect(observed).toBeGreaterThanOrEqual(512);
+      // 旧实现每次提交都整表解码，256 条是 512 次全表读取，会越过下面的 15000ms。
+      // 快照命中后不再解码；只剩第一条写锁内的那一次。
+      expect(fullScans, '已提交行的整表解码必须保持常数次').toBe(1);
+      expect(mainPeak).toBeGreaterThan(1024 * 1024);
+      expect(journalPeak).toBeGreaterThan(0);
+      expect(mainPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.databaseBytes);
+      expect(journalPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.journalBytes);
+      const d = new DatabaseSync(join(path, 'pending.sqlite'));
+      const version = d.prepare('SELECT sqlite_version() version').get()?.version;
+      d.close();
+      // 这些是语句边界观测；运行期硬界另由固定SQL/SQLite pager不变量证明，不把采样当证明。
+      console.log(
+        `SPOOL_PEAK_EVIDENCE=${JSON.stringify({ uid: process.getuid?.(), version, mainPeak, journalPeak, blocksPeak, observed })}`,
+      );
+    } catch (error) {
+      emit();
+      throw error;
     } finally {
-      DatabaseSync.prototype.exec = original;
+      DatabaseSync.prototype.exec = originalExec;
+      DatabaseSync.prototype.prepare = originalPrepare;
+      if (performance.now() - started >= 15000) emit();
     }
-    expect(count()).toBe(256);
-    expect(observed).toBeGreaterThanOrEqual(512);
-    expect(mainPeak).toBeGreaterThan(1024 * 1024);
-    expect(journalPeak).toBeGreaterThan(0);
-    expect(mainPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.databaseBytes);
-    expect(journalPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.journalBytes);
-    const d = new DatabaseSync(join(path, 'pending.sqlite'));
-    const version = d.prepare('SELECT sqlite_version() version').get()?.version;
-    d.close();
-    // 这些是语句边界观测；运行期硬界另由固定SQL/SQLite pager不变量证明，不把采样当证明。
-    console.log(
-      'SPOOL_PEAK_EVIDENCE=' +
-        JSON.stringify({ uid: process.getuid?.(), version, mainPeak, journalPeak, blocksPeak, observed }),
-    );
   }, 15000);
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
