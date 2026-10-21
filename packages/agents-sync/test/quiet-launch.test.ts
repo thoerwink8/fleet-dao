@@ -40,7 +40,9 @@ class Probe {
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
 
   struct STARTUPINFO {
-    public int cb; public IntPtr a, b, c; public int d, e, f, g, h; public short i, j; public IntPtr k, l, m, n; public int o, p;
+    public int cb; public IntPtr lpReserved, lpDesktop, lpTitle;
+    public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
   }
   struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int pid, tid; }
 
@@ -73,6 +75,7 @@ class Probe {
   }
 
   static int Main(string[] args) {
+    if (Marshal.SizeOf(typeof(STARTUPINFO)) != (IntPtr.Size == 8 ? 104 : 68)) return 3;
     string result = args[0];
     string quietExe = args[1];
     string id = args[2];
@@ -123,7 +126,9 @@ class NodeProbe {
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
 
   struct STARTUPINFO {
-    public int cb; public IntPtr a, b, c; public int d, e, f, g, h; public short i, j; public IntPtr k, l, m, n; public int o, p;
+    public int cb; public IntPtr lpReserved, lpDesktop, lpTitle;
+    public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
   }
   struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int pid, tid; }
 
@@ -167,6 +172,7 @@ class NodeProbe {
   static string Q(string s) { return "\\"" + s + "\\""; }
 
   static int Main(string[] args) {
+    if (Marshal.SizeOf(typeof(STARTUPINFO)) != (IntPtr.Size == 8 ? 104 : 68)) return 3;
     string result = args[0];
     string node = args[1];
     string quiet = args[2];
