@@ -60,7 +60,6 @@ import { extractJson, renderNewIssueBody } from './groom-plan.ts';
 import type { IntakeRepo } from './intake.ts';
 import type { ParkedRetryRow, ParkedSnapshot } from './parked-retry.ts';
 import { stamp } from './reconcile-common.ts';
-import type { RedoOutcome } from './redo.ts';
 
 export const PARK_TRIAGE_EVERY_MINUTES = 10;
 /** 和每 10 分钟的引擎续停（4 分起）错开。 */
@@ -173,6 +172,63 @@ export interface OpenParkAlert {
   at: Date;
 }
 
+/** 重做接续阶段。叫停已发出、新代请求已提交，都不是重做完成。 */
+export const REDO_FOLLOW_PHASES = [
+  'stop_sent_unconfirmed',
+  'old_terminal_pending_start',
+  'start_failed',
+  'started',
+] as const;
+export type RedoFollowPhase = (typeof REDO_FOLLOW_PHASES)[number];
+
+/** 给回执和测试钉住的四句。改字面要连测试一起改。 */
+export const REDO_RECEIPT = {
+  stopUnconfirmed: '叫停已发送、终态未确认',
+  pendingStart: '旧代已终态、新代待启动',
+  startFailed: '旧代已终态、新代启动失败',
+  started: '新代已确认启动',
+} as const;
+
+/** 叫停前看到的一代 Temporal 执行。接续时 runId 必须仍是这一条。 */
+export interface RedoExecutionIdentity {
+  workflowId: string;
+  generation: number;
+  runId: string;
+}
+
+export type RedoFollowBlock = 'running' | 'unknown' | 'identity' | 'exists' | 'start';
+
+/** 可信执行意图。只追加在 commander.act 的 after.redoFollow 里，不另开账。 */
+export interface RedoFollowIntent {
+  intentId: string;
+  phase: RedoFollowPhase;
+  /** 第一次没做成的原文。后面的接续不得改写这一句。 */
+  why: string;
+  identities: RedoExecutionIdentity[];
+  source: 'verdict' | 'default';
+  reason: string;
+  /** 同一时刻多条时，大的是后写的。 */
+  seq: number;
+  block?: RedoFollowBlock;
+}
+
+export interface RedoResumeContext {
+  intentId: string;
+  parkSeq: number;
+  source: 'verdict' | 'default';
+  reason: string;
+  follow?: RedoFollowIntent;
+}
+
+/** ok:true 只表示新代已经确认启动。follow 让下一轮标准调度认得接续停在哪。 */
+export type CommanderRedoResult =
+  | { ok: true; workflowId: string; generation: number; follow?: RedoFollowIntent }
+  | ({ ok: false; why: string } & { follow?: RedoFollowIntent });
+
+export function redoIntentId(workflowId: string, parkSeq: number): string {
+  return `redo:${workflowId}#${parkSeq}`;
+}
+
 export interface ParkTriageDeps {
   /** 设置 engine.commander：没设过算开；读不到、认不出按关（回原因）。 */
   enabled(): Promise<CommanderSwitch>;
@@ -230,8 +286,11 @@ export interface ParkTriageDeps {
   continueTask(workflowId: string, command: ContinueCommand): Promise<'sent' | 'gone'>;
   /** 收尾放弃这一代（拆单、停掉用）。 */
   abandonTask(workflowId: string, reason: string): Promise<'sent' | 'gone'>;
-  /** 叫停停着的这一代、另起下一代（换路由、换模型重来）。 */
-  redoTask(row: ParkedRetryRow, workflowId: string): Promise<RedoOutcome>;
+  /**
+   * 叫停停着的这一代、另起下一代（换路由、换模型重来）。
+   * resume 有 follow 时是沿原裁决接续：不再开会话，也不把「请求已提交」当成做完。
+   */
+  redoTask(row: ParkedRetryRow, workflowId: string, resume?: RedoResumeContext): Promise<CommanderRedoResult>;
   /** 开子单（拆单用）。 */
   openIssue(
     repo: IntakeRepo,
@@ -649,6 +708,102 @@ const LEAVE_WORDS: Readonly<Record<LeaveReason | 'human-only', string>> = {
   'human-only': '只有人能做（没权限等人闸）',
 };
 
+const OPEN_REDO_PHASES: readonly RedoFollowPhase[] = [
+  'stop_sent_unconfirmed',
+  'old_terminal_pending_start',
+  'start_failed',
+];
+
+function isRedoIdentity(value: unknown): value is RedoExecutionIdentity {
+  if (value === null || typeof value !== 'object') return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.workflowId === 'string' &&
+    row.workflowId !== '' &&
+    typeof row.generation === 'number' &&
+    Number.isInteger(row.generation) &&
+    row.generation >= 1 &&
+    typeof row.runId === 'string' &&
+    row.runId !== ''
+  );
+}
+
+/** 认不出的接续记录不当成「没有」或「已经做完」。调用方要报出来，并且不启动。 */
+export function parseRedoFollow(value: unknown): RedoFollowIntent | null {
+  if (value === null || typeof value !== 'object') return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.intentId !== 'string' || row.intentId === '') return null;
+  if (typeof row.phase !== 'string' || !REDO_FOLLOW_PHASES.includes(row.phase as RedoFollowPhase))
+    return null;
+  if (typeof row.why !== 'string' || row.why === '') return null;
+  if (row.source !== 'verdict' && row.source !== 'default') return null;
+  if (typeof row.reason !== 'string') return null;
+  if (typeof row.seq !== 'number' || !Number.isInteger(row.seq) || row.seq < 0) return null;
+  if (!Array.isArray(row.identities) || row.identities.length === 0 || !row.identities.every(isRedoIdentity))
+    return null;
+  const block = row.block;
+  const knownBlock =
+    block === 'running' ||
+    block === 'unknown' ||
+    block === 'identity' ||
+    block === 'exists' ||
+    block === 'start';
+  if (block !== undefined && !knownBlock) return null;
+  return {
+    intentId: row.intentId,
+    phase: row.phase as RedoFollowPhase,
+    why: row.why,
+    identities: row.identities.filter(isRedoIdentity),
+    source: row.source,
+    reason: row.reason,
+    seq: row.seq,
+    ...(knownBlock ? { block } : {}),
+  };
+}
+
+function redoPhrase(phase: RedoFollowPhase): string {
+  if (phase === 'stop_sent_unconfirmed') return REDO_RECEIPT.stopUnconfirmed;
+  if (phase === 'old_terminal_pending_start') return REDO_RECEIPT.pendingStart;
+  if (phase === 'start_failed') return REDO_RECEIPT.startFailed;
+  return REDO_RECEIPT.started;
+}
+
+/** 回执正文。有部分副作用时不写「任务没动」；没确认到新执行时不写已经启动。 */
+export function redoReceiptLines(redone: CommanderRedoResult): string[] {
+  if (redone.ok && (redone.follow === undefined || redone.follow.phase === 'started')) {
+    const lines = [
+      `${REDO_RECEIPT.started}：${redone.workflowId}（第 ${redone.generation} 代，重新选路，不带原来的避让）。`,
+    ];
+    const prior = redone.follow?.why ?? '';
+    if (prior !== '') lines.push(`先前的失败仍在：${prior}`);
+    return lines;
+  }
+  if (!redone.ok && redone.follow) {
+    const current = redone.why;
+    const prior = redone.follow.why;
+    // 阶段写成已启动但这次没成功：不能说新代已确认，也不能说任务没动。
+    const phrase =
+      redone.follow.phase === 'started' ? REDO_RECEIPT.startFailed : redoPhrase(redone.follow.phase);
+    const lines = [`${phrase}。${current}`];
+    if (prior !== '' && prior !== current) lines.push(`原失败：${prior}`);
+    return lines;
+  }
+  if (redone.ok) return ['重做回执说成功，但阶段不是已确认启动，不算重做完成。'];
+  if (/叫停 .+后还没停，没有另起/.test(redone.why)) return [`${REDO_RECEIPT.stopUnconfirmed}。${redone.why}`];
+  return [`执行「重做」没成：${redone.why}。任务没动。`];
+}
+
+function storedRedoFollow(redone: CommanderRedoResult): RedoFollowIntent | null {
+  const follow = redone.follow;
+  if (!follow) return null;
+  if (redone.ok) {
+    if (follow.phase !== 'started') return null;
+    return { ...follow, phase: 'started', seq: follow.seq + 1 };
+  }
+  if (follow.phase === 'started') return null;
+  return { ...follow, seq: follow.seq + 1 };
+}
+
 async function execute(
   deps: ParkTriageDeps,
   repo: IntakeRepo,
@@ -695,6 +850,58 @@ async function execute(
     level: 'daily',
     title: `指挥官处理了 ${ref}：${word}${plan.source === 'default' ? '（默认动作）' : ''}`,
   });
+  const settleRedo = async (redone: CommanderRedoResult): Promise<Outcome> => {
+    const lines = redoReceiptLines(redone);
+    const stored = storedRedoFollow(redone);
+    const partial = !redone.ok && redone.follow !== undefined && redone.follow.phase !== 'started';
+    if (stored) {
+      try {
+        await deps.audit({
+          item,
+          action: 'redo',
+          reason: why,
+          ok: redone.ok,
+          ...(redone.ok ? {} : { error: stored.why || redone.why }),
+          source: plan.source,
+          detail: { redoFollow: stored },
+        });
+      } catch (err) {
+        const msg = `重做接续没写进操作记录：${errMessage(err)}`;
+        return {
+          acted: null,
+          left: msg,
+          text: text([msg, ...lines]),
+          level: 'alert',
+          title: `指挥官重做 ${ref} 的回执没记下`,
+        };
+      }
+    } else if (!redone.ok) {
+      if (/叫停 .+后还没停，没有另起/.test(redone.why)) {
+        await deps
+          .audit({ item, action: 'redo', reason: why, ok: false, error: redone.why, source: plan.source })
+          .catch((err: unknown) =>
+            deps.log('error', '指挥官：失败的执行没记进操作记录', { error: errMessage(err) }),
+          );
+        return {
+          acted: null,
+          left: redone.why,
+          text: text(lines),
+          level: 'alert',
+          title: `指挥官重做 ${ref}：${REDO_RECEIPT.stopUnconfirmed}`,
+        };
+      }
+      return await failed(redone.why);
+    }
+    if (redone.ok && (redone.follow === undefined || redone.follow.phase === 'started')) return done(lines);
+    const phrase = partial && redone.follow ? redoPhrase(redone.follow.phase) : '重做';
+    return {
+      acted: null,
+      left: lines.join('\n'),
+      text: text(lines),
+      level: 'alert',
+      title: `指挥官重做 ${ref}：${phrase}`,
+    };
+  };
   try {
     if (plan.action === 'continue') {
       const note =
@@ -717,11 +924,20 @@ async function execute(
       return done([`已执行：继续${plan.widenBudget ? '，并把这张单的额度预算放宽一档（没有空转）' : ''}。`]);
     }
     if (plan.action === 'redo') {
-      const redone = await deps.redoTask(item.row, item.workflowId);
-      if (!redone.ok) return await failed(redone.why);
-      return done([
-        `已执行：重做，新一代 ${redone.workflowId}（第 ${redone.generation} 代，重新选路，不带原来的避让）。`,
-      ]);
+      // 先有操作记录里的意图，标准调度才能在进程中断或叫停迟到之后接着做。不在这里加长等待。
+      const context: RedoResumeContext = {
+        intentId: redoIntentId(item.workflowId, item.park.seq),
+        parkSeq: item.park.seq,
+        source: plan.source,
+        reason: plan.reason,
+      };
+      let redone: CommanderRedoResult;
+      try {
+        redone = await deps.redoTask(item.row, item.workflowId, context);
+      } catch (err) {
+        redone = { ok: false, why: errMessage(err) };
+      }
+      return await settleRedo(redone);
     }
     if (plan.action === 'split') {
       const opened: number[] = [];
@@ -1128,6 +1344,17 @@ interface AuditBook {
   handledByRef: Map<string, number>;
   /** 每张单最近一次判「继续」时那一停的原文指纹；那条记录没存指纹是 null。 */
   lastContinueHash: Map<string, string | null>;
+  /** 还没确认启动的重做。认不出的记录在 redoProblems，不当成没有、也不启动。 */
+  openRedos: OpenRedoFollow[];
+  redoProblems: string[];
+}
+
+interface OpenRedoFollow {
+  intentId: string;
+  row: ParkedRetryRow;
+  workflowId: string;
+  parkSeq: number;
+  follow: RedoFollowIntent;
 }
 
 function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
@@ -1140,6 +1367,8 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
   const windowed = new Map<string, { ref: string | null; times: number[] }>();
   const lastContinueHash = new Map<string, string | null>();
   const acts: { workflowId: string; seq: number; kind: string | null }[] = [];
+  const followBest = new Map<string, { at: number; open: OpenRedoFollow }>();
+  const redoProblems: string[] = [];
   let anon = 0;
   for (const a of audits) {
     const after = (a.after ?? {}) as {
@@ -1149,6 +1378,11 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
       action?: unknown;
       ref?: unknown;
       detailHash?: unknown;
+      taskId?: unknown;
+      owner?: unknown;
+      name?: unknown;
+      issueNumber?: unknown;
+      redoFollow?: unknown;
     };
     const ok = typeof after.workflowId === 'string' && typeof after.parkSeq === 'number';
     const key = ok ? claimKey(after.workflowId as string, after.parkSeq as number) : null;
@@ -1181,6 +1415,36 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
           seq: after.parkSeq as number,
           kind: typeof after.kind === 'string' ? after.kind : null,
         });
+    } else if (
+      a.action === COMMANDER_AUDIT_ACT &&
+      after.action === 'redo' &&
+      after.redoFollow !== undefined
+    ) {
+      const ref = typeof after.ref === 'string' ? after.ref : '这张单';
+      const parsed = parseRedoFollow(after.redoFollow);
+      const workflowId = typeof after.workflowId === 'string' ? after.workflowId : '';
+      const parkSeq = typeof after.parkSeq === 'number' ? after.parkSeq : NaN;
+      const row = redoRowOf(after);
+      if (
+        !parsed ||
+        !row ||
+        !Number.isInteger(parkSeq) ||
+        parsed.intentId !== redoIntentId(workflowId, parkSeq)
+      ) {
+        redoProblems.push(`${ref} 的重做接续记录认不出，没有当成完成，也没有另起`);
+        continue;
+      }
+      if (parsed.phase === 'started' && a.ok === false) {
+        redoProblems.push(`${ref} 的重做接续写成已启动但记录没成功，没有当成完成`);
+        continue;
+      }
+      const prev = followBest.get(parsed.intentId);
+      const at = a.at.getTime();
+      if (prev && (prev.at > at || (prev.at === at && prev.open.follow.seq > parsed.seq))) continue;
+      followBest.set(parsed.intentId, {
+        at,
+        open: { intentId: parsed.intentId, row, workflowId, parkSeq, follow: parsed },
+      });
     }
   }
   const claimTimes: number[] = [];
@@ -1197,6 +1461,10 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
   }
   const handled = new Set<string>();
   for (const [key, n] of claims) if (n > (retries.get(key) ?? 0)) handled.add(key);
+  const openRedos = [...followBest.values()]
+    .filter((slot) => OPEN_REDO_PHASES.includes(slot.open.follow.phase))
+    .sort((a, b) => a.at - b.at || a.open.follow.seq - b.open.follow.seq)
+    .map((slot) => slot.open);
   return {
     handled,
     retries,
@@ -1205,7 +1473,35 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
     claimTimes,
     handledByRef,
     lastContinueHash,
+    openRedos,
+    redoProblems,
   };
+}
+
+function redoRowOf(after: {
+  taskId?: unknown;
+  owner?: unknown;
+  name?: unknown;
+  issueNumber?: unknown;
+  ref?: unknown;
+  workflowId?: unknown;
+}): ParkedRetryRow | null {
+  const taskId = typeof after.taskId === 'string' ? after.taskId : '';
+  const workflowId = typeof after.workflowId === 'string' ? after.workflowId : '';
+  let owner = typeof after.owner === 'string' ? after.owner : '';
+  let name = typeof after.name === 'string' ? after.name : '';
+  let issueNumber = typeof after.issueNumber === 'number' ? after.issueNumber : NaN;
+  if ((!owner || !name || !Number.isInteger(issueNumber)) && typeof after.ref === 'string') {
+    const matched = /^([^/]+)\/([^#]+)#(\d+)$/.exec(after.ref);
+    if (matched?.[1] && matched[2] && matched[3]) {
+      owner = owner || matched[1];
+      name = name || matched[2];
+      if (!Number.isInteger(issueNumber)) issueNumber = Number(matched[3]);
+    }
+  }
+  if (taskId === '' || workflowId === '' || owner === '' || name === '' || !Number.isInteger(issueNumber))
+    return null;
+  return { taskId, owner, name, issueNumber, workflowId };
 }
 
 /** 单张单防空转：该不该不再放行「继续」（返回原因），否则 undefined。detailHash 是这一停原文的指纹（没读到是 undefined）。 */
@@ -1216,6 +1512,97 @@ function noContinueReason(book: AuditBook, ref: string, detailHash: string | und
   if (detailHash !== undefined && book.lastContinueHash.get(ref) === detailHash)
     return '这一次停下的原文和上一次判「继续」时一字不差，原样继续只会再停一次';
   return undefined;
+}
+
+function resumeItem(open: OpenRedoFollow, at: Date): ParkTriageItem {
+  const park: TaskParkInfo = {
+    kind: 'transient',
+    seq: open.parkSeq,
+    at: at.toISOString(),
+    title: '重做接续',
+    head: null,
+    retriedBefore: false,
+  };
+  return {
+    row: open.row,
+    workflowId: open.workflowId,
+    park,
+    handoff: false,
+    detail: null,
+    rounds: null,
+    spin: null,
+  };
+}
+
+/**
+ * 沿已经记下来的重做裁决接续。不再开会话、不再认领。
+ * 旧代仍在跑、查不到或身份变了，只拒绝；启动新代是 redoTask 在重新核完之后的事。
+ */
+async function resumeOpenRedos(
+  deps: ParkTriageDeps,
+  book: AuditBook,
+  result: ParkTriageResult,
+): Promise<void> {
+  for (const open of book.openRedos) {
+    const ref = refOf(open.row);
+    const item = resumeItem(open, deps.now());
+    const context: RedoResumeContext = {
+      intentId: open.intentId,
+      parkSeq: open.parkSeq,
+      source: open.follow.source,
+      reason: open.follow.reason,
+      follow: open.follow,
+    };
+    let redone: CommanderRedoResult;
+    try {
+      redone = await deps.redoTask(open.row, open.workflowId, context);
+    } catch (err) {
+      const why = errMessage(err);
+      result.problems.push(`${ref} 重做接续没查成：${why}`);
+      continue;
+    }
+    const lines = redoReceiptLines(redone);
+    const stored = storedRedoFollow(redone);
+    if (stored) {
+      try {
+        await deps.audit({
+          item,
+          action: 'redo',
+          reason: open.follow.reason,
+          ok: redone.ok,
+          ...(redone.ok ? {} : { error: stored.why || (!redone.ok ? redone.why : '没成') }),
+          source: open.follow.source,
+          detail: { redoFollow: stored },
+        });
+      } catch (err) {
+        result.problems.push(`${ref} 重做接续没写进操作记录：${errMessage(err)}`);
+      }
+    }
+    const confirmed = redone.ok && (redone.follow === undefined || redone.follow.phase === 'started');
+    if (confirmed && redone.ok) {
+      result.acted.push({ ref, action: 'redo', source: open.follow.source });
+      deps.log('info', '指挥官：重做接续已确认启动', { ref, workflowId: redone.workflowId });
+    } else if (!redone.ok) {
+      result.left.push({ ref, why: lines.join('\n') });
+      if (redone.follow?.block === 'unknown') {
+        result.problems.push(`${ref} 重做接续没查清上一代，没有另起：${redone.why}`);
+      }
+    }
+    const phrase = !redone.follow
+      ? REDO_RECEIPT.stopUnconfirmed
+      : !redone.ok && redone.follow.phase === 'started'
+        ? REDO_RECEIPT.startFailed
+        : redoPhrase(redone.follow.phase);
+    await deps
+      .notify({
+        level: confirmed ? 'daily' : 'alert',
+        key: noticeKey(item),
+        title: confirmed ? `指挥官处理了 ${ref}：重做` : `指挥官重做 ${ref}：${phrase}`,
+        body: lines.join('\n'),
+        taskId: open.row.taskId,
+      })
+      .catch((err: unknown) => result.problems.push(`${ref} 的重做接续提醒没推出去：${errMessage(err)}`));
+  }
 }
 
 /** 过一遍停着的引擎任务，够条件的交指挥官。列不出、读不到操作记录照抛。 */
@@ -1258,6 +1645,8 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
   // 认领记录不能只看最近几天：一个停点可以挂很久，过了窗口再认领就违反「每次停下最多处理一次」。
   // 每日上限仍只按下面的 24 小时窗口计算；这里读的是 commander 自己的审计记录，不把历史操作混进来。
   const book = readBook(await deps.audits(new Date(0)), now);
+  result.problems.push(...book.redoProblems);
+  await resumeOpenRedos(deps, book, result);
   let remaining = PARK_TRIAGE_DAILY_CAP - book.claimsToday;
   const rows = await deps.tasks();
   result.listed = rows.length;

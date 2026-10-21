@@ -6,6 +6,8 @@
 //   继续 / 放弃是发 Temporal 信号，重做走 shared 的 redoTask（和驾驶舱、命令行的「重做」同一份判断），拆单只有「开子单」一种 GitHub 写操作。
 // - 开关是设置 engine.commander（驾驶舱设置页能关）：没设过算开；值认不出按关并说明，不当成开。
 // - 操作记录经 recordEngineAudit 写，actor 是 engine:commander、target 是 commander；「认领」和「执行」各一条（jobs/park-triage.ts 看认领判是否处理过）。
+// - 重做叫停后，现有等待窗口内还没到终态：先把各代 runId 记进这条执行记录，后面的标准调度沿原裁决接续。
+//   新代启动前重读全部旧代的终态和 runId。仍在跑、查不到或身份变了就拒绝，不拉长等待、不终止、不改任务行。
 // - 提醒（诊断文字）经 upsertAlert 推：执行了的、贴「本机做」交本机指挥官的是 daily；留给人（要掏新钱、删了找不回、只有人能做）
 //   是 decision（带选项和原因）；没成、会话没起成的是 alert。改标准的停下经 addIssueLabel 贴「本机做」（#3423）。
 import {
@@ -38,8 +40,15 @@ import {
   COMMANDER_AUDIT_ACT,
   COMMANDER_AUDIT_CLAIM,
   COMMANDER_AUDIT_RETRY,
+  type CommanderRedoResult,
   PARK_TRIAGE_CAP_ALERT_KEY,
   type ParkTriageDeps,
+  type RedoExecutionIdentity,
+  type RedoFollowBlock,
+  type RedoFollowIntent,
+  type RedoFollowPhase,
+  type RedoResumeContext,
+  redoIntentId,
 } from '../jobs/park-triage.ts';
 import {
   taskAbandonSignal,
@@ -56,13 +65,52 @@ import { isWorkflowGone } from './route-wake.ts';
 export const COMMANDER_SETTING = 'engine.commander';
 
 const SIGNAL_TIMEOUT_MS = 5_000;
-/** 重做前叫停停着的上一代：等它收尾终止最多多久。 */
-const ABANDON_WAIT_MS = 60_000;
+/** 重做前叫停停着的上一代：等它收尾终止最多多久。接续不拉长这个窗口。 */
+export const ABANDON_WAIT_MS = 60_000;
+const ABANDON_POLL_MS = 200;
 
 export interface ParkTriageWiring extends GroomWiring {
   temporal: { use<T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>): Promise<T> };
   taskQueue: string;
+  /**
+   * 叫停后的现有等待窗口怎么睡。不传就是 setTimeout。
+   * 测试注入 now 时，这里必须把 now 往前拨；生产不传，时钟用真实时间。
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+function runIdFromRecord(record: unknown): string | null {
+  if (record === null || typeof record !== 'object') return null;
+  const runId = (record as { runId?: unknown }).runId;
+  return typeof runId === 'string' && runId !== '' ? runId : null;
+}
+
+function identitiesFrom(
+  generations: readonly { workflowId: string; generation: number; record: unknown }[],
+): RedoExecutionIdentity[] | null {
+  if (generations.length === 0) return null;
+  const out: RedoExecutionIdentity[] = [];
+  for (const item of generations) {
+    const runId = runIdFromRecord(item.record);
+    if (runId === null) return null;
+    out.push({ workflowId: item.workflowId, generation: item.generation, runId });
+  }
+  return out;
+}
+
+class RedoHalt extends Error {
+  readonly follow: RedoFollowIntent;
+  constructor(message: string, follow: RedoFollowIntent) {
+    super(message);
+    this.name = 'RedoHalt';
+    this.follow = follow;
+  }
+}
+
+type SeenExecution =
+  | { life: 'running' | 'terminated'; runId: string }
+  | { life: 'missing' }
+  | { life: 'unknown' };
 
 export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
   const now = w.now ?? (() => new Date());
@@ -80,89 +128,328 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     return hit ? toRepo(hit) : null;
   };
 
-  const redo: ParkTriageDeps['redoTask'] = async (row, workflowId) => {
+  const clock = () => now().getTime();
+  const sleep = w.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  const redo: ParkTriageDeps['redoTask'] = async (row, workflowId, resume) => {
+    const context: RedoResumeContext = resume ?? {
+      intentId: redoIntentId(workflowId, 0),
+      parkSeq: 0,
+      source: 'verdict',
+      reason: '指挥官判重做',
+    };
     const repo = await findRepo(row.owner, row.name);
     const title = await readTaskTitle(w.db, row.taskId);
     if (!repo || title === null) return { ok: false, why: `读不到仓或任务标题，没有重做（${workflowId}）` };
     return w.temporal.use(async (client) => {
-      const lifeOf = async (id: string) => {
-        const described = await client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () =>
-          client.workflow.getHandle(id).describe(),
-        );
-        return generationLife(described.status.name);
+      let seq = context.follow?.seq ?? 0;
+      let stopSent = context.follow !== undefined;
+      let identities: RedoExecutionIdentity[] = context.follow?.identities ?? [];
+      const followOf = (phase: RedoFollowPhase, why: string, block?: RedoFollowBlock): RedoFollowIntent => {
+        seq += 1;
+        return {
+          intentId: context.intentId,
+          phase,
+          why,
+          identities,
+          source: context.source,
+          reason: context.reason,
+          seq,
+          ...(block ? { block } : {}),
+        };
       };
-      const read = await readTaskGenerations(
-        { owner: row.owner, name: row.name },
-        row.issueNumber,
-        async (id) => {
-          try {
-            return { life: await lifeOf(id), record: { workflowId: id } };
-          } catch (err) {
-            return err instanceof WorkflowNotFoundError ? { life: 'missing' } : { life: 'unknown' };
+      const persist = async (follow: RedoFollowIntent, ok: boolean) => {
+        await recordEngineAudit(w.db, {
+          action: COMMANDER_AUDIT_ACT,
+          target: COMMANDER_AUDIT_TARGET,
+          actorId: COMMANDER_ACTOR,
+          after: {
+            taskId: row.taskId,
+            ref: `${row.owner}/${row.name}#${row.issueNumber}`,
+            workflowId,
+            parkSeq: context.parkSeq,
+            action: 'redo',
+            source: context.source,
+            owner: row.owner,
+            name: row.name,
+            issueNumber: row.issueNumber,
+            redoFollow: follow,
+          },
+          reason: context.reason,
+          ok,
+          ...(ok ? {} : { error: follow.why }),
+          at: now(),
+        });
+      };
+      const probe = async (id: string): Promise<SeenExecution> => {
+        try {
+          const described = await client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () =>
+            client.workflow.getHandle(id).describe(),
+          );
+          const runId = typeof described.runId === 'string' ? described.runId : '';
+          if (runId === '') return { life: 'unknown' };
+          const life = generationLife(described.status.name);
+          return { life, runId };
+        } catch (err) {
+          if (err instanceof WorkflowNotFoundError || isWorkflowGone(err)) return { life: 'missing' };
+          return { life: 'unknown' };
+        }
+      };
+      const read = () =>
+        readTaskGenerations({ owner: row.owner, name: row.name }, row.issueNumber, async (id) => {
+          const seen = await probe(id);
+          if (seen.life === 'missing' || seen.life === 'unknown') return { life: seen.life };
+          return { life: seen.life, record: { workflowId: id, runId: seen.runId } };
+        });
+      const judge = (
+        generations: readonly {
+          workflowId: string;
+          generation: number;
+          life: 'running' | 'terminated';
+          record: unknown;
+        }[],
+      ): { ok: true } | { ok: false; why: string; phase: RedoFollowPhase; block: RedoFollowBlock } => {
+        if (identities.length === 0) {
+          return {
+            ok: false,
+            why: '查不到叫停时的执行身份，没有另起',
+            phase: 'stop_sent_unconfirmed',
+            block: 'unknown',
+          };
+        }
+        const byGen = new Map(generations.map((item) => [item.generation, item]));
+        for (const expected of identities) {
+          const item = byGen.get(expected.generation);
+          const runId = item ? runIdFromRecord(item.record) : null;
+          if (!item || item.workflowId !== expected.workflowId || runId === null) {
+            return {
+              ok: false,
+              why: `查不到 ${expected.workflowId} 的执行身份，没有另起`,
+              phase: 'stop_sent_unconfirmed',
+              block: 'unknown',
+            };
           }
-        },
-      );
-      if (!read.ok) return read;
-      return redoTask({
-        list: async () => read.generations,
-        posture: async (id) => {
-          try {
-            const status = await withDeadline((c) => c.workflow.getHandle(id).query(taskStatusQuery));
-            return redoCanStop(status.phase) ? 'parked' : 'running';
-          } catch (err) {
-            return isWorkflowGone(err) ? 'parked' : 'running';
+          if (runId !== expected.runId) {
+            return {
+              ok: false,
+              why: `执行身份变了（${expected.workflowId} 的 runId 从 ${expected.runId} 变成 ${runId}），没有另起`,
+              phase: 'stop_sent_unconfirmed',
+              block: 'identity',
+            };
           }
-        },
-        abandonParked: async (id) => {
-          try {
-            await withDeadline((c) =>
-              c.workflow.getHandle(id).signal(taskAbandonSignal, {
-                by: COMMANDER_ACTOR,
-                reason: '指挥官判重做：先叫停停住的上一代',
-              }),
-            );
-          } catch (err) {
-            if (!isWorkflowGone(err)) throw err;
+          if (item.life !== 'terminated') {
+            return {
+              ok: false,
+              why: `叫停 ${expected.workflowId} 后还没停，没有另起`,
+              phase: 'stop_sent_unconfirmed',
+              block: 'running',
+            };
           }
-          const deadline = Date.now() + ABANDON_WAIT_MS;
-          while (Date.now() < deadline) {
-            if ((await lifeOf(id).catch(() => 'terminated' as const)) !== 'running') return;
-            await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        for (const item of generations) {
+          if (!identities.some((expected) => expected.generation === item.generation)) {
+            return {
+              ok: false,
+              why: `编号 ${item.workflowId} 已经有记录，没有覆盖旧代，也没另起`,
+              phase: 'start_failed',
+              block: 'exists',
+            };
           }
-          throw new Error(`叫停 ${id} 后还没停，没有另起`);
-        },
-        start: async (id) => {
-          try {
-            await withDeadline((c) =>
-              c.workflow.start(TASK_WORKFLOW_TYPE, {
-                taskQueue: w.taskQueue,
-                workflowId: id,
-                args: [
-                  {
-                    schemaVersion: 1,
-                    taskId: row.taskId,
-                    repo: {
-                      id: repo.id,
-                      owner: repo.owner,
-                      name: repo.name,
-                      defaultBranch: repo.defaultBranch,
-                      testCommand: repo.testCommand,
+        }
+        return { ok: true };
+      };
+      const refuse = async (
+        why: string,
+        phase: RedoFollowPhase,
+        block: RedoFollowBlock,
+        keepWhy: string,
+      ): Promise<CommanderRedoResult> => {
+        const follow = followOf(phase, keepWhy, block);
+        try {
+          await persist(follow, false);
+        } catch (err) {
+          log('error', '指挥官：重做接续没记进操作记录', { error: errMessage(err) });
+        }
+        return { ok: false, why, follow };
+      };
+      try {
+        const listed = await read();
+        if (!listed.ok) {
+          if (!context.follow) return { ok: false, why: listed.why };
+          return await refuse(listed.why, 'stop_sent_unconfirmed', 'unknown', context.follow.why);
+        }
+        if (!context.follow) {
+          const fresh = identitiesFrom(listed.generations);
+          if (fresh === null) return { ok: false, why: '查不到上一代的执行身份，没有另起' };
+          identities = fresh;
+        } else {
+          const verdict = judge(listed.generations);
+          if (!verdict.ok) return await refuse(verdict.why, verdict.phase, verdict.block, context.follow.why);
+        }
+        const outcome = await redoTask({
+          list: async () => listed.generations,
+          posture: async (id) => {
+            try {
+              const status = await withDeadline((c) => c.workflow.getHandle(id).query(taskStatusQuery));
+              return redoCanStop(status.phase) ? 'parked' : 'running';
+            } catch (err) {
+              return isWorkflowGone(err) ? 'parked' : 'running';
+            }
+          },
+          abandonParked: async (id) => {
+            if (context.follow) {
+              throw new RedoHalt(
+                `叫停 ${id} 后还没停，没有另起`,
+                followOf('stop_sent_unconfirmed', context.follow.why, 'running'),
+              );
+            }
+            try {
+              await withDeadline((c) =>
+                c.workflow.getHandle(id).signal(taskAbandonSignal, {
+                  by: COMMANDER_ACTOR,
+                  reason: '指挥官判重做：先叫停停住的上一代',
+                }),
+              );
+            } catch (err) {
+              if (!isWorkflowGone(err)) {
+                stopSent = true;
+                const why = `叫停 ${id} 没确认发出：${errMessage(err)}`;
+                throw new RedoHalt(why, followOf('stop_sent_unconfirmed', why, 'unknown'));
+              }
+            }
+            stopSent = true;
+            const marked = followOf('stop_sent_unconfirmed', `叫停 ${id} 已发送，终态未确认`, 'running');
+            try {
+              await persist(marked, false);
+            } catch (err) {
+              throw new RedoHalt(`叫停 ${id} 已发送，接续记录没写进：${errMessage(err)}`, marked);
+            }
+            const deadline = clock() + ABANDON_WAIT_MS;
+            const matchedRun = identities.find((item) => item.workflowId === id)?.runId;
+            while (clock() < deadline) {
+              const seen = await probe(id);
+              if (seen.life === 'terminated') {
+                if (matchedRun !== undefined && seen.runId !== matchedRun) {
+                  const why = `执行身份变了（${id} 的 runId 从 ${matchedRun} 变成 ${seen.runId}），没有另起`;
+                  throw new RedoHalt(why, followOf('stop_sent_unconfirmed', why, 'identity'));
+                }
+                return;
+              }
+              if (seen.life === 'missing') {
+                const why = `查不到 ${id} 的执行身份，没有另起`;
+                throw new RedoHalt(why, followOf('stop_sent_unconfirmed', why, 'unknown'));
+              }
+              const left = deadline - clock();
+              if (left <= 0) break;
+              await sleep(Math.min(ABANDON_POLL_MS, left));
+            }
+            const why = `叫停 ${id} 后还没停，没有另起`;
+            const failed = followOf('stop_sent_unconfirmed', why, 'running');
+            try {
+              await persist(failed, false);
+            } catch (err) {
+              log('error', '指挥官：叫停超时没记进操作记录', { error: errMessage(err) });
+            }
+            throw new RedoHalt(why, failed);
+          },
+          start: async (id) => {
+            const again = await read();
+            if (!again.ok) {
+              throw new RedoHalt(
+                again.why,
+                followOf('stop_sent_unconfirmed', context.follow?.why || again.why, 'unknown'),
+              );
+            }
+            const verdict = judge(again.generations);
+            if (!verdict.ok) {
+              throw new RedoHalt(
+                verdict.why,
+                followOf(verdict.phase, context.follow?.why || verdict.why, verdict.block),
+              );
+            }
+            const next = await probe(id);
+            if (next.life !== 'missing') {
+              const why = `编号 ${id} 已经有记录，没有覆盖旧代，也没另起`;
+              throw new RedoHalt(why, followOf('start_failed', context.follow?.why || why, 'exists'));
+            }
+            const pendingWhy = context.follow?.why || '旧代已终态，新代还没确认启动';
+            await persist(followOf('old_terminal_pending_start', pendingWhy), false);
+            try {
+              await withDeadline((c) =>
+                c.workflow.start(TASK_WORKFLOW_TYPE, {
+                  taskQueue: w.taskQueue,
+                  workflowId: id,
+                  args: [
+                    {
+                      schemaVersion: 1,
+                      taskId: row.taskId,
+                      repo: {
+                        id: repo.id,
+                        owner: repo.owner,
+                        name: repo.name,
+                        defaultBranch: repo.defaultBranch,
+                        testCommand: repo.testCommand,
+                      },
+                      issueNumber: row.issueNumber,
+                      title,
                     },
-                    issueNumber: row.issueNumber,
-                    title,
-                  },
-                ],
-                workflowIdConflictPolicy: 'FAIL',
-                workflowIdReusePolicy: 'REJECT_DUPLICATE',
-              }),
-            );
+                  ],
+                  workflowIdConflictPolicy: 'FAIL',
+                  workflowIdReusePolicy: 'REJECT_DUPLICATE',
+                }),
+              );
+            } catch (err) {
+              if (err instanceof WorkflowExecutionAlreadyStartedError) {
+                const why = `编号 ${id} 已经有记录，没有覆盖旧代，也没另起`;
+                throw new RedoHalt(why, followOf('start_failed', context.follow?.why || why, 'exists'));
+              }
+              throw new RedoHalt(
+                `旧代已终态，新代启动失败：${errMessage(err)}`,
+                followOf(
+                  'start_failed',
+                  context.follow?.why || `旧代已终态，新代启动失败：${errMessage(err)}`,
+                  'start',
+                ),
+              );
+            }
+            const confirmed = await probe(id);
+            if (confirmed.life !== 'running' && confirmed.life !== 'terminated') {
+              throw new RedoHalt(
+                `新代 ${id} 没有确认到执行，不算重做完成`,
+                followOf(
+                  'start_failed',
+                  context.follow?.why || `新代 ${id} 没有确认到执行，不算重做完成`,
+                  'start',
+                ),
+              );
+            }
+            const prior = context.follow?.why ?? '';
+            try {
+              await persist(followOf('started', prior || '新代已确认启动'), true);
+            } catch (err) {
+              log('error', '指挥官：新代已确认，接续记录没记进', { error: errMessage(err) });
+            }
             return 'started';
-          } catch (err) {
-            if (err instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
-            throw err;
-          }
-        },
-      });
+          },
+        });
+        if (!outcome.ok) {
+          if (!stopSent) return outcome;
+          const why = outcome.why;
+          return await refuse(why, 'start_failed', 'start', context.follow?.why || why);
+        }
+        if (!context.follow) return outcome;
+        return {
+          ok: true,
+          workflowId: outcome.workflowId,
+          generation: outcome.generation,
+          follow: followOf('started', context.follow.why),
+        };
+      } catch (err) {
+        if (err instanceof RedoHalt) return { ok: false, why: err.message, follow: err.follow };
+        const why = errMessage(err);
+        if (!stopSent) return { ok: false, why };
+        return await refuse(why, 'stop_sent_unconfirmed', 'unknown', context.follow?.why || why);
+      }
     });
   };
 
@@ -367,7 +654,8 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     async addLabel(repo, issueNumber, label) {
       await w.gh.addIssueLabel({ repo: { owner: repo.owner, name: repo.name }, issueNumber, label });
     },
-    async audit({ item, action, reason, ok, error, source }) {
+    async audit({ item, action, reason, ok, error, source, detail }) {
+      const redoFollow = detail?.redoFollow;
       await recordEngineAudit(w.db, {
         action: COMMANDER_AUDIT_ACT,
         target: COMMANDER_AUDIT_TARGET,
@@ -381,6 +669,10 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           kind: item.kind ?? triageKindOf(item.park),
           ...(item.detailHash ? { detailHash: item.detailHash } : {}),
           ...(source ? { source } : {}),
+          owner: item.row.owner,
+          name: item.row.name,
+          issueNumber: item.row.issueNumber,
+          ...(redoFollow !== undefined ? { redoFollow } : {}),
         },
         reason,
         ok,
