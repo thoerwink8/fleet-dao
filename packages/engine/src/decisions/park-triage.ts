@@ -24,6 +24,7 @@
 // 运行环境类停法按失败码和失败分流的规则编号认（triageKindOf），不按标题文字猜。
 // 老历史（没记 status.park）的停法从任务行和提醒正文认（legacyParkKind），认不出按「按临时的办」。
 
+import { type AcceptanceCoverage, parseAcceptanceCoverage } from '@fleet-dao/shared';
 import type { ParkKind } from '../task-contract.ts';
 import { PARK_CODE_NO_ROUTE, PARK_CODE_ROUTE_SWITCH } from '../task-contract.ts';
 import type { SpinJudgement } from './spin.ts';
@@ -289,6 +290,94 @@ export function defaultAction(
   if (action.action === 'continue' && park.noContinue !== undefined)
     return { action: 'redo', why: `${park.noContinue}，不再原样继续，换一代重做` };
   return action;
+}
+
+export type AcceptanceVerdictAction = 'settle' | 'supersede' | 'leave';
+
+export interface AcceptanceDutyIdentityView {
+  id: number;
+  generation: number;
+  repo: string;
+  issueNumber: number;
+  prNumber: number;
+  head: string;
+  items: readonly string[];
+  mergeCommit: string | null;
+}
+
+export interface RawAcceptanceVerdict {
+  action: string;
+  dutyId: number;
+  generation: number;
+  prNumber: number;
+  head: string;
+  reason: string;
+  evidence?: string | undefined;
+  target?:
+    | {
+        id: number;
+        generation: number;
+        prNumber: number;
+        head: string;
+      }
+    | undefined;
+  coverage?: readonly unknown[] | undefined;
+  humanOnly?: string | undefined;
+}
+
+export type AcceptanceVerdictCheck =
+  | { ok: true; action: AcceptanceVerdictAction; coverage?: AcceptanceCoverage[] }
+  | { ok: false; why: string };
+
+const sameAcceptanceIdentity = (
+  row: AcceptanceDutyIdentityView,
+  input: { id: number; generation: number; prNumber: number; head: string },
+) =>
+  row.id === input.id &&
+  row.generation === input.generation &&
+  row.prNumber === input.prNumber &&
+  row.head === input.head;
+
+/** 验收责任裁决的纯白名单：不读库、不读时钟，精确身份和证据先于 DB CAS。 */
+export function checkAcceptanceVerdict(
+  source: AcceptanceDutyIdentityView,
+  target: AcceptanceDutyIdentityView | undefined,
+  verdict: RawAcceptanceVerdict,
+): AcceptanceVerdictCheck {
+  if (!['settle', 'supersede', 'leave'].includes(verdict.action))
+    return { ok: false, why: `验收裁决动作「${verdict.action}」不在白名单里` };
+  if (
+    verdict.dutyId !== source.id ||
+    verdict.generation !== source.generation ||
+    verdict.prNumber !== source.prNumber ||
+    verdict.head !== source.head
+  )
+    return { ok: false, why: '验收责任的 id、代次、PR 或 head 与现读不符' };
+  if (!verdict.reason.trim()) return { ok: false, why: '验收裁决必须写理由' };
+  if (verdict.action === 'leave') {
+    if (!verdict.humanOnly?.trim()) return { ok: false, why: 'leave 必须写明只有创始人能提供的证据' };
+    return { ok: true, action: 'leave' };
+  }
+  if (!verdict.evidence?.trim()) return { ok: false, why: '验收收口必须写非空证据' };
+  if (verdict.action === 'settle') {
+    if (source.mergeCommit === null) return { ok: false, why: 'PR 没有合并回执，不能结清验收责任' };
+    return { ok: true, action: 'settle' };
+  }
+  if (!target || !verdict.target) return { ok: false, why: 'supersede 必须指向已读到的目标责任行' };
+  if (!sameAcceptanceIdentity(target, verdict.target))
+    return { ok: false, why: 'supersede 的目标 id、代次、PR 或 head 与现读不符' };
+  if (target.id === source.id) return { ok: false, why: 'supersede 不能指向自己' };
+  if (
+    target.repo !== source.repo ||
+    target.issueNumber !== source.issueNumber ||
+    target.prNumber !== source.prNumber
+  )
+    return { ok: false, why: 'supersede 的目标必须是同仓同单同一个 PR' };
+  if (!verdict.coverage || verdict.coverage.length === 0)
+    return { ok: false, why: 'supersede 必须逐条写 coverage' };
+  const coverage = parseAcceptanceCoverage(verdict.coverage);
+  if (!coverage) return { ok: false, why: 'supersede 的 coverage 格式不对或没有覆盖源验收项' };
+  return { ok: true, action: 'supersede', coverage };
 }
 
 function defaultByKind(

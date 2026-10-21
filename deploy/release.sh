@@ -734,7 +734,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
 RELEASE_PNPM_ENV=(pnpm_config_enable_global_virtual_store=false)
 RELEASE_PNPM_INSTALL=(install --frozen-lockfile --package-import-method=copy --reporter=append-only)
 RELEASE_PNPM_WEB_BUILD=(--filter ./packages/web run build)
-# 前端构建时预载的只读探针（#3491）：给预渲染发往本机的那个请求打时间点和进程 CPU 用量，见 deploy/lib/prerender-trace.mjs。
+# 前端构建时预载的只读探针（#3491、#3494）：给预渲染发往本机的 GET / 打时间点和进程资源读数（只打固定文字和数字），见 deploy/lib/prerender-trace.mjs。
 # release.sh（build_web）和 CI 的 release-smoke.sh 都从这里读；老提交里没有这个文件就不带（预载一个不存在的文件会让每个 node 进程起不来）。
 RELEASE_WEB_TRACE=deploy/lib/prerender-trace.mjs
 web_build_extra_env() { # 代码目录：把探针放进 BUILD_EXTRA_ENV（构建命令的额外环境变量，跑完由调用方清空）
@@ -960,8 +960,9 @@ build_web() { # 临时目录 日志
       log_tail "$log" 60
       if grep -aq 'Prerender: Request' -- "$log"; then
         echo "  ! 预渲染请求：@react-router/dev 固定 10 秒不回就报错、不重试（dist/vite.js prerender 的 timeout 默认 10000、retryCount 0）。" \
-          "请求和 vite preview 服务在同一个 node 进程里，进程拿不到 CPU 或被换出时整个进程一起停；对照上面的时间点和前后资源读数，" \
-          "分清是没连上、连上没回，还是进程自己用掉的 CPU 远少于墙钟（被抢占）"
+          "请求和 vite preview 服务在同一个 node 进程里；对照上面的时间点和前后资源读数，分清是没连上、连上没回，还是响应来了但慢。" \
+          "进程自己用掉的 CPU 和墙钟的比例只是读数：等 I/O 或正常等待也会让 CPU 远少于墙钟，不能单凭它断定 CPU 饥饿、被抢占或别的根因；" \
+          "要结合 PSI（/proc/pressure）、事件循环停顿、上下文切换和各阶段等了多久一起判断"
       fi
       red "驾驶舱前端构建失败（没切版本）：$(web_build_why "$log")"
       return 1
