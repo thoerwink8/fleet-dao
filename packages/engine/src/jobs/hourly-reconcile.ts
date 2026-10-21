@@ -239,9 +239,10 @@ function durationMs(deps: HourlyReconcileJobDeps, started: number): number | und
 async function markStep(
   deps: HourlyReconcileJobDeps,
   runId: number,
-  step: HourlyReconcileStep,
+  step: string,
   phase: StepPhase,
   ms?: number,
+  persistOnly = false,
 ): Promise<void> {
   // 见证只是诊断：写不进不能让这一步（或它真正的报错）变样，记一条日志；这一行的见证停在上一笔，不假装更新过
   try {
@@ -254,6 +255,8 @@ async function markStep(
       error: errMessage(err),
     });
   }
+  // 工作树里的子调用只写持久见证：控制台那条步骤轨迹（上面的必经步骤）保持原样，不被每棵树每条命令灌满
+  if (persistOnly) return;
   const word =
     phase === 'start' ? '开始' : phase === 'end' ? '结束' : phase === 'failed' ? '失败' : '缺省跳过';
   const fields: Record<string, unknown> = { runId, step, phase };
@@ -264,17 +267,25 @@ async function markStep(
 async function runStep<T>(
   deps: HourlyReconcileJobDeps,
   runId: number,
-  step: HourlyReconcileStep,
+  step: string,
   fn: () => Promise<T>,
+  persistOnly = false,
 ): Promise<T> {
-  await markStep(deps, runId, step, 'start');
+  await markStep(deps, runId, step, 'start', undefined, persistOnly);
   const started = deps.now().getTime();
   try {
     const value = await fn();
-    await markStep(deps, runId, step, returnedFailure(value) ? 'failed' : 'end', durationMs(deps, started));
+    await markStep(
+      deps,
+      runId,
+      step,
+      returnedFailure(value) ? 'failed' : 'end',
+      durationMs(deps, started),
+      persistOnly,
+    );
     return value;
   } catch (err) {
-    await markStep(deps, runId, step, 'failed', durationMs(deps, started));
+    await markStep(deps, runId, step, 'failed', durationMs(deps, started), persistOnly);
     throw err;
   }
 }
@@ -287,6 +298,57 @@ async function skipStep(
   await markStep(deps, runId, step, 'skip');
 }
 
+/**
+ * 工作树这一步里每个会碰外部（子进程、磁盘、库）的调用各留开始/结束/失败的持久见证，步骤名 worktrees.<调用>.<相对根的树>。
+ * 33304 这类只停在 worktrees 开始、看不出卡在哪棵树的哪条命令：最后一笔只有开始的，就是还没回来的那一个。
+ * 只包一层、不改返回值和报错，也不碰 sweepWorktrees 的判据；步骤名只含相对路径（规整成库里认的字符、截到 128）。
+ * 这只补在途证据，不证明原中断根因。
+ */
+export function witnessWorktreeCalls(deps: HourlyReconcileJobDeps, runId: number): HourlyReconcileJobDeps {
+  const name = (op: string, dir?: string): string => {
+    const rel =
+      dir === undefined ? '' : dir.startsWith(`${deps.root}/`) ? dir.slice(deps.root.length + 1) : dir;
+    const tag = rel.replace(/[^A-Za-z0-9._-]+/g, '.').replace(/^\.+/, '');
+    return `worktrees.${op}${tag ? `.${tag}` : ''}`.slice(0, 128);
+  };
+  // 只写持久见证（schedule_runs），不进控制台步骤轨迹
+  const witness = <T>(step: string, fn: () => Promise<T>): Promise<T> => runStep(deps, runId, step, fn, true);
+  const wrapped: HourlyReconcileJobDeps = {
+    ...deps,
+    listDir: (dir) => witness(name('list-dir', dir), () => deps.listDir(dir)),
+    ownerOf: (dir) => witness(name('owner-of', dir), () => deps.ownerOf(dir)),
+    leftovers: (dir, user, known, scratch) =>
+      witness(name('leftovers', dir), () => deps.leftovers(dir, user, known, scratch)),
+    remove: (dir) => witness(name('remove', dir), () => deps.remove(dir)),
+    keepShots: (dir, user, at) => witness(name('keep-shots', dir), () => deps.keepShots(dir, user, at)),
+    // 判树有没有人在用、报撤和树有关的提醒：库和 Temporal 的口子，卡住时一样要看得出是哪一个
+    issue: (ref) =>
+      witness(name('issue', `${ref.owner}_${ref.name}/${ref.issueNumber}`), () => deps.issue(ref)),
+    prHeads: (ref) =>
+      witness(name('pr-heads', `${ref.owner}_${ref.name}/${ref.branch}`), () => deps.prHeads(ref)),
+    subtaskTrees: (ids) => witness(name('subtask-trees'), () => deps.subtaskTrees(ids)),
+    openSessions: () => witness(name('open-sessions'), () => deps.openSessions()),
+    workflows: {
+      state: (id) => witness(name('workflow-state', id), () => deps.workflows.state(id)),
+      view: (id) => deps.workflows.view(id),
+    },
+    alerts: {
+      ...deps.alerts,
+      byKey: (key) => witness(name('alert-by-key', key), () => deps.alerts.byKey(key)),
+      resolve: (input) => witness(name('alert-resolve', input.dedupeKey), () => deps.alerts.resolve(input)),
+    },
+    repos: () => witness(name('repos'), () => deps.repos()),
+  };
+  const { cleanupNamespace, size, lastSessions, mirrorBytes } = deps;
+  if (cleanupNamespace) wrapped.cleanupNamespace = () => witness(name('cleanup-namespace'), cleanupNamespace);
+  if (size) wrapped.size = (dir, user) => witness(name('size', dir), () => size(dir, user));
+  if (lastSessions) wrapped.lastSessions = () => witness(name('last-sessions'), lastSessions);
+  if (mirrorBytes)
+    wrapped.mirrorBytes = (repo) =>
+      witness(name('mirror-bytes', `${repo.owner}_${repo.name}`), () => mirrorBytes(repo));
+  return wrapped;
+}
+
 async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<ScheduleResult> {
   // 工作树先跑（它撤的「工作树没收掉」，提醒那部分就不再为它再推）；两部分各列一次没处理的提醒
   let before: AlertRow[] | null = null;
@@ -297,7 +359,9 @@ async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<Sched
       error: errMessage(err),
     });
   }
-  const trees = await runStep(deps, runId, 'worktrees', () => sweepWorktrees(deps, before));
+  const trees = await runStep(deps, runId, 'worktrees', () =>
+    sweepWorktrees(witnessWorktreeCalls(deps, runId), before),
+  );
   const pendingCleanup = deps.pendingCleanup;
   if (pendingCleanup) {
     try {
