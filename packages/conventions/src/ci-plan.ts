@@ -18,6 +18,7 @@ import { type Reuse, reuseOf } from './main-reuse.ts';
 import { crossPackageTargets, packageOffSurface } from './package-surface.ts';
 import type { RepoView } from './repo.ts';
 import {
+  isHeavy,
   type Packed,
   packTests,
   TEMPORAL_MARKER,
@@ -915,6 +916,12 @@ function testsProblem(plan: CiPlan): string | undefined {
     }
     if (labels.has(x.label)) return `两台测试同名：${x.label}`;
     labels.add(x.label);
+    // 重负载多进程文件必须独占一台（#3469）：和别的文件同台并行跑，会把别的文件的 5 秒用例饿超时
+    if (x.files.some(isHeavy)) {
+      const others = x.files.filter((f) => !isHeavy(f));
+      if (others.length > 0)
+        return `${x.label}：重负载多进程文件和别的测试同台（${others.slice(0, 3).join('、')}）`;
+    }
     for (const f of x.files) {
       if (seen.has(f)) return `${f} 分到了两台`;
       seen.add(f);
