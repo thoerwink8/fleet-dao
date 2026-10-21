@@ -708,17 +708,35 @@ describe('real/park-triage', () => {
     expect(changed.left[0]?.why).toContain(`原失败：${TIMEOUT_WHY}`);
     expect(world.starts).toHaveLength(0);
     expect(world.signals).toHaveLength(1);
-
+    // 身份变了不会再变回来：下一轮不再沿这条意图另起，提醒留着。
     gen1.runId = 'run-1';
-    world.execs.set(GEN2, { runId: 'run-x', status: 'RUNNING' });
+    const afterChangedSessions: unknown[] = [];
+    const afterChanged = await triageParkedTasks(schedule(world, task.id, afterChangedSessions, false));
+    expect(afterChanged.acted).toEqual([]);
+    expect(afterChangedSessions).toHaveLength(0);
+    expect(world.starts).toHaveLength(0);
+    expect(world.signals).toHaveLength(1);
+    expect((await commanderNotice())?.body).toContain('执行身份变了');
+
+    await resetTestDb(t);
+    await registerScheduledJobs(t.db, [PARK_TRIAGE_JOB]);
+    const occupiedTask = await seedTask();
+    const occupiedWorld = clockedTemporal();
+    await triageParkedTasks(schedule(occupiedWorld, occupiedTask.id, [], true));
+    const occupiedGen1 = occupiedWorld.execs.get(GEN1);
+    if (!occupiedGen1) throw new Error('上一代不在假 Temporal 里');
+    occupiedGen1.status = 'TERMINATED';
+    occupiedWorld.execs.set(GEN2, { runId: 'run-x', status: 'RUNNING' });
     const occupiedSessions: unknown[] = [];
-    const occupied = await triageParkedTasks(schedule(world, task.id, occupiedSessions, false));
+    const occupied = await triageParkedTasks(
+      schedule(occupiedWorld, occupiedTask.id, occupiedSessions, false),
+    );
     expect(occupied.left[0]?.why).toContain('旧代已终态、新代启动失败');
     expect(occupied.left[0]?.why).toContain('已经有记录');
     expect(occupied.left[0]?.why).toContain(`原失败：${TIMEOUT_WHY}`);
     expect(occupied.left[0]?.why).not.toContain('新代已确认启动');
-    expect(world.starts).toHaveLength(0);
-    expect(world.signals).toHaveLength(1);
+    expect(occupiedWorld.starts).toHaveLength(0);
+    expect(occupiedWorld.signals).toHaveLength(1);
     expect(runningSessions).toHaveLength(0);
     expect(missedSessions).toHaveLength(0);
     expect(changedSessions).toHaveLength(0);
