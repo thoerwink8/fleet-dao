@@ -1,6 +1,7 @@
 // 法国指挥官看门狗和 attention / 每日简报共用的停下任务清单（queries/commander.ts）：
 // 指挥官自己留给人的提醒（commander:<工作流>:park:<第几次>）不是停点来源，已认领的停点照样算「指挥官处理」。
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { maintainAcceptanceCandidates } from '../src/queries/acceptance-candidates.ts';
 import {
   commanderStalledSummary,
   commanderSummaryLine,
@@ -167,6 +168,7 @@ describe('listCommanderAcceptanceTasks', () => {
       },
     ]);
 
+    await maintainAcceptanceCandidates(t.db);
     const got = await listCommanderAcceptanceTasks(t.db, new Date('2026-10-21T10:30:00Z'));
     expect(got).toHaveLength(1);
     expect(got[0]).toMatchObject({

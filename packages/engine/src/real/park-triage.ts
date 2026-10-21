@@ -17,6 +17,7 @@ import {
   listCommanderAcceptanceTasks,
   listIntakeRepos,
   listStalledEngineTasks,
+  maintainAcceptanceCandidates,
   readOpenParkAlert,
   readParkAlertBody,
   readSettingValue,
@@ -693,6 +694,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     },
     tasks: () => listStalledEngineTasks(w.db),
     async acceptanceTasks() {
+      await maintainAcceptanceCandidates(w.db);
       const candidates = await listCommanderAcceptanceTasks(w.db, new Date(now().getTime() - 30 * 60_000));
       const open: typeof candidates = [];
       for (const candidate of candidates) {

@@ -208,6 +208,9 @@ export const runs = pgTable(
     // 给组合外键用：追问（asks）挂的会话必须属于同一个需求。
     unique('runs_task_id_id_unique').on(t.taskId, t.id),
     index('runs_task_idx').on(t.taskId, t.createdAt),
+    index('runs_task_workflow_latest_idx')
+      .on(t.taskId, t.startedAt.desc(), t.createdAt.desc())
+      .where(sql`${t.workflowId} is not null`),
     index('runs_segment_created_idx').on(t.segment, t.createdAt),
     index('runs_workflow_idx').on(t.workflowId),
     index('runs_pr_idx').on(t.prNumber),

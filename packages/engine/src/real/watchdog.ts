@@ -27,6 +27,7 @@ import {
   listCommanderStalledTasks,
   listRunningEngineTasks,
   listStalledEngineTasks,
+  maintainAcceptanceCandidates,
   mergeStallFacts,
   openAlertsByPrefix,
   poolRouteFacts,
@@ -321,6 +322,7 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
       commander: {
         async tasks(at): Promise<CommanderWatchTask[]> {
           const stalled = await listCommanderStalledTasks(w.db);
+          await maintainAcceptanceCandidates(w.db);
           const acceptance = await listCommanderAcceptanceTasks(w.db, new Date(at.getTime() - 30 * 60_000));
           const audits = await commanderAuditRows(w.db, new Date(0));
           const tally = new Map<string, number>();
