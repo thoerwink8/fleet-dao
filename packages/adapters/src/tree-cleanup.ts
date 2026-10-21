@@ -188,7 +188,7 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
       go();
     };
     const onAbort = () => {
-      finish(() => reject(waitFailure(wait, '已取消', '', '', wait.exitCode)));
+      finish(() => reject(waitFailure(wait, '已取消', '', '', null)));
     };
     TreeHelperError.pending = wait;
     remember(wait);
@@ -208,9 +208,10 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
           finish(() => {
             if (error) {
               const errno = error as NodeJS.ErrnoException & { killed?: boolean };
-              const exitCode = typeof errno.code === 'number' ? errno.code : wait.exitCode;
+              // 错误对象上的 exitCode 照旧只认 execFile 报的退出码；exit 事件看到的码只写进原因文字。
+              const exitCode = typeof errno.code === 'number' ? errno.code : null;
               if (exitCode !== null) wait.exitCode = exitCode;
-              return reject(waitFailure(wait, waitCause(errno, exitCode), stderr, stdout, exitCode));
+              return reject(waitFailure(wait, waitCause(errno, wait.exitCode), stderr, stdout, exitCode));
             }
             try {
               const value: unknown = JSON.parse(stdout);
@@ -221,7 +222,8 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
               resolve(row);
             } catch (parseError) {
               const reason = parseError instanceof Error ? parseError.message : '解析失败';
-              reject(waitFailure(wait, `回执读失败：${clip(reason, 200)}`, '', '', wait.exitCode));
+              // 退出码 0 但回执坏不是进程失败：exitCode 仍是 null，removeWorktreeDir 才照旧报 failed 而不是退出码 0。
+              reject(waitFailure(wait, `回执读失败：${clip(reason, 200)}`, '', '', null));
             }
           });
         },
@@ -235,7 +237,7 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
       Promise.resolve()
         .then(() => options.beforeSpawn?.())
         .then(startChild, () => {
-          finish(() => reject(waitFailure(wait, '失败', '', '', wait.exitCode)));
+          finish(() => reject(waitFailure(wait, '失败', '', '', null)));
         });
     } else {
       startChild();
