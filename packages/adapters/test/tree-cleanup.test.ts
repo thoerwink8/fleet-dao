@@ -78,20 +78,28 @@ describe('cleanup-status 原帮手端口的命名空间事实', () => {
   // Actions run 39492760116 attempt 1，job test (3/8)，vitest 默认 5000ms。
   // 那次日志没有启动/协议读取/退出/异步收尾。本用例再通过，也不能把当时卡在哪一段写成已经知道。
   it('正常空/已结记录不进pending；未结记录原样保留', async () => {
+    // 三步各起两次帮手（capabilities + cleanup-status）。超时只报一个阶段分不清是一次卡死还是六次都慢，
+    // 所以连第几步、哪个动作、这一段等了多久、整条用例用了多久一起报。
+    const begun = Date.now();
+    let step = '';
     onTestFailed(({ task }) => {
-      const stage = TreeHelperError.pending?.stage;
-      if (!stage) return;
+      const now = TreeHelperError.pending;
+      if (!now) return;
       const timedOut = (task.result?.errors ?? []).some((error) => /timed out|5000/.test(shown(error)));
       if (!timedOut) return;
+      const at = Date.now();
       throw new Error(
-        `帮手等待阶段=${stage}。原首红 head fc1c891ef0d595c170e35cab1920bf814fb179aa、run 39492760116、attempt 1、test (3/8) 的 5000ms 没有这一段，当时卡在哪一段仍未知`,
+        `帮手等待：步骤=${step} 动作=${now.action} 阶段=${now.stage} 本段已等${at - now.stageAt}ms 本次调用${at - now.startedAt}ms 用例共${at - begun}ms。原首红 head fc1c891ef0d595c170e35cab1920bf814fb179aa、run 39492760116、attempt 1、test (3/8) 的 5000ms 没有这些，当时卡在哪一段仍未知`,
       );
     });
+    step = '1/3 读空';
     reply();
     expect(await readCleanupNamespace(root, options)).toEqual([]);
     const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
     reply({ rows });
+    step = '2/3 读未结';
     expect(await readCleanupNamespace(root, options)).toEqual(rows);
+    step = '3/3 cleanupStatus';
     expect(await cleanupStatus(options)).toEqual(rows);
   });
 
@@ -113,6 +121,8 @@ describe('cleanup-status 原帮手端口的命名空间事实', () => {
     reply();
     process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT = '1';
     await expect(failedHelper()).rejects.toThrow('退出码 1');
+    // 先过了 capabilities，失败要记在真正退出非 0 的 cleanup-status 上。
+    await expect(failedHelper()).rejects.toThrow(/动作=cleanup-status 等待阶段=\S+ 本段已等\d+ms 共\d+ms/);
     delete process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT;
     reply({ truncated: true });
     await expect(cleanupStatus(options)).rejects.toThrow('不完整');
@@ -156,12 +166,12 @@ describe('帮手等待阶段', () => {
     );
     try {
       const deadline = Date.now() + 4_000;
-      let reached = false;
+      let reached: NonNullable<typeof TreeHelperError.pending> | null = null;
       while (Date.now() < deadline) {
         const now = TreeHelperError.pending;
         const started = stage !== '启动' || (now?.spawned === true && now.stdoutBytes === 0);
         if (now?.stage === stage && started) {
-          reached = true;
+          reached = now;
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 15));
@@ -169,9 +179,12 @@ describe('帮手等待阶段', () => {
       if (!reached) {
         throw new Error(`4 秒内没有进入等待阶段=${stage}，停在 ${TreeHelperError.pending?.stage ?? '无'}`);
       }
+      // 假帮手对每个动作都停，第一次就是 capabilities；进入这一段的时刻不早于调用开始。
+      expect(reached.action).toBe('capabilities');
+      expect(reached.stageAt).toBeGreaterThanOrEqual(reached.startedAt);
       stop.abort();
       const error = await pending;
-      expect(shown(error)).toContain(`等待阶段=${stage}`);
+      expect(shown(error)).toMatch(new RegExp(`动作=capabilities 等待阶段=${stage} 本段已等\\d+ms 共\\d+ms`));
       expect(shown(error)).not.toContain('fake-scope-helper');
       expect(shown(error)).not.toContain(process.execPath);
     } finally {

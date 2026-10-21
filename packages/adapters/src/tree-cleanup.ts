@@ -29,7 +29,12 @@ export class TreeHelperError extends Error {
    * 测试超时钩子只读阶段名，不另开巡检出口。
    */
   static pending: {
+    /** 协议动作名（capabilities、cleanup-status…），不是命令行。 */
+    action: string;
     stage: HelperWaitStage;
+    /** 这一次调用开始、进入当前这一段的时刻（Date.now()）。 */
+    startedAt: number;
+    stageAt: number;
     spawned: boolean;
     stdoutBytes: number;
     stdoutEnded: boolean;
@@ -43,13 +48,21 @@ export class TreeHelperError extends Error {
 }
 
 interface HelperWaitSeen {
+  action: string;
   spawned: boolean;
   stdoutBytes: number;
   stdoutEnded: boolean;
   exited: boolean;
   closed: boolean;
   stage: HelperWaitStage;
+  startedAt: number;
+  stageAt: number;
   exitCode: number | null;
+}
+
+/** 只留协议动作这一个词；认不出的不原样写进错误。 */
+function helperAction(arg: string | undefined): string {
+  return arg && /^[a-z][a-z-]{0,31}$/.test(arg) ? arg : '其它';
 }
 
 /** 父进程眼里还在等哪一段。进程已退出但标准输出没关，算异步收尾，不能当成读完。 */
@@ -88,15 +101,19 @@ function waitFailure(
   exitCode: number | null,
 ): TreeHelperError {
   const tail = wait.stdoutEnded ? '标准输出已结束' : '标准输出未结束';
+  const now = Date.now();
   return new TreeHelperError(
-    `受管删树未完成：等待阶段=${wait.stage} ${tail} ${cause} ${clip(stderr, 1000)} ${clip(stdout, 2000)}`,
+    `受管删树未完成：动作=${wait.action} 等待阶段=${wait.stage} 本段已等${now - wait.stageAt}ms 共${now - wait.startedAt}ms ${tail} ${cause} ${clip(stderr, 1000)} ${clip(stdout, 2000)}`,
     exitCode,
   );
 }
 
 function remember(wait: HelperWaitSeen): void {
   // 只改这一次调用自己的对象。落地后 pending 已清空，退出/关闭事件不能再把它挂回去。
-  wait.stage = helperWaitStage(wait);
+  const stage = helperWaitStage(wait);
+  if (stage === wait.stage) return;
+  wait.stage = stage;
+  wait.stageAt = Date.now();
 }
 
 function watchHelper(child: ChildProcess, wait: HelperWaitSeen): void {
@@ -135,13 +152,17 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
     options.helper ?? '/usr/local/sbin/fleet-agent-scope',
     ...args,
   ];
+  const startedAt = Date.now();
   const wait: HelperWaitSeen = {
+    action: helperAction(args[0]),
     spawned: false,
     stdoutBytes: 0,
     stdoutEnded: false,
     exited: false,
     closed: false,
     stage: '启动',
+    startedAt,
+    stageAt: startedAt,
     exitCode: null,
   };
   return new Promise((resolve, reject) => {
