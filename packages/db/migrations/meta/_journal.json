@@ -708,6 +708,13 @@
       "when": 1792470656212,
       "tag": "0100_faithful_riptide",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1792622523483,
+      "tag": "0101_acceptance_candidates",
+      "breakpoints": true
     }
   ]
 }
