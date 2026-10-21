@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { WorkflowHandle } from '@temporalio/client';
-import { describe, expect, it } from 'vitest';
-import { createFakeWorld } from '../src/fakes.ts';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createFakeWorld, type FakeWorld } from '../src/fakes.ts';
 import { PortError } from '../src/ports.ts';
 import type { PushHandbackPreflight, PushHandbackRequest } from '../src/push-handback.ts';
 import { requestPushHandback } from '../src/push-handback-client.ts';
@@ -13,9 +14,33 @@ import {
   taskContinueSignal,
 } from '../src/task-contract.ts';
 import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
+import { DiagnosticOutput, SyntheticHistoryDiagnostics } from './history-diagnostics.ts';
 import { scripted } from './task-script.ts';
 
-const environment = useEnv();
+// 只给 worker replacement 这一条接既有合成假端口取证。钩子先于 useEnv 起 50 秒 watchdog。
+// 失败或 watchdog 时，阶段写进该 run 的 history/describe 帧；通过不读历史。
+const WORKER_REPLACEMENT =
+  'same run reconstructs business receipts after worker replacement, then accepts one new request';
+const output = new DiagnosticOutput();
+const testSha256 = createHash('sha256')
+  .update(readFileSync(new URL(import.meta.url)))
+  .digest('hex');
+let replacementDiagnostics: SyntheticHistoryDiagnostics | undefined;
+beforeEach((context) => {
+  replacementDiagnostics =
+    context.task.name === WORKER_REPLACEMENT
+      ? new SyntheticHistoryDiagnostics({
+          test: context.task.name,
+          testSha256,
+          output,
+          failed: () => context.task.result?.state === 'fail',
+        })
+      : undefined;
+});
+const environment = useEnv({
+  beforeTeardown: () => replacementDiagnostics?.finish() ?? Promise.resolve(),
+  teardown: (env) => (replacementDiagnostics ? replacementDiagnostics.closeEnvironment(env) : env.teardown()),
+});
 const success: PushHandbackPreflight = {
   outcome: 'natural-retired',
   head: 'a'.repeat(40),
@@ -42,7 +67,14 @@ function request(s: TaskStatus, id = 'request1'): PushHandbackRequest {
   if (!token) throw new Error('park token missing');
   return { version: 1, requestId: id, token, by: 'isolated-test', feedback: '修正写入工作流文件的交付' };
 }
-async function parked(h: WorkflowHandle) {
+// 先等假库写进停下再查。cache0 的工人每次查询都整段重放，从起头就每 50 毫秒查一次，负载下查询和真进度抢工人，
+// 20 秒走不到停下（replay/worker-replacement-3413/slow-parked-query.*；本机 accepted and ready 同样停在 implement）。
+// 已停过的再查，假库里已有停下，照旧直接轮询查询。
+async function parked(h: WorkflowHandle, w: FakeWorld) {
+  await w.until(
+    () => w.states.some((s) => s.phase === 'parked'),
+    'permission push park written to fake store',
+  );
   return pollQuery(
     () => h.query<TaskStatus>('taskStatus'),
     (s) => s.phase === 'parked' && s.waiting?.kind === 'human',
@@ -78,7 +110,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const s = await parked(h),
+        const s = await parked(h, w),
           r = request(s);
         const first = await requestPushHandback(h, r);
         expect(first.outcome).toBe('unknown');
@@ -89,7 +121,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
         expect(reads).toBe(1);
         expect(calls.segment).toHaveLength(1);
         expect(w.count('pushBranch')).toBe(1);
-        expect((await parked(h)).closedIssueClose?.token).toEqual(s.closedIssueClose?.token);
+        expect((await parked(h, w)).closedIssueClose?.token).toEqual(s.closedIssueClose?.token);
         await abandon(h);
       },
       { tasks },
@@ -124,7 +156,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const r = request(await parked(h));
+        const r = request(await parked(h, w));
         const result = requestPushHandback(h, r).then((x) => {
           settled = true;
           return x;
@@ -179,14 +211,14 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
             taskQueue,
             args: [task()],
           });
-          const result = requestPushHandback(h, request(await parked(h)));
+          const result = requestPushHandback(h, request(await parked(h, w)));
           await waitUntil(() => entered, 'trusted IO');
           if (control === 'continue') await h.signal(taskContinueSignal, { by: 'test' });
           else await h.signal(taskAbandonSignal, { by: 'test', reason: 'during IO' });
           read.resolve(success);
           expect((await result).outcome).toBe('stale');
           if (control === 'continue') {
-            await parked(h);
+            await parked(h, w);
             expect(calls.segment).toHaveLength(1);
             await abandon(h);
           } else expect(((await h.result()) as { outcome: string }).outcome).toBe('abandoned');
@@ -210,10 +242,10 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const s = await parked(h);
+        const s = await parked(h, w);
         expect((await requestPushHandback(h, request(s))).outcome).toBe('budget-held');
         expect(calls.segment).toHaveLength(1);
-        expect((await parked(h)).round).toBe(s.round);
+        expect((await parked(h, w)).round).toBe(s.round);
         expect(w.count('pushBranch')).toBe(1);
         await abandon(h);
       },
@@ -243,7 +275,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const result = requestPushHandback(h, request(await parked(h)));
+        const result = requestPushHandback(h, request(await parked(h, w)));
         await entered.promise;
         await h.signal(taskContinueSignal, { by: 'test' });
         round.resolve();
@@ -274,58 +306,88 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const s = await parked(h);
+        const s = await parked(h, w);
         expect(s.round).toBe(3);
         expect((await requestPushHandback(h, request(s))).outcome).toBe('budget-held');
         expect(reads).toBe(0);
         expect(calls.segment).toHaveLength(3);
-        expect((await parked(h)).round).toBe(3);
+        expect((await parked(h, w)).round).toBe(3);
         await abandon(h);
       },
       { tasks },
     );
   });
 
-  it('same run reconstructs business receipts after worker replacement, then accepts one new request', async () => {
+  it(WORKER_REPLACEMENT, async () => {
+    const diagnostics = replacementDiagnostics;
+    if (!diagnostics) throw new Error('diagnostics: worker replacement scope missing');
     const env = environment(),
       w = world(),
       { tasks, calls } = scripted(),
       taskQueue = `handback-${randomUUID()}`;
+    diagnostics.environment(env);
     let h: WorkflowHandle | undefined, r: PushHandbackRequest | undefined;
+    const runWorker = (fn: () => Promise<void>) =>
+      diagnostics.track(
+        withWorker(env, w, fn, {
+          tasks,
+          taskQueue,
+          maxCachedWorkflows: 0,
+          observeWorker: (worker, run, bundle) => diagnostics.worker(env, worker, run, bundle),
+        }),
+      );
     tasks.readPushHandbackPreflight = async () => ({ outcome: 'unknown', code: 'first_observation' });
-    await withWorker(
-      env,
-      w,
-      async () => {
-        h = await env.client.workflow.start('taskWorkflow', {
+    try {
+      diagnostics.mark('wait:first-worker:worker-start');
+      await runWorker(async () => {
+        diagnostics.mark('wait:first-worker:workflow-start');
+        h = await diagnostics.start(env, 'taskWorkflow', {
           workflowId: `handback-${randomUUID()}`,
           taskQueue,
           args: [task()],
         });
-        r = request(await parked(h));
+        // 先等假库写进停下，不发查询；停下之后才查一次拿凭据，停点断言照旧。cache0 的工人每次查询都整段重放，
+        // 从起头就每 50 毫秒查一次有两样毛病：一是查询撞上本地活动结果，core 强开新任务，
+        // 之后重放 TMPRL1100（replay/worker-replacement-3413/，la-query-split.test.ts 钉住，生产侧归 #3258）；
+        // 二是负载下查询的重放和真进度抢工人，20 秒还没走到停下（本机 run d8500003… 停在 implement，无失败事件）。
+        diagnostics.mark('wait:first-worker:parked-state');
+        await w.until(
+          () => w.states.some((s) => s.phase === 'parked'),
+          'permission push park written to fake store',
+        );
+        diagnostics.mark('wait:first-worker:parked-query');
+        r = request(await parked(h, w));
+        diagnostics.mark('wait:first-worker:handback-update');
         expect((await requestPushHandback(h, r)).outcome).toBe('unknown');
-      },
-      { tasks, taskQueue, maxCachedWorkflows: 0 },
-    );
-    tasks.readPushHandbackPreflight = async () => success;
-    await withWorker(
-      env,
-      w,
-      async () => {
-        const handle = h!,
-          original = r!;
+        diagnostics.mark('wait:first-worker:worker-stop');
+      });
+      diagnostics.mark('wait:replacement:worker-start');
+      tasks.readPushHandbackPreflight = async () => success;
+      await runWorker(async () => {
+        if (!h || !r) throw new Error('worker replacement handle missing');
+        const handle = h,
+          original = r;
+        diagnostics.mark('wait:replacement:reconstruct-update');
         expect((await requestPushHandback(handle, original)).outcome).toBe('unknown');
+        diagnostics.mark('wait:replacement:conflict-update');
         expect((await requestPushHandback(handle, { ...original, feedback: 'different' })).outcome).toBe(
           'conflict',
         );
+        diagnostics.mark('wait:replacement:new-request-update');
         expect(
           (await requestPushHandback(handle, { ...original, requestId: 'newObservation' })).outcome,
         ).toBe('handed_back');
+        diagnostics.mark('wait:replacement:second-segment');
         await waitUntil(() => calls.segment.length === 2, 'new bounded segment after worker replacement');
+        diagnostics.mark('wait:replacement:abandon-signal-and-result');
         await abandon(handle);
-      },
-      { tasks, taskQueue, maxCachedWorkflows: 0 },
-    );
+        diagnostics.mark('wait:replacement:worker-stop');
+      });
+    } catch (error) {
+      // finish 另报写出故障。这里先取证，原断言错误保持原对象。
+      await diagnostics.captureFailure().catch(() => undefined);
+      throw error;
+    }
   });
   it('future hold generation rejects immediately without preflight or a stranded terminal handler', async () => {
     const env = environment(),
@@ -345,7 +407,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const r = request(await parked(h));
+        const r = request(await parked(h, w));
         r.token = { ...r.token, generation: 2 };
         expect(await requestPushHandback(h, r)).toMatchObject({ outcome: 'stale', code: 'unsupported_hold' });
         expect(reads).toBe(0);
