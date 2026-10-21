@@ -207,6 +207,11 @@ export const INSTALLED_COPIES = [
     src: 'deploy/france/release-request',
     files: ['lib.mjs', 'session-wait.mjs', 'fleet-release-request.mjs'],
   },
+  {
+    dir: '/usr/local/lib/fleet-dao/footprint',
+    src: 'deploy/france/footprint',
+    files: ['fleet-footprint.mjs', 'dirs.json'],
+  },
 ];
 
 export const short = (sha) => (typeof sha === 'string' && sha ? sha.slice(0, 12) : '（没有）');

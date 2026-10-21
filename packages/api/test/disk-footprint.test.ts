@@ -1,237 +1,277 @@
-// 按目录的磁盘占用（#1985，disk-footprint.ts）：遍历文件按块算（和 du 一样：硬链接只算一次、不跟符号链接），
-// 读不了的子树记「不全」、整个目录读不到记 unread；库的大小走 SQL。测量器 10 分钟内只测一回、不在 5 秒那一回里等。
+// 按目录的磁盘占用（#1985、#3456，disk-footprint.ts）：法国上 root 的单元用 du 量好写进文件，这里读它。
+// 做完的判据（#3456 第 3 条）：这一回没量完时，给上次量成的大小和测量时间，不给「不到 1M」的下限；读不了的目录给明确原因。
+// 另核对：root 单元的目录清单（deploy/france/footprint/dirs.json）和登记表（vps-apps.ts）一致。
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { DiskFootprintSchema } from '@fleet-dao/shared';
 import { describe, expect, test } from 'vitest';
 import {
   createFootprintMeter,
   FOOTPRINT_EVERY_MS,
-  type FootprintFs,
-  measureDir,
-  measureFootprint,
+  FOOTPRINT_SIZES_FILE,
+  footprintFromSizes,
+  readDatabases,
+  readSizesFile,
 } from '../src/disk-footprint.ts';
-import type { VpsApp } from '../src/vps-apps.ts';
+import { VPS_APPS, type VpsApp } from '../src/vps-apps.ts';
 
-type Node =
-  | { kind: 'dir'; children: string[]; deny?: true }
-  | { kind: 'file'; blocks: number; ino?: number; nlink?: number }
-  | { kind: 'link' };
+const NOW = new Date('2026-10-21T03:00:00.000Z');
+const iso = (minutesAgo: number) => new Date(NOW.getTime() - minutesAgo * 60_000).toISOString();
 
-const err = (code: string, path: string) => Object.assign(new Error(`${code}: ${path}`), { code });
+const APPS: VpsApp[] = [
+  {
+    id: 'sessions',
+    name: 'AI 会话',
+    place: '/var/lib/fleet-work',
+    units: [],
+    dirs: ['/var/lib/fleet-work', '/home/fleet-agent-carpool', '/var/lib/daihuo'],
+    idleNote: 'x',
+  },
+  { id: 'postgres', name: '数据库', place: '/pg', units: [], dirs: [], databases: 'all', idleNote: 'x' },
+];
+const DB_UNREAD = { state: 'unread' as const, why: '这台后端没连数据库' };
 
-/** 一棵假的文件树：路径 → 节点；deny 的目录列不出（EACCES），不在表里的 ENOENT。 */
-function fakeFs(tree: Record<string, Node>, onLstat?: () => void): FootprintFs {
-  return {
-    async lstat(path) {
-      onLstat?.();
-      const n = tree[path];
-      if (!n) throw err('ENOENT', path);
-      if (n.kind === 'dir')
-        return { dir: true, link: false, bytes: 4096, dev: 1, ino: path.length, nlink: 2 };
-      if (n.kind === 'link')
-        return { dir: false, link: true, bytes: 0, dev: 1, ino: path.length + 1000, nlink: 1 };
-      return {
-        dir: false,
-        link: false,
-        bytes: n.blocks * 512,
-        dev: 1,
-        ino: n.ino ?? path.length + 5000,
-        nlink: n.nlink ?? 1,
-      };
-    },
-    async readDir(path) {
-      const n = tree[path];
-      if (!n) throw err('ENOENT', path);
-      if (n.kind !== 'dir') throw err('ENOTDIR', path);
-      if (n.deny) throw err('EACCES', path);
-      return n.children;
-    },
-  };
-}
+const entry = (path: string, over: Record<string, unknown> = {}) => ({
+  path,
+  bytes: 1000,
+  measuredAt: iso(5),
+  attemptedAt: iso(5),
+  tookMs: 1200,
+  skipped: 0,
+  error: null,
+  ...over,
+});
+const file = (dirs: unknown[], over: Record<string, unknown> = {}) =>
+  JSON.stringify({ schema: 1, measuredAt: iso(4), everyMs: FOOTPRINT_EVERY_MS, tookMs: 5000, dirs, ...over });
 
-const TREE: Record<string, Node> = {
-  '/srv/a': { kind: 'dir', children: ['x', 'sub', 'locked', 'ln', 'h1', 'h2'] },
-  '/srv/a/x': { kind: 'file', blocks: 8 },
-  '/srv/a/sub': { kind: 'dir', children: ['y'] },
-  '/srv/a/sub/y': { kind: 'file', blocks: 16 },
-  '/srv/a/locked': { kind: 'dir', children: [], deny: true },
-  '/srv/a/ln': { kind: 'link' },
-  // 同一个文件的两个硬链接：只算一次
-  '/srv/a/h1': { kind: 'file', blocks: 100, ino: 77, nlink: 2 },
-  '/srv/a/h2': { kind: 'file', blocks: 100, ino: 77, nlink: 2 },
+const GIB = 1024 ** 3;
+type Ok = Extract<ReturnType<typeof footprintFromSizes>, { state: 'ok' }>;
+const okOf = (fp: ReturnType<typeof footprintFromSizes>): Ok => {
+  if (fp.state !== 'ok') throw new Error(`应当是 ok：${JSON.stringify(fp)}`);
+  return fp;
 };
 
-describe('量一个目录', () => {
-  test('按块相加；读不了的子树记一棵、带第一棵的路径；符号链接不跟；硬链接只算一次', async () => {
-    const size = await measureDir('/srv/a', fakeFs(TREE), {
-      deadline: Number.POSITIVE_INFINITY,
-      seen: new Set(),
+describe('读 root 单元写的文件', () => {
+  test('量成了：每个目录给大小和各自的测量时间；整份过线上契约', () => {
+    const fp = footprintFromSizes({
+      apps: APPS,
+      file: file([
+        entry('/var/lib/fleet-work', { bytes: 9 * GIB }),
+        entry('/home/fleet-agent-carpool', { bytes: 3 * GIB, measuredAt: iso(6) }),
+        entry('/var/lib/daihuo', { bytes: 12345 }),
+      ]),
+      databases: DB_UNREAD,
+      now: NOW,
     });
-    // 目录 3 个 × 4096 + 文件 (8 + 16 + 100) × 512
-    expect(size).toEqual({
+    expect(DiskFootprintSchema.safeParse(fp).success).toBe(true);
+    const dirs = okOf(fp).dirs;
+    expect(dirs.map((d) => [d.path, d.size])).toEqual([
+      ['/var/lib/fleet-work', { state: 'ok', bytes: 9 * GIB, unreadTrees: 0, measuredAt: iso(5) }],
+      ['/home/fleet-agent-carpool', { state: 'ok', bytes: 3 * GIB, unreadTrees: 0, measuredAt: iso(6) }],
+      ['/var/lib/daihuo', { state: 'ok', bytes: 12345, unreadTrees: 0, measuredAt: iso(5) }],
+    ]);
+    expect(okOf(fp).measuredAt).toBe(iso(4));
+  });
+
+  test('【#3456 第 3 条】这一回没量完：返回上次量成的大小和测量时间，带原因，不返回下限', () => {
+    const fp = footprintFromSizes({
+      apps: APPS,
+      file: file([
+        entry('/var/lib/fleet-work', {
+          bytes: 9 * GIB,
+          measuredAt: iso(35),
+          attemptedAt: iso(5),
+          error: '超过 300 秒没量完，被停掉',
+        }),
+        entry('/home/fleet-agent-carpool'),
+        entry('/var/lib/daihuo'),
+      ]),
+      databases: DB_UNREAD,
+      now: NOW,
+    });
+    const work = okOf(fp).dirs[0]?.size;
+    expect(work).toEqual({
       state: 'ok',
-      bytes: 3 * 4096 + (8 + 16 + 100) * 512,
-      unreadTrees: 1,
-      unreadSample: '/srv/a/locked：EACCES: /srv/a/locked',
+      bytes: 9 * GIB,
+      unreadTrees: 0,
+      measuredAt: iso(35),
+      stale: { why: '超过 300 秒没量完，被停掉', attemptedAt: iso(5) },
     });
+    expect(JSON.stringify(fp)).not.toContain('capped');
+    expect(DiskFootprintSchema.safeParse(fp).success).toBe(true);
   });
 
-  test('【故意造出读不到】目录不在：unread「没有这个目录」，不是 0', async () => {
-    expect(
-      await measureDir('/nope', fakeFs(TREE), { deadline: Number.POSITIVE_INFINITY, seen: new Set() }),
-    ).toEqual({
+  test('读不了的目录：从没量成过给明确原因（不是 0、不是下限）；文件里没有的目录写清楚', () => {
+    const fp = footprintFromSizes({
+      apps: APPS,
+      file: file([
+        entry('/var/lib/fleet-work'),
+        entry('/home/fleet-agent-carpool', {
+          bytes: null,
+          measuredAt: null,
+          error: '没有这个目录（或这台机器上没有）',
+        }),
+      ]),
+      databases: DB_UNREAD,
+      now: NOW,
+    });
+    const [, home, daihuo] = okOf(fp).dirs;
+    expect(home?.size.state).toBe('unread');
+    expect(home?.size).toMatchObject({ why: expect.stringContaining('从没量成过：没有这个目录') });
+    expect(daihuo?.size).toMatchObject({
       state: 'unread',
-      why: '没有 /nope 这个目录（或后端看不见它）',
+      why: expect.stringContaining('清单里还没有 /var/lib/daihuo'),
     });
   });
 
-  test('【故意造出读不到】整个目录列不出（权限）：unread 带原因', async () => {
-    const got = await measureDir('/srv/a/locked', fakeFs(TREE), {
-      deadline: Number.POSITIVE_INFINITY,
-      seen: new Set(),
+  test('文件旧了（超过两个间隔没更新）：数照给、每个都标旧，原因写几分钟没更新和上次写在几点', () => {
+    const fp = footprintFromSizes({
+      apps: APPS,
+      file: file(
+        [entry('/var/lib/fleet-work'), entry('/home/fleet-agent-carpool'), entry('/var/lib/daihuo')],
+        {
+          measuredAt: iso(45),
+        },
+      ),
+      databases: DB_UNREAD,
+      now: NOW,
     });
-    expect(got).toEqual({ state: 'unread', why: '读不了 /srv/a/locked：EACCES: /srv/a/locked' });
+    for (const d of okOf(fp).dirs) {
+      expect(d.size).toMatchObject({
+        state: 'ok',
+        stale: { why: expect.stringContaining('已经 45 分钟没更新') },
+      });
+    }
   });
 
-  test('到时限没测完：数是下限、标 capped', async () => {
-    let t = 0;
-    const size = await measureDir(
-      '/srv/a',
-      fakeFs(TREE, () => (t += 1)),
-      {
-        deadline: 3,
-        seen: new Set(),
-        now: () => t,
-      },
-    );
-    expect(size).toMatchObject({ state: 'ok', capped: true });
+  test('文件不在、不是 JSON、格式认不出：整块 unread 带原因，不当 0、不当 pending', async () => {
+    const missing = await readSizesFile('/不存在/sizes.json');
+    expect(missing).toEqual({ error: expect.stringContaining('量磁盘的单元还没装或还没跑过') });
+    for (const f of [missing, 'not json', '{"schema":2}', file([entry('/x', { bytes: -1 })])]) {
+      const fp = footprintFromSizes({ apps: APPS, file: f, databases: DB_UNREAD, now: NOW });
+      expect(fp.state).toBe('unread');
+      if (fp.state === 'unread') expect(fp.why).toBeTruthy();
+      expect(DiskFootprintSchema.safeParse(fp).success).toBe(true);
+    }
+    expect(FOOTPRINT_SIZES_FILE).toBe('/var/lib/fleet-footprint/sizes.json');
+  });
+
+  test('定时任务近 24 小时的账原样带出；读不到的单元带原因', () => {
+    const timers = [
+      { unit: 'a.service', runs24h: 1422, cpuSeconds24h: 3193, peakMemoryBytes: 116 * 1024 * 1024 },
+      { unit: 'b.service', why: 'journalctl 超过 60 秒没读完，被停掉' },
+    ];
+    const fp = footprintFromSizes({
+      apps: APPS,
+      file: file(
+        [entry('/var/lib/fleet-work'), entry('/home/fleet-agent-carpool'), entry('/var/lib/daihuo')],
+        {
+          timers,
+        },
+      ),
+      databases: DB_UNREAD,
+      now: NOW,
+    });
+    expect(okOf(fp).timers).toEqual(timers);
+    expect(DiskFootprintSchema.safeParse(fp).success).toBe(true);
   });
 });
 
-const APPS: VpsApp[] = [
-  { id: 'a', name: 'A', place: '/srv/a', units: [], dirs: ['/srv/a', '/nope'], idleNote: 'x' },
-  {
-    id: 'db',
-    name: '数据库',
-    place: '/var/lib/postgresql',
-    units: [],
-    dirs: [],
-    databases: 'all',
-    idleNote: 'x',
-  },
-];
-
-describe('测一回', () => {
-  test('各目录照登记表量，库走 SQL 归到 databases: all 的应用名下；形状过 schema', async () => {
-    let t = 1_000;
-    const fp = await measureFootprint({
-      apps: APPS,
-      fs: fakeFs(TREE),
-      databases: async () => [
-        { name: 'fleet', bytes: 2_000_000 },
-        { name: 'locked', bytes: undefined },
-      ],
-      now: () => {
-        t += 10;
-        return new Date(t);
-      },
-    });
-    expect(DiskFootprintSchema.parse(fp)).toEqual(fp);
-    if (fp.state !== 'ok') throw new Error('该测成');
-    expect(fp.dirs.map((d) => [d.path, d.appId, d.size.state])).toEqual([
-      ['/srv/a', 'a', 'ok'],
-      ['/nope', 'a', 'unread'],
+describe('库的大小', () => {
+  test('每个库一行；没有 CONNECT 权限的单写没读到；查失败整块 unread', async () => {
+    const ok = await readDatabases(APPS, async () => [
+      { name: 'fleet', bytes: 100 },
+      { name: 'secret', bytes: undefined },
     ]);
-    expect(fp.databases).toEqual({
-      state: 'ok',
-      items: [
-        { name: 'fleet', appId: 'db', appName: '数据库', size: { state: 'ok', bytes: 2_000_000 } },
-        {
-          name: 'locked',
-          appId: 'db',
-          appName: '数据库',
-          size: { state: 'unread', why: '没有这个库的 CONNECT 权限，量不了' },
-        },
-      ],
-    });
-  });
-
-  test('【故意造出读不到】没连库 / 库查询抛错：databases 是 unread 带原因', async () => {
-    const none = await measureFootprint({ apps: APPS, fs: fakeFs(TREE), now: () => new Date(0) });
-    expect(none.state === 'ok' && none.databases).toEqual({
-      state: 'unread',
-      why: '这台后端没连数据库（开发用的内存版）',
-    });
-    const bad = await measureFootprint({
-      apps: APPS,
-      fs: fakeFs(TREE),
-      databases: async () => {
-        throw new Error('permission denied for function pg_database_size');
-      },
-      now: () => new Date(0),
-    });
-    expect(bad.state === 'ok' && bad.databases).toEqual({
-      state: 'unread',
-      why: '库的大小没查成：permission denied for function pg_database_size',
-    });
+    expect(ok.state).toBe('ok');
+    if (ok.state === 'ok') {
+      expect(ok.items[0]?.size).toEqual({ state: 'ok', bytes: 100 });
+      expect(ok.items[1]?.size).toMatchObject({ state: 'unread' });
+    }
+    expect(
+      await readDatabases(APPS, async () => {
+        throw new Error('连不上');
+      }),
+    ).toEqual({ state: 'unread', why: '库的大小没查成：连不上' });
+    expect((await readDatabases(APPS, undefined)).state).toBe('unread');
   });
 });
 
 describe('测量器', () => {
-  test('间隔写死：10 分钟', () => {
-    expect(FOOTPRINT_EVERY_MS).toBe(10 * 60_000);
-  });
-
-  test('还没测过是 pending；戳一下才在后台测，测完 latest 给结果；10 分钟内再戳不再测', async () => {
-    let runs = 0;
-    let t = 0;
-    let release: () => void = () => {};
+  const wait = () => new Promise((r) => setTimeout(r, 5));
+  test('还没读过是 pending；读一回后给结果；30 秒内不重读；库 10 分钟才查一回', async () => {
+    let t = NOW.getTime();
+    let reads = 0;
+    let dbCalls = 0;
     const meter = createFootprintMeter({
-      measure: async () => {
-        runs += 1;
-        await new Promise<void>((r) => {
-          release = r;
-        });
-        return {
-          state: 'ok',
-          measuredAt: new Date(t).toISOString(),
-          everyMs: FOOTPRINT_EVERY_MS,
-          tookMs: 1,
-          dirs: [],
-          databases: { state: 'ok', items: [] },
-        };
-      },
+      apps: APPS,
       now: () => new Date(t),
+      read: async () => {
+        reads += 1;
+        return file([entry('/var/lib/fleet-work')]);
+      },
+      databases: async () => {
+        dbCalls += 1;
+        return [{ name: 'fleet', bytes: 1 }];
+      },
     });
-    expect(meter.latest()).toEqual({ state: 'pending', why: '还没测过（有页面开着才测，每 10 分钟一次）' });
+    expect(meter.latest().state).toBe('pending');
     meter.poke();
-    expect(meter.latest()).toEqual({
-      state: 'pending',
-      why: '正在测第一回（要遍历文件，测完就有；之后每 10 分钟测一次）',
-    });
-    // 测着的时候再戳不另起
-    meter.poke();
-    expect(runs).toBe(1);
-    release();
-    await new Promise((r) => setTimeout(r, 0));
+    await wait();
     expect(meter.latest().state).toBe('ok');
-    t = FOOTPRINT_EVERY_MS - 1;
     meter.poke();
-    expect(runs).toBe(1);
-    t = FOOTPRINT_EVERY_MS + 1;
+    await wait();
+    expect(reads).toBe(1);
+    t += 31_000;
     meter.poke();
-    expect(runs).toBe(2);
-    release();
+    await wait();
+    expect(reads).toBe(2);
+    expect(dbCalls).toBe(1);
+    t += FOOTPRINT_EVERY_MS;
+    meter.poke();
+    await wait();
+    expect(dbCalls).toBe(2);
   });
 
-  test('【故意造出失败】测量抛错：还没有结果时 pending 写明没测成，不当成 0', async () => {
+  test('读文件抛了：这一回是 unread 带原因，不卡住、不留旧的冒充新的', async () => {
     const meter = createFootprintMeter({
-      measure: async () => {
+      apps: APPS,
+      now: () => NOW,
+      read: async () => {
         throw new Error('炸了');
       },
-      now: () => new Date(0),
     });
     meter.poke();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(meter.latest()).toEqual({ state: 'pending', why: '上一回没测成：炸了（10 分钟后再测）' });
+    await wait();
+    const fp = meter.latest();
+    expect(fp).toMatchObject({ state: 'unread', why: expect.stringContaining('炸了') });
+  });
+});
+
+describe('root 单元的目录清单和登记表一致', () => {
+  const root = fileURLToPath(new URL('../../../', import.meta.url));
+  const manifest = JSON.parse(readFileSync(`${root}deploy/france/footprint/dirs.json`, 'utf8')) as {
+    schema: number;
+    dirs: string[];
+    timers: string[];
+  };
+  const dirs = VPS_APPS.flatMap((a) => a.dirs);
+  const timers = VPS_APPS.flatMap((a) => a.units.map((u) => u.name))
+    .filter((n) => n.endsWith('.timer'))
+    .map((n) => n.replace(/\.timer$/, '.service'));
+
+  test('dirs.json 的目录 = 登记表里所有应用的目录（同顺序）', () => {
+    expect(
+      manifest.dirs,
+      'deploy/france/footprint/dirs.json 的 dirs 要和 vps-apps.ts 里所有应用的 dirs 一样（france.sh 的自动档把它装给 root 的量磁盘单元）',
+    ).toEqual(dirs);
+  });
+
+  test('dirs.json 的 timers = 登记表里带 .timer 的单元对应的 .service', () => {
+    expect(
+      manifest.timers,
+      'deploy/france/footprint/dirs.json 的 timers 要和 vps-apps.ts 里带 .timer 的单元一致',
+    ).toEqual(timers);
+    expect(manifest.schema).toBe(1);
   });
 });

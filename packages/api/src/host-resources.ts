@@ -485,7 +485,7 @@ export function createHostResourceSampler(input: {
   now: () => Date;
   log?: Logger;
   everyMs?: number;
-  /** 按目录的磁盘占用（#1985）：给了就每回带上它最近一回；遍历在它自己那边跑，不在这一回里等。 */
+  /** 按目录的磁盘占用（#1985）：给了就每回带上它最近一回；读文件在它自己那边后台做，不在这一回里等。 */
   footprint?: FootprintSource;
 }): HostResourceSampler {
   const everyMs = input.everyMs ?? RESOURCE_SAMPLE_MS;

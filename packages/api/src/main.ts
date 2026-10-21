@@ -41,12 +41,7 @@ import { pgDatabaseSizes } from './db-sizes.ts';
 import { runFeishuPushRecheck, runGitHubAppRecheck } from './decision-actions.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
-import {
-  createFootprintMeter,
-  type DatabaseSizes,
-  measureFootprint,
-  realFootprintFs,
-} from './disk-footprint.ts';
+import { createFootprintMeter, type DatabaseSizes } from './disk-footprint.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
 import { feishuBotFromConfig, startFeishuPush } from './feishu-push.ts';
@@ -335,14 +330,9 @@ async function assemble(): Promise<{
 
 const { deps, close, databaseSizes } = await assemble();
 // 这台机器此刻的内存、CPU（#1973）：两种装配都读本机 /proc 和 cgroup；不是 Linux、没有会话资源池的照实写没读到。
-// 整机磁盘、每个上线项目的 CPU 内存随这一回读（#1985）；按目录的磁盘占用由测量器 10 分钟最多测一回、在后台测，这一回只带结果
+// 整机磁盘、每个上线项目的 CPU 内存随这一回读（#1985）；按目录的磁盘占用由法国上 root 的单元每 10 分钟用 du 量好写进文件（#3456），测量器只读那个文件（后台读，这一回只带结果）
 const hostReader = realHostReader();
-const footprint = createFootprintMeter({
-  measure: () =>
-    measureFootprint({ apps: hostReader.apps ?? [], fs: realFootprintFs(), databases: databaseSizes, now }),
-  now,
-  log,
-});
+const footprint = createFootprintMeter({ apps: hostReader.apps ?? [], databases: databaseSizes, now, log });
 const hostResources = createHostResourceSampler({ read: hostReader, now, log, footprint });
 deps.hostResources = hostResources;
 snapshotDeps = deps;

@@ -62,7 +62,7 @@ SHARDS=(
   'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier user-slice-cap node-cache work-tmp agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
   'lint session-pnpm no-demo backup auto-release-state agents-sync agents-sync-account node-tests release-flow runtime-unchanged web-publish build-isolation'
 )
-NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child runtime-closure)
+NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child runtime-closure footprint)
 SPECIAL_UNITS=(lint backup node-tests ports)
 
 usage_error() {
@@ -254,6 +254,7 @@ unit_node_tests() {
     if node --test "$HERE/release-request.test.mjs"; then echo "发版接活脚本：通过"; else fail=1; fi
     if node --test "$HERE/config.test.mjs"; then echo "配置对账（期望进仓、私有值只比指纹）：通过"; else fail=1; fi
     if node --test "$HERE/static-child.test.mjs"; then echo "测试里不许直接同步起子进程：通过"; else fail=1; fi
+    if node --test "$HERE/footprint.test.mjs"; then echo "按目录量磁盘占用的 root 脚本：通过"; else fail=1; fi
   else
     echo "没跑成：这台没有 node，健康页的判定、自动发布没测"
     skipped=1

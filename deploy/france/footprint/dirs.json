@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "dirs": [
+    "/var/lib/fleet-dao/release-request",
+    "/var/lib/fleet-dao/engine",
+    "/var/lib/fleet-dao/github",
+    "/var/log/fleet-dao",
+    "/opt/fleet-dao/temporal",
+    "/var/lib/fleet-work",
+    "/var/lib/fleet-sessions",
+    "/home/fleet-agent-carpool",
+    "/usr/local/lib/fleet-dao",
+    "/var/lib/fleet-dao/cli-upgrade",
+    "/srv/fleet-dao-releases",
+    "/srv/fleet-dao"
+  ],
+  "timers": []
+}
