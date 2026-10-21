@@ -80,9 +80,7 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
     d.close();
     expect(statSync(path).mode & 0o777).toBe(0o700);
     expect(statSync(join(path, 'pending.sqlite')).mode & 0o777).toBe(0o600);
-    // 两次串行 record 各给产品 10 秒期限（options）。每次冷起 child 光导入 @fleet-dao/db 在负载约 15 的机器上要 2–3 秒，
-    // 默认 5 秒会在产品期限前先掐断。时限盖住两段产品期限加收尾，不改产品期限。
-  }, 25000);
+  });
   it('第257条明确capacity；满额同key仍回原行且所有旧行保留', () => {
     const first = observation();
     expect(recordAdmissionAlert(path, first).kind).toBe('spooled');
@@ -379,7 +377,5 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
       server.close();
     }
     expect(sink.status().active).toBe(0);
-    // 先 record（产品期限 10 秒），再 transfer 要等满它自己的 10 秒期限才回 deadline；中途 record 落在这 10 秒里。
-    // 原 15 秒只剩 5 秒给两次冷起 child，负载约 15 时撞上（实测 15062ms）。时限盖住两段产品期限加收尾，不改产品期限。
-  }, 25000);
+  }, 15000);
 });
