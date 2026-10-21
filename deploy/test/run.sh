@@ -26,6 +26,8 @@
 # france.sh 读回看板收件口挡不挡得住假通行证（node-report-gate：401 才算通过，503 没配钥匙记待配，200/400 判红）、
 # docs/ops.md 端口表和脚本对得上、--ops 真跑了端口表那块（ops-only）、
 # france.sh 读不到 Temporal 表结构的版本号（连不上库）判红、不建不升（temporal-schema），
+# 发布时前端构建失败的发布日志（web-build-diag，#3491：红字取真报错行不粘产物文件名、前后资源读数和用时、预渲染超时的说明、探针只在构建命令上带）、
+# 预渲染探针本身（prerender-trace：发往本机的请求打时间点和 CPU 用量，只观察、不吞错、非本机和没发请求的进程不出声）、
 # 分台名单没漏没重（shards）。
 # 用法：sudo bash deploy/test/run.sh（违规样本那项要 root）。退出码：0 通过，1 有不通过，2 有没跑成的。
 #   bash deploy/test/run.sh --shard 2/3：只跑第 2 台那几项。CI 把全套切成 3 台并行跑（ci-plan.ts 的 DEPLOY_SHARDS），不带 --shard
@@ -58,11 +60,11 @@ SKIP_WHY=""
 # 第三台拖后腿，把 session-ports、web-publish、release-flow 挪去第一台，grok、public-site、agent-scope-org-use 挪去第二台，
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
-  'login-user session-user listen root-exec-check ops-only ports shards session-proxy session-ports release-proxy node-report-gate service-home sshd-hardening hk-firewall hk-retired-gateway hk-self-proxy-owner hk-nginx-body hk-france-probe'
+  'login-user session-user listen root-exec-check ops-only ports shards session-proxy session-ports release-proxy node-report-gate service-home sshd-hardening hk-firewall hk-retired-gateway hk-self-proxy-owner hk-nginx-body hk-france-probe web-build-diag'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier user-slice-cap node-cache work-tmp agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
   'lint session-pnpm no-demo backup auto-release-state agents-sync agents-sync-account node-tests release-flow runtime-unchanged web-publish build-isolation'
 )
-NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child runtime-closure footprint)
+NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child runtime-closure footprint prerender-trace)
 SPECIAL_UNITS=(lint backup node-tests ports)
 
 usage_error() {

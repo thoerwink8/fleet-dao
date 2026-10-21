@@ -9,6 +9,7 @@
 // - 环境类和能力是两回事：FLEET_TEST_PG_URL 一设，这个进程里所有 createTestDb 都连真 Postgres（packages/db/src/testing.ts）；
 //   db 以外的测试在 CI 上一直是 PGlite 跑的，所以 db 的测试单独装台（pg 台），不和别的混在一个 vitest 进程里。
 //   Temporal 命令行只是多装一个程序、不改别的测试的行为，哪台装进了要它的文件哪台就装（可以混）。
+// - 一条用例同时起几十个子进程的文件（HEAVY_FILES）单独占一台：同台别的文件并行跑时，它占满 CPU 会把别的文件的 5 秒用例饿超时（#3469）。
 // - 枚举、选择、装箱都是纯函数、结果排好序：同一份检出、同一份改动，什么时候算都一样。
 import type { RepoView } from './repo.ts';
 
@@ -158,6 +159,22 @@ export function needsPg(file: string): boolean {
  */
 export const TEMPORAL_MARKER = /\bcreateRealEnv\s*\(/;
 
+/**
+ * 重负载多进程文件（#3469）：一条用例同时起几十个子进程，把运行机的 CPU 占满。同台有别的文件并行时，别的文件里 5 秒默认时限的用例
+ * 会被饿到超时（CI 上 6 次失败，红的文件每次都完整落在它的运行窗口里），所以这类文件单独占一台、台里不放别的文件。
+ * 不加超时、不删断言、不跳用例：覆盖不变，只是不再和别的文件抢核。
+ * 加新成员的条件：单个用例并发起的子进程数远超运行机核数（`packages/engine/test/admission-alert-crash.test.ts` 的 32 个）；
+ * test/test-split.test.ts 钉着清单里的文件都在、而且装箱后各自独占一台。
+ */
+export const HEAVY_FILES: ReadonlySet<string> = new Set([
+  'packages/engine/test/admission-alert-crash.test.ts',
+]);
+
+/** 是不是要单独占台的重负载多进程文件。 */
+export function isHeavy(file: string): boolean {
+  return HEAVY_FILES.has(file);
+}
+
 // ---- 耗时表
 
 /** 耗时表在仓里的位置（仓根相对）。 */
@@ -210,7 +227,7 @@ export const MAX_BOXES = 8;
 export const FALLBACK_FILE_MS = 2_000;
 
 export interface TestBox {
-  /** job 名里显示的：第几台/共几台；pg 台带「· pg」，装了要 Temporal 的带「· temporal」。 */
+  /** job 名里显示的：第几台/共几台；pg 台带「· pg」，装了要 Temporal 的带「· temporal」，重负载多进程文件独占的带「· heavy」。 */
   label: string;
   /** 这台跑的测试文件（仓内相对路径、排好序）。 */
   files: string[];
@@ -308,7 +325,8 @@ function lpt(items: readonly Item[], bins: number): Item[][] {
 /**
  * 装箱。返回空清单表示没有要跑的；有文件该放哪一类认不出（子串过滤把 db 和别的包的文件绑在了一起）返回一句为什么。
  * 台数先按总工作量定（boxCount），再在 pg、普通两类之间分：每类至少一台，其余一台一台给「平均每台最重」的那类。
- * 两类都有、而总量只够一台时，实际是两台（两类不能同一个进程）。
+ * 重负载多进程文件（HEAVY_FILES）是第三类：一件一台，占的台数从总台数里扣，不参与上面的分配。
+ * 几类都有、而总量只够一台时，实际是几台（各类不能同一个进程）。
  */
 export function packTests(input: PackInput): Packed | string {
   const notes: string[] = [];
@@ -351,6 +369,7 @@ export function packTests(input: PackInput): Packed | string {
     groups.set(r, [...(groups.get(r) ?? []), f]);
   }
   const pgItems: Item[] = [];
+  const heavyItems: Item[] = [];
   const plainItems: Item[] = [];
   for (const files of groups.values()) {
     // 按名字绑在一起的才记这一句。只因为都要 Temporal 命令行才并到一组的，上面已经另记过。
@@ -360,27 +379,36 @@ export function packTests(input: PackInput): Packed | string {
     const pg = files.filter(needsPg).length;
     if (pg > 0 && pg < files.length)
       return `${files.join('、')} 按名字绑在一起，却一半要真 Postgres、一半不要：分不了台`;
-    (pg > 0 ? pgItems : plainItems).push({ files, ms: files.reduce((s, f) => s + ms(f), 0) });
+    const heavy = files.filter(isHeavy).length;
+    if (heavy > 0 && heavy < files.length)
+      return `${files.join('、')} 按名字（或都要 Temporal 命令行）绑在一起，却一半是重负载多进程文件、一半不是：重负载的要单独占台，分不了台`;
+    if (heavy > 0 && pg > 0) return `${files.join('、')} 既是重负载多进程文件又要真 Postgres：没有这样的台`;
+    (pg > 0 ? pgItems : heavy > 0 ? heavyItems : plainItems).push({
+      files,
+      ms: files.reduce((s, f) => s + ms(f), 0),
+    });
   }
 
+  // 重负载多进程的文件一件一台（台里不放别的文件，也不和另一个重负载的并在一起抢核）：台数不随工作量走，从总台数里扣。
   const classes = [
-    { pg: true, items: pgItems, bins: 0 },
-    { pg: false, items: plainItems, bins: 0 },
+    { pg: true, heavy: false, items: pgItems, bins: 0 },
+    { pg: false, heavy: true, items: heavyItems, bins: 0 },
+    { pg: false, heavy: false, items: plainItems, bins: 0 },
   ].filter((c) => c.items.length > 0);
   const timingsGap = timings ? { missing: unknown.length, total: input.files.length } : undefined;
   if (classes.length === 0) return { boxes: [], notes };
   const total = classes.reduce((s, c) => s + c.items.reduce((t, i) => t + i.ms, 0), 0);
   const k = boxCount(total);
-  for (const c of classes) c.bins = 1;
+  for (const c of classes) c.bins = c.heavy ? c.items.length : 1;
   const loadOf = (c: (typeof classes)[number]) => c.items.reduce((t, i) => t + i.ms, 0) / c.bins;
-  for (let given = classes.length; given < k; given++) {
-    const open = classes.filter((c) => c.bins < c.items.length);
+  for (let given = classes.reduce((s, c) => s + c.bins, 0); given < k; given++) {
+    const open = classes.filter((c) => !c.heavy && c.bins < c.items.length);
     if (open.length === 0) break;
     const heaviest = open.reduce((a, b) => (loadOf(b) > loadOf(a) ? b : a));
     heaviest.bins++;
   }
 
-  const raw: Omit<TestBox, 'label'>[] = [];
+  const raw: (Omit<TestBox, 'label'> & { heavy: boolean })[] = [];
   for (const c of classes) {
     for (const bin of lpt(c.items, c.bins)) {
       const files = bin.flatMap((i) => i.files).sort();
@@ -389,12 +417,13 @@ export function packTests(input: PackInput): Packed | string {
         estMs: bin.reduce((t, i) => t + i.ms, 0),
         pg: c.pg,
         temporal: files.some((f) => input.temporal.has(f)),
+        heavy: c.heavy,
       });
     }
   }
   const n = raw.length;
-  const boxes = raw.map((b, i) => ({
-    label: `${i + 1}/${n}${b.pg ? ' · pg' : ''}${b.temporal ? ' · temporal' : ''}`,
+  const boxes = raw.map(({ heavy, ...b }, i) => ({
+    label: `${i + 1}/${n}${b.pg ? ' · pg' : ''}${b.temporal ? ' · temporal' : ''}${heavy ? ' · heavy' : ''}`,
     ...b,
   }));
   return { boxes, notes, ...(timingsGap ? { timingsGap } : { timingsProblem: input.timings as string }) };

@@ -23,15 +23,23 @@
 
 import { createHash } from 'node:crypto';
 import { LOCAL_LABEL } from '@fleet-dao/conventions';
-import type { ScheduleResult } from '@fleet-dao/db';
-import { type DecisionOption, type DecisionReason, noteOnlyOptions } from '@fleet-dao/shared';
+import type { AcceptanceDutyRow, CommanderAcceptanceTask, ScheduleResult } from '@fleet-dao/db';
+import {
+  type AcceptanceCoverage,
+  acceptanceDutyState,
+  type DecisionOption,
+  type DecisionReason,
+  noteOnlyOptions,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../commander-contract.ts';
 import {
+  type AcceptanceVerdictCheck,
   allowedActions,
   COMMANDER_ACTION_WORDS,
   type CommanderAction,
+  checkAcceptanceVerdict,
   checkVerdict,
   type DefaultAction,
   defaultAction,
@@ -107,6 +115,20 @@ export interface CommanderNotice {
   reason?: DecisionReason;
 }
 
+export interface ParsedAcceptanceVerdict {
+  issue: number;
+  dutyId: number;
+  generation: number;
+  prNumber: number;
+  head: string;
+  action: 'settle' | 'supersede' | 'leave';
+  reason: string;
+  evidence?: string | undefined;
+  humanOnly?: string | undefined;
+  target?: { id: number; generation: number; prNumber: number; head: string } | undefined;
+  coverage?: readonly unknown[] | undefined;
+}
+
 export interface ParkTriageItem {
   row: ParkedRetryRow;
   workflowId: string;
@@ -162,6 +184,9 @@ export interface ParkTriageDeps {
   resolveCapAlert(): Promise<void>;
   /** state=stalled、executor=engine 的任务。读不到照抛。 */
   tasks(): Promise<ParkedRetryRow[]>;
+  /** PR 已合并超过 30 分钟、仍有 open 验收责任的候选；真装配还会核 GitHub 单是否开着。 */
+  acceptanceTasks?: () => Promise<CommanderAcceptanceTask[]>;
+  acceptanceIssueOpen?: (task: CommanderAcceptanceTask) => Promise<boolean>;
   /** 现问工作流；已经没了回 gone。 */
   status(workflowId: string): Promise<ParkedSnapshot | 'gone'>;
   /** 这个工作流还开着的、最新的一条停下提醒（<工作流>:park:<n>）；没有回 null。老历史认停在哪一次用。读不到照抛。 */
@@ -178,6 +203,13 @@ export interface ParkTriageDeps {
     legacy?: boolean;
     attempt?: number;
   }): Promise<void>;
+  claimAcceptance?: (entry: {
+    task: CommanderAcceptanceTask;
+    requestId: string;
+    attempt: number;
+  }) => Promise<void>;
+  /** 验收会话没起成：抵销这次认领，下一轮仍可按同一 head 重试。 */
+  acceptanceRetry?: (entry: { task: CommanderAcceptanceTask; attempt: number; why: string }) => Promise<void>;
   /** 会话没起成：记一条 commander.retry，这一次停下不算处理过。写不进照抛。 */
   retry(entry: {
     row: ParkedRetryRow;
@@ -209,6 +241,27 @@ export interface ParkTriageDeps {
   addLabel(repo: IntakeRepo, issueNumber: number, label: string): Promise<void>;
   /** 记一条执行（commander.act，actor = engine:commander）。执行之前写；写不进照抛，这一张不执行。 */
   audit(entry: CommanderActEntry): Promise<void>;
+  acceptanceAudit?: (entry: {
+    task: CommanderAcceptanceTask;
+    duty: AcceptanceDutyRow;
+    action: string;
+    reason: string;
+    ok: boolean;
+    error?: string;
+  }) => Promise<void>;
+  settleAcceptance?: (input: {
+    task: CommanderAcceptanceTask;
+    duty: AcceptanceDutyRow;
+    evidence: string;
+  }) => Promise<void>;
+  supersedeAcceptance?: (input: {
+    task: CommanderAcceptanceTask;
+    source: AcceptanceDutyRow;
+    target: AcceptanceDutyRow;
+    evidence: string;
+    coverage: readonly AcceptanceCoverage[];
+  }) => Promise<void>;
+  closeAcceptanceTask?: (task: CommanderAcceptanceTask, mergeCommit: string) => Promise<void>;
   notify(notice: CommanderNotice): Promise<void>;
   /** 继续发出去之后撤这一次停下的提醒。 */
   resolveAlert(entry: { workflowId: string; park: TaskParkInfo; why: string }): Promise<void>;
@@ -265,6 +318,25 @@ const Verdict = z.object({
   options: z.array(z.unknown()).max(6).optional(),
   subtasks: z.array(z.unknown()).max(10).optional(),
 });
+const AcceptanceTarget = z.object({
+  id: z.number().int().positive(),
+  generation: z.number().int().positive(),
+  prNumber: z.number().int().positive(),
+  head: Text(100),
+});
+const AcceptanceVerdict = z.object({
+  issue: z.number().int().positive(),
+  dutyId: z.number().int().positive(),
+  generation: z.number().int().positive(),
+  prNumber: z.number().int().positive(),
+  head: Text(100),
+  action: z.enum(['settle', 'supersede', 'leave']),
+  reason: Text(1200),
+  evidence: z.string().trim().max(4000).optional(),
+  humanOnly: z.string().trim().max(1200).optional(),
+  target: AcceptanceTarget.optional(),
+  coverage: z.array(z.unknown()).max(100).optional(),
+});
 
 export interface ParsedVerdict {
   issue: number;
@@ -282,6 +354,7 @@ export interface ParsedVerdict {
 export interface ParsedCommanderAnswer {
   summary: string;
   verdicts: ParsedVerdict[];
+  acceptanceVerdicts: ParsedAcceptanceVerdict[];
   /** 格式不对的条目：没有执行。 */
   rejected: string[];
 }
@@ -324,8 +397,34 @@ export function parseCommanderAnswer(
       badSubtasks: subs.filter((s) => !s.success).length,
     });
   });
+  const acceptanceVerdicts: ParsedAcceptanceVerdict[] = [];
+  const acceptanceList = Array.isArray(obj.acceptanceVerdicts) ? obj.acceptanceVerdicts : [];
+  if (obj.acceptanceVerdicts !== undefined && !Array.isArray(obj.acceptanceVerdicts))
+    rejected.push('「acceptanceVerdicts」不是列表：没有执行');
+  acceptanceList.forEach((entry, index) => {
+    const parsed = AcceptanceVerdict.safeParse(entry);
+    if (!parsed.success) {
+      rejected.push(
+        `acceptanceVerdicts[${index}]：${parsed.error.issues.map((i) => `${i.path.join('.') || '整条'}：${i.message}`).join('；')}`,
+      );
+      return;
+    }
+    acceptanceVerdicts.push({
+      issue: parsed.data.issue,
+      dutyId: parsed.data.dutyId,
+      generation: parsed.data.generation,
+      prNumber: parsed.data.prNumber,
+      head: parsed.data.head,
+      action: parsed.data.action,
+      reason: parsed.data.reason,
+      ...(parsed.data.evidence === undefined ? {} : { evidence: parsed.data.evidence }),
+      ...(parsed.data.humanOnly === undefined ? {} : { humanOnly: parsed.data.humanOnly }),
+      ...(parsed.data.target === undefined ? {} : { target: parsed.data.target }),
+      ...(parsed.data.coverage === undefined ? {} : { coverage: parsed.data.coverage }),
+    });
+  });
   const summary = typeof obj.summary === 'string' ? obj.summary.trim().slice(0, 600) : '';
-  return { ok: true, summary, verdicts, rejected };
+  return { ok: true, summary, verdicts, acceptanceVerdicts, rejected };
 }
 
 // —— 提示词 ——
@@ -419,6 +518,49 @@ export function renderParkTriagePrompt(input: {
     '{"summary":"一句话总结","verdicts":[{"issue":123,"parkSeq":1,"action":"continue","reason":"为什么这么判（给人看的诊断）"},' +
       '{"issue":124,"parkSeq":2,"action":"split","reason":"…","subtasks":[{"title":"…","scene":"…","done":["…"]}]},' +
       '{"issue":125,"parkSeq":1,"action":"leave","leaveReason":"new-money","reason":"…","options":[{"label":"…","detail":"…","recommended":true},{"label":"…","detail":"…"}]}]}',
+    '```',
+  ].join('\n');
+}
+
+export function renderAcceptanceTriagePrompt(input: {
+  repo: string;
+  tasks: readonly CommanderAcceptanceTask[];
+  mainHead: string;
+  now: Date;
+}): string {
+  const blocks = input.tasks.flatMap((task) =>
+    task.duties
+      .filter((d) => acceptanceDutyState(d, task.duties) === 'open')
+      .map((d) => {
+        const terminal = task.duties.find(
+          (candidate) =>
+            acceptanceDutyState(candidate, task.duties) === 'settled' &&
+            candidate.id !== d.id &&
+            candidate.prNumber === d.prNumber,
+        );
+        return [
+          `### ${task.owner}/${task.name}#${task.issueNumber} duty ${d.id}（第 ${d.generation} 代）`,
+          `- PR：#${d.prNumber}，责任 head：${d.head}`,
+          `- 当前合并 PR head：${task.head}，合并于：${stamp(task.mergedAt)}（北京时间）`,
+          `- 验收项：${d.items.join('；') || '没有验收项'}`,
+          `- 当前状态：open`,
+          `- 可指向的已最终验收目标：${terminal ? `duty ${terminal.id}（第 ${terminal.generation} 代，head ${terminal.head}）` : '没有'}`,
+        ].join('\n');
+      }),
+  );
+  return [
+    `你是法国引擎的临时指挥官。仓 ${input.repo}（主线 ${input.mainHead.slice(0, 12)}）有合并超过 30 分钟但验收责任仍 open 的责任单。`,
+    '你没有 GitHub 写权限，也不能写库。只对每条 open duty 给一个验收裁决；引擎会再次核对精确的任务、责任 id、代次、PR 和 head。',
+    'settle：证据足够时结清当前责任；supersede：旧 head 的责任由同单同 PR、已合并且已最终验收的目标责任替代，必须给非空 evidence 和逐条 coverage；leave：只有创始人能提供的证据仍缺，humanOnly 必须写清楚。',
+    '单仍开着、PR 合并回执和责任代次都会由引擎复核；不要把 leave 当成结清。',
+    '',
+    '要处理的责任：',
+    '',
+    ...blocks,
+    '',
+    '最后只回一段 ```json 围栏，里面是一个对象：',
+    '```json',
+    '{"summary":"一句话总结","acceptanceVerdicts":[{"issue":123,"dutyId":7,"generation":1,"prNumber":456,"head":"完整 head","action":"settle","reason":"…","evidence":"…"}]}',
     '```',
   ].join('\n');
 }
@@ -819,6 +961,158 @@ async function triageRepo(
   }
 }
 
+const acceptanceKeyOf = (task: CommanderAcceptanceTask) =>
+  `acceptance:${task.taskId}:${task.prNumber}:${task.head}#0`;
+const acceptanceRefOf = (task: CommanderAcceptanceTask) => `${task.owner}/${task.name}#${task.issueNumber}`;
+
+async function triageAcceptanceRepo(
+  deps: ParkTriageDeps,
+  repo: IntakeRepo,
+  tasks: CommanderAcceptanceTask[],
+  requestId: string,
+  result: ParkTriageResult,
+): Promise<void> {
+  const slug = `${repo.owner}/${repo.name}`;
+  let mainHead: string;
+  try {
+    mainHead = await deps.mainHead(repo);
+  } catch (err) {
+    result.problems.push(`${slug} 验收责任没读到主线头：${errMessage(err)}`);
+    return;
+  }
+  const prompt = renderAcceptanceTriagePrompt({ repo: slug, tasks, mainHead, now: deps.now() });
+  const session = await deps.runSession({
+    repo,
+    requestId,
+    prompt,
+    mainHead,
+    timeoutMinutes: PARK_TRIAGE_SESSION_MINUTES,
+  });
+  const model = session.ok ? (session.model ?? session.routeId ?? '会话没报模型') : '会话没起成';
+  if (!session.ok) {
+    for (const task of tasks) {
+      result.retrying.push({
+        ref: acceptanceRefOf(task),
+        why: `验收责任会话没跑成：${session.why}`,
+      });
+      try {
+        await deps.acceptanceRetry?.({ task, attempt: 1, why: session.why });
+      } catch (err) {
+        result.problems.push(`${acceptanceRefOf(task)} 验收重试记录没写进：${errMessage(err)}`);
+      }
+    }
+    return;
+  }
+  const parsed = parseCommanderAnswer(session.answer);
+  if (!parsed.ok) {
+    for (const task of tasks) {
+      result.retrying.push({ ref: acceptanceRefOf(task), why: `验收责任${parsed.why}` });
+      try {
+        await deps.acceptanceRetry?.({ task, attempt: 1, why: parsed.why });
+      } catch (err) {
+        result.problems.push(`${acceptanceRefOf(task)} 验收重试记录没写进：${errMessage(err)}`);
+      }
+    }
+    return;
+  }
+  for (const why of parsed.rejected)
+    deps.log('warn', '指挥官：验收裁决格式不对，没有执行', { repo: slug, why });
+
+  for (const task of tasks) {
+    const ref = acceptanceRefOf(task);
+    const open = task.duties.filter((d) => acceptanceDutyState(d, task.duties) === 'open');
+    const mine = parsed.acceptanceVerdicts.filter((v) => v.issue === task.issueNumber);
+    let successful = 0;
+    const left: string[] = [];
+    const settledDutyIds = new Set<number>();
+    for (const duty of open) {
+      const verdicts = mine.filter((v) => v.dutyId === duty.id);
+      const verdict = verdicts[0];
+      if (!verdict || verdicts.length !== 1) {
+        left.push(`${ref} duty ${duty.id} 没有唯一验收裁决`);
+        continue;
+      }
+      const target = verdict.target
+        ? task.duties.find(
+            (candidate) =>
+              candidate.id === verdict.target?.id &&
+              acceptanceDutyState(candidate, task.duties) === 'settled',
+          )
+        : undefined;
+      const checked: AcceptanceVerdictCheck = checkAcceptanceVerdict(duty, target, verdict);
+      if (!checked.ok) {
+        left.push(`${ref} duty ${duty.id}：${checked.why}`);
+        continue;
+      }
+      if (checked.action === 'leave') {
+        left.push(`${ref} duty ${duty.id}：${verdict.humanOnly}`);
+        continue;
+      }
+      const action = checked.action;
+      const reason = `${verdict.reason}（引擎核对放行「${action}」）`;
+      try {
+        await deps.acceptanceAudit?.({ task, duty, action, reason, ok: true });
+        if (action === 'settle') {
+          if (!deps.settleAcceptance) throw new Error('验收结清口子未装配');
+          await deps.settleAcceptance({ task, duty, evidence: verdict.evidence ?? '' });
+        } else {
+          if (!deps.supersedeAcceptance || !target || !checked.coverage)
+            throw new Error('验收替代收口口子或目标未装配');
+          await deps.supersedeAcceptance({
+            task,
+            source: duty,
+            target,
+            evidence: verdict.evidence ?? '',
+            coverage: checked.coverage,
+          });
+        }
+        successful += 1;
+        settledDutyIds.add(duty.id);
+        result.acted.push({ ref: `${ref}/duty-${duty.id}`, action: 'continue', source: 'verdict' });
+      } catch (err) {
+        const why = errMessage(err);
+        left.push(`${ref} duty ${duty.id}：${why}`);
+        await deps.acceptanceAudit?.({ task, duty, action, reason, ok: false, error: why }).catch?.(() => {});
+      }
+    }
+    const allSettled = left.length === 0 && successful === open.length && open.length > 0;
+    const body = [
+      `指挥官（${model}）看了 ${ref} 的验收责任。`,
+      ...open.map(
+        (d) =>
+          `- duty ${d.id}（第 ${d.generation} 代，PR #${d.prNumber}，head ${d.head}）${
+            settledDutyIds.has(d.id) ? '已按裁决收口' : '仍未收口'
+          }`,
+      ),
+      ...(left.length ? ['仍留给创始人的证据：', ...left.map((x) => `- ${x}`)] : []),
+    ].join('\n');
+    for (const why of left) result.left.push({ ref, why });
+    if (allSettled) {
+      if (!deps.closeAcceptanceTask) {
+        result.problems.push(`${ref} 验收责任都已处理，但精确关单口子未装配`);
+      } else if (task.mergeCommit === null) {
+        result.problems.push(`${ref} 验收责任都已处理，但 PR 镜像没有合并提交，未关单`);
+      } else {
+        try {
+          await deps.closeAcceptanceTask(task, task.mergeCommit);
+        } catch (err) {
+          result.problems.push(`${ref} 验收责任已处理但精确关单没成：${errMessage(err)}`);
+        }
+      }
+    }
+    await deps
+      .notify({
+        level: left.length ? 'decision' : 'daily',
+        key: `commander:${task.taskId}:acceptance:${task.prNumber}`,
+        title: left.length ? `要你拍：${ref} 的验收责任` : `指挥官处理了 ${ref} 的验收责任`,
+        body,
+        taskId: task.taskId,
+        ...(left.length ? { options: noteOnlyOptions(), reason: 'human-only' as const } : {}),
+      })
+      .catch((err: unknown) => result.problems.push(`${ref} 验收提醒没推出去：${errMessage(err)}`));
+  }
+}
+
 interface AuditBook {
   /** 认领数多于没起成数的停下：处理过。 */
   handled: Set<string>;
@@ -1114,8 +1408,73 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
       result.problems.push(`${repo.owner}/${repo.name} 这一批没处理完：${errMessage(err)}`);
     }
   }
+  const acceptanceWaiting: CommanderAcceptanceTask[] = [];
+  if (deps.acceptanceTasks) {
+    try {
+      for (const task of await deps.acceptanceTasks()) {
+        if (
+          !book.handled.has(acceptanceKeyOf(task)) &&
+          (!deps.acceptanceIssueOpen || (await deps.acceptanceIssueOpen(task)))
+        )
+          acceptanceWaiting.push(task);
+      }
+    } catch (err) {
+      result.problems.push(`验收责任候选没查成：${errMessage(err)}`);
+    }
+  }
+  result.candidates += acceptanceWaiting.length;
+  const acceptanceClaimed = new Set<string>();
+  const acceptanceByRepo = new Map<string, CommanderAcceptanceTask[]>();
+  for (const task of acceptanceWaiting) {
+    const key = `${task.owner}/${task.name}`.toLowerCase();
+    acceptanceByRepo.set(key, [...(acceptanceByRepo.get(key) ?? []), task]);
+  }
+  for (const group of acceptanceByRepo.values()) {
+    if (sessions >= PARK_TRIAGE_MAX_SESSIONS || remaining <= 0) break;
+    const first = group[0];
+    if (!first) continue;
+    const repo = await deps.findRepo(first.owner, first.name);
+    if (!repo) {
+      result.problems.push(`${first.owner}/${first.name} 不是受管的仓，不交验收指挥官`);
+      continue;
+    }
+    const requestId = `park-triage:acceptance:${repo.owner}/${repo.name}:${now.getTime()}`;
+    const batch: CommanderAcceptanceTask[] = [];
+    for (const task of group.slice(0, Math.min(PARK_TRIAGE_BATCH, remaining))) {
+      if (!deps.claimAcceptance) {
+        result.problems.push(`${acceptanceRefOf(task)} 验收认领口子未装配`);
+        continue;
+      }
+      try {
+        await deps.claimAcceptance({ task, requestId, attempt: 1 });
+        batch.push(task);
+        acceptanceClaimed.add(acceptanceKeyOf(task));
+        remaining -= 1;
+        result.claimed += 1;
+      } catch (err) {
+        result.problems.push(`${acceptanceRefOf(task)} 验收认领没记进操作记录：${errMessage(err)}`);
+      }
+    }
+    if (batch.length === 0) continue;
+    sessions += 1;
+    try {
+      await triageAcceptanceRepo(deps, repo, batch, requestId, result);
+    } catch (err) {
+      result.problems.push(`${repo.owner}/${repo.name} 这一批验收责任没处理完：${errMessage(err)}`);
+    }
+  }
   const blocked = remaining <= 0 ? waiting.filter((w) => !claimedIds.has(w.workflowId)) : [];
-  if (blocked.length > 0) await raiseCapAlert(deps, result, blocked, book, now);
+  const blockedAcceptance =
+    remaining <= 0 ? acceptanceWaiting.filter((task) => !acceptanceClaimed.has(acceptanceKeyOf(task))) : [];
+  if (blocked.length > 0 || blockedAcceptance.length > 0)
+    await raiseCapAlert(
+      deps,
+      result,
+      blocked.map((w) => ({ row: w.row, park: w.park })),
+      blockedAcceptance,
+      book,
+      now,
+    );
   else
     await deps.resolveCapAlert().catch((err: unknown) => {
       result.problems.push(`${PARK_TRIAGE_CAP_ALERT_KEY} 撤不掉：${errMessage(err)}`);
@@ -1130,6 +1489,7 @@ async function raiseCapAlert(
   deps: ParkTriageDeps,
   result: ParkTriageResult,
   blocked: readonly { row: ParkedRetryRow; park: TaskParkInfo }[],
+  blockedAcceptance: readonly CommanderAcceptanceTask[],
   book: AuditBook,
   now: Date,
 ): Promise<void> {
@@ -1145,10 +1505,14 @@ async function raiseCapAlert(
   const listed = blocked
     .slice(0, CAP_ALERT_LISTED)
     .map((w) => `- ${refOf(w.row)}：停下「${w.park.title}」（第 ${w.park.seq} 次）`);
-  const more = blocked.length - listed.length;
+  const acceptanceListed = blockedAcceptance
+    .slice(0, Math.max(0, CAP_ALERT_LISTED - listed.length))
+    .map((task) => `- ${acceptanceRefOf(task)}：验收责任 PR #${task.prNumber}（合并超过 30 分钟）`);
+  const more = blocked.length + blockedAcceptance.length - listed.length - acceptanceListed.length;
   const body = [
     `指挥官 24 小时内已有 ${used} 张有效认领（没起成的不算），到全局熔断上限 ${PARK_TRIAGE_DAILY_CAP}：这一轮不再起会话，下面这些停下的单没人看：`,
     ...listed,
+    ...acceptanceListed,
     ...(more > 0 ? [`……还有 ${more} 张`] : []),
     `下一个名额空出来的时刻：${nextSlot}。`,
     '这个上限只防失控：用到它，多半是有几张单在反复停、反复被认领；先看这些单为什么一直停，回到上限以下这张提醒自动撤。',
@@ -1182,7 +1546,7 @@ export async function runParkTriageJob(deps: ParkTriageDeps): Promise<ScheduleRe
   let got: ParkTriageResult | undefined;
   try {
     got = await triageParkedTasks(deps);
-    const line = `停着的引擎任务 ${got.listed} 张，够条件交指挥官的 ${got.candidates} 张，认领 ${got.claimed} 张，执行 ${got.acted.length} 张，留给人 ${got.left.length} 张，会话没起成下一轮再看 ${got.retrying.length} 张`;
+    const line = `停着的引擎任务 ${got.listed} 张，指挥官候选（含验收责任）${got.candidates} 张，认领 ${got.claimed} 张，执行 ${got.acted.length} 张，留给人 ${got.left.length} 张，会话没起成下一轮再看 ${got.retrying.length} 张`;
     if (got.noModel) result = { outcome: 'partial', why: `${got.skipped ?? '没配模型'}；${line}` };
     else if (got.capped || got.problems.length > 0)
       result = {

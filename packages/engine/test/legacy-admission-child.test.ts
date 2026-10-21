@@ -150,7 +150,8 @@ describe('真实固定child生命周期，loopback不是真实数据库验收', 
       const [value] = await message;
       orphanPid = (value as { childPid: number }).childPid;
       expect(orphanPid).not.toBe(process.pid);
-      await expect.poll(() => server.state().startups, { timeout: 5000 }).toBe(1);
+      // 整段 test:changed 里这个子进程超过 5 秒才连上。仍要等到 startups 变成 1。
+      await expect.poll(() => server.state().startups, { timeout: 20000 }).toBe(1);
       expect(alive(orphanPid)).toBe(true);
       expect(server.state().active).toBe(1);
       host.send('exit-now');
@@ -166,5 +167,5 @@ describe('真实固定child生命周期，loopback不是真实数据库验收', 
       if (orphanPid !== undefined && alive(orphanPid)) process.kill(orphanPid, 'SIGKILL');
       await server.close();
     }
-  }, 15000);
+  }, 45000);
 });

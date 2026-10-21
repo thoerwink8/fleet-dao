@@ -66,7 +66,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 「派出过没有」只有 `jobs/dispatch-standing.ts` 一份（拉单、点名派单共用）。本机领单不新起一代，所以本机退回法国队列（租约到期 `task.local.expire`+returned、放手 `task.local.finish`+released）的行，各代都结束后要靠操作记录里的退回时刻晚于最后一代的 Temporal `closeTime` 认成「重新派」（起 `:rN+1`，#3461）；退回时刻读不到、结束时刻读不到都不判，不猜。法国接不了的单（验收要 diff 外证据、交代不全、改标准……）不能退回：租约到期先 `franceVerdict` 试判，放手来的由拉单 `holdReturned` 贴回「本机做」；通知键只报一次（`insertAlertOnce`），别改成 `upsertAlert`（会把人处理掉的重开）。
 - 引擎自己挑单，进队条件见 design 第九节。要它接：单的四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。
 
-- 冷验收转人的待验条持久写入 `acceptance_duties`；合并前通过 `acceptance-duty-before-merge` 分支读取全部待验责任、将 PR 正文写成 Refs 分片并现读核对，失败重试或停下，不带旧正文进入合并。代码仍可正常合并，收尾有待验责任不关单。责任项原子并集，新增项递增代次并撤销旧结清；最终验收只用精确仓、单、PR、head、责任 id 和代次 CAS，不认评论文本。
+- 冷验收转人的待验条持久写入 `acceptance_duties`；管理归并初建的待验目标（`management_merge`）按原来源读回，不改写成冷验收，认不出的来源记没查成。合并前通过 `acceptance-duty-before-merge` 分支读取全部待验责任、将 PR 正文写成 Refs 分片并现读核对，失败重试或停下，不带旧正文进入合并。代码仍可正常合并，收尾有待验责任不关单。责任项原子并集，新增项递增代次并撤销旧结清；没有新项时重放不把已验的再开回去。最终验收和替代仍走原来的精确仓、单、PR、head、责任 id 和代次 CAS，不认评论文本；换代后旧代次收不掉，替代要按新代重绑。
 
 ## 改它时要连带改
 
@@ -87,6 +87,10 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - `real/admission-alert-spool.ts` 固定 DELETE/EXTRA、4096 字节页、1024 页、关闭 spill/auto-vacuum，最多 256 条/1MiB payload。已有超额、错 schema、损坏 journal 或身份不明均保留原件并返回未知；不删库重建。移交先核 PG 真实 COMMIT 与 close，再在同一 transfer child 内按 key/hash 删除 pending，没有 caller ACK 接口。文件字节界和私有路径/耐久边界见 `docs/design/admission-alert-spool.md`。
 - 全局 identity 不含首诊断码；同 run 换码重建仍归并原通知。通知持久化不代表飞书送达，新前缀未加入推送白名单。本能力不接受 Start 正文、token 或任意 SQL。
 - `test/admission-alert-spool.test.ts` / `test/admission-alert-crash.test.ts` 必须用真实 Linux 普通用户；Windows 本机入口按 `local-vitest.ts` 转交明确配置的 runner。`test/admission-alert.real-pg.test.ts` 在真实 PG 台使用随机隔离库验证移交，缺配置的 CI 明确报错。
+
+## 定时任务中断见证（#3477）
+
+- schedule_runs 的 why 列在一轮没收尾期间只放诊断见证：每小时对账的最后一个子步骤（`在途阶段见证：`，写不进只记 warn，不改步骤结果）；引擎正常停机、宽限到了某任务一轮还没回，再追加 `停机宽限到期时这一轮仍在跑 at=…`（`timers.ts` 的 `recordUnfinished`，只写本进程起定时器之后开始的未结束行）。它们只证明「最后记到的位置」，不证明卡在哪、为什么中断，也不是结束时刻；这一行不结束，ended_at、scanned、found 仍未知，由下次启动补记成 failed（ended_at=started_at 是补记，不是真实结束时间）。SIGKILL/OOM/断电没有机会写，仍只有最后一笔阶段见证。
 
 ## 版本更新日志
 

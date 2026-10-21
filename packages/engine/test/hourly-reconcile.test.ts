@@ -20,6 +20,7 @@ const ROOT = '/var/lib/fleet-work';
 interface Harness {
   deps: HourlyReconcileJobDeps;
   finished: { id: number; result: ScheduleResult }[];
+  progressed: { id: number; step: string; phase: string }[];
   listed: string[];
   logs: string[];
 }
@@ -27,6 +28,7 @@ interface Harness {
 /** 一台什么残留都没有的机器：根下只有路由探针的目录（一个会话用户），没有没处理的提醒。 */
 function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
   const finished: Harness['finished'] = [];
+  const progressed: Harness['progressed'] = [];
   const listed: string[] = [];
   const logs: string[] = [];
   const deps: HourlyReconcileJobDeps = {
@@ -102,6 +104,9 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
       async start() {
         return 7;
       },
+      async progress(id, progress) {
+        progressed.push({ id, ...progress });
+      },
       async finish(id, result) {
         finished.push({ id, result });
       },
@@ -110,7 +115,7 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
     log: (level, text) => logs.push(`${level}:${text}`),
     ...over,
   };
-  return { deps, finished, listed, logs };
+  return { deps, finished, progressed, listed, logs };
 }
 
 describe('几部分的结局并成这一轮的（combineParts）', () => {
@@ -224,6 +229,79 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     expect(run).toEqual({ runId: 7, outcome: 'ok', scanned: 1, found: 0 });
     expect(h.finished).toEqual([{ id: 7, result: { outcome: 'ok', scanned: 1, found: 0 } }]);
     expect(h.logs).toContain('info:每小时对账跑完了');
+  });
+
+  it('先持久见证阶段和 runId，再进入可能中断的 await；正常收尾会继续写阶段结局', async () => {
+    let releaseFirstAlerts!: () => void;
+    let sawFirstStart!: () => void;
+    const firstAlertsReady = new Promise<void>((resolve) => {
+      sawFirstStart = resolve;
+    });
+    const firstAlertsReleased = new Promise<void>((resolve) => {
+      releaseFirstAlerts = resolve;
+    });
+    let first = true;
+    const h = harness({
+      alerts: {
+        ...harness().deps.alerts,
+        async listOpen() {
+          if (first) {
+            first = false;
+            await firstAlertsReleased;
+          }
+          return { alerts: [], truncated: false };
+        },
+      },
+    });
+    const originalProgress = h.deps.runs.progress;
+    h.deps.runs.progress = async (id, progress, at) => {
+      await originalProgress?.(id, progress, at);
+      if (progress.step === 'alerts-before-worktrees' && progress.phase === 'start') sawFirstStart();
+    };
+
+    const running = runHourlyReconcileJob(h.deps);
+    await firstAlertsReady;
+    expect(h.progressed[0]).toEqual({ id: 7, step: 'alerts-before-worktrees', phase: 'start' });
+    expect(h.progressed.every((entry) => entry.id === 7)).toBe(true);
+
+    releaseFirstAlerts();
+    await running;
+    expect(h.progressed).toContainEqual({ id: 7, step: 'alerts-before-worktrees', phase: 'end' });
+    expect(h.progressed).toContainEqual({ id: 7, step: 'worktrees', phase: 'start' });
+  });
+
+  it('持久阶段见证写不进：只记 warn，步骤和真正的报错不变（失败不被记成 ok，也不被见证的错盖掉）', async () => {
+    const h = harness({
+      listDir: async () => {
+        throw new Error('EACCES: 故意造的');
+      },
+      alerts: {
+        ...harness().deps.alerts,
+        listOpen: async () => {
+          throw new Error('库连不上');
+        },
+      },
+    });
+    h.deps.runs.progress = async () => {
+      throw new Error('见证库写不进');
+    };
+    await expect(runHourlyReconcileJob(h.deps)).rejects.toMatchObject({
+      name: 'HourlyReconcileFailedError',
+      runId: 7,
+      message: expect.stringContaining('EACCES'),
+    });
+    expect(h.finished[0]?.result).toMatchObject({ outcome: 'failed' });
+    expect(h.logs.some((l) => l.startsWith('warn:') && l.includes('持久阶段见证没写进'))).toBe(true);
+  });
+
+  it('持久阶段见证写不进，别的都正常：这一轮照常跑完，不因为见证失败变成 failed', async () => {
+    const h = harness();
+    h.deps.runs.progress = async () => {
+      throw new Error('见证库写不进');
+    };
+    expect(await runHourlyReconcileJob(h.deps)).toMatchObject({
+      outcome: expect.not.stringMatching(/failed/),
+    });
   });
 
   it('根下什么都没有：记 unscanned、写明为什么', async () => {

@@ -2,7 +2,7 @@
 // 以登记为准而不是以跑过的记录为准：一次都没跑过的任务没有记录，只看记录就永远看不见它（没跑成 ≠ 没问题）。
 import type { ScheduleOutcome } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { and, asc, desc, eq, gte, inArray, isNull, like, lt, max, not, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, like, lt, max, not, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { SCHEDULE_OUTCOMES } from '../schema/enums.ts';
 import { scheduledJobs, scheduleRuns } from '../schema/index.ts';
@@ -128,6 +128,91 @@ export const MASTER_OFF_SKIP_WHY = '引擎总开关关着，这一轮不跑：';
 
 /** 进程被发版或重启腰斩、已经记下开始却没人收尾时，起来补记写的原因。 */
 export const INTERRUPTED_SCHEDULE_WHY = '进程中断没收尾，启动时补记';
+/** 没有在途阶段见证的旧记录，不能猜它中断前走到了哪里。 */
+export const INTERRUPTED_SCHEDULE_STAGE_UNKNOWN = '中断前阶段未知';
+/** 进行中的阶段见证写在已有的 why 列，进程中断后由补记逻辑保留下来。 */
+export const SCHEDULE_PROGRESS_PREFIX = '在途阶段见证：';
+
+/**
+ * 引擎正常停机、宽限到了这一轮还没回，进程退出前留在这一行的见证。只证明「退出时它还在跑」，
+ * 不证明卡在哪、也不是结束时刻；粘在 why 上，后面还有阶段见证写进来也不被冲掉。
+ */
+export const SCHEDULE_SHUTDOWN_MARK = '；停机宽限到期时这一轮仍在跑';
+
+export type ScheduleProgressPhase = 'start' | 'end' | 'failed' | 'skip';
+
+export interface RecordScheduleRunProgressInput {
+  id: number;
+  step: string;
+  phase: ScheduleProgressPhase;
+  at: Date;
+}
+
+/**
+ * 在 schedule_runs 的未结束行上留下最后一个阶段见证。
+ * 复用 why 列避免为只读诊断再加表；正常 finish 会用真实结局覆盖它，进程中断时 closeInterrupted 会把它带进失败原因。
+ */
+export async function recordScheduleRunProgress(
+  db: Db,
+  input: RecordScheduleRunProgressInput,
+): Promise<void> {
+  if (!Number.isSafeInteger(input.id) || input.id < 1) throw new Error('阶段见证要有有效的定时任务编号');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.step)) throw new Error('阶段见证的步骤名无效');
+  if (!['start', 'end', 'failed', 'skip'].includes(input.phase)) throw new Error('阶段见证的阶段状态无效');
+  if (Number.isNaN(input.at.getTime())) throw new Error('阶段见证要有有效时刻');
+  const why = `${SCHEDULE_PROGRESS_PREFIX}run=${input.id} step=${input.step} phase=${input.phase} at=${input.at.toISOString()}`;
+  // 停机见证已经写在这一行就带着：进程退出前最后一笔阶段见证不能把它冲掉
+  const markAt = sql`position(${SCHEDULE_SHUTDOWN_MARK}::text in coalesce(${scheduleRuns.why}, ''))`;
+  const updated = await db
+    .update(scheduleRuns)
+    .set({
+      why: sql`${why}::text || case when ${markAt} > 0 then substring(${scheduleRuns.why} from ${markAt}) else '' end`,
+    })
+    .where(and(eq(scheduleRuns.id, input.id), isNull(scheduleRuns.endedAt)))
+    .returning({ id: scheduleRuns.id });
+  if (updated.length === 0) throw new Error(`没有这次进行中的定时任务记录：${input.id}`);
+}
+
+export interface RecordScheduleShutdownInput {
+  /** 停机宽限到了还没回的任务编号。 */
+  jobs: readonly string[];
+  /** 本进程起定时器的时刻：只记这之后开始的行，更早的未结束行是上个进程留下的，归启动补记。 */
+  since: Date;
+  at: Date;
+}
+
+/**
+ * 停机宽限到了、这一轮还没回：在本进程开始的未结束行上留一笔见证（保留已有的阶段见证）。
+ * 不结束这一行、不写结局、不写 scanned/found：进程退出不等于这一轮结束，结果仍是未知，由下次启动补记。
+ * 回写到的行编号；写库失败照抛。
+ */
+export async function recordScheduleRunsShutdown(
+  db: Db,
+  input: RecordScheduleShutdownInput,
+): Promise<number[]> {
+  if (Number.isNaN(input.at.getTime()) || Number.isNaN(input.since.getTime()))
+    throw new Error('停机见证要有有效时刻');
+  if (input.jobs.length === 0) return [];
+  const note = `${SCHEDULE_SHUTDOWN_MARK} at=${input.at.toISOString()}`;
+  const updated = await db
+    .update(scheduleRuns)
+    .set({
+      why: sql`case
+        when ${scheduleRuns.why} like ${`${SCHEDULE_PROGRESS_PREFIX}%`} then ${scheduleRuns.why}
+        else ${INTERRUPTED_SCHEDULE_STAGE_UNKNOWN}::text
+      end || ${note}::text`,
+    })
+    .where(
+      and(
+        inArray(scheduleRuns.job, [...input.jobs]),
+        isNull(scheduleRuns.endedAt),
+        gte(scheduleRuns.startedAt, input.since),
+        or(isNull(scheduleRuns.why), not(like(scheduleRuns.why, `%${SCHEDULE_SHUTDOWN_MARK}%`))),
+      ),
+    )
+    .returning({ id: scheduleRuns.id });
+  return updated.map((row) => row.id);
+}
 
 export interface CloseInterruptedScheduleRunsInput {
   /** 本进程会跑的任务，和各自的补记线：开始得比这早、还没结束的才补。 */
@@ -160,7 +245,7 @@ export async function closeInterruptedScheduleRuns(
     const ids: number[] = [];
     for (const job of input.jobs) {
       const open = await db
-        .select({ id: scheduleRuns.id, startedAt: scheduleRuns.startedAt })
+        .select({ id: scheduleRuns.id, startedAt: scheduleRuns.startedAt, why: scheduleRuns.why })
         .from(scheduleRuns)
         .where(
           and(
@@ -171,9 +256,21 @@ export async function closeInterruptedScheduleRuns(
         )
         .orderBy(asc(scheduleRuns.id));
       for (const row of open) {
+        const interruptedWhy = `${why}；${
+          row.why?.startsWith(SCHEDULE_PROGRESS_PREFIX) ||
+          row.why?.startsWith(INTERRUPTED_SCHEDULE_STAGE_UNKNOWN)
+            ? row.why
+            : INTERRUPTED_SCHEDULE_STAGE_UNKNOWN
+        }`;
         const updated = await db
           .update(scheduleRuns)
-          .set({ endedAt: row.startedAt, outcome: 'failed', why })
+          .set({
+            endedAt: row.startedAt,
+            outcome: 'failed',
+            scanned: null,
+            found: null,
+            why: interruptedWhy,
+          })
           .where(and(eq(scheduleRuns.id, row.id), isNull(scheduleRuns.endedAt)))
           .returning({ id: scheduleRuns.id });
         for (const written of updated) ids.push(written.id);
