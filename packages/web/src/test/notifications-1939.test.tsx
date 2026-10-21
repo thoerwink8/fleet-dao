@@ -16,7 +16,7 @@ describe('通知中心结论块（#1939）', () => {
     renderApp(<NotificationsPage />, { api: createMockApi({ live: false }), route: '/notifications' });
     const hero = await screen.findByTestId('pending-rule');
     const title = hero.querySelector('h2') as HTMLElement;
-    expect(title.className).toContain('text-subtitle');
+    expect(title.className).toContain('text-title');
     // 假数据 n-10 是看门狗的卡（决定 0093 主页三块），算进卡住的；n-11、n-12 是带动作的要你拍（#2353）
     expect(title.textContent).toBe('待处理 9 条');
     const line = hero.querySelector('[data-hero-line]') as HTMLElement;

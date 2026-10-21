@@ -1,9 +1,7 @@
-import { FolderGit2, Moon, Palette, Sun } from 'lucide-react';
+import { FolderGit2 } from 'lucide-react';
 import { useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router';
-import { PALETTES } from '../../lib/theme';
 import { useRepo } from '../repo-context';
-import { useTheme } from '../theme-provider';
 import {
   CommandDialog,
   CommandEmpty,
@@ -15,12 +13,11 @@ import {
 } from '../ui/command';
 import { NAV } from './nav';
 
-/** ⌘K：跳页面、切仓、切主题。 */
+/** ⌘K：跳页面、切仓。（主题只有一套、亮暗跟随系统，#3509 起没有切主题。） */
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { repos, setRepoId } = useRepo();
-  const theme = useTheme();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -59,9 +56,9 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
             );
           })}
         </CommandGroup>
-        <CommandSeparator />
         {repos.length ? (
           <>
+            <CommandSeparator />
             <CommandGroup heading="当前仓">
               {repos.map((r) => (
                 <CommandItem
@@ -79,26 +76,8 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
                 </CommandItem>
               ))}
             </CommandGroup>
-            <CommandSeparator />
           </>
         ) : null}
-        <CommandGroup heading="外观">
-          <CommandItem value="切换深浅色 深色 浅色 夜间" onSelect={() => run(theme.toggleMode)}>
-            {theme.resolvedMode === 'dark' ? <Sun /> : <Moon />}
-            切到{theme.resolvedMode === 'dark' ? '浅色' : '深色'}
-          </CommandItem>
-          {PALETTES.map((p) => (
-            <CommandItem
-              key={p.id}
-              value={`主题色 ${p.name} ${p.en}`}
-              onSelect={() => run(() => theme.setPalette(p.id))}
-            >
-              <Palette />
-              主题色：{p.name}
-              <span className="num text-meta text-muted-foreground">{p.en}</span>
-            </CommandItem>
-          ))}
-        </CommandGroup>
       </CommandList>
     </CommandDialog>
   );

@@ -1,13 +1,16 @@
 // 驾驶舱设计规范检查（#1847，规范 docs/design/驾驶舱界面.md 第八节）。并入了原来的 lint-arbitrary（#182、#1446）。
 // 扫 packages/web/src 下非测试的 .ts/.tsx：取出所有字符串字面量和模板串的静态段（className、cn()、cva、映射表都在里面），
 // 按空白切成类名，去掉变体前缀（md:、hover:、data-[…]:）后逐条按 R0–R10 判；.css 只判 R0。
-// 严格模式：整个 src 一条违规都不许有，没有旧账清单、没有例外名单（例外只在本文件的 allowed() 里，写明理由）。
+// R0–R12 严格模式：整个 src 一条违规都不许有，没有旧账清单、没有例外名单（例外只在本文件的 allowed() 里，写明理由）。
+// R13–R20（#3509 驾驶舱改版的分层规则）是棘轮：scripts/lint-design.baseline.json 按文件按规则记基线，数只许减，新文件一律 0；
+// 全部迁完后删基线，回到严格。
 // 用法（在 packages/web 下）：
-//   node scripts/lint-design.ts                 严格检查，有一条违规就退出 1
-//   node scripts/lint-design.ts --report        每条规则的总数和违规最多的前 20 个文件（PR 正文贴前后两次）
+//   node scripts/lint-design.ts                 检查，有一条违规或超基线就退出 1
+//   node scripts/lint-design.ts --report        每条规则的总数（R13–R20 带基线总数）和违规最多的前 20 个文件（PR 正文贴前后两次）
+//   node scripts/lint-design.ts --write-baseline  按现状重写基线（只在迁完一片、数减少后用）
 //   node scripts/lint-design.ts --list          列出每一处
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from '@babel/parser';
 
@@ -28,7 +31,15 @@ export type RuleId =
   | 'R9'
   | 'R10'
   | 'R11'
-  | 'R12';
+  | 'R12'
+  | 'R13'
+  | 'R14'
+  | 'R15'
+  | 'R16'
+  | 'R17'
+  | 'R18'
+  | 'R19'
+  | 'R20';
 
 /** 每条规则：名字和规范节号（报错里带上，照着去查）。 */
 export const RULES: Record<RuleId, { name: string; section: string }> = {
@@ -45,8 +56,21 @@ export const RULES: Record<RuleId, { name: string; section: string }> = {
   R10: { name: '组件令牌', section: '2.7' },
   R11: { name: '状态字裸文字', section: '4' },
   R12: { name: '写请求按钮没忙态', section: '三「会发写请求的按钮」' },
+  R13: { name: '业务层写样式类', section: '5' },
+  R14: { name: '业务层越层 import', section: '5' },
+  R15: { name: '业务层 inline style', section: '5' },
+  R16: { name: '时长缓动不在档位', section: '5' },
+  R17: { name: '业务层原生控件', section: '5' },
+  R18: { name: '容器套容器', section: '5' },
+  R19: { name: '读失败显示成默认值', section: '5' },
+  R20: { name: '状态不走字典、主按钮乱放', section: '5' },
 };
 export const RULE_IDS = Object.keys(RULES) as RuleId[];
+/** 棘轮规则（#3509）：按文件按规则记基线，数只许减，新文件一律 0。R0–R12 仍是严格模式。 */
+export const RATCHET_RULES: readonly RuleId[] = ['R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19', 'R20'];
+export function isRatchet(rule: RuleId): boolean {
+  return RATCHET_RULES.includes(rule);
+}
 
 export interface Hit {
   /** 相对 packages/web，正斜杠，例如 src/routes/tasks.tsx。 */
@@ -513,6 +537,452 @@ function layoutRulesApply(file: string): boolean {
   );
 }
 
+// ---------- R13–R20 棘轮规则（#3509） ----------
+// 业务层 = src/routes/** + src/components/**，但 components/layout、components/ui、components/shell 算组件层。
+// 业务层只许"摆"：位置类、组件、数据；样式全在组件层。R16 时长缓动连组件层一起查。
+
+export function isBusinessLayer(file: string): boolean {
+  return (
+    (file.startsWith('src/routes/') || file.startsWith('src/components/')) &&
+    !file.startsWith('src/components/ui/') &&
+    !file.startsWith('src/components/layout/') &&
+    !file.startsWith('src/components/shell/')
+  );
+}
+
+/** 业务层 className 里会被拦的样式类（去掉变体前缀后）。位置类（min-w-0 flex-1 shrink-0 col-span-* sr-only hidden num……）不在里面。 */
+const R13_TEXT_POSITION =
+  /^text-(?:left|right|center|justify|start|end|ellipsis|clip|wrap|nowrap|balance|pretty)$/;
+const R13_DASHED =
+  /^(?:text|bg|border|rounded|shadow|ring|outline|divide|font|leading|tracking|transition|duration|ease|delay|opacity|animate|fill|stroke|accent|caret|decoration|p[xytrblse]?|m[xytrblse]?|gap|gap-[xy]|space-[xy])-[a-z0-9[][\w.[\]()/%#:,-]*$/;
+/** 单独成词的样式类（border、rounded、shadow……）：整段字符串至少两个词才判，免得把普通英文单词当类名。 */
+const R13_BARE =
+  /^(?:border|rounded|shadow|ring|outline|transition|underline|no-underline|italic|not-italic|uppercase|lowercase|capitalize)$/;
+
+function r13Fix(util: string): string {
+  if (/^(?:transition|duration|ease|delay|animate)/.test(util))
+    return '动效由组件层给（悬停、展开、浮层都已带），页面不写';
+  if (
+    /^text-(?:ink|muted|brand|success|warn|fail|foreground|st-|on-)/.test(util) ||
+    /^text-.*foreground$/.test(util)
+  )
+    return '<Text tone="secondary|success|warning|danger">（字色由 Text 的 tone 给）';
+  if (/^text-/.test(util)) return '<Text size=… > 或 <Title level>（字号由 Text、Title 给）';
+  if (/^font-/.test(util)) return '<Text strong> 或 <Title>（字重由 Text 给）';
+  if (/^(?:bg|border|divide|rounded|shadow|ring|outline)/.test(util))
+    return '<Card>、<Section>、<Descriptions>、<Tag>（底色、描边、圆角、阴影都在组件里）';
+  if (/^(?:p|m|gap|space)/.test(util)) return '<Stack gap=…>、<Space>、<Grid gutter=…>（间距由布局组件给）';
+  return '换成 components/layout 里对应的组件';
+}
+
+export function judgeBusinessClass(util: string, multiWord: boolean): string | undefined {
+  if (R13_TEXT_POSITION.test(util)) return undefined;
+  if (R13_DASHED.test(util)) return r13Fix(util);
+  if (multiWord && R13_BARE.test(util)) return r13Fix(util);
+  return undefined;
+}
+
+const DURATION_OK = new Set(['100', '200', '300']);
+const EASE_OK = new Set(['arco', 'out', 'in-out']);
+const MOTION_NUMBER_OK = new Set([0.1, 0.2, 0.3, 100, 200, 300]);
+
+/** R16：duration-*、ease-* 不在档位（全 src，含组件层）。 */
+export function judgeMotionClass(util: string): string | undefined {
+  const d = util.match(/^duration-(.+)$/);
+  if (d && !DURATION_OK.has(d[1] as string))
+    return 'duration-100（悬停）、duration-200（展开、浮层）、duration-300（抽屉、进度）';
+  const e = util.match(/^ease-(.+)$/);
+  if (e && !EASE_OK.has(e[1] as string)) return 'ease-arco（也可 ease-out、ease-in-out）';
+  return undefined;
+}
+
+/** 这个文件的 import 路径落在 src/components/ui 里吗（相对路径按文件位置解析）。 */
+function importsUi(spec: string, file: string): boolean {
+  if (/^(?:@\/|~\/)?(?:src\/)?components\/ui(?:\/|$)/.test(spec)) return true;
+  if (!spec.startsWith('.')) return false;
+  const target = posix.normalize(posix.join(posix.dirname(file), spec));
+  return target === 'src/components/ui' || target.startsWith('src/components/ui/');
+}
+
+const R14_PKG = /^(?:radix-ui|@radix-ui\/.+|motion(?:\/.+)?|framer-motion)$/;
+
+function scanBusinessImports(src: string, file: string, starts: number[]): Hit[] {
+  const hits: Hit[] = [];
+  const re = /(?:^|\n)\s*(?:import|export)\b[^;'"`]*?(?:from\s*)?(['"])([^'"\n]+)\1/g;
+  for (const m of src.matchAll(re)) {
+    const spec = m[2] as string;
+    const at = (m.index ?? 0) + m[0].indexOf(m[1] as string);
+    if (importsUi(spec, file)) {
+      hits.push({
+        file,
+        line: lineAt(starts, at),
+        rule: 'R14',
+        cls: spec,
+        fix: '页面不直接用基础件 → 从 components/layout 引同名的业务组件',
+      });
+    } else if (R14_PKG.test(spec)) {
+      hits.push({
+        file,
+        line: lineAt(starts, at),
+        rule: 'R14',
+        cls: spec,
+        fix: '页面不直接用 radix-ui、motion → 交互和动效由 components/layout 里的件给',
+      });
+    }
+  }
+  return hits;
+}
+
+/** 原生控件：<button> <table> <h1>–<h4> <dl> <progress> <hr>。 */
+const R17_FIX: Record<string, string> = {
+  button: '<Button>',
+  table: '<Table columns rows>',
+  dl: '<Descriptions>',
+  progress: '<Progress percent>',
+  hr: '<Divider>',
+};
+
+function scanMotionCode(src: string, code: string, starts: number[], file: string): Hit[] {
+  const hits: Hit[] = [];
+  const importsMotion = /from\s*['"](?:motion(?:\/[\w-]+)?|framer-motion)['"]/.test(src);
+  // 只在引了 motion 的文件，或 transition={{…}} / transition: {…} 里判，免得把"耗时 duration: 3600"当动效
+  const re = /\bduration\s*:\s*(\d*\.?\d+)/g;
+  for (const m of code.matchAll(re)) {
+    const idx = m.index ?? 0;
+    const near = code.slice(Math.max(0, idx - 80), idx);
+    if (!importsMotion && !/transition\s*[=:]\s*\{\{?[^}]*$/.test(near)) continue;
+    if (MOTION_NUMBER_OK.has(Number(m[1]))) continue;
+    hits.push({
+      file,
+      line: lineAt(starts, idx),
+      rule: 'R16',
+      cls: `duration: ${m[1]}`,
+      fix: '时长只用 0.1 / 0.2 / 0.3 秒（100 / 200 / 300 毫秒）；缓动用 arco 的 [0.34, 0.69, 0.1, 1]',
+    });
+  }
+  // 缓动：数组、标识符、字符串都读原文（字符串在 code 里被抹掉了）
+  for (const m of src.matchAll(/\bease\s*:\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*|'[^'\n]*'|"[^"\n]*")/g)) {
+    const v = (m[1] as string).replace(/\s+/g, '').replace(/^['"]|['"]$/g, '');
+    if (v === '[0.34,0.69,0.1,1]' || /^(?:easeOut|easeInOut|EASE_ARCO)$/.test(v)) continue;
+    if (!importsMotion && !/transition/.test(code.slice(Math.max(0, (m.index ?? 0) - 120), m.index ?? 0)))
+      continue;
+    hits.push({
+      file,
+      line: lineAt(starts, m.index ?? 0),
+      rule: 'R16',
+      cls: `ease: ${m[1]}`,
+      fix: '缓动只用 arco 的 [0.34, 0.69, 0.1, 1]（或 easeOut、easeInOut）',
+    });
+  }
+  return hits;
+}
+
+function scanBusinessCode(code: string, starts: number[], file: string): Hit[] {
+  const hits: Hit[] = [];
+  for (const m of code.matchAll(/\bstyle=\{\s*\{/g)) {
+    hits.push({
+      file,
+      line: lineAt(starts, m.index ?? 0),
+      rule: 'R15',
+      cls: 'style={{…}}',
+      fix: '不写 inline style → 进度用 <Progress percent>，位置用 Stack、Grid 的参数',
+    });
+  }
+  for (const m of code.matchAll(/<(button|table|h[1-4]|dl|progress|hr)(?=[\s>/])/g)) {
+    const tag = m[1] as string;
+    hits.push({
+      file,
+      line: lineAt(starts, m.index ?? 0),
+      rule: 'R17',
+      cls: `<${tag}>`,
+      fix: /^h[1-4]$/.test(tag) ? '<Title level>' : (R17_FIX[tag] as string),
+    });
+  }
+  return hits;
+}
+
+// ---- 用真解析器判的几条：R18 R19 R20 ----
+
+type Pred = (n: AstNode) => boolean;
+
+/** 带祖先链的遍历：visit(node, ancestors)。 */
+function walkWithAncestors(
+  node: AstNode,
+  visit: (n: AstNode, anc: AstNode[]) => void,
+  anc: AstNode[] = [],
+): void {
+  visit(node, anc);
+  const next = [...anc, node];
+  for (const c of children(node)) walkWithAncestors(c, visit, next);
+}
+
+const CONTAINERS = new Set(['Section', 'Card']);
+const EXPAND_ELEMENTS = /^(?:Collapse|Collapsible|Expand\w*|Disclosure|Accordion\w*)$/;
+
+/** 元素 className 里的静态词（字符串、模板静态段，向下找）。 */
+function classTokensOf(el: AstNode): string[] {
+  const attr = jsxAttr(el, 'className');
+  const out: string[] = [];
+  if (!attr) return out;
+  for (const n of walkAst(attr)) {
+    if (n.type === 'StringLiteral') out.push(...String(n.value).split(/\s+/));
+    else if (n.type === 'TemplateElement')
+      out.push(...String((n.value as { raw?: string }).raw ?? '').split(/\s+/));
+  }
+  return out.filter(Boolean).map(utilityOf);
+}
+
+function boxy(tokens: string[]): boolean {
+  const bg = tokens.some((t) => /^bg-/.test(t) && !/^bg-(?:transparent|none)$/.test(t));
+  const border = tokens.some((t) => /^border(?:-[xytrbl])?$/.test(t) || /^border-[xytrbl]?-?\d+$/.test(t));
+  return bg || border;
+}
+
+const STATUS_KEYS = new Set([
+  'running',
+  'idle',
+  'queued',
+  'pending',
+  'done',
+  'success',
+  'failed',
+  'fail',
+  'error',
+  'ok',
+  'warn',
+  'warning',
+  'stopped',
+  'stop',
+  'paused',
+  'blocked',
+  'cancelled',
+  'canceled',
+  'open',
+  'closed',
+  'active',
+  'inactive',
+  'resolved',
+  'processing',
+  'on',
+  'off',
+]);
+const CJK = /[一-鿿]/;
+const DEFAULT_WORDS = new Set(['正常', 'ok', 'OK', '无', '没有', '良好', '0']);
+
+function keyName(p: AstNode): string | undefined {
+  const k = p.key;
+  if (!isNode(k)) return undefined;
+  if (k.type === 'Identifier') return k.name as string;
+  if (k.type === 'StringLiteral') return k.value as string;
+  return undefined;
+}
+
+/** 左边是不是从 query 的 data 读出来的：根标识符在 dataNames 里，或 q.data 这种。 */
+function rootsAtData(expr: AstNode, dataNames: Set<string>, queryNames: Set<string>): boolean {
+  let cur: AstNode | null = expr;
+  let firstProp: string | undefined;
+  while (cur) {
+    if (cur.type === 'Identifier') {
+      const name = cur.name as string;
+      if (dataNames.has(name)) return true;
+      return queryNames.has(name) && firstProp === 'data';
+    }
+    if (cur.type === 'TSNonNullExpression' || cur.type === 'ParenthesizedExpression') {
+      cur = isNode(cur.expression) ? cur.expression : null;
+      continue;
+    }
+    if (cur.type === 'MemberExpression' || cur.type === 'OptionalMemberExpression') {
+      const prop = cur.property;
+      firstProp =
+        isNode(prop) && prop.type === 'Identifier' && !cur.computed ? (prop.name as string) : undefined;
+      cur = isNode(cur.object) ? cur.object : null;
+      continue;
+    }
+    if (cur.type === 'CallExpression' || cur.type === 'OptionalCallExpression') {
+      firstProp = undefined;
+      cur = isNode(cur.callee) ? cur.callee : null;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+const isUseCall: Pred = (n) =>
+  n.type === 'CallExpression' &&
+  isNode(n.callee) &&
+  n.callee.type === 'Identifier' &&
+  /^use[A-Z]/.test(n.callee.name as string);
+
+export function scanBusinessAst(src: string, file: string): Hit[] {
+  let ast: AstNode;
+  try {
+    ast = parse(src, {
+      sourceType: 'module',
+      plugins: file.endsWith('.tsx') ? ['typescript', 'jsx'] : ['typescript'],
+    }) as unknown as AstNode;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return [{ file, line: 1, rule: 'R20', cls: '解析不了', fix: `这个文件解析没过，R18–R20 判不了：${msg}` }];
+  }
+  const hits: Hit[] = [];
+  const at = (n: AstNode) => n.loc?.start.line ?? 1;
+
+  // 先收 query 变量：const { data, data: x } = useX()；const q = useX()
+  const dataNames = new Set<string>();
+  const queryNames = new Set<string>();
+  for (const n of walkAst(ast)) {
+    if (n.type !== 'VariableDeclarator' || !isNode(n.init) || !isUseCall(n.init) || !isNode(n.id)) continue;
+    if (n.id.type === 'Identifier') queryNames.add(n.id.name as string);
+    if (n.id.type === 'ObjectPattern') {
+      for (const p of n.id.properties as AstNode[]) {
+        if (p.type !== 'ObjectProperty' || keyName(p) !== 'data') continue;
+        const v = p.value;
+        if (isNode(v) && v.type === 'Identifier') dataNames.add(v.name as string);
+        else if (
+          isNode(v) &&
+          v.type === 'AssignmentPattern' &&
+          isNode(v.left) &&
+          v.left.type === 'Identifier'
+        )
+          dataNames.add(v.left.name as string);
+      }
+    }
+  }
+
+  let primaryOutsideMap = 0;
+  walkWithAncestors(ast, (n, anc) => {
+    // R18 容器套容器
+    if (n.type === 'JSXElement') {
+      const name = jsxName(n);
+      if (
+        name &&
+        CONTAINERS.has(name) &&
+        anc.some((a) => a.type === 'JSXElement' && CONTAINERS.has(jsxName(a) ?? ''))
+      ) {
+        hits.push({
+          file,
+          line: at(n),
+          rule: 'R18',
+          cls: `<${name}> 套在 Section / Card 里`,
+          fix: '最多两层容器：里面的用 <Descriptions>、<List> 或分隔，不再套一层卡片',
+        });
+      }
+      // 展开区里再套带底色或描边的框：<Collapse…>、expandedRowRender 里的元素，className 里有 bg-* 或 border
+      const inExpand = anc.some(
+        (a) =>
+          (a.type === 'JSXElement' && EXPAND_ELEMENTS.test(jsxName(a) ?? '')) ||
+          (a.type === 'JSXAttribute' && isNode(a.name) && a.name.name === 'expandedRowRender'),
+      );
+      if (inExpand && boxy(classTokensOf(n))) {
+        hits.push({
+          file,
+          line: at(n),
+          rule: 'R18',
+          cls: '展开区里再套带底色或描边的框',
+          fix: '展开区直接摆内容（<Descriptions>、<List>），不再套框',
+        });
+      }
+      // R20 StatusBadge tone= / label=
+      if (name === 'StatusBadge') {
+        for (const a of ['tone', 'label']) {
+          if (jsxAttr(n, a)) {
+            hits.push({
+              file,
+              line: at(n),
+              rule: 'R20',
+              cls: `<StatusBadge ${a}=…>`,
+              fix: '状态从字典取 → <StatusBadge status="task:running">',
+            });
+          }
+        }
+      }
+      // R20 主按钮
+      if (name === 'Button') {
+        const v = attrExpr(jsxAttr(n, 'variant')) as AstNode | null;
+        if (v && v.type === 'StringLiteral' && v.value === 'primary') {
+          const inMap = anc.some(
+            (a) =>
+              (a.type === 'ArrowFunctionExpression' || a.type === 'FunctionExpression') &&
+              anc.some(
+                (p) =>
+                  p.type === 'CallExpression' &&
+                  isNode(p.callee) &&
+                  (p.callee.type === 'MemberExpression' || p.callee.type === 'OptionalMemberExpression') &&
+                  isNode(p.callee.property) &&
+                  p.callee.property.name === 'map' &&
+                  (p.arguments as unknown[]).includes(a),
+              ),
+          );
+          if (inMap) {
+            hits.push({
+              file,
+              line: at(n),
+              rule: 'R20',
+              cls: '<Button variant="primary"> 在 .map( 里',
+              fix: '列表行不许有主按钮 → 用 type="text" 的按钮，或收进「更多」',
+            });
+          } else {
+            primaryOutsideMap++;
+            if (primaryOutsideMap >= 2) {
+              hits.push({
+                file,
+                line: at(n),
+                rule: 'R20',
+                cls: '同一文件第二个主按钮',
+                fix: '一个页面一个主按钮，其余用次按钮（判法按文件数，条件分支里的两个也算）',
+              });
+            }
+          }
+        }
+      }
+    }
+    // R20 状态中文映射表
+    if (n.type === 'ObjectExpression') {
+      const props = (n.properties as AstNode[]).filter((p) => {
+        if (p.type !== 'ObjectProperty') return false;
+        const k = keyName(p);
+        return (
+          k !== undefined &&
+          STATUS_KEYS.has(k) &&
+          isNode(p.value) &&
+          p.value.type === 'StringLiteral' &&
+          CJK.test(p.value.value as string)
+        );
+      });
+      if (props.length >= 2) {
+        hits.push({
+          file,
+          line: at(n),
+          rule: 'R20',
+          cls: `状态中文映射表（${props.map((p) => keyName(p)).join('、')}）`,
+          fix: '状态从字典取 → <StatusBadge status="…">，业务层不自己写状态中文',
+        });
+      }
+    }
+    // R19 对 query 的 data 写默认值
+    if (n.type === 'LogicalExpression' && (n.operator === '??' || n.operator === '||')) {
+      const right = n.right;
+      if (isNode(right) && isNode(n.left)) {
+        const zero = right.type === 'NumericLiteral' && right.value === 0;
+        const emptyArr = right.type === 'ArrayExpression' && (right.elements as unknown[]).length === 0;
+        const word = right.type === 'StringLiteral' && DEFAULT_WORDS.has(right.value as string);
+        if ((zero || emptyArr || word) && rootsAtData(n.left, dataNames, queryNames)) {
+          const lit = zero ? '0' : emptyArr ? '[]' : `'${right.value as string}'`;
+          hits.push({
+            file,
+            line: at(n),
+            rule: 'R19',
+            cls: `${n.operator} ${lit}`,
+            fix: '读失败不能显示成默认值 → <LoadState> 或 Read<T>，先判加载、出错、空，再用数据',
+          });
+        }
+      }
+    }
+  });
+  return hits;
+}
+
 // 旧 lint-arbitrary 的写法：.css 里只判任意值。
 const CSS_ARBITRARY =
   /(?:^|[\s"'])((?:[a-zA-Z0-9][a-zA-Z0-9_-]*:)*[a-zA-Z][a-zA-Z0-9_-]*-\[([^\]]*\d[^\]]*)\])/g;
@@ -532,12 +1002,19 @@ export function scanSource(src: string, file: string): Hit[] {
   const starts = lineStarts(src);
   const { segments, code } = lex(src);
   const layout = layoutRulesApply(file);
+  const business = isBusinessLayer(file);
   for (const seg of segments) {
     const utils = new Set<string>();
+    const multiWord = seg.text.trim().split(/\s+/).length >= 2;
     for (const m of seg.text.matchAll(/\S+/g)) {
       const token = m[0];
       const util = utilityOf(token);
       if (token === util) utils.add(util);
+      const where = lineAt(starts, seg.start + (m.index ?? 0));
+      const motionFix = judgeMotionClass(util);
+      if (motionFix) hits.push({ file, line: where, rule: 'R16', cls: token, fix: motionFix });
+      const styleFix = business ? judgeBusinessClass(util, multiWord) : undefined;
+      if (styleFix) hits.push({ file, line: where, rule: 'R13', cls: token, fix: styleFix });
       const verdict = judgeUtility(util, file);
       if (!verdict) continue;
       hits.push({
@@ -598,6 +1075,11 @@ export function scanSource(src: string, file: string): Hit[] {
     }
   }
   if (file.endsWith('.tsx')) hits.push(...scanWriteButtons(src, file));
+  hits.push(...scanMotionCode(src, code, starts, file));
+  if (business) {
+    hits.push(...scanBusinessImports(src, file, starts), ...scanBusinessCode(code, starts, file));
+    hits.push(...scanBusinessAst(src, file));
+  }
   return hits;
 }
 
@@ -843,18 +1325,104 @@ export function countHits(hits: readonly Hit[]): Counts {
   return out;
 }
 
-/** 严格模式：整个 src 一条违规都不许有；返回出错信息（空数组＝通过）。 */
-export function check(): string[] {
-  return scan().map(formatHit);
+// ---------- 棘轮基线（R13–R20，#3509） ----------
+// scripts/lint-design.baseline.json：{ "version": 1, "files": { "src/routes/x.tsx": { "R13": 31 } } }。
+// 数只许减：现数 > 基线就红；不在基线里的文件基线是 0（新文件一律 0）。基线只记 R13–R20，R0–R12 不进。
+
+export const BASELINE_PATH = join(pkgDir, 'scripts', 'lint-design.baseline.json');
+export const BASELINE_VERSION = 1;
+export type Baseline = Record<string, Partial<Record<RuleId, number>>>;
+
+/** 解析基线文本；格式不对一律抛错（不当成 0、不当成空）。 */
+export function parseBaseline(text: string, from = 'lint-design.baseline.json'): Baseline {
+  const bad = (why: string): never => {
+    throw new Error(`${from} 格式不对：${why}。重写用 node scripts/lint-design.ts --write-baseline`);
+  };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    return bad(`不是合法 JSON（${e instanceof Error ? e.message : String(e)}）`);
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return bad('最外层要是对象');
+  const obj = raw as Record<string, unknown>;
+  if (obj.version !== BASELINE_VERSION)
+    return bad(`version 要是 ${BASELINE_VERSION}，读到 ${String(obj.version)}`);
+  const files = obj.files;
+  if (typeof files !== 'object' || files === null || Array.isArray(files)) return bad('files 要是对象');
+  const out: Baseline = {};
+  for (const [file, row] of Object.entries(files as Record<string, unknown>)) {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) return bad(`${file} 的值要是对象`);
+    const entry: Partial<Record<RuleId, number>> = {};
+    for (const [rule, n] of Object.entries(row as Record<string, unknown>)) {
+      if (!RATCHET_RULES.includes(rule as RuleId))
+        return bad(`${file} 里有基线不管的规则「${rule}」（只记 R13–R20）`);
+      if (typeof n !== 'number' || !Number.isInteger(n) || n <= 0)
+        return bad(`${file} 的 ${rule} 要是正整数，读到 ${String(n)}`);
+      entry[rule as RuleId] = n;
+    }
+    out[file] = entry;
+  }
+  return out;
 }
 
-export function report(hits: readonly Hit[]): string {
+export function loadBaseline(path = BASELINE_PATH): Baseline {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    throw new Error(`读不到基线文件 ${path}。生成用 node scripts/lint-design.ts --write-baseline`);
+  }
+  return parseBaseline(text, path);
+}
+
+/** 把现有命中按文件按规则数出来，只留棘轮规则。 */
+export function ratchetCounts(hits: readonly Hit[]): Baseline {
+  return countHits(hits.filter((h) => isRatchet(h.rule)));
+}
+
+export function serializeBaseline(base: Baseline): string {
+  const files: Baseline = {};
+  for (const file of Object.keys(base).sort()) files[file] = base[file] as Baseline[string];
+  return `${JSON.stringify({ version: BASELINE_VERSION, files }, null, 2)}\n`;
+}
+
+/** 现数对基线：超出的报错（多出的那几处带上位置）；返回出错信息，空数组＝通过。 */
+export function compareToBaseline(hits: readonly Hit[], base: Baseline): string[] {
+  const errors: string[] = [];
+  const now = ratchetCounts(hits);
+  for (const file of Object.keys(now).sort()) {
+    const row = now[file] as Baseline[string];
+    const isNew = !(file in base);
+    for (const rule of RATCHET_RULES) {
+      const cur = row[rule] ?? 0;
+      const allowedN = base[file]?.[rule] ?? 0;
+      if (cur <= allowedN) continue;
+      const mine = hits.filter((h) => h.file === file && h.rule === rule);
+      const head = isNew
+        ? `${file} ${rule} 新文件不许有（基线 0，现在 ${cur}）`
+        : `${file} ${rule} 基线 ${allowedN}，现在 ${cur}：只许减`;
+      errors.push([head, ...mine.map((h) => `  ${formatHit(h)}`)].join('\n'));
+    }
+  }
+  return errors;
+}
+
+/** 检查：R0–R12 严格（一条都不许有）+ R13–R20 不超基线。返回出错信息（空数组＝通过）。基线读不了会抛错。 */
+export function check(base: Baseline = loadBaseline(), hits: readonly Hit[] = scan()): string[] {
+  return [...hits.filter((h) => !isRatchet(h.rule)).map(formatHit), ...compareToBaseline(hits, base)];
+}
+
+export function report(hits: readonly Hit[], base?: Baseline): string {
   const lines: string[] = [];
   const counts = countHits(hits);
   lines.push(`共 ${hits.length} 处，${Object.keys(counts).length} 个文件。`);
+  const baseTotal = (rule: RuleId) => Object.values(base ?? {}).reduce((a, row) => a + (row[rule] ?? 0), 0);
   for (const rule of RULE_IDS) {
     const n = hits.filter((h) => h.rule === rule).length;
-    lines.push(`${rule} ${RULES[rule].name}：${n}`);
+    if (isRatchet(rule)) {
+      lines.push(`${rule} ${RULES[rule].name}：基线 ${base ? baseTotal(rule) : '（未读）'}，现 ${n}`);
+    } else lines.push(`${rule} ${RULES[rule].name}：${n}`);
   }
   lines.push('违规最多的前 20 个文件：');
   const top = Object.entries(counts)
@@ -867,21 +1435,41 @@ export function report(hits: readonly Hit[]): string {
 
 function main() {
   const argv = process.argv.slice(2);
+  if (argv.includes('--write-baseline')) {
+    const hits = scan();
+    writeFileSync(BASELINE_PATH, serializeBaseline(ratchetCounts(hits)));
+    console.log(
+      `已重写 ${relative(pkgDir, BASELINE_PATH)}（R13–R20 共 ${hits.filter((h) => isRatchet(h.rule)).length} 处）。`,
+    );
+    return;
+  }
   if (argv.includes('--report')) {
-    console.log(report(scan()));
+    let base: Baseline | undefined;
+    try {
+      base = loadBaseline();
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+    }
+    console.log(report(scan(), base));
     return;
   }
   if (argv.includes('--list')) {
     for (const h of scan()) console.log(formatHit(h));
     return;
   }
-  const errors = check();
+  let errors: string[];
+  try {
+    errors = check();
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
   for (const e of errors) console.error(e);
   if (errors.length > 0) {
     console.error(`\n设计规范检查没过（${errors.length} 条）。规范：${DOC}。`);
     process.exit(1);
   }
-  console.log('设计规范检查通过（严格模式，没有违规）。');
+  console.log('设计规范检查通过（R0–R12 严格没有违规；R13–R20 没超基线）。');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

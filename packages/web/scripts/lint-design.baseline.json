@@ -1,0 +1,512 @@
+{
+  "version": 1,
+  "files": {
+    "src/components/alert-repair.tsx": {
+      "R13": 96,
+      "R14": 1,
+      "R17": 1,
+      "R20": 4
+    },
+    "src/components/call-row.tsx": {
+      "R13": 33,
+      "R14": 1,
+      "R17": 1
+    },
+    "src/components/carpool-reconcile.tsx": {
+      "R13": 11
+    },
+    "src/components/channel-status.tsx": {
+      "R13": 71,
+      "R17": 3,
+      "R20": 2
+    },
+    "src/components/credentials-section.tsx": {
+      "R13": 28,
+      "R14": 1
+    },
+    "src/components/decision-picker.tsx": {
+      "R13": 31,
+      "R14": 2,
+      "R17": 1
+    },
+    "src/components/diff-stat.tsx": {
+      "R13": 5
+    },
+    "src/components/engine-master-card.tsx": {
+      "R13": 14,
+      "R14": 2,
+      "R17": 1,
+      "R20": 2
+    },
+    "src/components/engine-master.tsx": {
+      "R13": 43,
+      "R14": 2,
+      "R17": 1
+    },
+    "src/components/env-facts.tsx": {
+      "R13": 41,
+      "R17": 1,
+      "R20": 2
+    },
+    "src/components/flow-mode-setting.tsx": {
+      "R13": 1,
+      "R14": 3
+    },
+    "src/components/flow-mode-toggle.tsx": {
+      "R13": 12,
+      "R14": 1
+    },
+    "src/components/gateway-health-link.tsx": {
+      "R13": 4
+    },
+    "src/components/home/board/board-canvas.tsx": {
+      "R13": 142,
+      "R14": 6,
+      "R15": 1,
+      "R16": 3,
+      "R17": 2
+    },
+    "src/components/home/board/board-tree.tsx": {
+      "R13": 76,
+      "R14": 2,
+      "R17": 4
+    },
+    "src/components/home/board/context-menu.tsx": {
+      "R13": 76,
+      "R14": 1
+    },
+    "src/components/home/board/detail-panel.tsx": {
+      "R13": 127,
+      "R14": 2,
+      "R17": 4,
+      "R20": 4
+    },
+    "src/components/home/board/nodes.tsx": {
+      "R13": 144,
+      "R14": 2,
+      "R15": 8,
+      "R17": 1,
+      "R20": 4
+    },
+    "src/components/home/board/tones.ts": {
+      "R13": 7
+    },
+    "src/components/home/board/usage.tsx": {
+      "R13": 13
+    },
+    "src/components/home/decision-card.tsx": {
+      "R13": 20,
+      "R14": 1
+    },
+    "src/components/home/done-card.tsx": {
+      "R13": 25
+    },
+    "src/components/home/headline.tsx": {
+      "R13": 2
+    },
+    "src/components/home/health-strip.tsx": {
+      "R13": 12,
+      "R14": 1,
+      "R17": 1,
+      "R20": 6
+    },
+    "src/components/home/home-drawer.tsx": {
+      "R13": 78,
+      "R14": 2,
+      "R15": 1,
+      "R17": 5
+    },
+    "src/components/home/local-sessions.tsx": {
+      "R13": 25,
+      "R20": 4
+    },
+    "src/components/home/machine-meter.tsx": {
+      "R13": 30,
+      "R15": 1
+    },
+    "src/components/home/missing-env.tsx": {
+      "R13": 1,
+      "R14": 1
+    },
+    "src/components/home/project-cards.tsx": {
+      "R13": 10,
+      "R17": 1
+    },
+    "src/components/home/running-board.tsx": {
+      "R13": 2,
+      "R14": 1
+    },
+    "src/components/home/running-card.tsx": {
+      "R13": 28,
+      "R20": 4
+    },
+    "src/components/home/spend-line.tsx": {
+      "R13": 7
+    },
+    "src/components/home/today-blocks.tsx": {
+      "R13": 96,
+      "R14": 1,
+      "R19": 1,
+      "R20": 8
+    },
+    "src/components/intake/draft-panel.tsx": {
+      "R13": 94,
+      "R14": 3,
+      "R17": 1
+    },
+    "src/components/intake/new-request.tsx": {
+      "R13": 23,
+      "R14": 1,
+      "R17": 1
+    },
+    "src/components/intake/people.tsx": {
+      "R13": 21
+    },
+    "src/components/intake/request-cards.tsx": {
+      "R13": 114,
+      "R14": 3,
+      "R17": 1,
+      "R20": 1
+    },
+    "src/components/intake/request-chat.tsx": {
+      "R13": 50,
+      "R14": 3,
+      "R17": 3,
+      "R20": 4
+    },
+    "src/components/intake/request-composer.tsx": {
+      "R13": 50,
+      "R14": 3,
+      "R17": 1
+    },
+    "src/components/intake/request-list.tsx": {
+      "R13": 83,
+      "R14": 2,
+      "R17": 4
+    },
+    "src/components/intake/request-menu.tsx": {
+      "R13": 11,
+      "R14": 5
+    },
+    "src/components/intake/request-stream.tsx": {
+      "R13": 142,
+      "R14": 2,
+      "R17": 1
+    },
+    "src/components/intake/request-view.ts": {
+      "R20": 1
+    },
+    "src/components/job-row.tsx": {
+      "R13": 32,
+      "R14": 1
+    },
+    "src/components/manual-tracks.tsx": {
+      "R13": 2,
+      "R14": 1
+    },
+    "src/components/markdown-lite.tsx": {
+      "R13": 23,
+      "R17": 2
+    },
+    "src/components/markdown.tsx": {
+      "R13": 24
+    },
+    "src/components/node-notice.tsx": {
+      "R13": 7,
+      "R14": 1
+    },
+    "src/components/not-built.tsx": {
+      "R13": 5
+    },
+    "src/components/org-switch.tsx": {
+      "R13": 14
+    },
+    "src/components/page-nav.tsx": {
+      "R13": 19
+    },
+    "src/components/password-field.tsx": {
+      "R13": 7,
+      "R14": 3
+    },
+    "src/components/pool-problem.tsx": {
+      "R13": 6
+    },
+    "src/components/pool-switch.tsx": {
+      "R13": 29,
+      "R14": 4,
+      "R20": 4
+    },
+    "src/components/probe-log.tsx": {
+      "R13": 89,
+      "R17": 3,
+      "R20": 4
+    },
+    "src/components/pwa-status.tsx": {
+      "R14": 1,
+      "R20": 6
+    },
+    "src/components/quota-notice.tsx": {
+      "R13": 5
+    },
+    "src/components/quota-pressure.tsx": {
+      "R13": 4,
+      "R14": 1
+    },
+    "src/components/quota.tsx": {
+      "R13": 129,
+      "R14": 1,
+      "R15": 1,
+      "R16": 1,
+      "R17": 1,
+      "R20": 4
+    },
+    "src/components/refresh-bar.tsx": {
+      "R13": 10,
+      "R14": 1,
+      "R20": 4
+    },
+    "src/components/release-card.tsx": {
+      "R13": 102,
+      "R14": 2,
+      "R20": 11
+    },
+    "src/components/repo-ci-policy.tsx": {
+      "R13": 11,
+      "R14": 2
+    },
+    "src/components/repo-context.tsx": {
+      "R19": 1
+    },
+    "src/components/repo-dispatch.tsx": {
+      "R13": 2,
+      "R14": 2,
+      "R20": 2
+    },
+    "src/components/repo-groom.tsx": {
+      "R13": 61,
+      "R14": 4,
+      "R17": 3,
+      "R20": 1
+    },
+    "src/components/repo-import.tsx": {
+      "R13": 22,
+      "R14": 2,
+      "R20": 6
+    },
+    "src/components/resources/repos-section.tsx": {
+      "R13": 71,
+      "R14": 2,
+      "R17": 1,
+      "R20": 4
+    },
+    "src/components/round-progress.tsx": {
+      "R13": 33
+    },
+    "src/components/route-error.tsx": {
+      "R13": 15,
+      "R17": 1
+    },
+    "src/components/route-label.tsx": {
+      "R13": 3
+    },
+    "src/components/routing-browse.tsx": {
+      "R13": 87,
+      "R14": 2,
+      "R15": 5,
+      "R17": 2,
+      "R19": 2,
+      "R20": 7
+    },
+    "src/components/routing-edit.tsx": {
+      "R13": 5,
+      "R14": 3,
+      "R15": 1
+    },
+    "src/components/routing-efforts.tsx": {
+      "R13": 92,
+      "R14": 3,
+      "R17": 3,
+      "R20": 2
+    },
+    "src/components/routing-kinds.tsx": {
+      "R20": 4
+    },
+    "src/components/routing-membership.tsx": {
+      "R13": 35,
+      "R14": 4,
+      "R15": 2,
+      "R19": 1
+    },
+    "src/components/routing-roster.tsx": {
+      "R13": 19,
+      "R17": 2
+    },
+    "src/components/routing-routes.tsx": {
+      "R13": 90,
+      "R14": 1,
+      "R17": 2
+    },
+    "src/components/run-transcript.tsx": {
+      "R13": 137,
+      "R14": 2,
+      "R17": 2,
+      "R20": 10
+    },
+    "src/components/schedule-row.tsx": {
+      "R13": 23,
+      "R20": 4
+    },
+    "src/components/segment-usage.tsx": {
+      "R13": 135,
+      "R14": 1,
+      "R17": 1,
+      "R20": 6
+    },
+    "src/components/task-actions.tsx": {
+      "R13": 9,
+      "R14": 2
+    },
+    "src/components/task-model-pins.tsx": {
+      "R13": 50,
+      "R14": 2,
+      "R20": 2
+    },
+    "src/components/task-panel.tsx": {
+      "R13": 37,
+      "R14": 2,
+      "R17": 3
+    },
+    "src/components/task-process.tsx": {
+      "R13": 241,
+      "R14": 1,
+      "R15": 2,
+      "R17": 5,
+      "R20": 1
+    },
+    "src/components/task-summary.tsx": {
+      "R13": 100,
+      "R14": 1,
+      "R17": 3,
+      "R20": 4
+    },
+    "src/components/ui/sheet.tsx": {
+      "R16": 1
+    },
+    "src/components/usage-fold.tsx": {
+      "R13": 16,
+      "R17": 1
+    },
+    "src/routes/audit.tsx": {
+      "R13": 64,
+      "R14": 1,
+      "R17": 1,
+      "R19": 2,
+      "R20": 2
+    },
+    "src/routes/bare.tsx": {
+      "R13": 1
+    },
+    "src/routes/board.tsx": {
+      "R13": 19,
+      "R17": 1
+    },
+    "src/routes/changelog.tsx": {
+      "R13": 29,
+      "R20": 4
+    },
+    "src/routes/design.tsx": {
+      "R13": 87,
+      "R14": 11,
+      "R17": 1,
+      "R20": 12
+    },
+    "src/routes/france.tsx": {
+      "R13": 127,
+      "R14": 1,
+      "R15": 2,
+      "R17": 1,
+      "R19": 1,
+      "R20": 10
+    },
+    "src/routes/home.tsx": {
+      "R13": 2
+    },
+    "src/routes/intake.tsx": {
+      "R13": 5,
+      "R14": 1
+    },
+    "src/routes/login.tsx": {
+      "R13": 45,
+      "R14": 3,
+      "R17": 1
+    },
+    "src/routes/not-found.tsx": {
+      "R14": 1
+    },
+    "src/routes/notifications.tsx": {
+      "R13": 100,
+      "R14": 2,
+      "R17": 4,
+      "R19": 2,
+      "R20": 11
+    },
+    "src/routes/quota.tsx": {
+      "R13": 81,
+      "R14": 1,
+      "R17": 3,
+      "R19": 1,
+      "R20": 8
+    },
+    "src/routes/resources.tsx": {
+      "R13": 117,
+      "R14": 1,
+      "R15": 1,
+      "R17": 1,
+      "R20": 4
+    },
+    "src/routes/routing-status.tsx": {
+      "R13": 167,
+      "R14": 3,
+      "R17": 7,
+      "R19": 1,
+      "R20": 6
+    },
+    "src/routes/routing.tsx": {
+      "R13": 51,
+      "R17": 2,
+      "R20": 2
+    },
+    "src/routes/schedules.tsx": {
+      "R13": 2
+    },
+    "src/routes/settings.tsx": {
+      "R13": 97,
+      "R14": 4,
+      "R17": 2,
+      "R19": 2
+    },
+    "src/routes/shell.tsx": {
+      "R13": 14,
+      "R14": 2
+    },
+    "src/routes/soon.tsx": {
+      "R13": 8,
+      "R14": 1
+    },
+    "src/routes/task-run.tsx": {
+      "R13": 44,
+      "R17": 1
+    },
+    "src/routes/task.tsx": {
+      "R13": 25,
+      "R14": 1,
+      "R20": 2
+    },
+    "src/routes/tasks.tsx": {
+      "R13": 32,
+      "R14": 1,
+      "R19": 2,
+      "R20": 2
+    }
+  }
+}

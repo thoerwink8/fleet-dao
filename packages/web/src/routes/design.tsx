@@ -45,7 +45,6 @@ import { Textarea } from '../components/ui/textarea';
 import { ToggleGroup, ToggleGroupItem } from '../components/ui/toggle-group';
 import { contrastRatio, over, parseColor } from '../lib/color-ratio';
 import { toneLabel } from '../lib/status';
-import type { DensityPref } from '../lib/theme';
 import { cn } from '../lib/utils';
 
 const TONE_WORD: Record<LayoutTone, string> = { ...toneLabel, doubt: '疑似换模型' };
@@ -188,7 +187,7 @@ function ContrastTable() {
   );
 }
 
-// ---------- 一整屏陈列（亮、暗各渲染一份） ----------
+// ---------- 一整屏陈列（当前的亮或暗） ----------
 
 /** 确认框忙态的样板（#2009）：点确定后等 2.5 秒，按选的结果成功关上或失败留着写原因。 */
 function ConfirmBusyDemo() {
@@ -577,39 +576,16 @@ function Gallery({ mode }: { mode: 'light' | 'dark' }) {
   );
 }
 
-const DENSITY_ITEMS: { id: DensityPref; label: string }[] = [
-  { id: 'comfortable', label: '标准' },
-  { id: 'compact', label: '紧凑' },
-];
-
 export default function DesignGallery() {
-  const { pref, setDensity } = useTheme();
+  // 主题只有一套，亮暗跟随系统（#3509）：陈列页只画当前这一种，看另一种就切系统的深浅色。
+  const { resolvedMode } = useTheme();
   return (
     <Page
       title="设计陈列"
-      description="每个组件的各种状态，亮色和暗色各一屏，右上角切标准和紧凑密度。只在 dev:mock 里有。"
-      actions={
-        <FilterTabs
-          mode="toggle"
-          aria-label="密度"
-          items={DENSITY_ITEMS}
-          value={pref.density}
-          onChange={setDensity}
-        />
-      }
+      description="每个组件的各种状态。亮暗跟随系统，切系统深浅色看另一种。只在 dev:mock 里有。"
     >
-      <div className="grid gap-6 2xl:grid-cols-2">
-        {(['light', 'dark'] as const).map((mode) => (
-          <div
-            key={mode}
-            data-palette="graphite"
-            data-mode={mode}
-            data-gallery={mode}
-            className="min-w-0 rounded-lg bg-background p-4 text-foreground ring-1 ring-border"
-          >
-            <Gallery mode={mode} />
-          </div>
-        ))}
+      <div data-gallery={resolvedMode} className="min-w-0 rounded-md bg-page p-4 text-ink ring-1 ring-line">
+        <Gallery mode={resolvedMode} />
       </div>
     </Page>
   );

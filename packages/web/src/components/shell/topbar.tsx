@@ -5,13 +5,10 @@ import {
   Check,
   ChevronsUpDown,
   LogOut,
-  Monitor,
-  Moon,
   MoreHorizontal,
   Search,
   ServerCog,
   Settings,
-  Sun,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
@@ -32,12 +29,10 @@ import { useNow } from '../../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection, withNode } from '../../lib/node';
 import { pendingCount } from '../../lib/notice-count';
 import { noticeLevelMeta } from '../../lib/status';
-import { type ModePref, PALETTES } from '../../lib/theme';
 import { cn } from '../../lib/utils';
 import { usePhone } from '../../lib/viewport';
 import { EngineMasterBadge } from '../engine-master';
 import { StatusDot } from '../layout/status-badge';
-import { useTheme } from '../theme-provider';
 import { Button } from '../ui/button';
 import {
   DropdownMenu,
@@ -50,7 +45,6 @@ import {
 import { Kbd } from '../ui/kbd';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
-import { PaletteSwatch } from './palette-swatch';
 import { RepoSwitcher } from './repo-switcher';
 import { TopbarSlot } from './topbar-slot';
 
@@ -104,7 +98,6 @@ export function Topbar({ onSearch }: { onSearch(): void }) {
         </Button>
         <LiveIndicator />
         {nodeId === null ? <NotificationBell /> : null}
-        <ThemeMenu />
         <UserMenu />
       </div>
     </header>
@@ -408,82 +401,6 @@ function NotificationBell() {
           className="block border-t px-3 py-2 text-center text-meta text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           打开通知中心
-        </Link>
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-const MODES: { id: ModePref; label: string; icon: typeof Sun }[] = [
-  { id: 'light', label: '浅色', icon: Sun },
-  { id: 'dark', label: '深色', icon: Moon },
-  { id: 'system', label: '跟随系统', icon: Monitor },
-];
-
-export function ModeSwitch() {
-  const { pref, setMode } = useTheme();
-  return (
-    <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1" role="radiogroup" aria-label="深浅">
-      {MODES.map((m) => {
-        const Icon = m.icon;
-        const active = pref.mode === m.id;
-        return (
-          // biome-ignore lint/a11y/useSemanticElements: 分段按钮组，按钮比单选框更好点。
-          <button
-            key={m.id}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            onClick={() => setMode(m.id)}
-            className={cn(
-              'flex h-7 items-center justify-center gap-1.5 rounded-md text-meta text-muted-foreground transition-colors max-md:min-h-10',
-              active ? 'bg-card font-medium text-foreground shadow-xs' : 'hover:text-foreground',
-            )}
-          >
-            <Icon className="size-3.5" aria-hidden />
-            {m.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function ThemeMenu() {
-  const { pref, resolvedMode, setPalette } = useTheme();
-  const Icon = resolvedMode === 'dark' ? Moon : Sun;
-  return (
-    <Popover>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <Button size="icon" variant="ghost" className="hidden size-8 md:inline-flex" aria-label="主题">
-              <Icon />
-            </Button>
-          </PopoverTrigger>
-        </TooltipTrigger>
-        <TooltipContent>主题色与深浅</TooltipContent>
-      </Tooltip>
-      <PopoverContent align="end" className="w-usage">
-        <div className="mb-2 text-meta text-muted-foreground">深浅</div>
-        <ModeSwitch />
-        <div className="mt-4 mb-2 text-meta text-muted-foreground">主题色</div>
-        <div className="grid grid-cols-2 gap-2">
-          {PALETTES.map((p) => (
-            <PaletteSwatch
-              key={p.id}
-              id={p.id}
-              mode={resolvedMode}
-              active={pref.palette === p.id}
-              onPick={setPalette}
-            />
-          ))}
-        </div>
-        <Link
-          to="/settings"
-          className="mt-3 block text-center text-meta text-muted-foreground hover:text-foreground"
-        >
-          更多外观设置
         </Link>
       </PopoverContent>
     </Popover>

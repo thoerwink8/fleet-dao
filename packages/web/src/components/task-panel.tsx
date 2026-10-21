@@ -18,7 +18,6 @@ import { useHref, useNavigate, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import type { TaskDetail } from '../api/types';
 import { useLocalState } from '../lib/hooks';
-import { scaledPx, useRootScale } from '../lib/root-scale';
 import type { SegmentRunView } from '../lib/segments';
 import { runOrder } from '../lib/task-process';
 import { cn } from '../lib/utils';
@@ -33,7 +32,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from './ui/sheet';
 export const RUN_PARAM = 'run';
 export const PANEL_OPEN_KEY = `${brand.storagePrefix}task-panel-open`;
 export const PANEL_WIDTH_KEY = `${brand.storagePrefix}task-panel-width`;
-/** 面板宽：默认 560、最窄 400（16px 根字号下的设计值，用时乘根字号倍数），最宽不超过屏宽六成；左右键一下 40。 */
+/** 面板宽：默认 560、最窄 400（像素，根字号不放大），最宽不超过屏宽六成；左右键一下 40。 */
 const PANEL_DEFAULT_PX = 560;
 const PANEL_MIN_PX = 400;
 const PANEL_MAX_RATIO = 0.6;
@@ -310,12 +309,11 @@ function usePanelWidth(): {
   onDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
   onKey: (e: KeyboardEvent<HTMLDivElement>) => void;
 } {
-  const scale = useRootScale();
   const [stored, setStored] = useLocalState<number | null>(PANEL_WIDTH_KEY, null);
-  const minPx = scaledPx(PANEL_MIN_PX, scale);
+  const minPx = PANEL_MIN_PX;
   const clamp = (w: number) =>
     Math.round(Math.min(Math.max(minPx, window.innerWidth * PANEL_MAX_RATIO), Math.max(minPx, w)));
-  const width = clamp(typeof stored === 'number' ? stored : scaledPx(PANEL_DEFAULT_PX, scale));
+  const width = clamp(typeof stored === 'number' ? stored : PANEL_DEFAULT_PX);
   const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     // 面板贴右边：宽度 = 面板右边沿 - 指针
