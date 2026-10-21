@@ -387,6 +387,198 @@ describe('私有验收原 execution reader', () => {
       vi.useRealTimers();
     }
   });
+  describe('终态页仍带token：只按token耗尽收尾，合法空尾页不是损坏（#3500）', () => {
+    const page = (events: unknown[], token?: string) =>
+      temporal.api.workflowservice.v1.GetWorkflowExecutionHistoryResponse.create({
+        history: { events: events as never[] },
+        ...(token ? { nextPageToken: Buffer.from(token) } : {}),
+      });
+    const signal = (eventId: number) =>
+      temporal.api.history.v1.HistoryEvent.fromObject({
+        eventId: String(eventId),
+        eventType: 26,
+        workflowExecutionSignaledEventAttributes: { signalName: 'irrelevant' },
+      });
+    /** 终态页带 token，后面接给定的尾页。 */
+    function withTail(...tail: ReturnType<typeof page>[]) {
+      const f = fixture();
+      f.pages[1]!.nextPageToken = Buffer.from('tail-0');
+      f.pages.push(...tail);
+      return f;
+    }
+    /** 与现场同形：2105 个连续事件，第 2105 个是唯一终态，8 页后第 9 页为空且无 token。 */
+    function field() {
+      const f = fixture();
+      const head = f.events.slice(0, 7);
+      const events = [
+        ...head,
+        ...Array.from({ length: 2104 - 7 }, (_, i) => signal(8 + i)),
+        temporal.api.history.v1.HistoryEvent.fromObject({
+          eventId: '2105',
+          eventType: 2,
+          workflowExecutionCompletedEventAttributes: {},
+        }),
+      ];
+      const sizes = [303, 241, 243, 280, 260, 253, 262, 263];
+      let at = 0;
+      f.pages.length = 0;
+      sizes.forEach((n, i) => {
+        f.pages.push(page(events.slice(at, at + n), `page-${i + 1}`));
+        at += n;
+      });
+      f.pages.push(page([]));
+      f.describe.workflowExecutionInfo!.historyLength = events[2104]!.eventId;
+      return { ...f, all: events };
+    }
+
+    it('现场形状：2105事件分8页，终态在第8页仍有token，第9页0事件无token → observed', async () => {
+      const f = field();
+      expect(f.all).toHaveLength(2105);
+      expect(f.pages.map((x) => x.history?.events?.length)).toEqual([
+        303, 241, 243, 280, 260, 253, 262, 263, 0,
+      ]);
+      expect(f.pages[7]!.nextPageToken).toHaveLength(6);
+      const r = await f.reader.read(id);
+      expect(r.kind).toBe('observed');
+      if (r.kind !== 'observed') return;
+      expect(r.stats).toMatchObject({ events: 2105, pages: 9 });
+      expect(r.proof.closeEvent).toBe('2105');
+      expect(r.proof.final).toMatchObject({ head: id.head, scheduled: '6', completed: '7' });
+      expect(f.history).toHaveBeenCalledTimes(9);
+      expect(f.connection.workflowService.describeWorkflowExecution).toHaveBeenCalledTimes(2);
+    });
+    it('每页可多于maximumPageSize，仍在既有事件/页数预算内', async () => {
+      const f = field();
+      expect(Math.max(...f.pages.map((x) => x.history?.events?.length ?? 0))).toBeGreaterThan(128);
+      expect((await f.reader.read(id)).kind).toBe('observed');
+    });
+    it('终态后一个空尾页（token耗尽）→ observed，并确实读了尾页', async () => {
+      const f = withTail(page([]));
+      const r = await f.reader.read(id);
+      expect(r.kind).toBe('observed');
+      expect(f.history).toHaveBeenCalledTimes(3);
+      expect(
+        (f.history.mock.calls as unknown as [{ nextPageToken: Uint8Array }][]).map(([req]) =>
+          Buffer.from(req.nextPageToken).toString(),
+        ),
+      ).toEqual(['', 'next', 'tail-0']);
+    });
+    it('允许空尾页带进展token再接空尾页，最多两个空尾页', async () => {
+      expect((await withTail(page([], 'tail-1'), page([])).reader.read(id)).kind).toBe('observed');
+      expect(await withTail(page([], 'tail-1'), page([], 'tail-2'), page([])).reader.read(id)).toEqual({
+        kind: 'unknown',
+        code: 'limit',
+      });
+    });
+    it.each([
+      ['终态后出现新事件', () => withTail(page([signal(9)]))],
+      ['终态后空页之后再出现事件', () => withTail(page([], 'tail-1'), page([signal(9)]))],
+      [
+        '终态后重复终态',
+        () =>
+          withTail(
+            page([
+              temporal.api.history.v1.HistoryEvent.fromObject({
+                eventId: '9',
+                eventType: 2,
+                workflowExecutionCompletedEventAttributes: {},
+              }),
+            ]),
+          ),
+      ],
+      ['空尾页token循环', () => withTail(page([], 'tail-0'))],
+      ['空尾页回到旧token', () => withTail(page([], 'next'))],
+      [
+        '空尾页带rawHistory',
+        () => {
+          const f = withTail(page([]));
+          f.pages[2]!.rawHistory = [{ data: Buffer.from('raw') }];
+          return f;
+        },
+      ],
+      [
+        '空尾页archived',
+        () => {
+          const f = withTail(page([]));
+          f.pages[2]!.archived = true;
+          return f;
+        },
+      ],
+      ['空尾页token超长', () => withTail(page([], 'x'.repeat(ACCEPTANCE_HISTORY_LIMITS.tokenBytes + 1)))],
+      [
+        '终态前的空页',
+        () => {
+          const f = fixture();
+          f.pages.splice(1, 0, page([], 'mid'));
+          f.pages[0]!.nextPageToken = Buffer.from('next');
+          return f;
+        },
+      ],
+      [
+        '未终态时空页后token耗尽',
+        () => {
+          const f = fixture();
+          f.pages[1] = page([]);
+          return f;
+        },
+      ],
+      [
+        '缺最终coldVerify，空尾页不能弥补',
+        () => {
+          const f = withTail(page([]));
+          f.events[6]!.activityTaskCompletedEventAttributes!.result = p({ pass: false });
+          return f;
+        },
+      ],
+      [
+        '事件缺号，空尾页不能弥补',
+        () => {
+          const f = withTail(page([]));
+          f.events[4]!.eventId = temporal.api.history.v1.HistoryEvent.fromObject({ eventId: '999' }).eventId;
+          return f;
+        },
+      ],
+      [
+        'historyLength与末事件不符，空尾页不能弥补',
+        () => {
+          const f = withTail(page([]));
+          f.describe.workflowExecutionInfo!.historyLength = temporal.api.history.v1.HistoryEvent.fromObject({
+            eventId: '9',
+          }).eventId;
+          return f;
+        },
+      ],
+    ])('拒绝：%s', async (_name, build) => {
+      expect((await build().reader.read(id)).kind).toBe('unknown');
+    });
+    it('空尾页不能掩盖前后describe变化', async () => {
+      const f = withTail(page([]));
+      f.connection.workflowService.describeWorkflowExecution
+        .mockImplementationOnce(async () => structuredClone(f.describe))
+        .mockImplementationOnce(
+          async () =>
+            ({
+              ...f.describe,
+              workflowExecutionInfo: { ...f.describe.workflowExecutionInfo, status: 3 },
+            }) as typeof f.describe,
+        );
+      expect((await f.reader.read(id)).kind).toBe('unknown');
+    });
+    it('空尾页仍计入总页数预算：256页后停止', async () => {
+      const f = fixture();
+      f.pages[1]!.nextPageToken = Buffer.from('tail-0');
+      let n = 0;
+      f.history.mockImplementation(async () => {
+        const i = n++;
+        if (i === 0) return f.pages[0]!;
+        if (i === 1) return f.pages[1]!;
+        return page([], `tail-${i}`);
+      });
+      const r = await f.reader.read(id);
+      expect(r.kind).toBe('unknown');
+      expect(n).toBeLessThanOrEqual(ACCEPTANCE_HISTORY_LIMITS.pages);
+    });
+  });
   it('无关binary/null结果不必解码，不能靠notes碰巧命中建立B来源', async () => {
     const f = fixture();
     f.events[4]!.activityTaskCompletedEventAttributes!.result = p({ pass: false, notes: 'B' });

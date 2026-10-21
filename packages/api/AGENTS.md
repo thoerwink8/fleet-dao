@@ -51,4 +51,4 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 
 - 已结束却误记 abandoned 的真实已合任务：`fleet-api task correct-merged`（`task-correct-merged.ts`）。默认只读预检（现读 GitHub 精确 PR/head/合并提交/基线分支、Temporal 原 run 已 COMPLETED 且是最新一代且结果为 abandoned、库里 stopped/abandoned 且无活 run），执行必须带预检打印的 `--task`/`--seen`，由 `Store.correctMergedAbandoned` 在一个事务里 CAS 改任务并写操作记录（`task.correct-merged`，带前后状态和证据）。不改旧 run、不动 Temporal、不关 issue、不碰验收责任；同一请求幂等，换了任何身份或证据拒绝；没经 `bin/fleet-api`（无 FLEET_OPS_OPERATOR）不许执行。
 
-- 历史验收归并：`acceptance merge-plan` / `merge` 使用专用 `acceptance-execution-reader.ts`，只接受同 run 已完成活动的明确来源A/B，完整限额历史与最终头冷验收通过关联；不用旧 runs 的 NULL 列或会话号授权。merge 是私有 ops 写入，重取证据，随后由 DB 短事务完成目标/审计/幂等，不能挂普通HTTP或公开原项。
+- 历史验收归并：`acceptance merge-plan` / `merge` 使用专用 `acceptance-execution-reader.ts`，只接受同 run 已完成活动的明确来源A/B，完整限额历史与最终头冷验收通过关联；不用旧 runs 的 NULL 列或会话号授权。历史分页只按 token 耗尽收尾：终态页后可带 token 再接最多两个 0 事件空尾页（#3500），终态前的空页、终态后任何事件、token 循环仍一律 unknown。merge 是私有 ops 写入，重取证据，随后由 DB 短事务完成目标/审计/幂等，不能挂普通HTTP或公开原项。
