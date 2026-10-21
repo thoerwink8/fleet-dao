@@ -385,8 +385,8 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
                   `任务现在的状态是 ${last.state}，不是停着/已放弃，不再叫停（发叫停前最后一次复核，没有发叫停）`,
                 );
               phase = 'stop';
-              // 对所有还在跑（已核都停着）的旧代一次发完叫停请求，之后接续只读证、不再补发，
-              // 也就不会有「一直等一个根本没请求过叫停的旧代」。每一条都钉住已核的 run。
+              // 本轮先对全部已核停住的旧代发完叫停请求，不等尚未请求的代次；每条都钉住已核 run。
+              // 未确认的请求由接续入口重核归属、run 和姿态后有界补齐。
               const failures: string[] = [];
               for (const g of read.generations.filter((x) => x.life === 'running')) {
                 try {
