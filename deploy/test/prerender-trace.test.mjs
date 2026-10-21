@@ -3,20 +3,17 @@
 // 超时被掐断的请求打得出「没拿到响应」和原因；只观察——不加 error 监听（没人接的错照样让进程崩）、不改响应、
 // 非本机请求和没发过请求的进程一个字都不多说。用法：node --test deploy/test/prerender-trace.test.mjs（run.sh 的 node-tests 里跑）。
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runChild } from './child.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PRELOAD = pathToFileURL(join(here, '..', 'lib', 'prerender-trace.mjs')).href;
 
-/** 带探针跑一段脚本（ESM，stdin 不用），返回退出码和两路输出。 */
+/** 带探针跑一段脚本（ESM，stdin 不用），返回退出码和两路输出。真起子进程一律走 child.mjs（static-child 测试扫这条）。 */
 function run(script) {
-  const r = spawnSync(process.execPath, ['--import', PRELOAD, '--input-type=module', '-e', script], {
-    encoding: 'utf8',
-    timeout: 30_000,
-  });
+  const r = runChild(process.execPath, ['--import', PRELOAD, '--input-type=module', '-e', script]);
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 
