@@ -10,6 +10,7 @@ const SCRIPT = readFileSync(new URL('../../src/real/complex-snapshot.mjs', impor
 const BATCH = 4096;
 // 恢复段专用的格式，和 collect 带 objectsize 的格式分得开。
 const RESTORE_CHECK = /%\(objecttype\)$/;
+const PHYSICAL_CHECK = /cat-file --batch-all-objects --batch-check=%\(objectname\)$/;
 const BULK = BATCH + 300;
 
 interface SnapObject {
@@ -121,6 +122,31 @@ beforeAll(() => {
       '#!/bin/sh',
       'printf "%s\\n" "$*" >> "$FLEET_TEST_GIT_LOG"',
       'case "$*" in',
+      "  *'fetch --no-tags '* )",
+      '    if [ -n "$FLEET_TEST_EXTRA_PACK" ]; then',
+      '      git index-pack --stdin --strict < "$FLEET_TEST_EXTRA_PACK" >/dev/null || exit 4',
+      '    fi ;;',
+      "  *'cat-file --batch-all-objects --batch-check=%(objectname)')",
+      '    case "$FLEET_TEST_PHYSICAL_MODE" in',
+      '      empty) exit 0 ;;',
+      '      cut) git "$@" | head -c -1; exit 0 ;;',
+      "      invalid) printf 'invalid\\n'; exit 0 ;;",
+      '      blank) git "$@"; printf \'\\n\'; exit 0 ;;',
+      '      duplicate) git "$@"; git "$@" | head -n 1; exit 0 ;;',
+      '      limit) awk \'BEGIN {for(i=0;i<250001;i++) printf "%040x\\n",i}\'; exit 0 ;;',
+      '      buffer) awk \'BEGIN {for(i=0;i<250003;i++) printf "%040x\\n",i}\'; exit 0 ;;',
+      '      reverse) git "$@" | sort -r; exit 0 ;;',
+      '      fail) echo boom >&2; exit 3 ;;',
+      '      kill) kill -9 $$ ;;',
+      '    esac ;;',
+      "  *'%(objecttype) %(objectsize)')",
+      '    case "$FLEET_TEST_SIZE_MODE" in',
+      '      identity) git "$@" | sed \'1s/^[0-9a-f]*/ffffffffffffffffffffffffffffffffffffffff/\'; exit 0 ;;',
+      '      type) git "$@" | sed \'1s/ [a-z]* / bogus /\'; exit 0 ;;',
+      '      cut) git "$@" | head -c -1; exit 0 ;;',
+      '      single) git "$@" | sed \'1s/ [0-9]*$/ 268435457/\'; exit 0 ;;',
+      '      total) git "$@" | sed \'s/ [0-9]*$/ 268435456/\'; exit 0 ;;',
+      '    esac ;;',
       "  *'%(objecttype)')",
       '    case "$FLEET_TEST_GIT_MODE" in',
       '      drop) git "$@" | sed \'$d\'; exit 0 ;;',
@@ -139,6 +165,10 @@ beforeAll(() => {
   writeFileSync(join(repo, 'base.txt'), 'base\n');
   git(repo, ['add', '.']);
   git(repo, ['commit', '-q', '-m', 'base']);
+  // 旧 commit/tree/blob 仅被普通 reflog 指着；bulk 场景也必须真实恢复它们。
+  writeFileSync(join(repo, 'base.txt'), 'amended\n');
+  git(repo, ['add', '.']);
+  git(repo, ['commit', '-q', '--amend', '-m', 'amended']);
   git(repo, ['tag', '-a', 'v1', '-m', 'annotated']);
   // 不检出的旁支放足够多的 blob，凑出多批；工作树保持很小。
   const lines: string[] = [];
@@ -152,12 +182,15 @@ beforeAll(() => {
   lines.push('');
   git(repo, ['fast-import', '--quiet'], lines.join('\n'));
   writeFileSync(join(repo, 'dirty.txt'), 'dirty\n');
+  const stray = git(repo, ['hash-object', '-w', '--stdin'], 'source stray\n').toString('utf8').trim();
   const captured = snap('capture', undefined);
   if (captured.status !== 0) throw new Error(`capture 失败：${captured.stderr}`);
   frame = captured.stdout;
   const json = parseFrame(frame).find(([name]) => name === 'JSON');
   if (!json) throw new Error('帧缺 JSON');
   state = JSON.parse(json[1].toString('utf8'));
+  expect(state.objects.some((obj) => obj.sha === stray)).toBe(false);
+  expect(captured.calls.some((call) => PHYSICAL_CHECK.test(call))).toBe(false);
 }, 0);
 
 afterAll(() => {
@@ -176,9 +209,60 @@ describe.skipIf(process.platform !== 'linux')('复杂快照恢复的批量对象
     expect(restored.objects).toEqual(state.objects);
     const batches = Math.ceil(state.objects.length / BATCH);
     expect(result.calls.filter((call) => RESTORE_CHECK.test(call))).toHaveLength(2 * batches);
+    expect(result.calls.filter((call) => PHYSICAL_CHECK.test(call))).toHaveLength(1);
     expect(result.calls.filter((call) => /cat-file -t /.test(call))).toEqual([]);
     expect(result.calls.length).toBeLessThan(100);
     expect(result.calls.length).toBeLessThan(state.objects.length / 10);
+  });
+
+  it('恢复仓额外物理 blob 被实际枚举，不拿声明裁剪（不假设 fetch 导入 BUNDLE 冗余对象）', () => {
+    const stray = git(repo, ['hash-object', '-w', '--stdin'], 'bundle-only stray\n').toString('utf8').trim();
+    const path = join(root, 'extra.pack');
+    writeFileSync(path, git(repo, ['pack-objects', '--stdout'], `${stray}\n`));
+    // 真实 Git 同 refs 的 fetch 可能根本不读冗余 PACK。只在新恢复仓导入真实额外对象，独证末次枚举。
+    const result = snap('verify', frame, { FLEET_TEST_EXTRA_PACK: path });
+    expect(result.status).toBe(0);
+    const restored = JSON.parse(result.stdout.toString('utf8')) as SnapState;
+    expect(restored.objects).toContainEqual({ sha: stray, type: 'blob' });
+    expect(restored.objects).toHaveLength(state.objects.length + 1);
+    expect(restored.objects).not.toEqual(state.objects);
+  });
+
+  it.each([
+    ['empty', /物理对象枚举输出为空或截断/],
+    ['cut', /物理对象枚举输出为空或截断/],
+    ['invalid', /物理对象枚举输出认不出/],
+    ['blank', /物理对象枚举输出认不出/],
+    ['duplicate', /物理对象枚举重复/],
+    ['limit', /恢复物理对象太多/],
+    ['buffer', /git cat-file：.*ENOBUFS/],
+    ['fail', /git cat-file：退出码 3（boom）/],
+    ['kill', /git cat-file：退出码 null/],
+  ])('物理对象枚举%s时明确失败', (mode, error) => {
+    const result = snap('verify', frame, { FLEET_TEST_PHYSICAL_MODE: mode });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(error);
+    expect(result.stdout.length).toBe(0);
+  });
+
+  it('物理对象枚举乱序时仍按实际 oid 排序', () => {
+    const result = snap('verify', frame, { FLEET_TEST_PHYSICAL_MODE: 'reverse' });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout.toString('utf8')).objects).toEqual(state.objects);
+  });
+
+  it.each([
+    ['identity', /对象闭包核对输出认不出/],
+    ['type', /对象闭包核对输出认不出/],
+    ['cut', /对象闭包核对输出截断/],
+    ['single', /对象解压预算越界/],
+    ['total', /对象解压预算越界/],
+  ])('恢复实际对象的类型/大小读取%s时拒绝', (mode, error) => {
+    const result = snap('verify', frame, { FLEET_TEST_SIZE_MODE: mode });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(error);
+    expect(result.stdout.length).toBe(0);
+    expect(result.calls.filter((call) => PHYSICAL_CHECK.test(call))).toHaveLength(1);
   });
 
   it('PACK 缺对象时 BUNDLE 导入前就拒绝，不能靠成果包补', () => {
