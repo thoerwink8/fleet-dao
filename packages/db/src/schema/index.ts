@@ -1,4 +1,5 @@
 // 全部表与枚举。drizzle-kit 从这里读表结构生成迁移。
+export * from './acceptance-candidates.ts';
 export * from './alerts.ts';
 export * from './catalog.ts';
 export * from './channel-fallback.ts';
