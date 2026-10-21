@@ -1,6 +1,7 @@
 // 法国指挥官会话的真装配（real/park-triage.ts，#3294 第 2 片）在库上的几样：设置开关怎么读、用途没配模型怎么认、
 // 认领和执行的操作记录记在 engine:commander 名下、提醒带诊断文字、回合怎么读给空转判断。会话和 Temporal 不真连（另有 jobs 的假依赖测试）。
 import {
+  acceptanceDuties,
   auditLog,
   families,
   models,
@@ -288,5 +289,57 @@ describe('real/park-triage', () => {
     const rounds = await deps().rounds(task.id);
     expect(rounds).toHaveLength(3);
     expect(judgeSpin(rounds ?? []).spinning).toBe(true);
+  });
+
+  it('验收结清和 supersede 复用受管 store 的精确身份与代次核验', async () => {
+    const task = await seedTask();
+    const sourceHead = 'a'.repeat(40);
+    const finalHead = 'b'.repeat(40);
+    const [source] = await t.db
+      .insert(acceptanceDuties)
+      .values({
+        taskId: task.id,
+        repo: 'acme/app',
+        issueNumber: 7,
+        prNumber: 8,
+        head: sourceHead,
+        items: ['现场审计'],
+        source: 'cold_verify',
+        mergeCommit: null,
+      })
+      .returning();
+    const [target] = await t.db
+      .insert(acceptanceDuties)
+      .values({
+        taskId: task.id,
+        repo: 'acme/app',
+        issueNumber: 7,
+        prNumber: 8,
+        head: finalHead,
+        items: ['现场审计'],
+        source: 'cold_verify',
+        mergeCommit: 'c'.repeat(40),
+        settledAt: new Date(NOW.getTime() - 1_000),
+        settledBy: 'cold-verify',
+        settleEvidence: '最终头已验收',
+      })
+      .returning();
+    if (!source || !target) throw new Error('验收责任没写进去');
+    const d = deps();
+    await expect(
+      d.settleAcceptance?.({ task: {} as never, duty: source, evidence: '未合并' }),
+    ).rejects.toThrow();
+    await d.supersedeAcceptance?.({
+      task: {} as never,
+      source,
+      target,
+      evidence: '最终头覆盖旧头',
+      coverage: [{ source: '现场审计', target: '现场审计', basis: '同一条责任' }],
+    });
+    const rows = await t.db.select().from(acceptanceDuties);
+    expect(rows.find((row) => row.id === source.id)).toMatchObject({
+      supersededBy: COMMANDER_ACTOR,
+      successorId: target.id,
+    });
   });
 });

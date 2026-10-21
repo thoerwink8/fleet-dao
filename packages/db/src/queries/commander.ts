@@ -1,16 +1,21 @@
 // 法国指挥官会话（engine/src/jobs/park-triage.ts，#3294 第 2 片）读库的那几样。写操作记录经 recordEngineAudit（queries/session-org.ts）。
 // 都是只读；读不到原样抛，调用方记没查成，不当成空。
-import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
+import { acceptanceDutyState } from '@fleet-dao/shared';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
+  acceptanceDuties,
   auditLog,
   notifications,
+  pullRequests,
   repos,
   routingPurposeModels,
+  runs,
   settings,
   taskRounds,
   tasks,
 } from '../schema/index.ts';
+import type { AcceptanceDutyRow } from './acceptance-duties.ts';
 import { allSettledOrThrow } from './all-settled.ts';
 
 /** 指挥官会话的操作记录都记在这个 target 下（和 groom 一样一个 target 一类事）。 */
@@ -266,4 +271,72 @@ export async function commanderStalledSummary(db: Db): Promise<CommanderStalledS
 /** 「停下 N 张，指挥官处理 M 张，留给人 K 张」：attention 和每日简报打同一句。 */
 export function commanderSummaryLine(s: CommanderStalledSummary): string {
   return `停下 ${s.stalled} 张，指挥官处理 ${s.handled} 张，留给人 ${s.forHuman} 张`;
+}
+
+export interface CommanderAcceptanceTask {
+  taskId: string;
+  owner: string;
+  name: string;
+  issueNumber: number;
+  title: string;
+  workflowId: string | null;
+  prNumber: number;
+  head: string;
+  mergedAt: Date;
+  mergeCommit: string | null;
+  duties: AcceptanceDutyRow[];
+}
+
+/**
+ * PR 镜像已经合并超过 30 分钟、同单仍有 open 验收责任的候选。
+ * 责任状态必须用 shared 的统一判法；任务是否仍开着由 GitHub 真装配再核一次。
+ */
+export async function listCommanderAcceptanceTasks(
+  db: Db,
+  mergedBefore: Date,
+): Promise<CommanderAcceptanceTask[]> {
+  const allDuties = await db.select().from(acceptanceDuties).orderBy(asc(acceptanceDuties.id));
+  if (allDuties.length === 0) return [];
+  const taskIds = [...new Set(allDuties.map((d) => d.taskId))];
+  const workflowId = sql<string | null>`(
+    select ${runs.workflowId} from ${runs}
+    where ${runs.taskId} = ${tasks.id} and ${runs.workflowId} is not null
+    order by ${runs.startedAt} desc, ${runs.createdAt} desc
+    limit 1
+  )`;
+  const merged = await db
+    .select({
+      taskId: tasks.id,
+      owner: repos.owner,
+      name: repos.name,
+      issueNumber: tasks.issueNumber,
+      title: tasks.title,
+      workflowId,
+      prNumber: pullRequests.number,
+      head: pullRequests.headSha,
+      mergedAt: pullRequests.mergedAt,
+      mergeCommit: pullRequests.mergeSha,
+    })
+    .from(tasks)
+    .innerJoin(repos, eq(repos.id, tasks.repoId))
+    .innerJoin(pullRequests, eq(pullRequests.repoId, tasks.repoId))
+    .where(
+      and(
+        inArray(tasks.id, taskIds),
+        eq(pullRequests.state, 'merged'),
+        isNotNull(pullRequests.mergedAt),
+        lte(pullRequests.mergedAt, mergedBefore),
+      ),
+    )
+    .orderBy(asc(repos.owner), asc(repos.name), asc(tasks.issueNumber), asc(pullRequests.number));
+
+  const out = new Map<string, CommanderAcceptanceTask>();
+  for (const row of merged) {
+    if (row.mergedAt === null) continue;
+    const duties = allDuties.filter((d) => d.taskId === row.taskId && d.prNumber === row.prNumber);
+    if (!duties.some((d) => acceptanceDutyState(d, duties) === 'open')) continue;
+    const key = `${row.taskId}:${row.prNumber}:${row.head}`;
+    out.set(key, { ...row, mergedAt: row.mergedAt, duties });
+  }
+  return [...out.values()];
 }

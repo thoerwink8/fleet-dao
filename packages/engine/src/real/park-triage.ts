@@ -13,6 +13,7 @@ import {
   commanderAuditRows,
   countPurposeModels,
   finishScheduleRun,
+  listCommanderAcceptanceTasks,
   listIntakeRepos,
   listStalledEngineTasks,
   readOpenParkAlert,
@@ -22,7 +23,9 @@ import {
   readTaskTitle,
   recordEngineAudit,
   resolveAlertWithReason,
+  settleAcceptanceDuty,
   startScheduleRun,
+  supersedeAcceptanceDuty,
   upsertAlert,
 } from '@fleet-dao/db';
 import { TASK_WORKFLOW_TYPE } from '@fleet-dao/shared';
@@ -38,7 +41,12 @@ import {
   PARK_TRIAGE_CAP_ALERT_KEY,
   type ParkTriageDeps,
 } from '../jobs/park-triage.ts';
-import { taskAbandonSignal, taskContinueSignal, taskStatusQuery } from '../task-contract.ts';
+import {
+  taskAbandonSignal,
+  taskContinueSignal,
+  taskSettleMergedUpdate,
+  taskStatusQuery,
+} from '../task-contract.ts';
 import { type GroomWiring, toRepo } from './groom.ts';
 import { mapped } from './mirror.ts';
 import { readOnlySessionRunner } from './read-only-session.ts';
@@ -189,6 +197,18 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
       });
     },
     tasks: () => listStalledEngineTasks(w.db),
+    async acceptanceTasks() {
+      const candidates = await listCommanderAcceptanceTasks(w.db, new Date(now().getTime() - 30 * 60_000));
+      const open: typeof candidates = [];
+      for (const candidate of candidates) {
+        const state = await w.gh.readIssueState({
+          repo: { owner: candidate.owner, name: candidate.name },
+          issueNumber: candidate.issueNumber,
+        });
+        if (state.state === 'open') open.push(candidate);
+      }
+      return open;
+    },
     async status(workflowId) {
       try {
         const s = await withDeadline((client) =>
@@ -231,6 +251,50 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         },
         reason: `交指挥官会话看：停法 ${triage}，停下「${park.title}」`,
         ok: true,
+        at: now(),
+      });
+    },
+    async claimAcceptance({ task, requestId, attempt }) {
+      const workflowId = `acceptance:${task.taskId}:${task.prNumber}:${task.head}`;
+      await recordEngineAudit(w.db, {
+        action: COMMANDER_AUDIT_CLAIM,
+        target: COMMANDER_AUDIT_TARGET,
+        actorId: COMMANDER_ACTOR,
+        after: {
+          taskId: task.taskId,
+          ref: `${task.owner}/${task.name}#${task.issueNumber}`,
+          workflowId,
+          parkSeq: 0,
+          kind: 'acceptance',
+          prNumber: task.prNumber,
+          head: task.head,
+          ...(attempt ? { attempt } : {}),
+          requestId,
+        },
+        reason: `交指挥官会话看验收责任：PR #${task.prNumber}，合并于 ${task.mergedAt.toISOString()}`,
+        ok: true,
+        at: now(),
+      });
+    },
+    async acceptanceRetry({ task, attempt, why }) {
+      const workflowId = `acceptance:${task.taskId}:${task.prNumber}:${task.head}`;
+      await recordEngineAudit(w.db, {
+        action: COMMANDER_AUDIT_RETRY,
+        target: COMMANDER_AUDIT_TARGET,
+        actorId: COMMANDER_ACTOR,
+        after: {
+          taskId: task.taskId,
+          ref: `${task.owner}/${task.name}#${task.issueNumber}`,
+          workflowId,
+          parkSeq: 0,
+          kind: 'acceptance',
+          prNumber: task.prNumber,
+          head: task.head,
+          attempt,
+        },
+        reason: `验收责任会话没起成（第 ${attempt} 次），下一轮再看`,
+        ok: false,
+        error: why.slice(0, 1000),
         at: now(),
       });
     },
@@ -323,6 +387,105 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         ...(ok ? {} : { error: error ?? '没成' }),
         at: now(),
       });
+    },
+    async acceptanceAudit({ task, duty, action, reason, ok, error }) {
+      await recordEngineAudit(w.db, {
+        action: COMMANDER_AUDIT_ACT,
+        target: COMMANDER_AUDIT_TARGET,
+        actorId: COMMANDER_ACTOR,
+        after: {
+          taskId: task.taskId,
+          ref: `${task.owner}/${task.name}#${task.issueNumber}`,
+          kind: 'acceptance',
+          dutyId: duty.id,
+          generation: duty.generation,
+          repo: duty.repo,
+          issue: duty.issueNumber,
+          prNumber: duty.prNumber,
+          head: duty.head,
+          action,
+        },
+        reason,
+        ok,
+        ...(ok ? {} : { error: error ?? '没成' }),
+        at: now(),
+      });
+    },
+    async settleAcceptance({ duty, evidence }) {
+      await settleAcceptanceDuty(
+        w.db,
+        {
+          id: duty.id,
+          generation: duty.generation,
+          repo: duty.repo,
+          issueNumber: duty.issueNumber,
+          prNumber: duty.prNumber,
+          head: duty.head,
+          by: COMMANDER_ACTOR,
+          evidence,
+        },
+        now(),
+      );
+    },
+    async supersedeAcceptance({ source, target, evidence, coverage }) {
+      await supersedeAcceptanceDuty(
+        w.db,
+        {
+          source: {
+            id: source.id,
+            generation: source.generation,
+            repo: source.repo,
+            issueNumber: source.issueNumber,
+            prNumber: source.prNumber,
+            head: source.head,
+          },
+          target: {
+            id: target.id,
+            generation: target.generation,
+            repo: target.repo,
+            issueNumber: target.issueNumber,
+            prNumber: target.prNumber,
+            head: target.head,
+          },
+          by: COMMANDER_ACTOR,
+          evidence,
+          coverage,
+        },
+        now(),
+      );
+    },
+    async closeAcceptanceTask(task, mergeCommit) {
+      if (!task.workflowId) throw new Error('验收责任候选没有工作流编号，不能精确收尾');
+      const status = await withDeadline((client) =>
+        client.workflow.getHandle(task.workflowId as string).query(taskStatusQuery),
+      );
+      const close = status.mergedTaskClose;
+      const token = close?.token;
+      if (
+        !close ||
+        token === null ||
+        token === undefined ||
+        close.repo.owner.toLowerCase() !== task.owner.toLowerCase() ||
+        close.repo.name.toLowerCase() !== task.name.toLowerCase() ||
+        close.prNumber !== task.prNumber ||
+        close.head !== task.head
+      )
+        throw new Error('工作流的合并收尾凭据与验收候选不符，不能关单');
+      const receipt = {
+        repo: { owner: task.owner, name: task.name },
+        prNumber: task.prNumber,
+        head: task.head,
+        mergeCommit,
+      };
+      const outcome = await withDeadline((client) =>
+        client.workflow
+          .getHandle(task.workflowId as string, token.runId)
+          .executeUpdate(taskSettleMergedUpdate, {
+            args: [{ token, receipt }],
+            updateId: `merged-task:${token.runId}:${token.generation}:${token.continued}:${task.prNumber}:${task.head}:${mergeCommit}`,
+          }),
+      );
+      if (outcome !== 'accepted') throw new Error(`精确合并收尾没有受理：${outcome}`);
     },
     async notify(n) {
       await upsertAlert(w.db, {
