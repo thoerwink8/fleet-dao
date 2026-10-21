@@ -25,6 +25,7 @@ import {
   COMMANDER_AUDIT_RETRY,
   PARK_TRIAGE_JOB,
   PARK_TRIAGE_REDO_START_TRIES,
+  PARK_TRIAGE_REDO_STOP_TRIES,
   type ParkTriageItem,
   runParkTriageJob,
   triageParkedTasks,
@@ -516,12 +517,12 @@ describe('real/park-triage', () => {
     expect(notice?.body).toContain('叫停 task:acme/app#7 后还没停');
   });
 
-  it('旧代仍在跑时接续每一轮都不起新代、不重发叫停；等它结束后才起一个', async () => {
+  it('旧代仍在跑时接续每一轮都不起新代、补发叫停有界；等它结束后才起一个', async () => {
     const { fake, state, d } = await seedRedoRig();
     await triageParkedTasks(d);
     state.stalled = false;
-    for (let i = 0; i < 3; i++) await triageParkedTasks(d);
-    expect(fake.w.signals).toEqual([WF1]);
+    for (let i = 0; i < 4; i++) await triageParkedTasks(d);
+    expect(fake.w.signals).toHaveLength(PARK_TRIAGE_REDO_STOP_TRIES);
     expect(fake.w.starts).toEqual([]);
     fake.w.finish(WF1);
     await triageParkedTasks(d);
@@ -723,6 +724,98 @@ describe('real/park-triage', () => {
     const again = await triageParkedTasks(d);
     expect(fake.w.starts).toEqual([]);
     expect(again.problems.join('\n')).toContain('阻断');
+  });
+
+  // —— 第 2 轮根独验退回：两处接续缺口 ——
+  it('起新代响应丢了、新代已把任务行改成 running：接续只读确认同一新代已存在，不 Start', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    fake.w.startFault = () => 'lost';
+    await triageParkedTasks(d);
+    state.stalled = false;
+    await t.db.update(tasks).set({ state: 'running' });
+    const result = await triageParkedTasks(d);
+    expect(result.acted).toHaveLength(1);
+    expect(fake.w.starts).toEqual([WF2]);
+    expect((await parkNotice())?.title).toContain('接续完成');
+    expect(await ledgerPhases()).toContain('exists');
+  });
+
+  it('任务行不是停着/已放弃（running）而新代并不存在：只读核对不能变成 Start 或叫停，记 given-up', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    fake.w.finish(WF1);
+    await t.db.update(tasks).set({ state: 'running' });
+    await triageParkedTasks(d);
+    expect(fake.w.starts).toEqual([]);
+    expect(await ledgerPhases()).toContain('given-up');
+  });
+
+  it('叫停请求记账后、发信号前进程崩溃：接续在同一授权意图内补发已核 run 的叫停，旧代结束后只起一个新代', async () => {
+    const { task, fake, state, d } = await seedRedoRig();
+    state.stalled = false;
+    fake.w.onSignal = (id) => fake.w.finish(id);
+    await d.redoJournal({
+      row: { taskId: task.id, owner: 'acme', name: 'app', issueNumber: 7, workflowId: WF1 },
+      workflowId: WF1,
+      parkSeq: 3,
+      rec: {
+        phase: 'stop-requested',
+        trail: { fromGeneration: 1, runs: [{ workflowId: WF1, runId: 'run-1' }] },
+      },
+    });
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([WF2]);
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([WF2]);
+    expect(await ledgerPhases()).toEqual(['stop-requested', 'stop-requested', 'start-requested', 'started']);
+  });
+
+  it('补发叫停有界：叫停一直不生效时，总共只发 PARK_TRIAGE_REDO_STOP_TRIES 次，不起新代', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    for (let i = 0; i < 6; i++) await triageParkedTasks(d);
+    expect(fake.w.signals).toHaveLength(PARK_TRIAGE_REDO_STOP_TRIES);
+    expect(fake.w.starts).toEqual([]);
+  });
+
+  it.each(['running', 'abandoned'])(
+    '补发叫停只对真正停着的旧代：旧代姿态是 %s 时不再发信号也不 Start',
+    async (phase) => {
+      const { fake, state, d } = await seedRedoRig();
+      await triageParkedTasks(d);
+      state.stalled = false;
+      const run = fake.w.runs.get(WF1);
+      if (run) run.phase = phase;
+      await triageParkedTasks(d);
+      expect(fake.w.signals).toEqual([WF1]);
+      expect(fake.w.starts).toEqual([]);
+    },
+  );
+
+  it('旧代还停着时任务转给本机：接续不补发叫停、不 Start', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    await t.db.update(tasks).set({ executor: 'local' });
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([]);
+  });
+
+  it('旧代还停着时 run 身份变了：接续不补发叫停、不 Start', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    const run = fake.w.runs.get(WF1);
+    if (run) run.runId = 'run-other';
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([]);
   });
 
   it('多个旧代都停着时，首次叫停先对全部旧代发出请求，接续只读不再补叫停', async () => {

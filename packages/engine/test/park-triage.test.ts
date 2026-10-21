@@ -20,6 +20,7 @@ import {
   type OpenParkAlert,
   PARK_TRIAGE_DAILY_CAP,
   PARK_TRIAGE_REDO_START_TRIES,
+  PARK_TRIAGE_REDO_STOP_TRIES,
   PARK_TRIAGE_SESSION_TRIES,
   type ParkTriageDeps,
   REDO_FAILURE_PHASES,
@@ -146,6 +147,7 @@ function rig(
   const r = {
     journal: [] as { phase: string; why?: string | undefined }[],
     resumed: [] as { phase: string; canStart: boolean }[],
+    canSignal: [] as boolean[],
     sessions: [] as Parameters<ParkTriageDeps['runSession']>[0][],
     sent: [] as ContinueCommand[],
     abandoned: [] as string[],
@@ -226,6 +228,7 @@ function rig(
     },
     resumeRedo: async (pending, o) => {
       r.resumed.push({ phase: pending.phase, canStart: o.canStart });
+      r.canSignal.push(o.canSignal);
       if (opts.resumeThrows) throw new Error(opts.resumeThrows);
       return opts.resume ?? { ok: false, stage: 'waiting', why: '默认：不动' };
     },
@@ -1164,6 +1167,21 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
     const r = rig({ audits: [STOPPED, ...tries], over: GONE });
     await triageParkedTasks(r.deps);
     expect(r.resumed).toEqual([{ phase: 'start-requested', canStart: false }]);
+  });
+
+  it('补发叫停有界：账上记过 PARK_TRIAGE_REDO_STOP_TRIES 轮 stop-requested 后 canSignal=false；过了窗口也不再补发', async () => {
+    const rows = Array.from({ length: PARK_TRIAGE_REDO_STOP_TRIES }, (_, i) =>
+      redoRow('stop-requested', { trail: TRAIL }, 30 - i),
+    );
+    const full = rig({ audits: rows, over: GONE });
+    await triageParkedTasks(full.deps);
+    expect(full.canSignal).toEqual([false]);
+    const some = rig({ audits: rows.slice(0, PARK_TRIAGE_REDO_STOP_TRIES - 1), over: GONE });
+    await triageParkedTasks(some.deps);
+    expect(some.canSignal).toEqual([true]);
+    const old = rig({ audits: [redoRow('stop-requested', { trail: TRAIL }, 25 * 60)], over: GONE });
+    await triageParkedTasks(old.deps);
+    expect(old.canSignal).toEqual([false]);
   });
 
   it('接续过了 24 小时仍没核实：只停止发起新的启动，未知责任继续保留、每轮报没查成，不写 given-up', async () => {

@@ -102,6 +102,11 @@ export const COMMANDER_AUDIT_RETRY = 'commander.retry';
 export const COMMANDER_AUDIT_REDO = 'commander.redo';
 /** 接续里最多发起几次「起新代」（含第一次）。试满不再起，转人看；只数起新代这一步，等旧代终态不耗它。 */
 export const PARK_TRIAGE_REDO_START_TRIES = 3;
+/**
+ * 叫停请求最多发几轮（含首次）。叫停请求记账后进程崩溃、或部分旧代的信号根本没送到时，接续只对「账上已核 run 且姿态仍是 parked」
+ * 的旧代补发，每补一轮先记一条 stop-requested；用满不再补发，只读证。叫停是幂等信号，补发不增加任何新代。
+ */
+export const PARK_TRIAGE_REDO_STOP_TRIES = 3;
 
 /**
  * 接续账里的阶段：
@@ -165,6 +170,8 @@ export interface PendingRedo {
   trail: RedoTrail;
   /** 发起过几次「起新代」。 */
   startAttempts: number;
+  /** 记过几轮 stop-requested（首次叫停 + 接续补发）。 */
+  stopAttempts: number;
   /** 这一轮重做第一次记账的时刻。 */
   since: Date;
   /** 这一轮重做最早记下的失败原文。 */
@@ -339,7 +346,7 @@ export interface ParkTriageDeps {
    */
   resumeRedo(
     pending: PendingRedo,
-    opts: { canStart: boolean },
+    opts: { canStart: boolean; canSignal: boolean },
     journal: RedoJournal,
   ): Promise<CommanderRedoOutcome>;
   /** 开子单（拆单用）。 */
@@ -1384,6 +1391,7 @@ function readRedoLedger(audits: readonly CommanderAuditView[]): {
         phase: rec,
         trail,
         startAttempts: 0,
+        stopAttempts: 0,
         since: a.at,
         firstWhy: null,
         newWorkflowId: null,
@@ -1405,6 +1413,7 @@ function readRedoLedger(audits: readonly CommanderAuditView[]): {
       }
     }
     state.phase = rec;
+    if (rec === 'stop-requested') state.stopAttempts += 1;
     if (rec === 'start-requested') {
       state.startAttempts += 1;
       state.newWorkflowId = expectId;
@@ -1534,11 +1543,12 @@ async function resumeRedos(
     }
     const expired = now.getTime() - p.since.getTime() > WINDOW_MS;
     const canStart = !expired && p.startAttempts < PARK_TRIAGE_REDO_START_TRIES;
+    const canSignal = !expired && p.stopAttempts < PARK_TRIAGE_REDO_STOP_TRIES;
     const journal: RedoJournal = (rec) =>
       deps.redoJournal({ row: p.row, workflowId: p.workflowId, parkSeq: p.parkSeq, rec });
     let out: CommanderRedoOutcome;
     try {
-      out = await deps.resumeRedo(p, { canStart }, journal);
+      out = await deps.resumeRedo(p, { canStart, canSignal }, journal);
     } catch (err) {
       result.problems.push(`${ref} 重做接续这一轮没查成（账上仍是待接续）：${errMessage(err)}`);
       continue;
