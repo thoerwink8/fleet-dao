@@ -24,7 +24,14 @@ import { Tag } from '../components/layout/tag';
 import { SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
 import { ReposSection } from '../components/resources/repos-section';
-import { type AppRow, appRows, type Cell, type DiskCell, type DiskPart } from '../components/resources/view';
+import {
+  type AppRow,
+  appRows,
+  type Cell,
+  type DiskCell,
+  type DiskPart,
+  UNREGISTERED_HINT,
+} from '../components/resources/view';
 import { Button } from '../components/ui/button';
 import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -167,7 +174,7 @@ function CellText({ cell }: { cell: Cell }) {
     case 'unread':
       return (
         <span className="text-muted-foreground" title={cell.why}>
-          没读到
+          {cell.word ?? '没读到'}
         </span>
       );
   }
@@ -254,6 +261,12 @@ function AppDetail({ row, totalCores }: { row: AppRow; totalCores: number | unde
       ),
     },
   ];
+  if (row.unregistered) {
+    lines.push({
+      label: '没登记',
+      value: `机器上在跑，但登记表里没有它：${UNREGISTERED_HINT}（要么加一项，要么写进「系统自带服务」名单）`,
+    });
+  }
   const cpuWhy = why(row.cpu);
   lines.push({
     label: 'CPU',
@@ -328,6 +341,7 @@ function AppDetail({ row, totalCores }: { row: AppRow; totalCores: number | unde
 }
 
 function cellWord(cell: Cell): string {
+  if (cell.kind === 'unread' && cell.word) return cell.word;
   return {
     ok: '',
     sampling: '采样中',
@@ -409,15 +423,18 @@ function AppsSection({
                         <span className="flex min-w-0 items-center gap-2">
                           <span className="text-body font-medium">{row.name}</span>
                           {row.external ? <Tag>不归本仓管</Tag> : null}
+                          {row.scheduled ? <Tag>定时任务</Tag> : null}
+                          {row.unregistered ? <Tag tone="human">没登记</Tag> : null}
                         </span>
                         <span
                           className={cn(
                             'block truncate text-meta text-muted-foreground',
                             row.place.startsWith('/') && 'font-mono',
                           )}
-                          title={row.place}
+                          title={row.unregistered ? `${row.place}；${UNREGISTERED_HINT}` : row.place}
+                          data-unregistered-hint={row.unregistered ? '' : undefined}
                         >
-                          {row.place}
+                          {row.unregistered ? UNREGISTERED_HINT : row.place}
                         </span>
                       </span>
                     }
@@ -432,6 +449,11 @@ function AppsSection({
           ))}
         </List>
       )}
+      {result.kind === 'ok' && result.scanWhy ? (
+        <p className="border-t border-border p-3 text-meta text-muted-foreground" data-resources-apps-scan>
+          没登记的服务、定时任务没扫成，可能还有没列出来的：{result.scanWhy}
+        </p>
+      ) : null}
     </Section>
   );
 }
