@@ -258,6 +258,55 @@ describe('进程内定时器（startTimers）', () => {
     expect(calls).toBe(1);
   });
 
+  it('stop：宽限到了没回的一轮，把编号、本进程起定时器的时刻和停机时刻交给 recordUnfinished；记不上不挡停机', async () => {
+    const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+    const recorded: { ids: readonly string[]; since: number; at: number }[] = [];
+    let fail = false;
+    const t = startTimers([job({ run: () => new Promise<void>(() => {}) })], {
+      ...f.host,
+      async recordUnfinished(ids, since, at) {
+        recorded.push({ ids, since: since.getTime(), at: at.getTime() });
+        if (fail) throw new Error('库写不进');
+      },
+    });
+    await f.advanceTo(T0 + 4 * MIN);
+    const stopping = t.stop(1_000);
+    await f.advanceTo(T0 + 4 * MIN + 1_000);
+    expect(await stopping).toEqual(['j']);
+    expect(recorded).toEqual([{ ids: ['j'], since: T0 + 1 * MIN, at: T0 + 4 * MIN + 1_000 }]);
+
+    fail = true;
+    const g = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+    const t2 = startTimers([job({ run: () => new Promise<void>(() => {}) })], {
+      ...g.host,
+      async recordUnfinished() {
+        throw new Error('库写不进');
+      },
+    });
+    await g.advanceTo(T0 + 4 * MIN);
+    const stopping2 = t2.stop(1_000);
+    await g.advanceTo(T0 + 4 * MIN + 1_000);
+    expect(await stopping2).toEqual(['j']);
+    expect(g.logs.some((l) => l.startsWith('error:') && l.includes('库写不进'))).toBe(true);
+  });
+
+  it('stop：宽限内都回了，不调 recordUnfinished', async () => {
+    const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+    let release: () => void = () => {};
+    let called = 0;
+    const t = startTimers([job({ run: () => new Promise<void>((r) => (release = r)) })], {
+      ...f.host,
+      recordUnfinished: async () => {
+        called += 1;
+      },
+    });
+    await f.advanceTo(T0 + 4 * MIN);
+    const stopping = t.stop(60_000);
+    release();
+    expect(await stopping).toEqual([]);
+    expect(called).toBe(0);
+  });
+
   it('stop：在跑的一轮宽限内完了，回空，不拖到宽限', async () => {
     const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
     let release: () => void = () => {};

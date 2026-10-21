@@ -43,6 +43,8 @@ import {
   recordPrHeadFiles,
   recordRouteProbeDone,
   recordRouteProbeStart,
+  recordScheduleRunsShutdown,
+  recordWorktreeRemoval,
   resolveAlertIfUnchangedSince,
   routeProbeAuditRows,
   scheduleHealth,
@@ -138,6 +140,7 @@ import {
   wakeAfterProbeRound,
 } from './route-wake.ts';
 import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
+import { productionScopeOom } from './scope-oom-evidence.ts';
 import { createPlanSegmentResume, createSegmentSettled } from './segment-resume.ts';
 import { reportSubagentDefs } from './segment-settings.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
@@ -880,6 +883,8 @@ export function realPortsFromEnv(
   recordSkippedRun(jobId: string, why: string): Promise<void>;
   /** 定时器起之前：超过一轮工作上限还没结束的 schedule_runs 补记成 failed（#1522）。写库失败照抛。 */
   closeInterruptedScheduleRuns: InterruptedScheduleClose;
+  /** 停机宽限到了还没回的定时任务：在本进程开始的未结束行上留「退出时仍在跑」见证，不结束这一行（jobs/timers.ts 的 recordUnfinished）。 */
+  recordUnfinishedScheduleRuns(jobIds: readonly string[], since: Date, at: Date): Promise<void>;
   close(): Promise<void>;
   stateDir: string;
   /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
@@ -897,7 +902,11 @@ export function realPortsFromEnv(
     locker: pgLocker(db),
     env: gitNetworkEnv(env as Record<string, string | undefined>, config.sessionProxy),
   });
-  const trees = helperWorkTrees({ root: config.workRoot });
+  // 每次受管删树都在 audit_log 留一条含树名、dev/ino 的回执（#3474）
+  const trees = helperWorkTrees({
+    root: config.workRoot,
+    recordRemoval: (receipt) => recordWorktreeRemoval(db, receipt),
+  });
   const { claudeCommand, cursorCommand, grokCommand } = agentCommands(config);
   // 单子归类（#448）问的是判断题配置（issue-kind），走 issue-kind-jev.ts；起来时在 registerJobs 里登记。
   // 错误分流、停滞预判没有工作流再问，引擎不再登记、不再问。
@@ -1168,6 +1177,8 @@ export function realPortsFromEnv(
     memoryPeak: productionMemoryPeak(),
     // 会话用掉的 CPU 秒数写进 runs（#1980）：边跑边读 cpu.stat，收场再读一次 usage_usec
     cpuUsage: productionCpuUsage(),
+    // 会话 scope 自己的内存事件见证写进 result.json（#3448）：边跑边读 memory.events.local，只证明 scope 内有事件
+    scopeOom: productionScopeOom(),
     // 拼车池上的会话被拒：证据当场交给切号判（#194 方案 4.3），不等路由探针那一轮；不等结果（切号要等这个会话收场）
     onCarpoolRejection: (rejection) => {
       void orgSwitch.now({ by: '拼车会话被拒', rejection });
@@ -1411,6 +1422,9 @@ export function realPortsFromEnv(
       await finishScheduleRun(db, id, { outcome: 'partial', why }, at);
     },
     closeInterruptedScheduleRuns: (input) => closeInterruptedScheduleRunsInDb(db, input),
+    recordUnfinishedScheduleRuns: async (jobIds, since, at) => {
+      await recordScheduleRunsShutdown(db, { jobs: jobIds, since, at });
+    },
     jobLastStartedAt: async () =>
       new Map(
         (await scheduleHealth(db)).flatMap((h) =>

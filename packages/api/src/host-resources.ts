@@ -17,7 +17,7 @@ import { posix } from 'node:path';
 import type { DiskFootprintSchema, HomeResourcesSchema, SessionUsageSchema } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type { Logger } from './ports.ts';
-import { VPS_APPS, type VpsApp } from './vps-apps.ts';
+import { isSystemService, isUnregisteredTimer, VPS_APPS, type VpsApp } from './vps-apps.ts';
 
 type HomeResources = z.infer<typeof HomeResourcesSchema>;
 type SessionUsage = z.infer<typeof SessionUsageSchema>;
@@ -56,6 +56,8 @@ export interface HostReadDeps {
   diskPath?: string;
   /** 上线项目登记表（#1985）：没装就不带 apps 这一项。 */
   apps?: readonly VpsApp[];
+  /** 管理员装的单元文件在哪（/etc/systemd/system）：列里面的 *.timer 兜底找没登记的定时任务；没给就不扫。 */
+  systemdDir?: string;
 }
 
 export function realHostReader(overrides: Partial<HostReadDeps> = {}): HostReadDeps {
@@ -68,6 +70,7 @@ export function realHostReader(overrides: Partial<HostReadDeps> = {}): HostReadD
     statfs: (path) => statfs(path),
     diskPath: '/',
     apps: VPS_APPS,
+    systemdDir: '/etc/systemd/system',
     ...overrides,
   };
 }
@@ -278,12 +281,112 @@ async function readApps(
         place: app.place,
         units: app.units.map((u) => u.name),
         ...(app.external ? { external: true } : {}),
+        ...(app.scheduled ? { scheduled: true } : {}),
         ...(app.diskNote ? { diskNote: app.diskNote } : {}),
         usage,
       };
     }),
   );
-  return { apps: { state: 'ok', items }, units };
+  const extra = await readUnregistered(deps, prev, elapsedMs, units);
+  return {
+    apps: {
+      state: 'ok',
+      items: [...items, ...extra.items],
+      ...(extra.scanWhy ? { unregisteredScanWhy: extra.scanWhy } : {}),
+    },
+    units,
+  };
+}
+
+/**
+ * 兜底（#3457）：列 system.slice 下（含 system-*.slice 子层里的模板实例）的 *.service，memory.current 非 0 的、
+ * 既不在登记表里、也不在 SYSTEM_SERVICES 里的，每个单独出一项 unregistered，免得手写清单漏了新服务就静默看不到。
+ * 读不了的目录记进 scanWhy（不当作「没有」）；cgroup 在、memory.current 是 0 的不算在跑，不出行。
+ */
+async function readUnregistered(
+  deps: HostReadDeps,
+  prev: ResourceMemo | undefined,
+  elapsedMs: number,
+  usecs: Map<string, number>,
+): Promise<{ items: HostApp[]; scanWhy?: string }> {
+  const registered = new Set((deps.apps ?? []).flatMap((a) => a.units.map((u) => u.name)));
+  const base = 'system.slice';
+  const found: { name: string; cgroup: string }[] = [];
+  let scanWhy: string | undefined;
+  const list = async (rel: string): Promise<string[]> => {
+    const dir = posix.join(deps.cgroupRoot, rel);
+    try {
+      return await deps.readDir(dir);
+    } catch (err) {
+      if (!isMissing(err)) scanWhy ??= `${dir} 没读成：${message(err)}`;
+      return [];
+    }
+  };
+  const consider = (name: string, rel: string) => {
+    if (!name.endsWith('.service') || registered.has(name) || isSystemService(name)) return;
+    found.push({ name, cgroup: posix.join(rel, name) });
+  };
+  for (const name of await list(base)) {
+    if (/^system-.+\.slice$/.test(name)) {
+      for (const inner of await list(posix.join(base, name))) consider(inner, posix.join(base, name));
+    } else {
+      consider(name, base);
+    }
+  }
+  const items: HostApp[] = [];
+  if (deps.systemdDir) {
+    let timers: string[] = [];
+    try {
+      timers = await deps.readDir(deps.systemdDir);
+    } catch (err) {
+      if (!isMissing(err)) scanWhy ??= `${deps.systemdDir} 没读成：${message(err)}`;
+    }
+    for (const t of timers.filter((n) => n.endsWith('.timer')).sort()) {
+      if (!isUnregisteredTimer(t, deps.apps ?? [])) continue;
+      items.push({
+        id: `unregistered:${t}`,
+        name: t,
+        place: `${posix.join(deps.systemdDir, t)}（定时任务，登记表里没有它）`,
+        units: [t],
+        unregistered: true,
+        scheduled: true,
+        diskNote: '没登记目录',
+        usage: { state: 'idle', why: '定时任务：跑完进程就没了，此刻读不到占用' },
+      });
+    }
+  }
+  for (const { name, cgroup } of found.sort((a, b) => a.name.localeCompare(b.name))) {
+    const r = await readUnit(deps, cgroup);
+    if (r.kind === 'off' || r.kind === 'empty') continue;
+    let usage: HostApp['usage'];
+    if (r.kind === 'unread') {
+      usage = { state: 'unread', why: r.why };
+    } else {
+      usecs.set(name, r.usec);
+      const before = prev?.units?.get(name);
+      const cores =
+        before === undefined || r.usec < before || elapsedMs <= 0
+          ? undefined
+          : Math.round(((r.usec - before) / (elapsedMs * 1000)) * 100) / 100;
+      usage = {
+        state: 'ok',
+        running: 1,
+        memoryMb: Math.round(r.memoryBytes / MIB),
+        ...(r.maxBytes === undefined ? {} : { memoryMaxMb: Math.round(r.maxBytes / MIB) }),
+        ...(cores === undefined ? {} : { cpuCores: cores }),
+      };
+    }
+    items.push({
+      id: `unregistered:${name}`,
+      name,
+      place: `${cgroup}（机器上在跑，登记表里没有它）`,
+      units: [name],
+      unregistered: true,
+      diskNote: '没登记目录',
+      usage,
+    });
+  }
+  return { items, ...(scanWhy ? { scanWhy } : {}) };
 }
 
 async function readMemory(deps: HostReadDeps): Promise<HomeResources['memory']> {
@@ -485,7 +588,7 @@ export function createHostResourceSampler(input: {
   now: () => Date;
   log?: Logger;
   everyMs?: number;
-  /** 按目录的磁盘占用（#1985）：给了就每回带上它最近一回；遍历在它自己那边跑，不在这一回里等。 */
+  /** 按目录的磁盘占用（#1985）：给了就每回带上它最近一回；读文件在它自己那边后台做，不在这一回里等。 */
   footprint?: FootprintSource;
 }): HostResourceSampler {
   const everyMs = input.everyMs ?? RESOURCE_SAMPLE_MS;

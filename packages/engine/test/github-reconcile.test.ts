@@ -234,6 +234,25 @@ describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_00
     expect((await healthOf())?.status).toBe('ok');
   });
 
+  it('真实装配把窗口落在 PG 幂等账：重新装配、非 ok 不挪起点，ok 后才开始新窗口', async () => {
+    const w = await wiring({ pulls: [] });
+    const start = Date.now() - 60 * 60_000;
+    const windows: number[] = [];
+    for (const [i, outcome] of (['partial', 'failed', 'unscanned', 'ok', 'ok'] as const).entries()) {
+      const d = w.job(client, 'fleet');
+      const now = new Date(start + i * 60_000);
+      d.now = () => now;
+      d.reconcile = async ({ since }) => {
+        windows.push(since.getTime());
+        return { outcome, scanned: 1, found: 0, steps: [], why: outcome === 'ok' ? undefined : '未查全' };
+      };
+      if (outcome === 'failed') await expect(runGitHubReconcileJob(d)).rejects.toThrow();
+      else await runGitHubReconcileJob(d);
+    }
+    expect(windows.slice(0, 4)).toEqual(Array(4).fill(start - GITHUB_RECONCILE_LOOKBACK_MS));
+    expect(windows[4]).toBe(start + 3 * 60_000);
+  });
+
   it('真装配从 schedule_runs 读上一次 ok 的结束时刻当回看起点，更近的 partial 不把窗口往前推', async () => {
     const w = await wiring({ pulls: [] });
     const ended = new Date(Date.now() - 5 * 60 * 60_000);

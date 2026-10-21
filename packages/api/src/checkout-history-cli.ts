@@ -15,7 +15,8 @@ const Identity = z
     issueNumber: z.number().int().positive(),
     workflowId: Text,
     runId: z.string().uuid(),
-    temporalRunId: Text,
+    // 旧 run 的 temporal_run_id 可以为空串（#3067）；非空时必须与 run 行一致。
+    temporalRunId: z.string().trim().max(8000),
     pr: z.number().int().positive(),
     head: Sha,
   })

@@ -221,33 +221,62 @@ export const HostAppSchema = z.object({
   external: z.boolean().optional(),
   /** 磁盘那一格的补充：名下没登记目录时说算在哪（例如「代码在发布版本目录里」）。 */
   diskNote: z.string().min(1).optional(),
+  /** 机器上在跑、但登记表里没有的服务（#3457，兜底扫 system.slice 扫出来的）：页面排在最后、标「没登记」。老后端没有这个字段。 */
+  unregistered: z.boolean().optional(),
+  /** systemd 定时任务（oneshot）：跑完 cgroup 就没了，页面这一格看 footprint.timers 里近 24 小时的账（#3456），没有就写没给，不画 0。 */
+  scheduled: z.boolean().optional(),
   usage: AppUsageSchema,
 });
 
-/** 一个目录的大小：遍历文件、按占用的块算（和 du 一样，硬链接只算一次、不跟符号链接）。 */
+/**
+ * 一个目录的大小：法国上 root 的单元（fleet-footprint.timer）每 10 分钟用 du 量、只写数字，后端读它（#3456）。
+ * 按占用的块算（硬链接只算一次、不过挂载点）。这一回没量成的目录：有上次量成的数就带 stale（数是旧的，写旧在哪、为什么没更新），
+ * 从没量成过是 unread。绝不拿「不到 1M」这种下限顶数。
+ */
 export const DirSizeSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('ok'),
     bytes: z.number().int().min(0),
-    /** 里面有几棵子树读不了（权限、中途没了）：大于 0 时数是下限，页面写「不全：有 N 棵树没读到」。 */
+    /** 量的时候有几处读不了（权限、IO 错）：大于 0 时数是下限，页面写「不全：有 N 处没读到」。（字段名是老的，别处还在读。） */
     unreadTrees: z.number().int().min(0),
-    /** 第一棵读不了的子树和原因，给悬停看。 */
-    unreadSample: z.string().optional(),
-    /** 测到时限没测完：数是下限。 */
-    capped: z.boolean().optional(),
+    /** 这个数是什么时候量的；老后端、别的环境推来的读数没有。 */
+    measuredAt: Time.optional(),
+    /** 这个数是旧的：最近一次没量成（attemptedAt 试的时刻）和原因；数是上次量成的（measuredAt）。 */
+    stale: z.object({ why: z.string().min(1), attemptedAt: Time.optional() }).optional(),
   }),
   ResourceUnreadSchema,
 ]);
 
-/** 按目录的磁盘占用（#1985）：遍历较重，每 everyMs（10 分钟）测一回、缓存；还没测完第一回是 pending。 */
+/**
+ * 按目录的磁盘占用（#1985、#3456）：法国上 root 的单元每 everyMs（10 分钟）量一回写文件，后端读它；
+ * 文件读不到、认不出是 unread（带原因），后端刚起还没读过是 pending。
+ */
 export const DiskFootprintSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('ok'),
-    /** 这一回测完的时刻。 */
+    /** 这一回量完的时刻（单元写的）。 */
     measuredAt: Time,
     everyMs: z.number().int().positive(),
-    /** 这一回测了多久（毫秒）。 */
+    /** 这一回量了多久（毫秒）。 */
     tookMs: z.number().int().min(0),
+    /**
+     * 定时任务（systemd oneshot，跑完 cgroup 就没了，5 秒一采抓不到）近 24 小时的账：root 单元从 journal 里数 systemd 每回结束打的
+     * 「Consumed X CPU time, Y memory peak」。读不到是 { unit, why }。老后端、别的环境推来的读数没有这一项。
+     */
+    timers: z
+      .array(
+        z.union([
+          z.object({
+            unit: z.string().min(1),
+            runs24h: z.number().int().min(1),
+            cpuSeconds24h: z.number().min(0),
+            /** 单次峰值；旧版 systemd 不打内存峰值时是 null。 */
+            peakMemoryBytes: z.number().int().min(0).nullable(),
+          }),
+          z.object({ unit: z.string().min(1), why: z.string().min(1) }),
+        ]),
+      )
+      .optional(),
     dirs: z.array(
       z.object({
         path: z.string().min(1),
@@ -277,6 +306,7 @@ export const DiskFootprintSchema = z.discriminatedUnion('state', [
     ]),
   }),
   z.object({ state: z.literal('pending'), why: z.string().min(1) }),
+  ResourceUnreadSchema,
 ]);
 
 /**
@@ -301,7 +331,12 @@ export const HomeResourcesSchema = z.object({
   /** 每个上线项目此刻的 CPU、内存（每 everyMs 随这一回一起读），按登记表的先后；整块读不到是 unread。 */
   apps: z
     .discriminatedUnion('state', [
-      z.object({ state: z.literal('ok'), items: z.array(HostAppSchema) }),
+      z.object({
+        state: z.literal('ok'),
+        items: z.array(HostAppSchema),
+        /** 扫「没登记的服务」没扫成（system.slice 读不了）：原因。有它就说明可能还有没列出来的服务。老后端没有。 */
+        unregisteredScanWhy: z.string().min(1).optional(),
+      }),
       ResourceUnreadSchema,
     ])
     .optional(),

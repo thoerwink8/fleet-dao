@@ -5,7 +5,7 @@
 // - 一格三种：读成了写数；没在跑写「没在占用」；读不到写「没读到」加原因。绝不拿 0 顶（仓的底线）。
 // - CPU 写「忙的核数」（1 核 = 占满一个核，cgroup cpu.stat 两回的差 ÷ 墙钟）；只读到一回时写「采样中」，不写 0。
 // - 磁盘按应用：它名下登记的目录 + 库（pg_database_size）相加。有目录读不全（权限、时限）时数是下限，写「不全」带棵数；
-//   名下一个目录都没读成写没读到；名下没登记目录写登记表里的补充（diskNote，例如「代码在发布版本目录里」）。
+//   这一回没量成的目录用上次量成的旧数（带「旧数」缺口），名下一个目录都没读成写没读到；名下没登记目录写登记表里的补充（diskNote，例如「代码在发布版本目录里」）。
 // - 老后端（没有 apps、footprint、disk 这几项）写明「后端没给」，选了远程环境写「那台没推」。
 // - AI 会话按所属仓折成子行：主页数据里每张在跑的单有 runIds 和 repo，拿它到 sessions.byRun 里对；对不上单的（路由探针这类）归「别的会话」。
 import { formatBytes, formatMb, type ResourceOptions } from '../home/resources';
@@ -18,7 +18,8 @@ export type Cell =
   /** 会话 scope 都还在、里面没进程（memory.current 是 0，#1992）：写「空 scope」，不写 0M / 0 核。 */
   | { kind: 'empty'; why: string }
   | { kind: 'none'; why: string }
-  | { kind: 'unread'; why: string };
+  /** word：格子上写的字，默认「没读到」（定时任务写「近 24 小时没给」）。 */
+  | { kind: 'unread'; why: string; word?: string };
 
 export type DiskCell =
   | { kind: 'ok'; text: string; bytes: number; gaps: Gaps; incomplete?: string }
@@ -36,6 +37,10 @@ export interface AppRow {
   place: string;
   units: readonly string[];
   external: boolean;
+  /** 机器上在跑、登记表里没有（#3457）：排在最后，标「没登记」，提示去哪登记。 */
+  unregistered: boolean;
+  /** 定时任务：此刻没在跑时 CPU、内存格写近 24 小时。 */
+  scheduled: boolean;
   cpu: Cell;
   memory: Cell;
   disk: DiskCell;
@@ -78,6 +83,7 @@ function notGiven(what: string, opts: ResourceOptions): string {
 
 /** 忙的核数：一位小数，太小写两位，免得「0.0 核」看着像没在跑。 */
 export function formatCores(cores: number): string {
+  if (cores > 0 && cores < 0.005) return '<0.01 核';
   if (cores > 0 && cores < 0.05) return `${cores.toFixed(2)} 核`;
   return `${cores.toFixed(1)} 核`;
 }
@@ -92,8 +98,50 @@ function cpuCell(cores: number | undefined, total: number | undefined): Cell {
   };
 }
 
+/**
+ * 定时任务（oneshot，跑完 cgroup 就没了，5 秒一采抓不到）：名下有单元在 footprint.timers 里就用 root 单元从 journal 数出来的
+ * 近 24 小时账——CPU 写「近 24 小时平均 N 核（跑了 M 次）」、内存写「单次峰值」。读不到写原因，不当 0。没有定时任务数据时回 undefined。
+ */
+function timerCells(app: HostApp, footprint: Footprint | undefined): { cpu: Cell; memory: Cell } | undefined {
+  if (footprint?.state !== 'ok' || !footprint.timers) return undefined;
+  const mine = footprint.timers.filter((t) => app.units.includes(t.unit));
+  if (mine.length === 0) return undefined;
+  let runs = 0;
+  let cpuSeconds = 0;
+  let peak: number | null = 0;
+  for (const t of mine) {
+    if ('why' in t) {
+      const why = `近 24 小时的账没读到（${t.unit}）：${t.why}`;
+      return { cpu: { kind: 'unread', why }, memory: { kind: 'unread', why } };
+    }
+    runs += t.runs24h;
+    cpuSeconds += t.cpuSeconds24h;
+    peak = peak === null || t.peakMemoryBytes === null ? null : Math.max(peak, t.peakMemoryBytes);
+  }
+  const cores = cpuSeconds / 86400;
+  return {
+    cpu: {
+      kind: 'ok',
+      text: `近 24 小时平均 ${formatCores(cores)}（跑了 ${runs} 次）`,
+      title: `近 24 小时共用 CPU ${Math.round(cpuSeconds)} 秒，跑了 ${runs} 次；定时任务跑完就没了，这是从系统日志里数的`,
+    },
+    memory:
+      peak === null
+        ? { kind: 'unread', why: '这台的 systemd 日志里没有内存峰值（版本旧），量不了单次峰值' }
+        : { kind: 'ok', text: `单次峰值 ${formatBytes(peak)}`, title: '近 24 小时里单次跑到的最高内存' },
+  };
+}
+
+/** 定时任务此刻没在跑、footprint 里也没有它的近 24 小时账：明说没给，不写没在占用、不画 0。 */
+function missingRecentCells(): { cpu: Cell; memory: Cell } {
+  const why = '近 24 小时用量没给（定时任务跑完进程就没了，此刻读不到；要等 root 采集器给）';
+  const word = '近 24 小时没给';
+  return { cpu: { kind: 'unread', why, word }, memory: { kind: 'unread', why, word } };
+}
+
 function usageCells(app: HostApp, totalCores: number | undefined): { cpu: Cell; memory: Cell } {
   const u = app.usage;
+  if (app.scheduled && u.state === 'idle') return missingRecentCells();
   if (u.state === 'unread')
     return { cpu: { kind: 'unread', why: u.why }, memory: { kind: 'unread', why: u.why } };
   if (u.state === 'idle') {
@@ -124,8 +172,8 @@ export interface Gaps {
   trees: number;
   /** 整个没读成的目录。 */
   dirs: number;
-  /** 测到时限没测完。 */
-  capped: boolean;
+  /** 用的是上次量成的旧数的目录个数（这一回没量成）。 */
+  stale: number;
   /** 库的大小没读成。 */
   databases: boolean;
 }
@@ -135,7 +183,7 @@ export function gapText(g: Gaps): string | undefined {
   const notes = [
     ...(g.trees ? [`有 ${g.trees} 棵树没读到`] : []),
     ...(g.dirs ? [`有 ${g.dirs} 个目录整个没读到`] : []),
-    ...(g.capped ? ['测到时限没测完'] : []),
+    ...(g.stale ? [`有 ${g.stale} 个目录是上次量成的旧数`] : []),
     ...(g.databases ? ['库的大小没读成'] : []),
   ];
   return notes.length ? `不全：${notes.join('，')}` : undefined;
@@ -149,14 +197,14 @@ function okDisk(bytes: number, gaps: Gaps): DiskCell {
 /** 按目录的占用里一项的格。 */
 function sizeCell(
   size:
-    | { state: 'ok'; bytes: number; unreadTrees?: number | undefined; capped?: boolean | undefined }
+    | { state: 'ok'; bytes: number; unreadTrees?: number | undefined; stale?: { why: string } | undefined }
     | { state: 'unread'; why: string },
 ): DiskCell {
   if (size.state === 'unread') return { kind: 'unread', why: size.why };
   return okDisk(size.bytes, {
     trees: size.unreadTrees ?? 0,
     dirs: 0,
-    capped: size.capped === true,
+    stale: size.stale ? 1 : 0,
     databases: false,
   });
 }
@@ -195,6 +243,7 @@ function appDisk(
 ): DiskCell {
   if (!footprint) return { kind: 'unread', why: notGiven('按目录的磁盘占用', opts) };
   if (footprint.state === 'pending') return { kind: 'pending', why: footprint.why };
+  if (footprint.state === 'unread') return { kind: 'unread', why: footprint.why };
   // 库整块没读成：名下记着库的应用（数据库）就少了库那一截
   const dbMissing =
     footprint.databases.state === 'unread' && app.id === 'postgres' ? footprint.databases.why : undefined;
@@ -202,7 +251,7 @@ function appDisk(
     if (dbMissing) return { kind: 'unread', why: `库的大小没读成：${dbMissing}` };
     return { kind: 'none', why: app.diskNote ?? '名下没登记目录' };
   }
-  const gaps: Gaps = { trees: 0, dirs: 0, capped: false, databases: dbMissing !== undefined };
+  const gaps: Gaps = { trees: 0, dirs: 0, stale: 0, databases: dbMissing !== undefined };
   let bytes = 0;
   let readable = 0;
   for (const p of parts) {
@@ -213,7 +262,7 @@ function appDisk(
     readable += 1;
     bytes += p.size.bytes;
     gaps.trees += p.size.gaps.trees;
-    gaps.capped ||= p.size.gaps.capped;
+    gaps.stale += p.size.gaps.stale;
   }
   if (readable === 0) {
     const first = parts.find((p) => p.size.kind === 'unread');
@@ -296,7 +345,12 @@ export function sessionChildren(
   return rows.sort((a, b) => (a.key === '_other' ? 1 : b.key === '_other' ? -1 : b.memoryMb - a.memoryMb));
 }
 
-export type AppRowsResult = { kind: 'ok'; rows: AppRow[] } | { kind: 'unread'; why: string };
+/** 没登记的行下面的提示：登记表在哪。 */
+export const UNREGISTERED_HINT = '在 packages/api/src/vps-apps.ts 登记';
+
+export type AppRowsResult =
+  | { kind: 'ok'; rows: AppRow[] /** 扫没登记的服务没扫成的原因：可能还有没列出来的。 */; scanWhy?: string }
+  | { kind: 'unread'; why: string };
 
 /** 每个上线项目一行，按后端登记表的先后（本仓的在前，别家的在后）。 */
 export function appRows(
@@ -325,7 +379,9 @@ export function appRows(
       place: app.place,
       units: app.units,
       external: app.external === true,
-      ...usageCells(app, totalCores),
+      unregistered: app.unregistered === true,
+      scheduled: app.scheduled === true,
+      ...(timerCells(app, resources.footprint) ?? usageCells(app, totalCores)),
       disk: appDisk(app, resources.footprint, mine, opts),
       diskParts: mine,
       ...(children?.length ? { children } : {}),
@@ -333,6 +389,11 @@ export function appRows(
   });
   return {
     kind: 'ok',
-    rows: [...rows.filter((r) => !r.external), ...rows.filter((r) => r.external)],
+    rows: [
+      ...rows.filter((r) => !r.external && !r.unregistered),
+      ...rows.filter((r) => r.external && !r.unregistered),
+      ...rows.filter((r) => r.unregistered),
+    ],
+    ...(apps.unregisteredScanWhy ? { scanWhy: apps.unregisteredScanWhy } : {}),
   };
 }

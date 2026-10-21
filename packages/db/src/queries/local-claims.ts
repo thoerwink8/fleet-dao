@@ -3,7 +3,7 @@
 // 读不到、写不成照抛，不拿空顶。
 import type { LocalClaimRefusal, LocalFinishOutcome, TaskExecutor, TaskState } from '@fleet-dao/shared';
 import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
-import { and, arrayContains, asc, eq, gt, gte, like, lt, or, sql } from 'drizzle-orm';
+import { and, arrayContains, asc, desc, eq, gt, gte, like, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, pullRequests, repos, tasks } from '../schema/index.ts';
 
@@ -202,7 +202,7 @@ export async function renewLocalTask(
 
 /**
  * 本机结束：done 记做完；failed 记失败（还是本机的账，法国不自动接）；released 放手，退回法国队列（stopped + engine，
- * 拉单下一轮按「stopped 且没有任何一代」接手）。只有本机在做的行能结束。
+ * 拉单下一轮按「stopped 且没有任何一代」接手，以前跑过的按「重新派」起下一代）。只有本机在做的行能结束。
  */
 export async function finishLocalTask(
   db: Db,
@@ -413,6 +413,30 @@ export async function settleExpiredLocalClaim(
     });
     return rows.length;
   });
+}
+
+/**
+ * 这张任务行最近一次「退回法国队列」的时刻（操作记录里读，不加列、不加迁移）：
+ * 租约到期退回（`task.local.expire` 且 how = returned），或本机主动放手（`task.local.finish` 且 outcome = released）。
+ * 从没退回过回 null。拉单靠它认出「退回之后一直没人接」的行（jobs/dispatch-standing.ts 的「重新派」）。
+ */
+export async function lastLocalReturnAt(db: Pick<Db, 'select'>, taskId: string): Promise<Date | null> {
+  const [row] = await db
+    .select({ at: auditLog.at })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.target, `task:${taskId}`),
+        eq(auditLog.ok, true),
+        or(
+          and(eq(auditLog.action, LOCAL_CLAIM_AUDIT.expire), sql`${auditLog.after}->>'how' = 'returned'`),
+          and(eq(auditLog.action, LOCAL_CLAIM_AUDIT.finish), sql`${auditLog.after}->>'outcome' = 'released'`),
+        ),
+      ),
+    )
+    .orderBy(desc(auditLog.at))
+    .limit(1);
+  return row?.at ?? null;
 }
 
 /**

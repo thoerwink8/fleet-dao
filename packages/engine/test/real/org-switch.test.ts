@@ -60,6 +60,7 @@ import {
   SOLO_ORG_ID,
   world,
 } from './fixtures.ts';
+import { expectNoOrgIds, shownAudits, shownNotifications } from './org-leak.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -405,8 +406,10 @@ describe('全程：拼车被拒 → 等到没有在跑的会话 → 切独享 �
       expect(await alertOf(key), key).toBeUndefined();
     }
     // 操作记录、日志里不带组织编号
-    const text = JSON.stringify([await t.db.select().from(auditLog), s.logs]);
-    for (const bad of [String(CARPOOL_ORG_ID), String(SOLO_ORG_ID)]) expect(text).not.toContain(bad);
+    expectNoOrgIds(
+      [shownAudits(await t.db.select().from(auditLog)), s.logs],
+      [String(CARPOOL_ORG_ID), String(SOLO_ORG_ID)],
+    );
   });
 });
 
@@ -809,11 +812,14 @@ describe('组织临时被切走又切回（#335）：选路、探针、切号按
         error: null,
       },
     ]);
-    const text = JSON.stringify([
-      await t.db.select().from(auditLog),
-      await t.db.select().from(notifications),
-    ]);
-    for (const bad of [String(CARPOOL_ORG_ID), String(SOLO_ORG_ID)]) expect(text).not.toContain(bad);
+    // 通知主键、audit 对象里的 uuid 是随机的不透明身份，可能碰巧带 1111（#3487）：取展示内容再查
+    expectNoOrgIds(
+      [
+        shownAudits(await t.db.select().from(auditLog)),
+        shownNotifications(await t.db.select().from(notifications)),
+      ],
+      [String(CARPOOL_ORG_ID), String(SOLO_ORG_ID)],
+    );
   });
 
   it('切过去一直没切回：2 分钟后认它（提醒撤掉、写明认了），活等切号不挂起；下一轮探针引擎切回拼车，切完照常派', async () => {

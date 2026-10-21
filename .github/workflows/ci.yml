@@ -294,6 +294,13 @@ jobs:
           docker logs fleet-test-pg >&2 || true
           echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
           exit 1
+      # useEnv/createEnv 可落在任一台；与只供 createRealEnv 的 CLI 分开准备。
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/fleet-temporal-test-server
+          key: temporal-test-server-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/conventions/src/temporal-test-server.ts') }}
+      - name: 准备时间跳跃服务（固定官方制品，缓存命中也核 SHA256）
+        run: pnpm test:temporal-server
       # Temporal 命令行用和法国同一版，版本和校验和从 deploy/france.sh 读（只有一份），缓存按版本 + 校验和。
       - name: Temporal 命令行的版本（和法国同版）
         if: matrix.temporal

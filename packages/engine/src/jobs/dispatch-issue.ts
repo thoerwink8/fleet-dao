@@ -165,7 +165,15 @@ async function hardFailure(
   issueNumber: number,
 ): Promise<
   | { failure: GateFailure }
-  | { failure: null; issue: IntakeIssue; plan: IntakePlan; brief: TaskBrief; adopted: boolean }
+  | {
+      failure: null;
+      issue: IntakeIssue;
+      plan: IntakePlan;
+      brief: TaskBrief;
+      adopted: boolean;
+      /** 退回法国队列后没人接的单（重新派）要起的代数；第一代是 undefined。 */
+      generation: number | undefined;
+    }
 > {
   const master = masterNote(await deps.engineMasterRow());
   if (!master.on) return { failure: fail('engine_off', master.why) };
@@ -252,7 +260,14 @@ async function hardFailure(
       failure: fail('brief_incomplete', `交代不全（任务工作流第一步会拒收，force 也派不了）：${what}`),
     };
   }
-  return { failure: null, issue, plan, brief: brief.brief, adopted: standing.kind === 'adopt' };
+  return {
+    failure: null,
+    issue,
+    plan,
+    brief: brief.brief,
+    adopted: standing.kind === 'adopt',
+    generation: standing.kind === 'redispatch' ? standing.generation : undefined,
+  };
 }
 
 /** 就绪度闸：全部判完一次说全。 */
@@ -340,7 +355,7 @@ async function decide(deps: DispatchIssueDeps, args: DispatchIssueArgs): Promise
   const hard = await hardFailure(deps, repo, args.issueNumber);
   if (hard.failure) return { outcome: 'refused', failures: [hard.failure] };
 
-  const { issue, plan, brief, adopted } = hard;
+  const { issue, plan, brief, adopted, generation } = hard;
   const soft = await readinessFailures(deps, repo, args.issueNumber, brief);
   if (soft.length > 0 && !args.force) return { outcome: 'refused', failures: soft };
 
@@ -350,6 +365,7 @@ async function decide(deps: DispatchIssueDeps, args: DispatchIssueArgs): Promise
     title: brief.title,
     body: issue.body,
     author: issue.author,
+    ...(generation === undefined ? {} : { generation }),
   });
   if (got === 'already_exists') {
     return {

@@ -88,6 +88,9 @@ import {
 } from './issues.ts';
 import type { Ledger } from './ledger.ts';
 import {
+  type BranchUpdateOf,
+  type BranchUpdateOfInput,
+  branchUpdateOf,
   type CiWaitResult,
   type MergePrInput,
   type MergePrResult,
@@ -193,6 +196,8 @@ export interface GitHub {
   mergePr(input: MergePrInput, ctx?: ActivityContext): Promise<MergePrResult>;
   /** 把 PR 分支更新到最新主线（合并被拒、因为落后主线之后的补救；新头要调用方重跑 CI 和验收）。 */
   updateBranch(input: UpdateBranchInput, ctx?: ActivityContext): Promise<UpdateBranchResult>;
+  /** PR 的头换了：是不是引擎自己同步主线换的（账上有 GitHub 收下的那次同步、新头正是那个合并提交）。读不成照抛。 */
+  branchUpdateOf(input: BranchUpdateOfInput, ctx?: ActivityContext): Promise<BranchUpdateOf>;
   updateIssueProgress(
     input: UpdateIssueProgressInput,
     ctx?: ActivityContext,
@@ -435,6 +440,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     pullFiles: (input) => pullFiles(deps, input.repo, input.prNumber, input.signal),
     mergePr: (input, ctx) => mergePr(deps, input, ctx),
     updateBranch: (input, ctx) => updateBranch(deps, input, ctx),
+    branchUpdateOf: (input, ctx) => branchUpdateOf(deps, input, ctx),
     updateIssueProgress: (input, ctx) => updateIssueProgress(deps, input, ctx),
     closeIssue: (input, ctx) => closeIssue(deps, input, ctx),
     openIssue: (input, ctx) => openIssue(deps, input, ctx),

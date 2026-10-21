@@ -3,6 +3,7 @@
 // 真装配的开关、操作记录名下在 real/park-triage.test.ts。
 import { describe, expect, it, vi } from 'vitest';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
+import { allowedActions, defaultAction } from '../src/decisions/park-triage.ts';
 import type { SpinRound } from '../src/decisions/spin.ts';
 import type { GroomSessionOutcome } from '../src/jobs/groom.ts';
 import type { IntakeRepo } from '../src/jobs/intake.ts';
@@ -11,6 +12,7 @@ import {
   COMMANDER_AUDIT_CLAIM,
   COMMANDER_AUDIT_RETRY,
   type CommanderNotice,
+  detailHashOf,
   type OpenParkAlert,
   PARK_TRIAGE_DAILY_CAP,
   PARK_TRIAGE_SESSION_TRIES,
@@ -19,6 +21,7 @@ import {
   triageParkedTasks,
 } from '../src/jobs/park-triage.ts';
 import type { ParkedRetryRow, ParkedSnapshot } from '../src/jobs/parked-retry.ts';
+import { stamp } from '../src/jobs/reconcile-common.ts';
 import { type ContinueCommand, PARK_CODE_ROUTE_SWITCH, type ParkKind } from '../src/task-contract.ts';
 
 const NOW = new Date('2026-10-19T12:00:00Z');
@@ -107,15 +110,16 @@ function rig(
     enabled: async () => (opts.enabled === false ? { on: false, why: '设置关着' } : { on: true }),
     purposeConfigured: async () => opts.configured !== false,
     resolveNoModelAlert: vi.fn(async () => {}),
+    resolveCapAlert: vi.fn(async () => {}),
     tasks: async () => [ROW],
     status: async () => opts.snap ?? snap('rounds'),
     openPark: async () => opts.openPark ?? null,
     audits: async () => r.audits,
-    claim: async ({ workflowId, park, kind }) => {
+    claim: async ({ row, workflowId, park, kind }) => {
       r.audits.push({
         at: NOW,
         action: COMMANDER_AUDIT_CLAIM,
-        after: { workflowId, parkSeq: park.seq, kind },
+        after: { workflowId, parkSeq: park.seq, kind, ref: `${row.owner}/${row.name}#${row.issueNumber}` },
       });
     },
     retry: async ({ workflowId, park, attempt }) => {
@@ -261,15 +265,89 @@ describe('护栏', () => {
     expect((await triageParkedTasks(head.deps)).candidates).toBe(1);
   });
 
-  it(`每天总次数有上限：24 小时内已认领 ${PARK_TRIAGE_DAILY_CAP} 张，不再起会话`, async () => {
-    const audits = Array.from({ length: PARK_TRIAGE_DAILY_CAP }, (_, i) => ({
-      at: new Date(NOW.getTime() - 3_600_000),
+  const validClaims = (n: number, at: (i: number) => Date) =>
+    Array.from({ length: n }, (_, i) => ({
+      at: at(i),
       action: COMMANDER_AUDIT_CLAIM,
-      after: { workflowId: `task-other-${i}`, parkSeq: 1 },
+      after: { workflowId: `task-other-${i}`, parkSeq: 1, ref: `thoerwink8/fleet-dao#${5000 + i}` },
     }));
-    const r = rig({ audits });
-    expect((await triageParkedTasks(r.deps)).skipped).toContain('上限');
+
+  it(`全局熔断：24 小时内已有 ${PARK_TRIAGE_DAILY_CAP} 张有效认领，不再起会话，这一轮记 partial，发 commander:daily-cap 并写明等的单和下一个名额`, async () => {
+    // 最早那条在 3 小时前，其余在 1 小时前
+    const audits = validClaims(
+      PARK_TRIAGE_DAILY_CAP,
+      (i) => new Date(NOW.getTime() - (i === 0 ? 3 : 1) * 3_600_000),
+    );
+    const log = vi.fn();
+    const r = rig({ audits, over: { log } });
+    const result = await runParkTriageJob(r.deps);
     expect(r.sessions).toHaveLength(0);
+    expect(result.outcome).toBe('partial');
+    expect(result.why).toContain('上限');
+    const card = r.notices.find((n) => n.key === 'commander:daily-cap');
+    expect(card).toMatchObject({ level: 'alert', taskId: null });
+    expect(card?.body).toContain('thoerwink8/fleet-dao#3296');
+    // 下一个名额＝窗口里最早那条认领 + 24 小时
+    expect(card?.body).toContain(stamp(new Date(NOW.getTime() - 3 * 3_600_000 + 24 * 3_600_000)));
+    expect(r.deps.resolveCapAlert).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      expect.any(String),
+      expect.objectContaining({
+        skipped: expect.stringContaining('上限'),
+        candidates: 1,
+        claimed: 0,
+        retrying: [],
+        problems: [],
+      }),
+    );
+  });
+
+  it('回到上限以下：不再发 commander:daily-cap，并撤掉旧卡', async () => {
+    const audits = validClaims(PARK_TRIAGE_DAILY_CAP - 1, () => new Date(NOW.getTime() - 3_600_000));
+    const r = rig({ audits, answer: verdict('continue') });
+    const result = await runParkTriageJob(r.deps);
+    expect(result.outcome).toBe('ok');
+    expect(r.sessions).toHaveLength(1);
+    expect(r.notices.some((n) => n.key === 'commander:daily-cap')).toBe(false);
+    expect(r.deps.resolveCapAlert).toHaveBeenCalledOnce();
+  });
+
+  it('这一轮自己把名额用满、还有单没轮上：也算被上限挡住，发 commander:daily-cap', async () => {
+    const audits = validClaims(PARK_TRIAGE_DAILY_CAP - 1, () => new Date(NOW.getTime() - 3_600_000));
+    const second: ParkedRetryRow = { ...ROW, taskId: 't-3297', issueNumber: 3297, workflowId: 'wf-3297' };
+    const r = rig({
+      audits,
+      answer: verdict('continue'),
+      over: { tasks: async () => [ROW, second], status: async () => snap('rounds') },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.claimed).toBe(1);
+    expect(r.notices.find((n) => n.key === 'commander:daily-cap')?.body).toContain(
+      'thoerwink8/fleet-dao#3297',
+    );
+  });
+
+  it('没起成的认领不占上限：各配一条没起成的重试，候选照常进会话', async () => {
+    const claims = validClaims(PARK_TRIAGE_DAILY_CAP, () => new Date(NOW.getTime() - 3_600_000));
+    const audits = claims.flatMap((c) => [
+      c,
+      {
+        at: new Date(NOW.getTime() - 3_000_000),
+        action: COMMANDER_AUDIT_RETRY,
+        after: { workflowId: c.after.workflowId, parkSeq: 1, attempt: 1 },
+        ok: false,
+      },
+    ]);
+    const r = rig({ audits, answer: verdict('continue') });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.skipped).toBeUndefined();
+    expect(r.sessions).toHaveLength(1);
+    expect(r.notices.some((n) => n.key === 'commander:daily-cap')).toBe(false);
+  });
+
+  it('上限是 60：熔断，不是日常配额', () => {
+    expect(PARK_TRIAGE_DAILY_CAP).toBe(60);
   });
 
   it('设置里的开关关着：不看、不起会话', async () => {
@@ -621,5 +699,118 @@ describe('老历史（查询里没有 status.park）不再静默跳过', () => {
     const out = await triageParkedTasks(r.deps);
     expect(out.candidates).toBe(0);
     expect(out.problems[0]).toContain('认不出停在哪一次');
+  });
+});
+
+describe('单张单防空转：同一张单反复停、反复继续，不再放行继续', () => {
+  const REF = 'thoerwink8/fleet-dao#3296';
+  const claimed = (seq: number, hoursAgo: number, n: number) => ({
+    at: new Date(NOW.getTime() - hoursAgo * 3_600_000),
+    action: COMMANDER_AUDIT_CLAIM,
+    after: { workflowId: `task-old-${n}`, parkSeq: seq, ref: REF },
+  });
+  const continuedAct = (seq: number, detail: string | null) => ({
+    at: new Date(NOW.getTime() - 3_600_000),
+    action: COMMANDER_AUDIT_ACT,
+    after: {
+      workflowId: WF,
+      parkSeq: seq,
+      action: 'continue',
+      ref: REF,
+      ...(detail === null ? {} : { detailHash: detailHashOf(detail) }),
+    },
+    ok: true,
+  });
+
+  it('放行表：防空转生效时继续不放行，重做、拆单、停掉放行；默认动作改成重做', () => {
+    const facts = { kind: 'size' as const, handoff: false };
+    expect(allowedActions(facts, null).continue).toBe(true);
+    const guarded = { ...facts, noContinue: '24 小时内指挥官已处理这张单 3 次' };
+    const table = allowedActions(guarded, null);
+    expect(table.continue).toContain('3 次');
+    expect([table.redo, table.split, table.stop]).toEqual([true, true, true]);
+    expect(defaultAction({ ...facts, continuedBefore: false }, null).action).toBe('continue');
+    expect(defaultAction({ ...guarded, continuedBefore: false }, null)).toMatchObject({ action: 'redo' });
+    // 本来就不放行继续的，防空转不会把别的动作放开
+    const unknownSpin = { kind: 'quota' as const, handoff: false, noContinue: '防空转' };
+    expect(allowedActions(unknownSpin, null).split).not.toBe(true);
+  });
+
+  it('24 小时内指挥官已经处理满 3 次：会话判继续也不放行，改按默认动作重做', async () => {
+    const r = rig({
+      audits: [claimed(1, 5, 0), claimed(3, 3, 1), claimed(4, 2, 2)],
+      answer: verdict('continue'),
+      snap: snap('size'),
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.acted).toEqual([{ ref: REF, action: 'redo', source: 'default' }]);
+    expect(r.sent).toHaveLength(0);
+    expect(r.notices[0]?.body).toContain('不放行');
+    expect(r.notices[0]?.body).toContain('3 次');
+  });
+
+  it('只处理过 2 次：继续照常放行；超过 24 小时的处理不算', async () => {
+    const two = rig({
+      audits: [claimed(1, 5, 0), claimed(3, 2, 1)],
+      answer: verdict('continue'),
+      snap: snap('size'),
+    });
+    await triageParkedTasks(two.deps);
+    expect(two.sent).toHaveLength(1);
+    const old = rig({
+      audits: [claimed(1, 30, 0), claimed(3, 26, 1), claimed(4, 25, 2), claimed(5, 2, 3)],
+      answer: verdict('continue'),
+      snap: snap('size'),
+    });
+    await triageParkedTasks(old.deps);
+    expect(old.sent).toHaveLength(1);
+  });
+
+  it('没起成的认领不算处理过', async () => {
+    const claims = [claimed(1, 3, 0), claimed(3, 3, 1), claimed(4, 3, 2)];
+    const retries = claims.slice(0, 2).map((c) => ({
+      at: new Date(NOW.getTime() - 2 * 3_600_000),
+      action: COMMANDER_AUDIT_RETRY,
+      after: { workflowId: c.after.workflowId, parkSeq: c.after.parkSeq },
+      ok: false,
+    }));
+    const r = rig({ audits: [...claims, ...retries], answer: verdict('continue'), snap: snap('size') });
+    await triageParkedTasks(r.deps);
+    expect(r.sent).toHaveLength(1);
+  });
+
+  it('这次停下的原文和上一次判继续时一字不差：第二次判继续被改成默认动作', async () => {
+    const same = rig({
+      audits: [continuedAct(1, '动手 3 轮仍没过')],
+      answer: verdict('continue'),
+      snap: snap('size'),
+    });
+    const out = await triageParkedTasks(same.deps);
+    expect(out.acted).toEqual([{ ref: REF, action: 'redo', source: 'default' }]);
+    expect(same.sent).toHaveLength(0);
+    expect(same.notices[0]?.body).toContain('一字不差');
+  });
+
+  it('原文有变化、或上一次的记录里没存原文：不拦继续', async () => {
+    const changed = rig({
+      audits: [continuedAct(1, '另一句话')],
+      answer: verdict('continue'),
+      snap: snap('size'),
+    });
+    await triageParkedTasks(changed.deps);
+    expect(changed.sent).toHaveLength(1);
+    const unknown = rig({ audits: [continuedAct(1, null)], answer: verdict('continue'), snap: snap('size') });
+    await triageParkedTasks(unknown.deps);
+    expect(unknown.sent).toHaveLength(1);
+  });
+
+  it('继续的执行记录带原文指纹，下一次停下才比得上', async () => {
+    const r = rig({ answer: verdict('continue'), snap: snap('size') });
+    const seen: (string | undefined)[] = [];
+    r.deps.audit = async (e) => {
+      seen.push(e.item.detailHash);
+    };
+    await triageParkedTasks(r.deps);
+    expect(seen[0]).toBe(detailHashOf('动手 3 轮仍没过'));
   });
 });

@@ -10,7 +10,10 @@
 // - 每张单每次停下最多处理一次：处理前先记一条 commander.claim（键 = 工作流编号 + 第几次停下）。会话没起成（主线头没读到、
 //   选不到路由、会话报错、回答里找不到裁决清单）不算处理过：另记一条 commander.retry，下一轮还会再看；同一次停下最多试
 //   PARK_TRIAGE_SESSION_TRIES 次，第 3 次还没起成就当场按默认动作执行。认领数多于没起成数才算处理过。
-//   每天处理的张数有上限（PARK_TRIAGE_DAILY_CAP，数 24 小时内的 claim）。设置 engine.commander 能关，关着不看。
+//   全局熔断（PARK_TRIAGE_DAILY_CAP，数 24 小时内「有效」的 claim；没起成的那次不算）：碰到它这一轮记 partial、发
+//   commander:daily-cap（列等着的单和下一个名额什么时候空出来），回到上限以下自动撤。它只防失控，不是日常配额：
+//   防同一张单空转的是单张单防空转（decisions/park-triage.ts 的 noContinue：24 小时内指挥官处理满 3 次，
+//   或这次停下的原文和上一次判「继续」时一字不差，就不再放行「继续」）。设置 engine.commander 能关，关着不看。
 // - 老历史（patched('park-kind') 为假，查询里没有 status.park）不再静默跳过：停下编号从开着的停下提醒（<工作流>:park:<n>）读，
 //   停法按提醒标题、正文和任务行认（legacyParkKind），认不出写进这一轮的 problems 并按「按临时的办」处理。
 //   老历史的「继续」用 COMMANDER_LEGACY_ACTOR（工作流按普通继续收），收不到额度放宽。
@@ -18,6 +21,7 @@
 // - 用途 commander 没配模型（路由页清空了）：明说「没配模型」并报警，不悄悄不跑。
 // - 执行的操作都记在 engine:commander 名下（操作记录 target=commander），诊断文字（理由、白名单核对结果、空转判断）带进发出的提醒。
 
+import { createHash } from 'node:crypto';
 import { LOCAL_LABEL } from '@fleet-dao/conventions';
 import type { ScheduleResult } from '@fleet-dao/db';
 import { type DecisionOption, type DecisionReason, noteOnlyOptions } from '@fleet-dao/shared';
@@ -55,8 +59,12 @@ export const PARK_TRIAGE_EVERY_MINUTES = 10;
 export const PARK_TRIAGE_OFFSET_MINUTES = 7;
 /** 停下超过这么久、规则没解开，才交指挥官（引擎续停每 10 分钟看一遍，这里等它至少看过一次）。 */
 export const PARK_TRIAGE_AFTER_MINUTES = 15;
-/** 每天最多处理几张（数 24 小时内的 commander.claim）。 */
-export const PARK_TRIAGE_DAILY_CAP = 20;
+/** 全局熔断：24 小时内最多几张有效认领（commander.claim 去掉没起成的）。碰到它就报警，不再起会话。 */
+export const PARK_TRIAGE_DAILY_CAP = 60;
+export const PARK_TRIAGE_CAP_ALERT_KEY = 'commander:daily-cap';
+/** 单张单防空转：同一张单 24 小时内指挥官已经处理满这么多次，就不再放行「继续」。 */
+export const PARK_TRIAGE_SPIN_HANDLED = 3;
+const WINDOW_MS = 24 * 3_600_000;
 /** 一个会话一次最多看几张（同一个仓的）；一轮最多起几个会话。 */
 export const PARK_TRIAGE_BATCH = 5;
 export const PARK_TRIAGE_MAX_SESSIONS = 2;
@@ -115,6 +123,10 @@ export interface ParkTriageItem {
   handoff: boolean;
   /** 这一次停下的提醒正文（原因原文）；没读到是 null。 */
   detail: string | null;
+  /** 原文的指纹（detailHashOf）；原文没读到没有。记进执行记录，下一次停下拿来比「一字不差」。 */
+  detailHash?: string | undefined;
+  /** 单张单防空转生效时的原因：有它就不放行「继续」。 */
+  noContinue?: string | undefined;
   /** 这张单已有的回合（旧的在前）；没读到是 null。 */
   rounds: SpinRound[] | null;
   /** 只有额度停法算；回合没读到也是 null（allowedActions 当「没法判」）。 */
@@ -146,6 +158,8 @@ export interface ParkTriageDeps {
   purposeConfigured(): Promise<boolean>;
   /** 用途已明确配有模型时，只解除缺配置提醒；不代表路由或会话已恢复。 */
   resolveNoModelAlert(): Promise<void>;
+  /** 回到上限以下，撤 commander:daily-cap。没有这张卡也不报错。写不进照抛。 */
+  resolveCapAlert(): Promise<void>;
   /** state=stalled、executor=engine 的任务。读不到照抛。 */
   tasks(): Promise<ParkedRetryRow[]>;
   /** 现问工作流；已经没了回 gone。 */
@@ -204,9 +218,11 @@ export interface ParkTriageDeps {
 }
 
 export interface ParkTriageResult {
-  /** 开关关着、用途没配模型、今天次数用完：这一轮没看，原因在这。 */
+  /** 开关关着、用途没配模型、碰到全局熔断上限：这一轮没看（或没看全），原因在这。 */
   skipped?: string;
   noModel?: boolean;
+  /** 被全局上限挡住：这一轮记 partial。 */
+  capped?: boolean;
   listed: number;
   /** 正停着、够条件交指挥官的张数。 */
   candidates: number;
@@ -314,10 +330,15 @@ export function parseCommanderAnswer(
 
 // —— 提示词 ——
 
+/** 停下原文的指纹：记进执行记录，下一次停下比「一字不差」。 */
+export const detailHashOf = (detail: string): string =>
+  createHash('sha256').update(detail).digest('hex').slice(0, 32);
+
 const parkFactsOf = (item: ParkTriageItem): ParkFacts => ({
   kind: kindOf(item),
   handoff: item.handoff,
   ...(item.legacy ? { legacy: true } : {}),
+  ...(item.noContinue === undefined ? {} : { noContinue: item.noContinue }),
 });
 
 const defaultOf = (item: ParkTriageItem): DefaultAction =>
@@ -805,7 +826,14 @@ interface AuditBook {
   retries: Map<string, number>;
   /** 每个工作流上判过继续的停下（编号、停法）。 */
   continued: Map<string, { seq: number; kind: string | null }[]>;
+  /** 24 小时内有效认领（没起成的不算）的数量；等于 claimTimes.length。 */
   claimsToday: number;
+  /** 24 小时内每条有效认领的时刻（毫秒，从早到晚）：算下一个名额什么时候空出来。 */
+  claimTimes: number[];
+  /** 每张单（owner/name#号）24 小时内指挥官处理过几次（有效认领的停下数）。 */
+  handledByRef: Map<string, number>;
+  /** 每张单最近一次判「继续」时那一停的原文指纹；那条记录没存指纹是 null。 */
+  lastContinueHash: Map<string, string | null>;
 }
 
 function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
@@ -813,40 +841,87 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
   const claimKind = new Map<string, string>();
   const retries = new Map<string, number>();
   const continued = new Map<string, { seq: number; kind: string | null }[]>();
-  let claimsToday = 0;
+  const windowStart = now.getTime() - WINDOW_MS;
+  // 窗口内每个停点的有效认领：认领入栈，没起成（retry）把它前面最近一条认领出栈。没起成的不占名额，也不算处理过。
+  const windowed = new Map<string, { ref: string | null; times: number[] }>();
+  const lastContinueHash = new Map<string, string | null>();
   const acts: { workflowId: string; seq: number; kind: string | null }[] = [];
+  let anon = 0;
   for (const a of audits) {
     const after = (a.after ?? {}) as {
       workflowId?: unknown;
       parkSeq?: unknown;
       kind?: unknown;
       action?: unknown;
+      ref?: unknown;
+      detailHash?: unknown;
     };
     const ok = typeof after.workflowId === 'string' && typeof after.parkSeq === 'number';
     const key = ok ? claimKey(after.workflowId as string, after.parkSeq as number) : null;
+    const inWindow = a.at.getTime() >= windowStart;
     if (a.action === COMMANDER_AUDIT_CLAIM) {
       if (key) {
         claims.set(key, (claims.get(key) ?? 0) + 1);
         if (typeof after.kind === 'string') claimKind.set(key, after.kind);
       }
-      if (a.at.getTime() >= now.getTime() - 24 * 3_600_000) claimsToday += 1;
+      if (inWindow) {
+        anon += 1;
+        const slotKey = key ?? `#anon${anon}`;
+        let slot = windowed.get(slotKey);
+        if (!slot) {
+          slot = { ref: null, times: [] };
+          windowed.set(slotKey, slot);
+        }
+        if (typeof after.ref === 'string') slot.ref = after.ref;
+        slot.times.push(a.at.getTime());
+      }
     } else if (a.action === COMMANDER_AUDIT_RETRY) {
       if (key) retries.set(key, (retries.get(key) ?? 0) + 1);
-    } else if (a.action === COMMANDER_AUDIT_ACT && a.ok !== false && after.action === 'continue' && ok) {
-      acts.push({
-        workflowId: after.workflowId as string,
-        seq: after.parkSeq as number,
-        kind: typeof after.kind === 'string' ? after.kind : null,
-      });
+      if (key && inWindow) windowed.get(key)?.times.pop();
+    } else if (a.action === COMMANDER_AUDIT_ACT && a.ok !== false && after.action === 'continue') {
+      if (typeof after.ref === 'string')
+        lastContinueHash.set(after.ref, typeof after.detailHash === 'string' ? after.detailHash : null);
+      if (ok)
+        acts.push({
+          workflowId: after.workflowId as string,
+          seq: after.parkSeq as number,
+          kind: typeof after.kind === 'string' ? after.kind : null,
+        });
     }
   }
+  const claimTimes: number[] = [];
+  const handledByRef = new Map<string, number>();
+  for (const slot of windowed.values()) {
+    if (slot.times.length === 0) continue;
+    claimTimes.push(...slot.times);
+    if (slot.ref !== null) handledByRef.set(slot.ref, (handledByRef.get(slot.ref) ?? 0) + 1);
+  }
+  claimTimes.sort((x, y) => x - y);
   for (const act of acts) {
     const kind = act.kind ?? claimKind.get(claimKey(act.workflowId, act.seq)) ?? null;
     continued.set(act.workflowId, [...(continued.get(act.workflowId) ?? []), { seq: act.seq, kind }]);
   }
   const handled = new Set<string>();
   for (const [key, n] of claims) if (n > (retries.get(key) ?? 0)) handled.add(key);
-  return { handled, retries, continued, claimsToday };
+  return {
+    handled,
+    retries,
+    continued,
+    claimsToday: claimTimes.length,
+    claimTimes,
+    handledByRef,
+    lastContinueHash,
+  };
+}
+
+/** 单张单防空转：该不该不再放行「继续」（返回原因），否则 undefined。detailHash 是这一停原文的指纹（没读到是 undefined）。 */
+function noContinueReason(book: AuditBook, ref: string, detailHash: string | undefined): string | undefined {
+  const handled = book.handledByRef.get(ref) ?? 0;
+  if (handled >= PARK_TRIAGE_SPIN_HANDLED)
+    return `这张单 24 小时内指挥官已经处理 ${handled} 次（满 ${PARK_TRIAGE_SPIN_HANDLED} 次），再原样继续是空转`;
+  if (detailHash !== undefined && book.lastContinueHash.get(ref) === detailHash)
+    return '这一次停下的原文和上一次判「继续」时一字不差，原样继续只会再停一次';
+  return undefined;
 }
 
 /** 过一遍停着的引擎任务，够条件的交指挥官。列不出、读不到操作记录照抛。 */
@@ -965,11 +1040,8 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
     }
   }
   result.candidates = waiting.length;
-  if (waiting.length > 0 && remaining <= 0) {
-    result.skipped = `今天已处理 ${book.claimsToday} 张，到上限 ${PARK_TRIAGE_DAILY_CAP}，还有 ${waiting.length} 张等着`;
-    return result;
-  }
   waiting.sort((a, b) => a.at - b.at);
+  const claimedIds = new Set<string>();
   const byRepo = new Map<string, Waiting[]>();
   for (const w of waiting) {
     const key = `${w.row.owner}/${w.row.name}`.toLowerCase();
@@ -1010,12 +1082,14 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
       }
       remaining -= 1;
       result.claimed += 1;
+      claimedIds.add(w.workflowId);
       const [detail, rounds] = await Promise.all([
         w.detail !== undefined
           ? Promise.resolve(w.detail)
           : deps.detail(w.workflowId, w.park.seq).catch(() => null),
         deps.rounds(w.row.taskId).catch(() => null),
       ]);
+      const detailHash = detail === null ? undefined : detailHashOf(detail);
       items.push({
         row: w.row,
         workflowId: w.workflowId,
@@ -1026,6 +1100,8 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
         continuedBefore: w.continuedBefore,
         handoff: w.park.title === ROUNDS_HANDOFF_TITLE,
         detail,
+        detailHash,
+        noContinue: noContinueReason(book, refOf(w.row), detailHash),
         rounds,
         spin: spinOf(w.park, rounds),
       });
@@ -1038,7 +1114,56 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
       result.problems.push(`${repo.owner}/${repo.name} 这一批没处理完：${errMessage(err)}`);
     }
   }
+  const blocked = remaining <= 0 ? waiting.filter((w) => !claimedIds.has(w.workflowId)) : [];
+  if (blocked.length > 0) await raiseCapAlert(deps, result, blocked, book, now);
+  else
+    await deps.resolveCapAlert().catch((err: unknown) => {
+      result.problems.push(`${PARK_TRIAGE_CAP_ALERT_KEY} 撤不掉：${errMessage(err)}`);
+    });
   return result;
+}
+
+const CAP_ALERT_LISTED = 20;
+
+/** 被全局上限挡住：记在结果上（这一轮记 partial），发 commander:daily-cap，列在等的单和下一个名额什么时候空出来。 */
+async function raiseCapAlert(
+  deps: ParkTriageDeps,
+  result: ParkTriageResult,
+  blocked: readonly { row: ParkedRetryRow; park: TaskParkInfo }[],
+  book: AuditBook,
+  now: Date,
+): Promise<void> {
+  const used = book.claimsToday + result.claimed;
+  const times = result.claimed > 0 ? [...book.claimTimes, now.getTime()] : book.claimTimes;
+  const first = times[0];
+  const nextSlot =
+    first === undefined
+      ? '算不出来（窗口里没有有效认领的记录）'
+      : `${stamp(new Date(first + WINDOW_MS))}（北京时间；窗口里最早那条认领 + 24 小时）`;
+  result.capped = true;
+  result.skipped = `24 小时内已有 ${used} 张有效认领，到熔断上限 ${PARK_TRIAGE_DAILY_CAP}，还有 ${blocked.length} 张等着`;
+  const listed = blocked
+    .slice(0, CAP_ALERT_LISTED)
+    .map((w) => `- ${refOf(w.row)}：停下「${w.park.title}」（第 ${w.park.seq} 次）`);
+  const more = blocked.length - listed.length;
+  const body = [
+    `指挥官 24 小时内已有 ${used} 张有效认领（没起成的不算），到全局熔断上限 ${PARK_TRIAGE_DAILY_CAP}：这一轮不再起会话，下面这些停下的单没人看：`,
+    ...listed,
+    ...(more > 0 ? [`……还有 ${more} 张`] : []),
+    `下一个名额空出来的时刻：${nextSlot}。`,
+    '这个上限只防失控：用到它，多半是有几张单在反复停、反复被认领；先看这些单为什么一直停，回到上限以下这张提醒自动撤。',
+  ].join('\n');
+  await deps
+    .notify({
+      level: 'alert',
+      key: PARK_TRIAGE_CAP_ALERT_KEY,
+      title: `指挥官的认领到了 24 小时熔断上限（${PARK_TRIAGE_DAILY_CAP}），停下的单没人看`,
+      body,
+      taskId: null,
+    })
+    .catch((e: unknown) => {
+      result.problems.push(`${PARK_TRIAGE_CAP_ALERT_KEY} 的提醒没推出去：${errMessage(e)}`);
+    });
 }
 
 export class ParkTriageFailedError extends Error {
@@ -1059,8 +1184,13 @@ export async function runParkTriageJob(deps: ParkTriageDeps): Promise<ScheduleRe
     got = await triageParkedTasks(deps);
     const line = `停着的引擎任务 ${got.listed} 张，够条件交指挥官的 ${got.candidates} 张，认领 ${got.claimed} 张，执行 ${got.acted.length} 张，留给人 ${got.left.length} 张，会话没起成下一轮再看 ${got.retrying.length} 张`;
     if (got.noModel) result = { outcome: 'partial', why: `${got.skipped ?? '没配模型'}；${line}` };
-    else if (got.problems.length > 0)
-      result = { outcome: 'partial', why: `${line}；${got.problems.slice(0, 3).join('；')}` };
+    else if (got.capped || got.problems.length > 0)
+      result = {
+        outcome: 'partial',
+        why: [got.capped ? got.skipped : null, line, ...got.problems.slice(0, 3)]
+          .filter((s): s is string => typeof s === 'string' && s !== '')
+          .join('；'),
+      };
     else
       result = {
         outcome: 'ok',
@@ -1076,6 +1206,17 @@ export async function runParkTriageJob(deps: ParkTriageDeps): Promise<ScheduleRe
     deps.log('error', '指挥官这一轮没跑成', { runId, why: result.why });
     throw new ParkTriageFailedError(runId, result.why);
   }
-  deps.log('info', '指挥官这一轮跑完', { runId, acted: got?.acted ?? [], left: got?.left ?? [] });
+  // 被上限挡住、没配模型、有读不到的东西（partial）也照样打这些字段：日志里能直接看到为什么这一轮没动。
+  deps.log(result.outcome === 'partial' ? 'warn' : 'info', '指挥官这一轮跑完', {
+    runId,
+    outcome: result.outcome,
+    skipped: got?.skipped,
+    candidates: got?.candidates ?? 0,
+    claimed: got?.claimed ?? 0,
+    acted: got?.acted ?? [],
+    left: got?.left ?? [],
+    retrying: got?.retrying ?? [],
+    problems: got?.problems ?? [],
+  });
   return result;
 }

@@ -2,12 +2,12 @@
 // 用 patched() 包住的改法照样能查状态、收信号、按老步序走完，新起的走新步序；没包的，重放当场报 TMPRL1100。
 // 真工作流的同一道检查在 replay.test.ts（录好的历史对现在的代码重放）。
 import { fileURLToPath } from 'node:url';
-import { TestWorkflowEnvironment } from '@temporalio/testing';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker, type WorkflowBundle } from '@temporalio/worker';
 import { DeterminismViolationError } from '@temporalio/workflow';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as steps from './fixtures/evolution/steps.ts';
-import { waitUntil } from './support.ts';
+import { createEnv, waitUntil } from './support.ts';
 
 const silent = { trace() {}, debug() {}, info() {}, warn() {}, error: console.error, log() {} };
 const bundleOf = (file: string) =>
@@ -22,7 +22,7 @@ let patchedV2: WorkflowBundle;
 let unpatchedV2: WorkflowBundle;
 
 beforeAll(async () => {
-  env = await TestWorkflowEnvironment.createTimeSkipping();
+  env = await createEnv();
   [v1, patchedV2, unpatchedV2] = await Promise.all([
     bundleOf('v1.ts'),
     bundleOf('v2-patched.ts'),

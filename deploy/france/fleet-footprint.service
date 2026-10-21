@@ -1,0 +1,37 @@
+# fleet-dao 按目录量磁盘占用（#3456）：对登记表里每个目录跑 du（root 看得见会话用户 700 的工作树、会话用户的家、别家应用的 750 目录），
+# 只把数字（字节数、测于何时、耗时、没测成的原因）原子写进 /var/lib/fleet-footprint/sizes.json，驾驶舱后端读它画资源页。由
+# fleet-footprint.timer 每 10 分钟拉起一轮。脚本和目录清单（/usr/local/lib/fleet-dao/footprint/，全链归 root）由 deploy/france.sh 装（自动档，
+# 发完版跟着换），别在机器上手改。规矩见 docs/ops.md「按目录的磁盘」和决定 0109。
+# 以 root 跑但收得很紧：只留「读任意文件、进任意目录」这一项能力，只许写自己的输出目录，不连网，Nice 19、IO 空闲、CPU 最多半个核。
+[Unit]
+Description=fleet-dao 按目录量磁盘占用（只写数字到 /var/lib/fleet-footprint/sizes.json）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+ConditionPathExists=/usr/local/lib/fleet-dao/footprint/dirs.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node /usr/local/lib/fleet-dao/footprint/fleet-footprint.mjs
+# 每个目录自己限 5 分钟（脚本里）；整轮留足余量
+TimeoutStartSec=45min
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+CPUQuota=50%
+# du 遍历几十万个文件会把目录项缓存记在这个 cgroup 上（可回收，但 256M 时实测顶到上限还用了交换，2026-10-21 首轮 428 秒）
+MemoryMax=768M
+MemorySwapMax=0
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fleet-footprint
+# 要读 /home 下会话用户的家：只读
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes

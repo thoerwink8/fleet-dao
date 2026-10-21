@@ -16,7 +16,7 @@
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动（整套，含人工档）
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
-#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、发版接活脚本副本（#2728）、fleet-agents.slice、root ssh 会话的内存上限 user-0.slice（#2842）、清掉老机器上已删的演示版单元和脚本（#1223）、
+#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、发版接活脚本副本（#2728）、按目录量磁盘占用的 root 单元和定时器（#3456）、fleet-agents.slice、root ssh 会话的内存上限 user-0.slice（#2842）、清掉老机器上已删的演示版单元和脚本（#1223）、
 #                                   Mirasim 常驻单元（#1274；服务端本体不在记待配，单元文件内容变了才重启）、
 #                                   换 fleet-agent-scope（sudoers 已放行这一个路径，只换文件）并把工作树 _tmp 改成引擎用户（冷验收要在下面 mkdir）
 #                                   （不碰防火墙、sudoers、用户、/etc/fleet-dao 里的钥匙和环境文件；幂等）。自动发布每发完一版以 root
@@ -228,6 +228,13 @@ CONFIG_CLI=$DEPLOY_DIR/france/auto-release/config.mjs
 AUTO_RELEASE_UNITS=(fleet-auto-release.service fleet-auto-release.timer)
 AUTO_DIR=$RELEASES_DIR/.auto
 APPLIED_FILE=$AUTO_DIR/france-applied
+# 按目录量磁盘占用（#3456，决定 0109；docs/ops.md「按目录的磁盘」）：root 的 oneshot 单元 + 定时器，每 10 分钟对登记表里每个目录跑 du，
+# 只把数字写进 FOOTPRINT_OUT_DIR/sizes.json（644，后端 fleet 读）。脚本和目录清单是副本（全链归 root，fleet 改不了清单，
+# 也就没法让 root 去量任意路径），归自动档，发完版跟着换。输出目录不放 /var/lib/fleet-dao 下：那里是 fleet 的，root 属主的文件会被读回判红
+FOOTPRINT_LIB=/usr/local/lib/fleet-dao/footprint
+FOOTPRINT_OUT_DIR=/var/lib/fleet-footprint
+FOOTPRINT_FILES=(fleet-footprint.mjs dirs.json)
+FOOTPRINT_UNITS=(fleet-footprint.service fleet-footprint.timer)
 
 FLEET_WG_HK_ENDPOINT=""
 FLEET_WG_HK_PUBLIC_KEY=""
@@ -972,6 +979,41 @@ setup_auto_release() {
   ensure_unit_running fleet-auto-release.timer "$unit_changed"
 }
 
+# 按目录量磁盘占用（自动档，#3456）：脚本和目录清单的副本、输出目录、单元和定时器。单元收得很紧（只留读任意文件的能力、只写输出目录、
+# 不连网），不碰防火墙、sudoers、用户。清单变了不用重启：定时器下一轮 oneshot 起来时现读。
+setup_footprint() {
+  step "按目录量磁盘占用（root 的 oneshot，每 10 分钟；副本在 $FOOTPRINT_LIB，输出在 $FOOTPRINT_OUT_DIR/sizes.json）"
+  local f u unit_changed=0
+  ensure_dir /usr/local/lib/fleet-dao root:root 755
+  ensure_dir "$FOOTPRINT_LIB" root:root 755
+  ensure_dir "$FOOTPRINT_OUT_DIR" root:root 755
+  for f in "${FOOTPRINT_FILES[@]}"; do
+    put_file "$FOOTPRINT_LIB/$f" root:root 644 "$(<"$DEPLOY_DIR/france/footprint/$f")"
+  done
+  for u in "${FOOTPRINT_UNITS[@]}"; do
+    put_file "/etc/systemd/system/$u" root:root 644 "$(<"$DEPLOY_DIR/france/$u")"
+    if ((WROTE)); then unit_changed=1; fi
+  done
+  if ((unit_changed)); then systemctl daemon-reload; fi
+  # 定时器本身换了才重启（重启会让 OnActiveSec 重新数 1 分钟）；服务是 oneshot，改了下一轮自然用新的
+  ensure_unit_running fleet-footprint.timer "$unit_changed"
+}
+
+readback_footprint() {
+  local f u
+  if [[ "$(systemctl is-active fleet-footprint.timer 2>/dev/null)" != active ]]; then
+    red "fleet-footprint.timer 没在跑：资源页的磁盘占用不会更新（后端会写「旧数」再写「没读到」）"
+  fi
+  for f in "${FOOTPRINT_FILES[@]}"; do
+    if ! cmp -s -- "$FOOTPRINT_LIB/$f" "$DEPLOY_DIR/france/footprint/$f"; then
+      red "$FOOTPRINT_LIB/$f 和仓里的不一样（或没装）：重跑 bash $0 --auto-tier"
+    fi
+  done
+  for u in "${FOOTPRINT_UNITS[@]}"; do
+    if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then red "/etc/systemd/system/$u 和仓里的不一样（或没装）"; fi
+  done
+}
+
 # 驾驶舱「发布到法国」按钮的接活脚本副本（自动档，#2728）：单元和请求目录归人工档（lib/human-tier.sh 的 setup_release_request），
 # 脚本本身只是 root 跑的副本、不开新口子，发完版跟着在用那一版换，不再等人重跑整套。path 单元正接着一趟时换副本不碍事：node 起来时已读进内存。
 # 要在 setup_auto_release 之后装：接活脚本用同级的 ../auto-release/lib.mjs。
@@ -1089,6 +1131,7 @@ readback() {
   readback_retired_units
   readback_auto_release
   readback_release_request
+  readback_footprint
   readback_proxy_headers
   readback_node_report_gate
   readback_service_home
@@ -1667,6 +1710,7 @@ setup_auto_tier() {
   retire_old_units
   setup_auto_release
   setup_release_request_scripts
+  setup_footprint
   # 只把这段原文抽出来跑的测试里，下面两个函数不在作用域；整份 france.sh 里都在。
   if declare -F install_scope_bin >/dev/null; then install_scope_bin; fi
   if declare -F ensure_work_tmp >/dev/null; then ensure_work_tmp; fi
@@ -1693,6 +1737,7 @@ readback_auto_tier() {
     if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then red "/etc/systemd/system/$u 和仓里的不一样（或没装）"; fi
   done
   readback_release_request_scripts
+  readback_footprint
   readback_mirasim_session_unit
   # 不对就红（句子里有目录路径），不在读回里改权限。抽出来跑的测试里这个函数不在。
   if declare -F readback_work_tmp >/dev/null; then readback_work_tmp || true; fi
@@ -1744,6 +1789,7 @@ main() {
     retire_old_units
     setup_auto_release
     setup_release_request_scripts
+    setup_footprint
     setup_release_request
     setup_agent_rules
     setup_cli_tools

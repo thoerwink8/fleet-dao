@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "dirs": [
+    "/var/lib/fleet-dao/release-request",
+    "/var/lib/fleet-dao/engine",
+    "/var/lib/fleet-dao/github",
+    "/var/log/fleet-dao",
+    "/opt/fleet-dao/temporal",
+    "/var/lib/fleet-work",
+    "/var/lib/fleet-sessions",
+    "/home/fleet-agent-carpool",
+    "/usr/local/lib/fleet-dao",
+    "/var/lib/fleet-dao/cli-upgrade",
+    "/srv/fleet-dao-releases",
+    "/srv/fleet-dao",
+    "/opt/miraquota",
+    "/opt/daihuo",
+    "/var/lib/daihuo",
+    "/opt/reclaude-refill",
+    "/var/lib/reclaude-refill",
+    "/opt/mirasim-radar",
+    "/var/lib/mirasim-radar"
+  ],
+  "timers": ["reclaude-refill-collector.service", "mirasim-radar-collector.service"]
+}

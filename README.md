@@ -75,6 +75,8 @@
 
 也可以用 `pnpm test:temporal --cli <已安装的CLI绝对路径>` 登记已有 CLI，版本必须与 `deploy/france.sh` 一致；之后 `pnpm test:temporal` 检查登记是否仍可用。登记只写 `~/.fleet-dao/test-tools/`，不下载、不启动服务端。也可直接设 `FLEET_TEST_TEMPORAL_CLI`，显式路径优先，坏路径不会退回登记；CI 必须显式设置。
 
+`pnpm test:temporal-server` 显式下载并核验时间跳跃测试需要的 Java test-server 1.40.0（本次 CI 429 的实际目标版本），缓存到 `~/.cache/fleet-temporal-test-server/`；支持 Linux x64/arm64、macOS x64/arm64、Windows x64，跨平台制品身份已核，执行仍由对应平台 CI/现场验证。版本、官方发布 archive SHA256 和解包 binary SHA256 固定在 `packages/conventions/src/temporal-test-server.ts`，网络准备最多三次、总进程期限90秒，提取期限30秒。命中缓存也核真实 binary；损坏缓存报错且保留，核实后可删除该命令生成的缓存文件再准备。准备不启动服务；业务测试、单跑 evolution 和录重放夹具前先运行此命令，缺失/损坏时测试明确失败，不退回 SDK 下载。每个用例仍单独创建与 teardown 时间跳跃环境，不能用真实 CLI 环境代替。CI 所有测试台都在测试前准备；制品缓存和测试结果缓存均包含这份固定身份。
+
 `pnpm check`、`pnpm test:changed` 选到调用 `createRealEnv` 的文件时先核 CLI；没选到则不做这项准备。直接跑单个测试也会在创建真环境前核验，缺失明确失败，不回退 SDK 隐式下载。`--version` 探测限 5 秒，超时终止该探测进程。随后 SDK 创建只报 `start-or-connect`：SDK 未公开启动和连接的细分状态，日志如实记未知；没有另套超时竞速，环境仍由 SDK 创建并由用例 teardown 清理。
 
 ### Windows 上的 Linux 安全测试

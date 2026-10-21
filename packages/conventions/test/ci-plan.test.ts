@@ -38,7 +38,14 @@ import {
   TEST_READS,
 } from '../src/ci-plan.ts';
 import { fsRepo } from '../src/repo.ts';
-import { listTestFiles, parseTimings, type TestBox, TIMINGS_FILE } from '../src/test-split.ts';
+import {
+  HEAVY_FILES,
+  isHeavy,
+  listTestFiles,
+  parseTimings,
+  type TestBox,
+  TIMINGS_FILE,
+} from '../src/test-split.ts';
 import { runChild } from './child.ts';
 import { memRepo } from './helpers.ts';
 
@@ -876,6 +883,25 @@ describe('汇总（必过检查 check）：一律全套（决定 0101），该�
       expect(v.ok, JSON.stringify(b.tests)).toBe(false);
       expect(v.lines.join('\n')).toMatch(/测试台认不出|分到了两台|同名/);
     }
+  });
+
+  /** 重负载多进程文件和别的文件同台（#3469）：会把同台 5 秒用例饿超时，汇总要红并点名。 */
+  it('【故意造出的失败】重负载多进程文件和别的测试同台：不过', () => {
+    const heavy = [...HEAVY_FILES][0] as string;
+    const others = plan.tests.flatMap((b) => b.files).filter((f) => !isHeavy(f));
+    const bad: CiPlan = {
+      ...plan,
+      tests: [{ label: '1/1', files: [heavy, others[0] as string], estMs: 1, pg: false, temporal: false }],
+    };
+    const v = ciVerdict(needs({}, bad));
+    expect(v.ok).toBe(false);
+    expect(v.lines.join('\n')).toContain('重负载多进程文件和别的测试同台');
+    // 独占一台就过（真仓装出来的台就是这样）
+    const alone: CiPlan = {
+      ...plan,
+      tests: [{ label: '1/1', files: [heavy], estMs: 1, pg: false, temporal: false }],
+    };
+    expect(ciVerdict(needs({}, alone)).lines.join('\n')).not.toContain('重负载多进程文件');
   });
 });
 

@@ -239,6 +239,13 @@ describe('上一次跑成的时刻（对账回看起点，记在 schedule_runs�
     expect(await lastSuccessfulScheduleRunEndedAt(t.db, job.id)).toBeNull();
   });
 
+  it('有成功行但时刻不能用：明确抛错，不冒充从未成功而选择 initial 批次', async () => {
+    await registerScheduledJobs(t.db, [job]);
+    const id = await startScheduleRun(t.db, job.id, new Date(0));
+    await finishScheduleRun(t.db, id, { outcome: 'ok', scanned: 1, found: 0 }, new Date(0));
+    await expect(lastSuccessfulScheduleRunEndedAt(t.db, job.id)).rejects.toThrow('成功结束时刻不能用');
+  });
+
   it('只认本任务 outcome = ok 的结束时刻；更近的 partial、failed 和还在跑的都不算', async () => {
     await registerScheduledJobs(t.db, [job, { ...job, id: 'watchdog', name: '看门狗' }]);
     const older = ago(10 * HOUR);

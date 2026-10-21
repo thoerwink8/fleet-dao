@@ -166,6 +166,10 @@ export class FakeGitHub {
   /** update-branch 的行为：conflict = 和主线冲突（422），stall = 回 202 但头一直不变，其余 = 头换成一个新的。 */
   updateBranchMode: 'ok' | 'conflict' | 'stall' = 'ok';
   updatedBranches = 0;
+  /** update-branch 并进来的主线提交（新合并提交的第二个父）。 */
+  updateBranchMainline = '9'.repeat(40);
+  /** 提交的父（GET /commits/<sha>）；update-branch 造的合并提交自动记上 [老头, 主线]。没有的回 404。 */
+  commitParents = new Map<string, string[]>();
   /** compare 老头...新头的 ahead_by（默认 1）；设成 0 模拟「读到的新头其实是老头的祖先」（刚推完读到旧头）。 */
   aheadBy = new Map<string, number>();
   interaction: { limit: string; origin: string; expires_at: string } | null = null;
@@ -704,10 +708,18 @@ export class FakeGitHub {
         this.updatedBranches += 1;
         const old = pr.head.sha;
         pr.head.sha = this.updatedBranches.toString(16).padStart(40, 'e');
+        this.commitParents.set(pr.head.sha, [old, this.updateBranchMainline]);
         this.behindBy.delete(old);
         if (this.refs.has(pr.head.ref)) this.refs.set(pr.head.ref, pr.head.sha);
       }
       return this.json(202, { message: 'Updating pull request branch.' });
+    }
+
+    x = /^\/commits\/([0-9a-f]{40})$/.exec(rest);
+    if (x && m === 'GET') {
+      const parents = this.commitParents.get(x[1] ?? '');
+      if (!parents) return this.notFound();
+      return this.json(200, { sha: x[1], parents: parents.map((sha) => ({ sha })) });
     }
 
     // —— CI ——

@@ -27,7 +27,7 @@ import {
   keyIdOf,
   parseFingerprintKey,
 } from '../france/auto-release/config.mjs';
-import { realIo } from '../france/auto-release/fleet-auto-release.mjs';
+import { realIo, requestWriters } from '../france/auto-release/fleet-auto-release.mjs';
 import {
   AUTO_RELEASE_BY,
   AUTO_REQUEST_KEY,
@@ -77,6 +77,7 @@ import {
   untouchedFails,
 } from '../france/auto-release/lib.mjs';
 import { assessRunningRelease, readRunningRelease } from '../france/auto-release/running-release.mjs';
+import { parseRequest } from '../france/release-request/lib.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
 const H1 = 'b'.repeat(40); // 主线头
@@ -979,6 +980,11 @@ const AUTO_TIER_FILES = [
   'deploy/france/user-0-slice-memory.conf',
   'deploy/france/fleet-auto-release.service',
   'deploy/france/fleet-auto-release.timer',
+  // 按目录量磁盘占用（#3456）：root 的 oneshot + 定时器 + 脚本和目录清单副本，自动档
+  'deploy/france/fleet-footprint.service',
+  'deploy/france/fleet-footprint.timer',
+  'deploy/france/footprint/fleet-footprint.mjs',
+  'deploy/france/footprint/dirs.json',
   // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
   'deploy/france/fleet-mirasim-session.service',
   'deploy/france/mirasim-retired',
@@ -1061,6 +1067,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
     'retire_old_units',
     'setup_auto_release',
     'setup_release_request_scripts',
+    'setup_footprint',
     'setup_mirasim_session',
   ]) {
     const text = body(fn);
@@ -1075,7 +1082,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
   // （Mirasim 常驻单元仍放最后，#1274）；注释行不算
   assert.match(
     body('setup_auto_tier').replace(/^\s*#.*\n/gm, ''),
-    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*if declare -F install_scope_bin >\/dev\/null; then install_scope_bin; fi\n\s*if declare -F ensure_work_tmp >\/dev\/null; then ensure_work_tmp; fi\n\s*setup_mirasim_session\s*$/,
+    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*setup_footprint\n\s*if declare -F install_scope_bin >\/dev\/null; then install_scope_bin; fi\n\s*if declare -F ensure_work_tmp >\/dev\/null; then ensure_work_tmp; fi\n\s*setup_mirasim_session\s*$/,
   );
   assert.match(body('readback_auto_tier'), /readback_work_tmp/);
   // 读回也读回它：缺了 MIRASIM_NO_AGENT_EGRESS=1 之类判红（check_mirasim_session_unit_file）
@@ -1200,7 +1207,11 @@ function autoMachine() {
 test('CI 绿、闸全过就请求发主线头，请求里写明谁发的；同一个头 30 分钟内不重复请求；换了新头立刻发', async () => {
   const m = autoMachine();
   const st = await m.round();
-  assert.deepEqual(m.requests, [{ sha: H1, at: new Date(T0).toISOString(), by: AUTO_RELEASE_BY }]);
+  assert.match(m.requests[0].requestId, /^[0-9a-f-]{36}$/);
+  assert.deepEqual(
+    m.requests.map(({ requestId, ...request }) => request),
+    [{ sha: H1, at: new Date(T0).toISOString(), by: AUTO_RELEASE_BY }],
+  );
   assert.equal(st.auto.sha, H1);
   assert.equal(st.auto.at, new Date(T0).toISOString());
   assert.equal(st.last.action, 'auto-release-requested');
@@ -1286,7 +1297,7 @@ test('【故意造出的失败】头 pending、头的前一个绿：请求发前
   );
   const st = await m.round();
   assert.deepEqual(
-    m.requests,
+    m.requests.map(({ requestId, ...request }) => request),
     [{ sha: H2, at: new Date(T0).toISOString(), by: AUTO_RELEASE_BY }],
     '发最近绿的 H2，不是 H1 也不是头',
   );
@@ -1695,7 +1706,11 @@ test('【#3278】版本切上了、健康没核实：隔 10 分钟自动请求�
   };
   let st = await m.round();
   assert.equal(m.requests.length, 0, '健康没核实不发新的');
-  assert.deepEqual(retries, [{ sha: H1, at: new Date(m.t).toISOString(), by: AUTO_RELEASE_BY }]);
+  assert.match(retries[0].requestId, /^[0-9a-f-]{36}$/);
+  assert.deepEqual(
+    retries.map(({ requestId, ...request }) => request),
+    [{ sha: H1, at: new Date(m.t).toISOString(), by: AUTO_RELEASE_BY }],
+  );
   assert.match(st.auto.note, /已请求第 1 次只读复核/);
   m.t += 5 * MIN;
   st = await m.round();
@@ -2478,4 +2493,66 @@ test('batchVerdict：纯函数的边界', () => {
     String(batchVerdict({ restart: null, why: '', engineSince: now - 1, historyLast: null, now })),
     /要停引擎/,
   );
+});
+
+test('#3409 真实 auto adapter 完整转发 requestId、supersedes 与 expectedAttempt，receiver 实际解析', async () => {
+  const first = {
+    requestId: '11111111-1111-4111-8111-111111111111',
+    kind: 'release',
+    sha: H1,
+    at: new Date(T0).toISOString(),
+    by: 'commander',
+  };
+  const captured = [];
+  const writer = requestWriters((request) => captured.push(request));
+  await writer.requestRelease({
+    sha: H1,
+    at: new Date(T0).toISOString(),
+    by: AUTO_RELEASE_BY,
+    requestId: '22222222-2222-4222-8222-222222222222',
+    supersedes: first,
+  });
+  await writer.requestRetry({
+    sha: H1,
+    at: new Date(T0).toISOString(),
+    by: AUTO_RELEASE_BY,
+    requestId: '33333333-3333-4333-8333-333333333333',
+    expectedAttempt: first,
+  });
+  const release = parseRequest(JSON.stringify(captured[0]));
+  const retry = parseRequest(JSON.stringify(captured[1]));
+  assert.equal(release.ok, true);
+  assert.equal(retry.ok, true);
+  assert.deepEqual(release.supersedes, first);
+  assert.deepEqual(retry.expectedAttempt, first);
+  assert.notEqual(release.requestId, retry.requestId);
+});
+
+test('#3409 真实 gate 准许的未动手 failed 才生成显式后继；running 不写请求', async () => {
+  const m = autoMachine();
+  const identity = {
+    requestId: '11111111-1111-4111-8111-111111111111',
+    kind: 'release',
+    sha: H1,
+    at: new Date(T0 - MIN).toISOString(),
+    by: 'commander',
+  };
+  const train = {
+    status: 'failed',
+    phase: 0,
+    target: { kind: 'sha', value: H1 },
+    requestId: identity.requestId,
+    rootRequestId: identity.requestId,
+    requests: [{ identity, target: H1, parent: null, supersededBy: null, status: 'failed' }],
+    untouchedFails: 1,
+  };
+  m.gate.trainText = JSON.stringify(train);
+  await m.round();
+  assert.equal(m.requests.length, 1);
+  assert.deepEqual(m.requests[0].supersedes, identity);
+  assert.notEqual(m.requests[0].requestId, identity.requestId);
+  const running = autoMachine();
+  running.gate.trainText = JSON.stringify({ ...train, status: 'running' });
+  await running.round();
+  assert.equal(running.requests.length, 0);
 });
