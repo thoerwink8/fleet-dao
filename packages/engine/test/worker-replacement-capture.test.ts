@@ -64,7 +64,8 @@ beforeAll(async () => {
   bundle = await engineBundle();
 }, 120_000);
 
-describe('#3413 原用例停在查停点的取证', () => {
+// 离线重放整份引擎包：单跑 1 秒上下，全量并行时会过 vitest 默认的 5 秒，和别的 Temporal 用例一样给 60 秒。
+describe('#3413 原用例停在查停点的取证', { timeout: 60_000 }, () => {
   it('watchdog 绑这条 run：readTaskBrief 之后 self-check-own-timeout 的工作流任务失败，随后任务超时', () => {
     const historyBytes = readFileSync(`${directory}park-query-timeout.history.bin`);
     const describeBytes = readFileSync(`${directory}park-query-timeout.describe.bin`);
@@ -201,7 +202,7 @@ describe('#3413 原用例停在查停点的取证', () => {
 // 测试文件是 a6c77390 那版（testSha256 对得上），还是从起头每 50 毫秒查一次。没有失败、超时事件，
 // 工作流一直在走，只是 cache0 下每个任务和每次查询都整段重放，20 秒只走到 implement 的 selfCheck。
 // 和上面那份不是一个机制，也不替换它。
-describe('#3413 原用例负载下查停点 20 秒超时的失败取证（无失败事件，走得慢）', () => {
+describe('#3413 原用例负载下查停点 20 秒超时的失败取证（无失败事件，走得慢）', { timeout: 60_000 }, () => {
   const SLOW_HISTORY_SHA256 = 'b777f32758f9f171d381a3a77852c1610f631899a54c0aecea3a7bcfbdb94204';
   const SLOW_DESCRIBE_SHA256 = '77c9d1b1467108474c338bc495ffddd5e82cfa2977af3eb872557eaa469115bb';
   const SLOW_IDENTITY_SHA256 = '15163c4ab47dbc49cfcd1aae8e5e09d7ca04887838ac69c3015ecc2188141403';
