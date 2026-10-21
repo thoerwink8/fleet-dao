@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AdmissionAlertObservation } from '@fleet-dao/db';
@@ -43,18 +43,19 @@ afterEach(() => {
 });
 
 describe('叶目录项的父目录fsync', () => {
-  it('叶目录被删后在同一路径重建：新目录项必须重新同步父目录', () => {
+  it('每次写入都同步父目录：同一叶目录不缓存，删后立即同路径重建（同 tick 可同 ino/时间戳）也同步', () => {
     const parentIno = statSync(root).ino;
     expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
     expect(synced.inodes).toContain(parentIno);
 
-    // 同一叶实例再写：父目录已同步过，不重复（创建时刻读不到的文件系统不缓存，不断言）。
+    // 未变的叶目录也同步：任何按叶身份的缓存都分不清它和同 tick 内重建的新目录。
     synced.inodes.length = 0;
     expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
-    if (statSync(path).birthtimeMs > 0) expect(synced.inodes).not.toContain(parentIno);
+    expect(synced.inodes).toContain(parentIno);
 
-    // 删掉叶目录再在同一路径重建：父 inode 没变，但这是新目录项。
+    // 删掉后紧接着在同一路径建空叶目录，中间不夹任何 fsync，造出 ino 和时间戳都可能与旧目录相同的新目录项。
     rmSync(path, { recursive: true, force: true });
+    mkdirSync(path, { mode: 0o700 });
     synced.inodes.length = 0;
     expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
     expect(synced.inodes).toContain(parentIno);

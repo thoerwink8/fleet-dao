@@ -76,9 +76,6 @@ function errorCode(error: unknown): AlertUnknownCode {
   return 'io';
 }
 const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.uid === b.uid;
-// 父目录 fsync 只为把新叶目录项落盘。同一进程、同一叶目录实例（路径+父 inode+叶 dev/ino/创建时刻）成功一次后不必再做；
-// 叶目录被删后同路径重建是新实例，必须重新同步父目录。
-const syncedLeafParents = new Set<string>();
 
 class PrivatePath {
   readonly path: string;
@@ -115,21 +112,11 @@ class PrivatePath {
           )
             fail('private_path');
           if (!same(s, lstatSync(next))) fail('private_path');
-          // EXTRA 只同步叶目录，不替代父目录这一次。没记成功的重试仍会再同步。
+          // 叶目录首次创建/重试都同步父目录。EXTRA不替代这一步。
+          // 不按身份缓存：删后同路径重建的叶目录在同一时钟 tick 内可拿到相同 ino 和时间戳，换名再换回 ino 也不变，
+          // 都认不出是新目录项；跳过就可能在崩溃时连同 pending 一起丢。
           const parent = this.anchors[this.anchors.length - 2];
-          if (leaf && parent) {
-            // 叶目录被删后在同一路径重建，父 inode 不变，新目录项还没落盘：键必须带叶自己的 dev/ino/创建时刻。
-            // 读不到创建时刻（0 或非有限）就不缓存，每次都同步。
-            const born = s.birthtimeMs;
-            const key =
-              Number.isFinite(born) && born > 0
-                ? `${path}\0${parent.initial.dev}:${parent.initial.ino}\0${s.dev}:${s.ino}:${born}`
-                : undefined;
-            if (key === undefined || !syncedLeafParents.has(key)) {
-              fsyncSync(parent.fd);
-              if (key !== undefined) syncedLeafParents.add(key);
-            }
-          }
+          if (leaf && parent) fsyncSync(parent.fd);
         } catch (e) {
           if (e instanceof SpoolError) throw e;
           fail('private_path');

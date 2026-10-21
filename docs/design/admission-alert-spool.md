@@ -33,9 +33,9 @@ transfer 在 SQLite 读事务结束后才连接 PG。专用 PG 事务以 `INSERT
 
 `recordAdmissionAlert` 每次新开连接。已提交行的规范解码如果每次整表重做，256 条近上界记录会按行数二次放大，和 256 次真实 EXTRA 提交叠在一起会越过该测试原来的 15 秒。写锁内若暂存目录、主库 dev/ino、字节长度和文件头变更计数（偏移 24）与本进程上次提交后在锁内记下的一致，就跳过逐行解码；权限、schema、`quick_check` 和容量 SQL 仍每次做。同一连接的 `data_version` 在刷新快照时变了，说明别的连接已提交，快照作废。对不上、读不到或中途失败都整表重核。这不减少真实 COMMIT，也不放宽 EXTRA 或固定字节界。
 
-原故障的本机复现（同一台、1 分钟负载约 11，测试文件相同）：主线实现下 256 条用时 16.3 秒越过 15 秒，`fullScans=512`，COMMIT 外 10.6 秒、COMMIT 内 5.8 秒（CPU 0.3 秒），所以越线的主因是整表解码，不是等盘。本分支实现下 `fullScans=1`；按 SQL 语句计时的 256 次 `recordAdmissionAlert` 合计 8.7 秒，其中 COMMIT 6.6 秒（257 次），`quick_check` 0.25 秒，其余 SQL 合计不到 0.5 秒。这些是本机读数，不是 CI run 39390033280 的读数，那一轮当时没有诊断输出。
+原故障的本机复现（同一台、1 分钟负载约 11，测试文件相同）：主线实现下 256 条用时 16.3 秒越过 15 秒，`fullScans=512`，COMMIT 外 10.6 秒、COMMIT 内 5.8 秒（CPU 0.3 秒），所以越线的主因是整表解码，不是等盘。本分支实现下 `fullScans=1`；按 SQL 语句计时的 256 次 `recordAdmissionAlert` 合计 8.7 秒，其中 COMMIT 6.6 秒（257 次），`quick_check` 0.25 秒，其余 SQL 合计不到 0.5 秒。这些是本机读数，不是 CI run 39390033280 的读数，那一轮当时没有诊断输出。上面 8.7 秒那次还带着按叶目录缓存的父目录同步；缓存撤掉后（见「私有路径与耐久边界」），每次打开在 COMMIT 外多一次父目录 fsync。同一台、负载约 16 时再测，256 次合计 20.4 秒，其中 COMMIT 15.5 秒；紧接着跑原 256 条用例仍在 15 秒内通过。读数随共盘争用大幅波动，主要变化在 COMMIT 内。
 
-剩下的是提交本身。strace 实测 DELETE/EXTRA 下每次 COMMIT 恰好 5 次 fsync，全由 SQLite 发出：journal 内容、新 journal 的目录项、journal 头、主库、删 journal 后的目录。256 条就是约 1285 次 fsync，COMMIT 墙钟基本等于 fsync 等待（一次实测 fsync 合计 31.0 秒，COMMIT 墙钟 32.6 秒），本进程 CPU 只占约十分之一。所以多个会话共用同一块盘时，单靠提交就可能超过 15 秒。不能为此改 journal 模式、降同步级别、合并提交或放宽限时。测试失败时打印 `SPOOL_COMMIT_DIAG`，里面拆开 COMMIT 内外耗时、COMMIT 墙钟与 CPU、单次最慢提交和 1 分钟负载，用来区分是解码回退还是等盘。
+剩下的是提交本身。strace 实测 DELETE/EXTRA 下每次 COMMIT 恰好 5 次 fsync，全由 SQLite 发出：journal 内容、新 journal 的目录项、journal 头、主库、删 journal 后的目录。256 条就是约 1285 次 SQLite fsync，另有每次打开一次的父目录 fsync；COMMIT 墙钟基本等于 fsync 等待（一次实测 fsync 合计 31.0 秒，COMMIT 墙钟 32.6 秒），本进程 CPU 只占约十分之一。所以多个会话共用同一块盘时，单靠提交就可能超过 15 秒。不能为此改 journal 模式、降同步级别、合并提交或放宽限时。测试失败时打印 `SPOOL_COMMIT_DIAG`，里面拆开 COMMIT 内外耗时、COMMIT 墙钟与 CPU、单次最慢提交和 1 分钟负载，用来区分是解码回退还是等盘。
 
 文件头只经打开 SQLite 前固定主库身份时留下的那个 fd 读，这个 fd 等 SQLite 关库后才关。Linux 上关掉同一文件的任何 fd，会释放本进程在该文件上的全部 POSIX 锁；事务里另开另关主库会放掉 SQLite 的 RESERVED/EXCLUSIVE 锁，别的进程就能拿到写锁，把活 journal 当 hot journal 回滚删除，本进程的 COMMIT 随后报 `SQLITE_IOERR_DELETE_NOENT`。
 
@@ -43,4 +43,4 @@ transfer 在 SQLite 读事务结束后才连接 PG。专用 PG 事务以 `INSERT
 
 仅 Linux 非 root 服务 UID 可用。逐级 no-follow 打开目录并保持 FD/dev/ino/uid/mode；祖先仅 root/当前可信 UID 可写，叶目录当前 UID、0700，两个文件当前 UID、0600、单硬链接。SQLite 用字符串路径，并不因持 FD 而自动获得 dirfd 锚定；安全依据是祖先写权限边界及操作前后的身份复核。
 
-威胁模型排除恶意 root 和同一可信 UID。新叶同步父目录，新库同步文件和叶目录，DELETE/EXTRA 由 SQLite 保证事务同步和删除 journal 后的目录同步。同一进程里，同一叶目录实例（路径、父 inode、叶 dev/ino/创建时刻都对上）的父目录同步成功一次后不再重复；叶目录被删后在同一路径重建是新实例，父 inode 虽没变也重新同步，否则新目录项未落盘时崩溃会连同其中 pending 一起丢；读不到创建时刻、父 inode 换了，或上次同步没成功，下次仍同步。`admission-alert-spool-parent-sync.test.ts` 记录真实 fsync 落在哪个 inode，钉住删后重建必须再同步父目录。这不减少每次写入自己的 EXTRA 提交。强杀测试验证进程崩溃；不把它称为真实断电测试。断电耐久仍要求内核、文件系统和存储实际兑现 fsync。永久介质损坏、未来通知保留期/删除策略及生产装配均需独立验收。
+威胁模型排除恶意 root 和同一可信 UID。新叶同步父目录，新库同步文件和叶目录，DELETE/EXTRA 由 SQLite 保证事务同步和删除 journal 后的目录同步。父目录同步每次打开都做，不按叶目录身份缓存：叶目录被删后在同一路径重建，ext4 会马上复用刚释放的 inode 号，时间戳按内核时钟 tick 取值，同一 tick 内新旧目录的 ino 和创建时刻可以完全相同；换名再换回 ino 也不变。认不出新目录项就跳过同步，崩溃时会连同其中 pending 一起丢。`admission-alert-spool-parent-sync.test.ts` 记录真实 fsync 落在哪个 inode，钉住未变的叶目录和删后立即重建的叶目录都同步父目录。这不减少每次写入自己的 EXTRA 提交。强杀测试验证进程崩溃；不把它称为真实断电测试。断电耐久仍要求内核、文件系统和存储实际兑现 fsync。永久介质损坏、未来通知保留期/删除策略及生产装配均需独立验收。
