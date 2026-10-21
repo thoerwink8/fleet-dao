@@ -17,6 +17,11 @@ export interface TreeHelperOptions {
    * 子进程脚本跑起来时进程已经存在，做不到这段。
    */
   beforeSpawn?: () => Promise<void> | void;
+  /**
+   * 只给测试记每段实际等了多久：离开一段（含落地时停着的那一段）报一次动作、段名、毫秒。
+   * 生产调用不传；不带命令行和环境。
+   */
+  onWaitStage?: (action: string, stage: HelperWaitStage, ms: number) => void;
 }
 
 type Reply = Record<string, unknown>;
@@ -63,6 +68,7 @@ interface HelperWaitSeen {
   startedAt: number;
   stageAt: number;
   exitCode: number | null;
+  onWaitStage?: TreeHelperOptions['onWaitStage'];
 }
 
 /** 只留协议动作这一个词；认不出的不原样写进错误。 */
@@ -122,8 +128,10 @@ function remember(wait: HelperWaitSeen): void {
   // 只改这一次调用自己的对象。落地后 pending 已清空，退出/关闭事件不能再把它挂回去。
   const stage = helperWaitStage(wait);
   if (stage === wait.stage) return;
+  const now = Date.now();
+  wait.onWaitStage?.(wait.action, wait.stage, now - wait.stageAt);
   wait.stage = stage;
-  wait.stageAt = Date.now();
+  wait.stageAt = now;
 }
 
 function watchHelper(child: ChildProcess, wait: HelperWaitSeen): void {
@@ -176,6 +184,7 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
     startedAt,
     stageAt: startedAt,
     exitCode: null,
+    ...(options.onWaitStage ? { onWaitStage: options.onWaitStage } : {}),
   };
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -185,6 +194,9 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
       settled = true;
       stop?.removeEventListener('abort', onAbort);
       if (TreeHelperError.pending === wait) TreeHelperError.pending = null;
+      // 落地时停着的那一段也报；之后的退出/关闭事件不再报。
+      wait.onWaitStage?.(wait.action, wait.stage, Date.now() - wait.stageAt);
+      delete wait.onWaitStage;
       go();
     };
     const onAbort = () => {

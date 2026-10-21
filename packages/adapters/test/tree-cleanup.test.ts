@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -270,6 +270,74 @@ describe('帮手等待阶段', () => {
     expect(await readCleanupNamespace(root, plain)).toEqual(rows);
     expect(await cleanupStatus(plain)).toEqual(rows);
   });
+
+  it('对照：同一份假帮手存成 .ts 和 .mjs 跑首红那条链，剥类型落在已启动、还没读到字节的协议读取', async ({
+    annotate,
+  }) => {
+    // 只换扩展名，代码一字不差：差出来的只有子进程起来后先剥类型这一步。不断言毫秒（CI 忙闲不定），只把各段实测写进报告；
+    // 断言的是：两种都交回原记录、每次调用的段序不乱，关掉剥类型时 .ts 停在已启动、0 字节之后失败而不是变成空。
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-strip-'));
+    try {
+      writeFileSync(join(dir, 'package.json'), '{"type":"module"}');
+      copyFileSync(options.helper, join(dir, 'fake-scope-helper.mjs'));
+      copyFileSync(options.helper, join(dir, 'fake-scope-helper.ts'));
+      const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
+      const order = ['启动', '协议读取', '退出', '异步收尾'];
+      const spent: string[] = [];
+      for (const ext of ['.ts', '.mjs']) {
+        const file = `fake-scope-helper${ext}`;
+        const sum: Record<string, number> = {};
+        const calls: string[][] = [];
+        const helper = {
+          ...options,
+          helper: join(dir, file),
+          onWaitStage: (action: string, stage: HelperWaitStage, ms: number) => {
+            if (stage === '启动') calls.push([action]);
+            calls.at(-1)?.push(stage);
+            sum[stage] = (sum[stage] ?? 0) + ms;
+          },
+        };
+        const begun = Date.now();
+        reply();
+        expect(await readCleanupNamespace(root, helper)).toEqual([]);
+        reply({ rows });
+        expect(await readCleanupNamespace(root, helper)).toEqual(rows);
+        expect(await cleanupStatus(helper)).toEqual(rows);
+        // 三步各两次：capabilities + cleanup-status；每次从启动起、按四段顺序走，不跳回。
+        expect(calls.map((call) => call[0])).toEqual(
+          Array(3).fill(['capabilities', 'cleanup-status']).flat(),
+        );
+        for (const [, ...stages] of calls) {
+          expect(stages[0]).toBe('启动');
+          expect(stages.map((stage) => order.indexOf(stage))).toEqual(
+            [...stages.map((stage) => order.indexOf(stage))].sort(),
+          );
+        }
+        spent.push(
+          `${ext} 整链${Date.now() - begun}ms ${order.map((stage) => `${stage}=${sum[stage] ?? 0}ms`).join(' ')}`,
+        );
+      }
+      await annotate(`首红链六次帮手各段合计：${spent.join('；')}`);
+      reply();
+      const strip = ['--no-experimental-strip-types'];
+      const off = { ...options, sudo: [process.execPath, ...strip] };
+      expect(
+        await readCleanupNamespace(root, { ...off, helper: join(dir, 'fake-scope-helper.mjs') }),
+      ).toEqual([]);
+      const error = await readCleanupNamespace(root, {
+        ...off,
+        helper: join(dir, 'fake-scope-helper.ts'),
+      }).then(
+        () => {
+          throw new Error('不剥类型起不来的 .ts 被当成完成');
+        },
+        (caught: unknown) => caught,
+      );
+      expect(shown(error)).toMatch(/动作=capabilities 等待阶段=异步收尾 已启动=是 已读字节=0 .*退出码 1/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('只吐半截时停在协议读取且已有字节，不当成空', async () => {
     process.env.FLEET_FAKE_SCOPE_HOLD = 'protocol';

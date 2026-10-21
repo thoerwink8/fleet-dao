@@ -4,6 +4,8 @@
 // 写成不带类型的 .mjs：每次调用都新起一个 node，原来的 .ts 每起一次都要先剥类型，子进程吐第一个字节前多等一截
 // （tree-cleanup.test.ts 那条五秒用例要起六次。本机和 7 个空转进程挤一个核：.ts 时那条用例 5056ms 超时，停在
 // 协议读取、已启动、0 字节；换成 .mjs 同样条件 3.0–3.2 秒过。差的都在「已启动、还没读到字节」这一段）。
+// 按段对照（原 .ts 原文 vs 本文件，同一条链交替各 3 轮，单核+7 空转）：.ts 整链中位 8016ms、协议读取 7696ms；
+// .mjs 2939ms、2774ms；启动/退出/异步收尾两边都在几百毫秒内。tree-cleanup.test.ts 的「对照」用例每次把各段写进报告。
 // tree-cleanup.test.ts 用 --no-experimental-strip-types 核它不带类型。
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
