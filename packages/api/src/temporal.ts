@@ -134,6 +134,45 @@ export function createTaskWorkflowExecution(client: {
   };
 }
 
+/**
+ * 受管纠正核原 run：只读 describe 指定 run 和该编号的最新 run，COMPLETED 才取返回值（Temporal 历史里的 result）。
+ * 读失败（连不上、超时、run 不存在、取不到返回值）原样抛，不拿默认值顶。
+ */
+export function createClosedTaskWorkflow(client: {
+  connection: TemporalClientLike['connection'];
+  workflow: {
+    getHandle(
+      workflowId: string,
+      runId?: string,
+    ): {
+      describe(): Promise<{
+        workflowId: string;
+        runId: string;
+        status: { name: string };
+        closeTime?: Date | undefined;
+      }>;
+      result(): Promise<unknown>;
+    };
+  };
+}): NonNullable<WorkflowControl['closedTaskWorkflow']> {
+  const withDeadline = <R>(fn: () => Promise<R>): Promise<R> =>
+    client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, fn);
+  return async (workflowId, runId) => {
+    const latest = await withDeadline(() => client.workflow.getHandle(workflowId).describe());
+    const pinned = client.workflow.getHandle(workflowId, runId);
+    const run = await withDeadline(() => pinned.describe());
+    const completed = run.status.name === 'COMPLETED';
+    return {
+      workflowId: run.workflowId,
+      runId: run.runId,
+      latestRunId: latest.runId,
+      status: run.status.name,
+      ...(run.closeTime ? { closeTime: run.closeTime.toISOString() } : {}),
+      ...(completed ? { result: await withDeadline(() => pinned.result()) } : {}),
+    };
+  };
+}
+
 /** 重评 Update 名和 taskStatus 里的停点字段，与引擎 task-contract.ts 同一份（api 的 src 不许引 engine；test 核对）。 */
 export const REMEASURE_UPDATE_NAME = 'taskRemeasureLineBudget';
 /** 一次重评最多等多久：工作流里 240 秒限时，再留回执余量。 */
@@ -647,6 +686,7 @@ export function connectTemporal(
     control: {
       ...control,
       taskWorkflowExecution: createTaskWorkflowExecution(client),
+      closedTaskWorkflow: createClosedTaskWorkflow(client),
       remeasureLineBudget: createTemporalLineBudgetRemeasure(client),
       runningTaskWorkflow(repo, issueNumber) {
         return signalTaskWorkflowId(repo, issueNumber, (id) => seenLife(client, id)).catch((err: unknown) => {
