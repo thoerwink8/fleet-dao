@@ -16,7 +16,7 @@ import {
 import { readTreePlace } from '../src/tree-cleanup.ts';
 import { tempDir } from './helpers.ts';
 
-const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.ts');
+const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.mjs');
 const DIR = '/var/lib/fleet-work/repo1/task1';
 const SESSION = '8e188c1c-4430-4735-9eb2-bbb3d9f012c6';
 

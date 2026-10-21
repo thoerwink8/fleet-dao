@@ -14,7 +14,7 @@ import {
 
 const root = '/var/lib/fleet-work';
 const options = {
-  helper: join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.ts'),
+  helper: join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.mjs'),
   sudo: [process.execPath],
 };
 const namespace = {
@@ -259,6 +259,16 @@ describe('帮手等待阶段', () => {
     process.env.FLEET_FAKE_SCOPE_HOLD_MS = '30';
     expect(await readCleanupNamespace(root, options)).toEqual(rows);
     expect(await cleanupStatus(options)).toEqual(rows);
+  });
+
+  it('假帮手不用剥类型也能走完整条调用：首红那条用例的六次启动不再各付一次剥类型', async () => {
+    // 原首红的 5000ms 里分不出段；本机复现时差额全在「已启动、还没读到字节」，即子进程自己剥 .ts 类型那一截。
+    // 关掉剥类型照样起、照样交回原记录：假帮手再写回带类型的 .ts，这里起不来、报启动后的退出失败，不会变成空。
+    const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
+    reply({ rows });
+    const plain = { ...options, sudo: [process.execPath, '--no-experimental-strip-types'] };
+    expect(await readCleanupNamespace(root, plain)).toEqual(rows);
+    expect(await cleanupStatus(plain)).toEqual(rows);
   });
 
   it('只吐半截时停在协议读取且已有字节，不当成空', async () => {

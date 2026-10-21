@@ -23,7 +23,7 @@ if (mode === 'exit-before-ready') {
   });
   process.exit(1);
 } else if (mode === 'hang') {
-  // 什么都不写：等着被调用方判超时。假帮手（fake-scope-helper.ts）是 fork 出这个假桥接的，不是 exec 成它——
+  // 什么都不写：等着被调用方判超时。假帮手（fake-scope-helper.mjs）是 fork 出这个假桥接的，不是 exec 成它——
   // 调用方杀的是假帮手那一层，杀不到这里（真帮手是 exec，只有一个进程号，没有这层）；不自己兜底退出的话会一直
   // 挂着。5 秒后自己退，别让测试起的孤儿进程占着。
   setTimeout(() => process.exit(0), 5_000);

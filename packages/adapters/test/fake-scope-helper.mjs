@@ -1,6 +1,10 @@
 // 假的 fleet-agent-scope：只在测试里用。run 把自己的参数和环境记下来，然后照帮手脚本的规矩起 -- 后面的命令；
 // stop 只记一笔。记录写到环境变量 FLEET_FAKE_SCOPE_LOG 指的文件（一行一条 JSON）。
 // 真帮手（deploy/france/fleet-agent-scope.sh）以 root 跑、换身份、进 scope；这里只验插头交给它的东西对不对。
+// 写成不带类型的 .mjs：每次调用都新起一个 node，原来的 .ts 每起一次都要先剥类型，子进程吐第一个字节前多等一截
+// （tree-cleanup.test.ts 那条五秒用例要起六次。本机和 7 个空转进程挤一个核：.ts 时那条用例 5056ms 超时，停在
+// 协议读取、已启动、0 字节；换成 .mjs 同样条件 3.0–3.2 秒过。差的都在「已启动、还没读到字节」这一段）。
+// tree-cleanup.test.ts 用 --no-experimental-strip-types 核它不带类型。
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
@@ -8,7 +12,7 @@ const [action, ...rest] = process.argv.slice(2);
 const log = process.env.FLEET_FAKE_SCOPE_LOG;
 if (log) appendFileSync(log, `${JSON.stringify({ action, args: rest, env: process.env })}\n`);
 
-function holdPayload(): string {
+function holdPayload() {
   if (action === 'cleanup-status') return process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT ?? '';
   if (action === 'capabilities') {
     return JSON.stringify({
@@ -27,11 +31,11 @@ function holdPayload(): string {
   return '';
 }
 
-function keepAlive(): void {
+function keepAlive() {
   setInterval(() => {}, 1 << 30);
 }
 
-function main(): void {
+function main() {
   if (action === 'capabilities') {
     if (process.env.FLEET_FAKE_SCOPE_CAPABILITIES !== undefined) {
       process.stdout.write(process.env.FLEET_FAKE_SCOPE_CAPABILITIES);
@@ -53,10 +57,10 @@ function main(): void {
     );
   } else if (action === 'cleanup-status' && process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES) {
     // 分页：按调用顺序逐个吐 JSON 数组里的回执，用过几页记在 FLEET_FAKE_SCOPE_CLEANUP_COUNTER 文件；吐完了按读失败退出
-    const counter = process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER as string;
+    const counter = process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER;
     const used = existsSync(counter) ? Number(readFileSync(counter, 'utf8')) : 0;
     writeFileSync(counter, String(used + 1));
-    const pages = JSON.parse(process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES) as unknown[];
+    const pages = JSON.parse(process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES);
     if (used >= pages.length) process.exit(1);
     process.stdout.write(JSON.stringify(pages[used]));
   } else if (action === 'cleanup-status') {
@@ -68,7 +72,7 @@ function main(): void {
     const command = rest.slice(at + 1);
     // 和真帮手一样：环境只剩 FLEET_* 这几类；PATH 取 FLEET_SESSION_PATH（没给用同一个默认），会话用户自己写得动的
     // ~/.local/bin 接在最后
-    const env: Record<string, string> = {};
+    const env = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (
         v !== undefined &&
@@ -78,7 +82,7 @@ function main(): void {
     }
     env.HOME = '/home/fake-session-user';
     env.PATH = `${process.env.FLEET_SESSION_PATH ?? '/usr/local/bin:/usr/bin:/bin'}:${env.HOME}/.local/bin`;
-    const child = spawn(command[0] as string, command.slice(1), {
+    const child = spawn(command[0], command.slice(1), {
       cwd: cwdAt >= 0 ? rest[cwdAt + 1] : '/',
       env,
       stdio: 'inherit',
