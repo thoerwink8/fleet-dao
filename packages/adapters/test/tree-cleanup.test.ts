@@ -324,9 +324,13 @@ describe('帮手等待阶段', () => {
 
   it('没有输出或不完整回执不当成空', async () => {
     process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT = '';
-    await expect(readCleanupNamespace(root, options)).rejects.toThrow('回执读失败');
+    await expect(readCleanupNamespace(root, options)).rejects.toThrow(
+      /动作=cleanup-status 等待阶段=异步收尾 已启动=是 已读字节=0 .*回执读失败/,
+    );
     process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT = '{';
-    await expect(readCleanupNamespace(root, options)).rejects.toThrow('回执读失败');
+    await expect(readCleanupNamespace(root, options)).rejects.toThrow(
+      /动作=cleanup-status 等待阶段=异步收尾 已启动=是 已读字节=[1-9]\d* .*回执读失败/,
+    );
   });
 });
 

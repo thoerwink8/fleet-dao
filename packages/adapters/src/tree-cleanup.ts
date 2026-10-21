@@ -220,7 +220,8 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
                 throw new Error('删树协议版本/状态不完整');
               resolve(row);
             } catch (parseError) {
-              reject(new Error(`受管删树回执读失败：${String(parseError)}`));
+              const reason = parseError instanceof Error ? parseError.message : '解析失败';
+              reject(waitFailure(wait, `回执读失败：${clip(reason, 200)}`, '', '', wait.exitCode));
             }
           });
         },
