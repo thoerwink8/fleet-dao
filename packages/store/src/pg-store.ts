@@ -119,6 +119,12 @@ import type {
   Store,
   User,
 } from './ports.ts';
+import {
+  judgeMergedCorrection,
+  MERGED_CORRECTION_ACTION,
+  type MergedCorrectionFacts,
+  mergedCorrectionTarget,
+} from './ports.ts';
 import { pgTaskExecution } from './task-execution-pg.ts';
 import {
   addRepoAudit,
@@ -448,6 +454,72 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       },
       pullRequest: toPullRequest(pr),
       activeRunIds,
+    };
+  }
+
+  async function readMergedCorrection(
+    input: Parameters<OpsStore['readMergedCorrection']>[0],
+    executor: Db = db,
+  ): Promise<MergedCorrectionFacts | null> {
+    if (!isUuid(input.taskId) || !isUuid(input.repoId)) return null;
+    const [row] = await executor
+      .select({ task: tasks, repo: repos })
+      .from(tasks)
+      .innerJoin(repos, eq(repos.id, tasks.repoId))
+      .where(eq(tasks.id, input.taskId));
+    if (!row) return null;
+    const owned = await runsOfTask(executor, {
+      id: row.task.id,
+      issueNumber: row.task.issueNumber,
+      workflowId: taskWorkflowId(row.repo, row.task.issueNumber),
+    });
+    const [priorRow] = await executor
+      .select()
+      .from(auditLog)
+      .where(
+        and(
+          eq(auditLog.action, MERGED_CORRECTION_ACTION),
+          eq(auditLog.target, mergedCorrectionTarget(row.task.id)),
+          eq(auditLog.ok, true),
+        ),
+      )
+      .orderBy(asc(auditLog.id))
+      .limit(1);
+    const prior = priorRow && toAudit(priorRow);
+    const after = (prior?.after ?? {}) as Record<string, unknown>;
+    const str = (v: unknown) => (typeof v === 'string' ? v : null);
+    const runFacts = owned.map((r) => ({
+      id: r.id,
+      segment: r.segment,
+      ...(r.workflowId === null ? {} : { workflowId: r.workflowId }),
+      ...(r.temporalRunId === null ? {} : { temporalRunId: r.temporalRunId }),
+      startedAt: iso(r.startedAt),
+      ...(r.endedAt === null ? {} : { endedAt: iso(r.endedAt) }),
+      ...(r.outcome === null ? {} : { outcome: r.outcome }),
+    }));
+    return {
+      task: toTask(row.task),
+      ledger: {
+        phase: row.task.phase,
+        doing: row.task.doing,
+        lastProblem: row.task.lastProblem,
+        updatedAt: row.task.updatedAt === null ? null : iso(row.task.updatedAt),
+      },
+      runs: runFacts,
+      activeRunIds: runFacts.filter((r) => r.endedAt === undefined).map((r) => r.id),
+      ...(prior
+        ? {
+            prior: {
+              auditId: prior.id,
+              at: prior.at,
+              pr: typeof after.pr === 'number' ? after.pr : null,
+              head: str(after.head),
+              mergeCommit: str(after.mergeCommit),
+              temporalRunId: str(after.temporalRunId),
+              evidenceKey: str(after.evidenceKey),
+            },
+          }
+        : {}),
     };
   }
 
@@ -915,6 +987,40 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         if (archived.length === 0) return 'conflict';
         await insertAudit(tx, entry);
         return 'ok';
+      });
+    },
+    async readMergedCorrection(input) {
+      return readMergedCorrection(input);
+    },
+    async correctMergedAbandoned(input, entry) {
+      if (!isUuid(input.taskId) || !isUuid(input.repoId)) return { result: 'not_found', why: '编号看不懂' };
+      if (entry.action !== MERGED_CORRECTION_ACTION || entry.target !== mergedCorrectionTarget(input.taskId))
+        return { result: 'conflict', why: '操作记录不是这张任务的受管纠正记录' };
+      if (!entry.ok && entry.error !== undefined)
+        return { result: 'conflict', why: '受管纠正的操作记录必须是成功记录' };
+      return db.transaction(async (tx) => {
+        // 任务行加锁串行同一张单的并发纠正；task_id 为空的兼容 run 不受它约束，所以再锁 runs 表挡住并发新增/改动，
+        // 拿不到锁就整笔失败（抛出），不纠正。
+        await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, input.taskId)).for('update');
+        await tx.execute(sql`set local lock_timeout = '5s'`);
+        await tx.execute(sql`lock table ${runs} in share row exclusive mode`);
+        const verdict = judgeMergedCorrection(await readMergedCorrection(input, tx), input);
+        if (verdict.result !== 'ok') return verdict;
+        const updated = await tx
+          .update(tasks)
+          .set({ state: 'done', phase: 'done', doing: input.doing, lastProblem: null, updatedAt: now() })
+          .where(
+            and(
+              eq(tasks.id, input.taskId),
+              eq(tasks.state, 'stopped'),
+              eq(tasks.phase, 'abandoned'),
+              ne(tasks.executor, 'local'),
+            ),
+          )
+          .returning({ id: tasks.id });
+        if (updated.length === 0) return { result: 'conflict', why: '任务账在纠正前一刻变了' } as const;
+        await insertAudit(tx, entry);
+        return { result: 'ok' } as const;
       });
     },
     async resolveNotification({ id, by, expected }, entry) {

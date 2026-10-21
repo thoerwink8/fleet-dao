@@ -209,8 +209,11 @@ export function acceptanceExecutionReader(
             events + (es?.length ?? 0) > ACCEPTANCE_HISTORY_LIMITS.events
           )
             fail('limit');
-          if (response.rawHistory?.length || response.archived || !es?.length) fail('malformed_history');
-          for (const event of es) {
+          if (response.rawHistory?.length || response.archived) fail('malformed_history');
+          // 分页只按 token 耗尽收尾（官方 SDK 同）：空页可在终态前后出现，不能单独证明缺事件；
+          // 缺事件由连续 eventId、historyLength、唯一终态和 token 耗尽后的完整来源判据兜住，
+          // 空页个数只受总页数、token 循环、字节和时间预算约束。
+          for (const event of es ?? []) {
             check();
             const n = BigInt(event.eventId?.toString() ?? '0');
             if (closed || n !== last + 1n) fail('malformed_history');
@@ -306,7 +309,6 @@ export function acceptanceExecutionReader(
           }
           token = response.nextPageToken ?? new Uint8Array();
           if (!token.byteLength) break;
-          if (closed) fail('malformed_history');
           if (token.byteLength > ACCEPTANCE_HISTORY_LIMITS.tokenBytes) fail('limit');
           const key = Buffer.from(token).toString('base64');
           if (seen.has(key)) fail('malformed_history');

@@ -49,4 +49,6 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 
 - `fleet-api quote put|get|list` 仅私有管理命令；put 从 stdin 收数组，同 id 同内容幂等、异文整批拒绝。错误不回显 payload 或数据库明细，get/list 的私有原文输出不可送公开日志；不挂 HTTP 或 realtime。
 
-- 历史验收归并：`acceptance merge-plan` / `merge` 使用专用 `acceptance-execution-reader.ts`，只接受同 run 已完成活动的明确来源A/B，完整限额历史与最终头冷验收通过关联；不用旧 runs 的 NULL 列或会话号授权。merge 是私有 ops 写入，重取证据，随后由 DB 短事务完成目标/审计/幂等，不能挂普通HTTP或公开原项。
+- 已结束却误记 abandoned 的真实已合任务：`fleet-api task correct-merged`（`task-correct-merged.ts`）。默认只读预检（现读 GitHub 精确 PR/head/合并提交/基线分支、Temporal 原 run 已 COMPLETED 且是最新一代且结果为 abandoned、库里 stopped/abandoned 且无活 run），执行必须带预检打印的 `--task`/`--seen`，由 `Store.correctMergedAbandoned` 在一个事务里 CAS 改任务并写操作记录（`task.correct-merged`，带前后状态和证据）。不改旧 run、不动 Temporal、不关 issue、不碰验收责任；同一请求幂等，换了任何身份或证据拒绝；没经 `bin/fleet-api`（无 FLEET_OPS_OPERATOR）不许执行。
+
+- 历史验收归并：`acceptance merge-plan` / `merge` 使用专用 `acceptance-execution-reader.ts`，只接受同 run 已完成活动的明确来源A/B，完整限额历史与最终头冷验收通过关联；不用旧 runs 的 NULL 列或会话号授权。历史分页只按 token 耗尽收尾（同官方 SDK）：0 事件页（有进展 token）在终态前后都合法，没有固定空页个数上限，只受原总页数 256、事件、字节、时间和 token 循环预算约束；终态后任何事件、token 循环、rawHistory/归档仍 unknown，token 耗尽后连续事件、historyLength、唯一终态、来源和精确 head 冷验收仍须全过（#3500、#3502）。merge 是私有 ops 写入，重取证据，随后由 DB 短事务完成目标/审计/幂等，不能挂普通HTTP或公开原项。
