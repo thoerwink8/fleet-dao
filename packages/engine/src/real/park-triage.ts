@@ -13,6 +13,7 @@ import {
   commanderAuditRows,
   countPurposeModels,
   finishScheduleRun,
+  intakeTaskRow,
   listCommanderAcceptanceTasks,
   listIntakeRepos,
   listStalledEngineTasks,
@@ -20,12 +21,12 @@ import {
   readParkAlertBody,
   readSettingValue,
   readTaskRoundsForSpin,
-  readTaskTitle,
   recordEngineAudit,
   resolveAlertWithReason,
   settleAcceptanceDuty,
   startScheduleRun,
   supersedeAcceptanceDuty,
+  taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
 import { TASK_WORKFLOW_TYPE } from '@fleet-dao/shared';
@@ -108,10 +109,16 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
   /** 叫停没等到终态：已经把请求发出去了，旧代之后可能才结束。 */
   class StopUnconfirmedError extends Error {}
 
-  /** 旧代现在到底是在跑还是已终止：读失败原样抛，绝不当成已终止。 */
-  const lifeOf = async (client: TemporalClient, id: string) => {
+  /** 起新代前的核对发现不能再接续的事实（身份对不上、旧代不见了）。 */
+  class GateFinalError extends Error {}
+
+  /** 钉住已核的 run：旧代的查询、叫停、读状态都指到记下的那一次执行，不会落到后来换掉的执行上。 */
+  const pinned = (client: TemporalClient, id: string, runId: string) => client.workflow.getHandle(id, runId);
+
+  /** 旧代这一次执行现在到底是在跑还是已终止：读失败原样抛，绝不当成已终止。 */
+  const lifeOf = async (client: TemporalClient, id: string, runId: string) => {
     const described = await client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () =>
-      client.workflow.getHandle(id).describe(),
+      pinned(client, id, runId).describe(),
     );
     return generationLife(described.status.name);
   };
@@ -132,13 +139,85 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
       }
     });
 
-  const trailOf = (generations: readonly GenerationView[]): RedoTrail => ({
-    fromGeneration: generations.length,
-    runs: generations.map((g) => ({
-      workflowId: g.workflowId,
-      runId: (g.record as { runId: string }).runId,
-    })),
-  });
+  const runIdOf = (g: GenerationView): string | null => {
+    const runId = (g.record as { runId?: unknown } | null)?.runId;
+    return typeof runId === 'string' && runId.trim() !== '' ? runId : null;
+  };
+
+  /**
+   * 叫停前先把全部旧代的身份核成一份账：每一代都要有非空 run 编号、编号正好是第 i 代、裁决那一代在里面。
+   * 缺任何一样就在任何副作用之前拒绝（不用强转，undefined 不会和 undefined 对上）。
+   */
+  const trailOf = (
+    generations: readonly GenerationView[],
+    row: ParkedRetryRow,
+    verdictWorkflowId: string,
+  ): { ok: true; trail: RedoTrail } | { ok: false; why: string } => {
+    const runs: RedoTrail['runs'] = [];
+    for (const [i, g] of generations.entries()) {
+      const expect = taskWorkflowId({ owner: row.owner, name: row.name }, row.issueNumber, i + 1);
+      const runId = runIdOf(g);
+      if (g.workflowId !== expect || g.generation !== i + 1)
+        return { ok: false, why: `第 ${i + 1} 代的编号对不上（读到 ${g.workflowId}），没有重做` };
+      if (runId === null)
+        return { ok: false, why: `旧代 ${g.workflowId} 读不到有效的 run 身份，没有叫停、没有重做` };
+      runs.push({ workflowId: g.workflowId, runId });
+    }
+    if (runs.length === 0) return { ok: false, why: '没有上一代任务可重做' };
+    if (!runs.some((r) => r.workflowId === verdictWorkflowId))
+      return { ok: false, why: `裁决那一代 ${verdictWorkflowId} 不在这张单的代次里，没有重做` };
+    return { ok: true, trail: { fromGeneration: runs.length, runs } };
+  };
+
+  type Owned =
+    | { ok: true; repo: IntakeRepo; title: string }
+    /** unknown：读不到，保持待接续；mismatch：已读到的事实说明不该再动手。 */
+    | { ok: false; kind: 'unknown' | 'mismatch'; why: string };
+  const ACTIVE_STATES: readonly string[] = ['stalled', 'stopped'];
+
+  /**
+   * 每次动手（叫停、起新代）之前，从现有可信任务/仓记录核当前归属：账里的 task id/ref 必须就是库里这张任务，
+   * 仍归引擎（executor=engine，没转本机）、状态是停着或已放弃。旧账、标题能读到都不算授权。
+   */
+  const verifyOwnership = async (row: ParkedRetryRow): Promise<Owned> => {
+    try {
+      const ctx = await taskContext(w.db, row.taskId);
+      if (ctx === null)
+        return { ok: false, kind: 'mismatch', why: `库里没有任务 ${row.taskId}，账和任务对不上` };
+      const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+      if (
+        !same(ctx.repo.owner, row.owner) ||
+        !same(ctx.repo.name, row.name) ||
+        ctx.issueNumber !== row.issueNumber
+      )
+        return {
+          ok: false,
+          kind: 'mismatch',
+          why: `任务 ${row.taskId} 在库里是 ${ctx.repo.owner}/${ctx.repo.name}#${ctx.issueNumber}，和账上的 ${row.owner}/${row.name}#${row.issueNumber} 对不上`,
+        };
+      const current = await intakeTaskRow(w.db, ctx.repo.id, ctx.issueNumber);
+      if (current === null || current.id !== row.taskId)
+        return { ok: false, kind: 'mismatch', why: `这张单现在对应的任务不是 ${row.taskId}` };
+      if (current.executor !== 'engine')
+        return {
+          ok: false,
+          kind: 'mismatch',
+          why: `任务现在 executor=${current.executor}，不属于引擎，不再动手`,
+        };
+      if (!ACTIVE_STATES.includes(current.state))
+        return {
+          ok: false,
+          kind: 'mismatch',
+          why: `任务现在的状态是 ${current.state}，不是停着/已放弃，不再动手`,
+        };
+      const repo = await findRepo(row.owner, row.name);
+      if (repo === null || repo.id !== ctx.repo.id)
+        return { ok: false, kind: 'unknown', why: `读不到受管的仓 ${row.owner}/${row.name}，这一轮不动手` };
+      return { ok: true, repo, title: ctx.title };
+    } catch (err) {
+      return { ok: false, kind: 'unknown', why: `核任务归属时读库失败：${errMessage(err)}` };
+    }
+  };
 
   type Gate =
     | { kind: 'ready' }
@@ -147,8 +226,9 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     | { kind: 'final'; why: string };
 
   /**
-   * 每次起新代之前都走这一关：现读全部代次，旧代 run 身份必须和叫停前记下的一致，且都真实终止；
-   * 已经有更高的一代就不再起。读不到、还在跑只是等（waiting）；身份对不上、旧代不见了是不能再接续（final）。
+   * 每次起新代之前都走这一关：现读全部代次。先核全部旧代——run 身份必须和叫停前记下的一致、数量不能少、且都真实终止；
+   * 旧代没核完（还在跑/读不到）一律等，哪怕新代已经存在也不能报完成；旧代都核完了，新代已存在才算「已存在」，不再起。
+   * 读不到、还在跑只是等（waiting）；身份对不上、旧代不见了是不能再接续（final）。
    */
   const gateOf = async (client: TemporalClient, row: ParkedRetryRow, trail: RedoTrail): Promise<Gate> => {
     const read = await readGenerations(client, row);
@@ -157,7 +237,9 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     for (const known of trail.runs) {
       const seen = gens.find((g) => g.workflowId === known.workflowId);
       if (!seen) return { kind: 'final', why: `旧代 ${known.workflowId} 现在读不到了，身份对不上，不再接续` };
-      const runId = (seen.record as { runId: string }).runId;
+      const runId = runIdOf(seen);
+      if (runId === null)
+        return { kind: 'waiting', why: `旧代 ${known.workflowId} 这次读不到有效的 run 身份，先不动` };
       if (runId !== known.runId)
         return {
           kind: 'final',
@@ -169,24 +251,24 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         kind: 'final',
         why: `现在只有 ${gens.length} 代，少于叫停前的 ${trail.fromGeneration} 代，不再接续`,
       };
-    const next = gens[trail.fromGeneration];
-    if (next) return { kind: 'exists', workflowId: next.workflowId, generation: next.generation };
-    const alive = gens.filter((g) => g.life !== 'terminated');
+    const alive = gens.slice(0, trail.fromGeneration).filter((g) => g.life !== 'terminated');
     if (alive.length > 0)
       return {
         kind: 'waiting',
         why: `旧代 ${alive.map((g) => g.workflowId).join('、')} 终态未确认（仍在运行）`,
       };
+    const next = gens[trail.fromGeneration];
+    if (next) return { kind: 'exists', workflowId: next.workflowId, generation: next.generation };
     return { kind: 'ready' };
   };
 
-  /** 叫停发出后等旧代终止最多 ABANDON_WAIT_MS；读不到状态不算终止，等不到抛 StopUnconfirmedError。 */
-  const waitTerminal = async (client: TemporalClient, id: string) => {
+  /** 叫停发出后等旧代这一次执行终止最多 ABANDON_WAIT_MS；读不到状态不算终止，等不到抛 StopUnconfirmedError。 */
+  const waitTerminal = async (client: TemporalClient, id: string, runId: string) => {
     const deadline = clock.nowMs() + ABANDON_WAIT_MS;
     let last = '一直没读到状态';
     while (clock.nowMs() < deadline) {
       try {
-        if ((await lifeOf(client, id)) === 'terminated') return;
+        if ((await lifeOf(client, id, runId)) === 'terminated') return;
         last = '仍在运行';
       } catch (err) {
         last = `读状态失败：${errMessage(err)}`;
@@ -247,13 +329,21 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
   };
 
   const redo: ParkTriageDeps['redoTask'] = async (row, workflowId, journal) => {
-    const repo = await findRepo(row.owner, row.name);
-    const title = await readTaskTitle(w.db, row.taskId);
-    if (!repo || title === null) return { ok: false, why: `读不到仓或任务标题，没有重做（${workflowId}）` };
+    // 任何副作用之前：任务归属（账上的 task id/ref、executor=engine、停着/已放弃）和全部旧代的 run 身份都要核全
+    const owned = await verifyOwnership(row);
+    if (!owned.ok) return { ok: false, why: `${owned.why}（${workflowId}），没有重做` };
+    const { repo, title } = owned;
     return w.temporal.use(async (client): Promise<CommanderRedoOutcome> => {
       const read = await readGenerations(client, row);
       if (!read.ok) return read;
-      const trail = trailOf(read.generations);
+      const made = trailOf(read.generations, row, workflowId);
+      if (!made.ok) return { ok: false, why: made.why };
+      const trail = made.trail;
+      const runIdFor = (id: string): string => {
+        const hit = trail.runs.find((r) => r.workflowId === id);
+        if (!hit) throw new Error(`旧代 ${id} 不在已核的身份里`);
+        return hit.runId;
+      };
       // idle：什么都没发；stop：叫停已写账并发出；old-terminal：旧代已重核终止，起新代前；start：起新代请求已写账并发出
       let phase: 'idle' | 'stop' | 'old-terminal' | 'start' = 'idle';
       // 接续账里已经有这一轮的第一笔（后续调度才有东西可接）
@@ -265,34 +355,49 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           list: async () => read.generations,
           posture: async (id) => {
             try {
-              const status = await withDeadline((c) => c.workflow.getHandle(id).query(taskStatusQuery));
+              const status = await withDeadline((c) => pinned(c, id, runIdFor(id)).query(taskStatusQuery));
               return redoCanStop(status.phase) ? 'parked' : 'running';
             } catch (err) {
               return isWorkflowGone(err) ? 'parked' : 'running';
             }
           },
           abandonParked: async (id) => {
-            // 先记账再叫停：账写不进就不发，回执才能如实写「任务没动」
             if (phase === 'idle') {
+              // 先记账再叫停：账写不进就不发，回执才能如实写「任务没动」
               await journal({ phase: 'stop-requested', trail });
               ledgered = true;
               phase = 'stop';
+              // 对所有还在跑（已核都停着）的旧代一次发完叫停请求，之后接续只读证、不再补发，
+              // 也就不会有「一直等一个根本没请求过叫停的旧代」。每一条都钉住已核的 run。
+              const failures: string[] = [];
+              for (const g of read.generations.filter((x) => x.life === 'running')) {
+                try {
+                  await withDeadline((c) =>
+                    pinned(c, g.workflowId, runIdFor(g.workflowId)).signal(taskAbandonSignal, {
+                      by: COMMANDER_ACTOR,
+                      reason: '指挥官判重做：先叫停停住的上一代',
+                    }),
+                  );
+                } catch (err) {
+                  if (!isWorkflowGone(err)) failures.push(`${g.workflowId}：${errMessage(err)}`);
+                }
+              }
+              if (failures.length > 0)
+                throw new StopUnconfirmedError(
+                  `叫停请求有 ${failures.length} 条没发成：${failures.join('；')}`,
+                );
             }
-            try {
-              await withDeadline((c) =>
-                c.workflow.getHandle(id).signal(taskAbandonSignal, {
-                  by: COMMANDER_ACTOR,
-                  reason: '指挥官判重做：先叫停停住的上一代',
-                }),
-              );
-            } catch (err) {
-              if (!isWorkflowGone(err)) throw err;
-            }
-            await waitTerminal(client, id);
+            await waitTerminal(client, id, runIdFor(id));
           },
           start: async (id) => {
-            // 起之前把全部旧代的真实终态和 run 身份再核一遍，不信前面的等待结果
+            // 起之前把任务归属和全部旧代的真实终态、run 身份再核一遍，不信前面的等待结果
+            const again = await verifyOwnership(row);
+            if (!again.ok) {
+              if (again.kind === 'mismatch') throw new GateFinalError(again.why);
+              throw new StopUnconfirmedError(again.why);
+            }
             const gate = await gateOf(client, row, trail);
+            if (gate.kind === 'final') throw new GateFinalError(gate.why);
             if (gate.kind === 'exists') {
               existing = { workflowId: gate.workflowId, generation: gate.generation };
               return 'already_exists';
@@ -315,6 +420,12 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         });
       } catch (err) {
         const why = errMessage(err);
+        if (err instanceof GateFinalError) {
+          // 起新代前核到不能再接续的事实：已经叫停过的才有账可收口，什么都没发就是原样失败
+          if (!ledgered) return { ok: false, why };
+          await journalBestEffort(journal, { phase: 'given-up', why });
+          return { ok: false, why, stage: 'final' };
+        }
         if (phase === 'idle') return { ok: false, why };
         if (phase === 'stop') {
           await journalBestEffort(journal, { phase: 'stop-unconfirmed', why });
@@ -351,14 +462,11 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
 
   const resume: ParkTriageDeps['resumeRedo'] = async (pending, opts, journal) => {
     const { row, trail } = pending;
-    const repo = await findRepo(row.owner, row.name);
-    const title = await readTaskTitle(w.db, row.taskId);
-    if (!repo || title === null)
-      return {
-        ok: false,
-        stage: 'waiting',
-        why: `读不到仓或任务标题，这一轮不接续（${pending.workflowId}）`,
-      };
+    // 每次接续都从现有任务/仓记录重核归属：转本机、任务对不上都拒绝（已核实的事实 → final），读不到只是这一轮不动
+    const owned = await verifyOwnership(row);
+    if (!owned.ok)
+      return { ok: false, stage: owned.kind === 'mismatch' ? 'final' : 'waiting', why: owned.why };
+    const { repo, title } = owned;
     return w.temporal.use(async (client): Promise<CommanderRedoOutcome> => {
       const gate = await gateOf(client, row, trail);
       if (gate.kind === 'final') return { ok: false, stage: 'final', why: gate.why };
@@ -378,7 +486,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         return {
           ok: false,
           stage: 'final',
-          why: `旧代已终止但新代还没起，而接续已过 24 小时或起新代已试满 ${PARK_TRIAGE_REDO_START_TRIES} 次，不再起`,
+          why: `已核实旧代都已终止、新代不存在，但接续已过 24 小时或起新代已试满 ${PARK_TRIAGE_REDO_START_TRIES} 次，不再发起新的启动`,
         };
       const id = taskWorkflowId({ owner: row.owner, name: row.name }, row.issueNumber, generation);
       try {

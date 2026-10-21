@@ -31,7 +31,9 @@ import {
   type DecisionReason,
   noteOnlyOptions,
 } from '@fleet-dao/shared';
+import { MAX_TASK_GENERATION } from '@fleet-dao/shared/task-redo';
 import { errMessage } from '@fleet-dao/shared/util';
+import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { z } from 'zod';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../commander-contract.ts';
 import {
@@ -105,13 +107,16 @@ export const PARK_TRIAGE_REDO_START_TRIES = 3;
  * 接续账里的阶段：
  * - stop-requested：叫停请求即将/已经发出（终态未知）；stop-unconfirmed：等了没确认旧代终态；
  * - start-requested：起新代的请求即将/已经发出；start-unconfirmed：旧代已终态，起新代没得到确认；
- * - started（新代已确认启动）、exists（新代已存在，本次没再起）、given-up（不再接续，带原因）：到此为止。
+ * - unverified：接续窗口（24 小时）已过，旧代终态/新代是否存在仍然读不到或没核实——责任继续保留，每轮继续读证，只是不再发起新的 Start；
+ * - started（新代已确认启动）、exists（旧代已核终态且新代已存在，本次没再起）、given-up（已核实的事实使重做不能再接续，带原因）：到此为止。
+ *   未知从不记 given-up：时间到了、试满次数都不能把没核实的东西算成结清。
  */
 export type RedoPhase =
   | 'stop-requested'
   | 'stop-unconfirmed'
   | 'start-requested'
   | 'start-unconfirmed'
+  | 'unverified'
   | 'started'
   | 'exists'
   | 'given-up';
@@ -120,6 +125,7 @@ const REDO_PHASES: readonly RedoPhase[] = [
   'stop-unconfirmed',
   'start-requested',
   'start-unconfirmed',
+  'unverified',
   'started',
   'exists',
   'given-up',
@@ -129,6 +135,7 @@ const REDO_TERMINAL: readonly RedoPhase[] = ['started', 'exists', 'given-up'];
 export const REDO_FAILURE_PHASES: readonly RedoPhase[] = [
   'stop-unconfirmed',
   'start-unconfirmed',
+  'unverified',
   'given-up',
 ];
 
@@ -163,6 +170,8 @@ export interface PendingRedo {
   /** 这一轮重做最早记下的失败原文。 */
   firstWhy: string | null;
   newWorkflowId: string | null;
+  /** 账本身对不上（见 readRedoLedger）：这个重做已阻断，不再接续，每轮列为问题。 */
+  blocked: string | null;
 }
 
 /**
@@ -1254,99 +1263,158 @@ interface AuditBook {
 const asObj = (v: unknown): Record<string, unknown> | null =>
   typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 
-function parseTrail(v: unknown): RedoTrail | null {
+/**
+ * 严格核旧代身份：代数连续（第 i 条必须正好是第 i 代的工作流编号）、数量等于 fromGeneration、run 编号非空且不重复。
+ * 任何一处对不上都是坏账，不修补、不跳过。
+ */
+function parseTrail(
+  v: unknown,
+  who: { owner: string; name: string; issueNumber: number },
+): { ok: true; trail: RedoTrail } | { ok: false; why: string } {
   const o = asObj(v);
-  if (
-    !o ||
-    typeof o.fromGeneration !== 'number' ||
-    !Number.isInteger(o.fromGeneration) ||
-    o.fromGeneration < 1
-  )
-    return null;
-  if (!Array.isArray(o.runs) || o.runs.length !== o.fromGeneration) return null;
+  if (!o) return { ok: false, why: 'trail 不是对象' };
+  const from = o.fromGeneration;
+  if (typeof from !== 'number' || !Number.isInteger(from) || from < 1 || from > MAX_TASK_GENERATION)
+    return { ok: false, why: `trail.fromGeneration 不是 1~${MAX_TASK_GENERATION} 的整数` };
+  if (!Array.isArray(o.runs) || o.runs.length !== from)
+    return {
+      ok: false,
+      why: `trail.runs 数量（${Array.isArray(o.runs) ? o.runs.length : '非列表'}）和 fromGeneration ${from} 对不上`,
+    };
   const runs: RedoTrail['runs'] = [];
-  for (const r of o.runs) {
+  const seen = new Set<string>();
+  for (const [i, r] of o.runs.entries()) {
     const x = asObj(r);
-    if (!x || typeof x.workflowId !== 'string' || typeof x.runId !== 'string' || x.runId === '') return null;
-    runs.push({ workflowId: x.workflowId, runId: x.runId });
+    const expect = taskWorkflowId({ owner: who.owner, name: who.name }, who.issueNumber, i + 1);
+    if (!x || x.workflowId !== expect)
+      return { ok: false, why: `trail.runs[${i}] 不是第 ${i + 1} 代的工作流编号（应为 ${expect}）` };
+    if (typeof x.runId !== 'string' || x.runId.trim() === '' || seen.has(x.runId))
+      return { ok: false, why: `trail.runs[${i}] 的 run 编号为空或重复` };
+    seen.add(x.runId);
+    runs.push({ workflowId: expect, runId: x.runId });
   }
-  return { fromGeneration: o.fromGeneration, runs };
+  return { ok: true, trail: { fromGeneration: from, runs } };
 }
 
-/** 按时间从早到晚读接续账，每个（工作流编号 + 停下编号）归并成最新状态；终态之外的就是还没做完的。 */
+type LedgerState = PendingRedo & { done: boolean };
+
+/**
+ * 按时间从早到晚读接续账，每个（工作流编号 + 停下编号）归并成最新状态；终态之外的就是还没做完的。
+ * 坏账不跳过：同键的记录对不上（身份/代次/编号不一致、该带 trail 的没带、trail 不合法）把这个意图阻断（blocked，
+ * 一直列为 problems，不再接续、不沿旧状态继续）；连键都定位不到的记录每轮列为 problems，不当成没问题。
+ */
 function readRedoLedger(audits: readonly CommanderAuditView[]): {
   pending: PendingRedo[];
   problems: string[];
 } {
-  const states = new Map<string, PendingRedo & { done: boolean }>();
+  const states = new Map<string, LedgerState>();
+  const orphanBlocks: string[] = [];
   const problems: string[] = [];
   for (const a of audits) {
     if (a.action !== COMMANDER_AUDIT_REDO) continue;
     const after = asObj(a.after);
-    const phase = after?.phase;
-    const row = {
-      taskId: after?.taskId,
-      owner: after?.owner,
-      name: after?.name,
-      issueNumber: after?.issueNumber,
-    };
-    if (
-      !after ||
-      typeof after.workflowId !== 'string' ||
-      typeof after.parkSeq !== 'number' ||
-      typeof phase !== 'string' ||
-      !REDO_PHASES.includes(phase as RedoPhase) ||
-      typeof row.taskId !== 'string' ||
-      typeof row.owner !== 'string' ||
-      typeof row.name !== 'string' ||
-      typeof row.issueNumber !== 'number'
-    ) {
-      problems.push(`重做接续账有一条读不懂（${stamp(a.at)}），这一条不参与接续`);
+    if (!after || typeof after.workflowId !== 'string' || typeof after.parkSeq !== 'number') {
+      problems.push(
+        `重做接续账有一条定位不到是哪个重做（${stamp(a.at)}）：无法判断它影响哪张单，已列为问题，不当作没事`,
+      );
       continue;
     }
-    const key = claimKey(after.workflowId, after.parkSeq);
-    const rec = phase as RedoPhase;
-    const why = typeof after.why === 'string' ? after.why : null;
-    const trail = after.trail === undefined ? null : parseTrail(after.trail);
+    const workflowId = after.workflowId;
+    const parkSeq = after.parkSeq;
+    const key = claimKey(workflowId, parkSeq);
     let state = states.get(key);
-    if ((rec === 'stop-requested' || rec === 'start-requested') && (!state || state.done)) {
-      if (trail === null) {
-        problems.push(`${after.workflowId} 的重做接续账缺旧代身份（${stamp(a.at)}），无法核身份，不接续`);
+    const block = (why: string) => {
+      const msg = `${workflowId} 第 ${parkSeq} 次停下的重做接续账有一条对不上（${stamp(a.at)}）：${why}。这个重做已阻断，不再接续，需要人核`;
+      if (state) state.blocked ??= msg;
+      else orphanBlocks.push(msg);
+    };
+    const { taskId, owner, name, issueNumber, phase } = after;
+    if (
+      typeof taskId !== 'string' ||
+      typeof owner !== 'string' ||
+      typeof name !== 'string' ||
+      typeof issueNumber !== 'number' ||
+      !Number.isInteger(issueNumber) ||
+      typeof phase !== 'string' ||
+      !REDO_PHASES.includes(phase as RedoPhase)
+    ) {
+      block('任务/仓/单号/阶段字段缺失或类型不对');
+      continue;
+    }
+    const rec = phase as RedoPhase;
+    if (
+      state &&
+      (state.row.taskId !== taskId ||
+        state.row.owner !== owner ||
+        state.row.name !== name ||
+        state.row.issueNumber !== issueNumber)
+    ) {
+      block('任务/仓/单号和这一轮重做起头记录不一致');
+      continue;
+    }
+    const needsTrail = rec === 'stop-requested' || rec === 'start-requested';
+    let trail: RedoTrail | null = null;
+    if (after.trail !== undefined || needsTrail) {
+      const parsed = parseTrail(after.trail, { owner, name, issueNumber });
+      if (!parsed.ok) {
+        block(parsed.why);
         continue;
       }
+      trail = parsed.trail;
+      if (!trail.runs.some((r) => r.workflowId === workflowId)) {
+        block('裁决那一代不在 trail 里');
+        continue;
+      }
+      if (state && JSON.stringify(state.trail) !== JSON.stringify(trail)) {
+        block('旧代身份（trail）和这一轮重做起头记录不一致');
+        continue;
+      }
+    }
+    if (!state || state.done) {
+      if (!needsTrail || trail === null) {
+        // 没有起头记录就出现的后续阶段：不知道它接的是哪一轮
+        if (!state) block(`阶段 ${rec} 前面没有 stop-requested/start-requested 起头记录`);
+        continue;
+      }
+      if (state?.blocked) continue;
       state = {
-        row: {
-          taskId: row.taskId,
-          owner: row.owner,
-          name: row.name,
-          issueNumber: row.issueNumber,
-          workflowId: after.workflowId,
-        },
-        workflowId: after.workflowId,
-        parkSeq: after.parkSeq,
+        row: { taskId, owner, name, issueNumber, workflowId },
+        workflowId,
+        parkSeq,
         phase: rec,
         trail,
         startAttempts: 0,
         since: a.at,
         firstWhy: null,
         newWorkflowId: null,
+        blocked: null,
         done: false,
       };
       states.set(key, state);
     }
-    if (!state) continue;
+    const expectGeneration = state.trail.fromGeneration + 1;
+    const expectId = taskWorkflowId({ owner, name }, issueNumber, expectGeneration);
+    if (rec === 'start-requested' || rec === 'started' || rec === 'exists') {
+      if (after.newWorkflowId !== undefined && after.newWorkflowId !== expectId) {
+        block(`新代编号 ${String(after.newWorkflowId)} 不是应有的 ${expectId}`);
+        continue;
+      }
+      if (after.generation !== undefined && after.generation !== expectGeneration) {
+        block(`新代代次 ${String(after.generation)} 不是应有的 ${expectGeneration}`);
+        continue;
+      }
+    }
     state.phase = rec;
     if (rec === 'start-requested') {
       state.startAttempts += 1;
-      if (typeof after.newWorkflowId === 'string') state.newWorkflowId = after.newWorkflowId;
+      state.newWorkflowId = expectId;
     }
-    if (why !== null && state.firstWhy === null) state.firstWhy = why;
-    if (trail !== null) state.trail = trail;
+    if (typeof after.why === 'string' && state.firstWhy === null) state.firstWhy = after.why;
     state.done = REDO_TERMINAL.includes(rec);
   }
   return {
-    pending: [...states.values()].filter((s) => !s.done).map(({ done: _done, ...p }) => p),
-    problems,
+    pending: [...states.values()].filter((s) => !s.done || s.blocked).map(({ done: _done, ...p }) => p),
+    problems: [...problems, ...orphanBlocks],
   };
 }
 
@@ -1444,8 +1512,12 @@ function noContinueReason(book: AuditBook, ref: string, detailHash: string | und
 /**
  * 沿原来已核的裁决接续没做完的重做（#3496）。它不是新的巡检：和认领流程同一轮、读同一份操作记录，只接账上已有的意图；
  * 不新认领、不占每日名额、不再起会话。旧代终态、run 身份、新代是否已存在都由 deps.resumeRedo 现读；
- * 读不到/还在跑只是这一轮不动（不写账、不发提醒），最多启动一个新代，起新代最多试 PARK_TRIAGE_REDO_START_TRIES 次，
- * 账上第一笔起满 24 小时仍没接上就转人看（given-up），不无限重试。
+ * 读不到/还在跑只是这一轮不动（不写账、不发提醒）。
+ * 对预算的约束：接续不新认领，所以每日认领计数、单张单防空转（24 小时处理满 3 次不再放行继续）、代数上限都不变；
+ * 一个意图（工作流编号 + 停下编号）只对应一个固定的新代编号（旧代数 + 1），Start 用 FAIL + REJECT_DUPLICATE，
+ * 所以「起新代最多试 PARK_TRIAGE_REDO_START_TRIES 次」是对同一个编号的有界重发，永远最多创建一个新代，不是多出来的额度。
+ * 窗口（24 小时）或次数用完只停止发起新的 Start；已核实旧代终止而新代不存在时才记 given-up，
+ * 没核实的（读不到/旧代未终止）记 unverified 并每轮继续读证、报没查成，绝不把未知当结清。
  */
 async function resumeRedos(
   deps: ParkTriageDeps,
@@ -1456,6 +1528,10 @@ async function resumeRedos(
   result.problems.push(...book.redoProblems);
   for (const p of book.redoPending) {
     const ref = refOf(p.row);
+    if (p.blocked !== null) {
+      result.problems.push(`${ref} ${p.blocked}`);
+      continue;
+    }
     const expired = now.getTime() - p.since.getTime() > WINDOW_MS;
     const canStart = !expired && p.startAttempts < PARK_TRIAGE_REDO_START_TRIES;
     const journal: RedoJournal = (rec) =>
@@ -1495,11 +1571,29 @@ async function resumeRedos(
       continue;
     }
     const stage = out.stage ?? 'waiting';
-    if (stage === 'waiting' && !expired) {
-      deps.log('info', '指挥官：重做接续这一轮还不能动，下一轮再看', { ref, why: out.why });
+    if (stage === 'waiting') {
+      if (!expired) {
+        deps.log('info', '指挥官：重做接续这一轮还不能动，下一轮再看', { ref, why: out.why });
+        continue;
+      }
+      // 过了接续窗口：只停止发起新的 Start；没核实的责任继续保留，每轮继续读证并报「没查成」，不记 given-up
+      if (p.phase !== 'unverified') {
+        try {
+          await journal({ phase: 'unverified', why: out.why });
+        } catch (err) {
+          result.problems.push(`${ref} 「未核实」的记录没写进，下一轮还会再试：${errMessage(err)}`);
+          continue;
+        }
+        await notify(
+          'alert',
+          `指挥官的重做接续没查成 ${ref}：已过 24 小时仍未核实`,
+          `账上记下的最后阶段是 ${p.phase}，那只是请求记录，不证明旧代已停、也不证明新代存在或不存在。已过 24 小时接续窗口，不再发起新的启动，但没核实的责任继续保留，引擎每轮继续读证。这是「没查成」，不是「没有」：${out.why}。${first}`,
+        );
+      }
+      result.problems.push(`${ref} 重做接续仍未核实（账上阶段 ${p.phase}）：${out.why}`);
       continue;
     }
-    if ((stage === 'stop-unconfirmed' || stage === 'start-unconfirmed') && !expired) {
+    if (stage === 'stop-unconfirmed' || stage === 'start-unconfirmed') {
       result.left.push({ ref, why: out.why });
       await notify(
         'alert',
@@ -1508,19 +1602,18 @@ async function resumeRedos(
       );
       continue;
     }
-    // 不再接续：身份对不上、代数到顶、试满次数、超过 24 小时
-    const why = expired && stage !== 'final' ? `接续超过 24 小时仍没能完成（${out.why}）` : out.why;
+    // 已核实的事实使这个重做不能再接续：身份对不上、任务不再归引擎、代数到顶、旧代已终止但新代已不许再起
     try {
-      await journal({ phase: 'given-up', why });
+      await journal({ phase: 'given-up', why: out.why });
     } catch (err) {
       result.problems.push(`${ref} 不再接续的记录没写进，下一轮还会再试：${errMessage(err)}`);
       continue;
     }
-    result.left.push({ ref, why });
+    result.left.push({ ref, why: out.why });
     await notify(
       'alert',
-      `指挥官不再接续 ${ref} 的重做，需要人看`,
-      `${why}。账上记下的阶段：${p.phase}；旧代已叫停但新代没有确认启动，这张单现在没有在跑的新代。${first}`,
+      `指挥官不再接续 ${ref} 的重做，需要人核`,
+      `${out.why}。账上记下的最后阶段：${p.phase}（那只是请求记录，不证明旧代是否已停、新代是否存在）；这一轮重做不再接续。${first}`,
     );
   }
 }

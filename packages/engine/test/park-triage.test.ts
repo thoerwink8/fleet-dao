@@ -1021,7 +1021,10 @@ describe('单张单防空转：同一张单反复停、反复继续，不再放�
 
 // —— #3496：重做的受管接续。可信意图 = 接续账（commander.redo）里已记下的阶段，实际阶段由 resumeRedo 现读 ——
 describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
-  const TRAIL = { fromGeneration: 1, runs: [{ workflowId: WF, runId: 'run-1' }] };
+  /** 接续账里的工作流编号必须是这张单的第 n 代标准编号（账解析按它严格核）。 */
+  const CANON = 'task:thoerwink8/fleet-dao#3296';
+  const CANON2 = `${CANON}:r2`;
+  const TRAIL = { fromGeneration: 1, runs: [{ workflowId: CANON, runId: 'run-1' }] };
   const redoRow = (
     phase: string,
     extra: Record<string, unknown> = {},
@@ -1035,7 +1038,7 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
       owner: ROW.owner,
       name: ROW.name,
       issueNumber: ROW.issueNumber,
-      workflowId: WF,
+      workflowId: CANON,
       parkSeq: 2,
       phase,
       ...extra,
@@ -1049,14 +1052,18 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
     const r = rig({
       audits: [STOPPED],
       over: GONE,
-      resume: { ok: true, workflowId: `${WF}:r2`, generation: 2 },
+      resume: { ok: true, workflowId: CANON2, generation: 2 },
     });
     const out = await triageParkedTasks(r.deps);
     expect(r.resumed).toEqual([{ phase: 'stop-requested', canStart: true }]);
     expect(out.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'redo', source: 'verdict' }]);
     expect(r.sessions).toHaveLength(0);
     expect(r.notices).toHaveLength(1);
-    expect(r.notices[0]).toMatchObject({ level: 'daily', key: `commander:${WF}:park:2`, taskId: ROW.taskId });
+    expect(r.notices[0]).toMatchObject({
+      level: 'daily',
+      key: `commander:${CANON}:park:2`,
+      taskId: ROW.taskId,
+    });
     expect(r.notices[0]?.body).toContain('已确认启动');
   });
 
@@ -1099,10 +1106,10 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
     const r = rig({
       audits: [
         STOPPED,
-        redoRow('start-requested', { trail: TRAIL, newWorkflowId: `${WF}:r2`, generation: 2 }, 35),
+        redoRow('start-requested', { trail: TRAIL, newWorkflowId: CANON2, generation: 2 }, 35),
       ],
       over: GONE,
-      resume: { ok: true, workflowId: `${WF}:r2`, generation: 2, existing: true },
+      resume: { ok: true, workflowId: CANON2, generation: 2, existing: true },
     });
     const out = await triageParkedTasks(r.deps);
     expect(r.resumed).toEqual([{ phase: 'start-requested', canStart: true }]);
@@ -1117,7 +1124,7 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
       audits: [
         STOPPED,
         redoRow('stop-unconfirmed', { why: '叫停 task:x 后还没停，没有另起' }, 39),
-        redoRow('start-requested', { trail: TRAIL, newWorkflowId: `${WF}:r2`, generation: 2 }, 20),
+        redoRow('start-requested', { trail: TRAIL, newWorkflowId: CANON2, generation: 2 }, 20),
       ],
       over: GONE,
       resume: { ok: false, stage: 'start-unconfirmed', why: 'DEADLINE_EXCEEDED：start 的响应丢了' },
@@ -1152,35 +1159,86 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
 
   it('起新代最多试满次数：试满后 canStart=false，只许核存在、不许再起', async () => {
     const tries = Array.from({ length: PARK_TRIAGE_REDO_START_TRIES }, (_, i) =>
-      redoRow('start-requested', { trail: TRAIL, newWorkflowId: `${WF}:r2`, generation: 2 }, 30 - i),
+      redoRow('start-requested', { trail: TRAIL, newWorkflowId: CANON2, generation: 2 }, 30 - i),
     );
     const r = rig({ audits: [STOPPED, ...tries], over: GONE });
     await triageParkedTasks(r.deps);
     expect(r.resumed).toEqual([{ phase: 'start-requested', canStart: false }]);
   });
 
-  it('接续超过 24 小时仍没进展：转人看，不无限等', async () => {
+  it('接续过了 24 小时仍没核实：只停止发起新的启动，未知责任继续保留、每轮报没查成，不写 given-up', async () => {
     const r = rig({ audits: [redoRow('stop-requested', { trail: TRAIL }, 25 * 60)], over: GONE });
-    const out = await triageParkedTasks(r.deps);
+    const first = await triageParkedTasks(r.deps);
     expect(r.resumed).toEqual([{ phase: 'stop-requested', canStart: false }]);
-    expect(r.journal[0]?.phase).toBe('given-up');
-    expect(r.journal[0]?.why).toContain('24 小时');
-    expect(out.left).toHaveLength(1);
+    expect(r.journal.map((j) => j.phase)).toEqual(['unverified']);
+    expect(r.notices).toHaveLength(1);
     expect(r.notices[0]?.level).toBe('alert');
+    expect(r.notices[0]?.body).toContain('没查成');
+    expect(r.notices[0]?.body).not.toContain('没有在跑的新代');
+    expect(first.problems.join('\n')).toContain('未核实');
+    // 之后每一轮继续读证、继续报，但不重复写账和提醒
+    const second = await triageParkedTasks(r.deps);
+    expect(r.resumed).toHaveLength(2);
+    expect(r.journal.map((j) => j.phase)).toEqual(['unverified']);
+    expect(r.notices).toHaveLength(1);
+    expect(second.problems.join('\n')).toContain('未核实');
   });
 
-  it('账上缺旧代 run 身份或读不懂：不接续，明报，不拿它凑成功', async () => {
+  it('已核实的事实使重做不能再接续（final）才记 given-up；回执不断言旧代已停或新代不存在', async () => {
+    const r = rig({
+      audits: [STOPPED],
+      over: GONE,
+      resume: { ok: false, stage: 'final', why: '任务现在 executor=local，不属于引擎，不再动手' },
+    });
+    await triageParkedTasks(r.deps);
+    expect(r.journal.map((j) => j.phase)).toEqual(['given-up']);
+    expect(r.notices[0]?.body).toContain('不属于引擎');
+    expect(r.notices[0]?.body).toContain('不证明旧代是否已停、新代是否存在');
+    expect(r.notices[0]?.body).not.toContain('没有在跑的新代');
+  });
+
+  it('账上缺 trail、读不懂、或同键后来一条坏记录：阻断该意图并报 problems，不沿旧状态继续', async () => {
     const noTrail = rig({ audits: [redoRow('stop-requested')], over: GONE });
     const a = await triageParkedTasks(noTrail.deps);
     expect(noTrail.resumed).toEqual([]);
-    expect(a.problems.join('\n')).toContain('缺旧代身份');
+    expect(a.problems.join('\n')).toContain('已阻断');
     const garbled = rig({
       audits: [{ at: NOW, action: COMMANDER_AUDIT_REDO, ok: true, after: { phase: 'stop-requested' } }],
       over: GONE,
     });
     const b = await triageParkedTasks(garbled.deps);
     expect(garbled.resumed).toEqual([]);
-    expect(b.problems.join('\n')).toContain('读不懂');
+    expect(b.problems.join('\n')).toContain('定位不到');
+    const badLater = (extra: Record<string, unknown>) =>
+      rig({
+        audits: [STOPPED, redoRow('start-requested', { newWorkflowId: CANON2, generation: 2, ...extra }, 30)],
+        over: GONE,
+        resume: { ok: true, workflowId: CANON2, generation: 2 },
+      });
+    for (const bad of [
+      { trail: { fromGeneration: 1, runs: [] } },
+      {
+        trail: {
+          fromGeneration: 2,
+          runs: [
+            { workflowId: CANON, runId: 'run-1' },
+            { workflowId: CANON2, runId: 'x' },
+          ],
+        },
+      },
+      { trail: { fromGeneration: 1, runs: [{ workflowId: CANON, runId: '' }] } },
+      { trail: { fromGeneration: 1, runs: [{ workflowId: 'task:other#1', runId: 'run-1' }] } },
+      { trail: TRAIL, generation: 7 },
+      { trail: TRAIL, newWorkflowId: 'task:thoerwink8/fleet-dao#3296:r9' },
+      {},
+    ]) {
+      const r = badLater(bad);
+      const out = await triageParkedTasks(r.deps);
+      expect(r.resumed, JSON.stringify(bad)).toEqual([]);
+      expect(out.acted, JSON.stringify(bad)).toEqual([]);
+      expect(out.problems.join('\n'), JSON.stringify(bad)).toContain('已阻断');
+      expect((await triageParkedTasks(r.deps)).problems.join('\n')).toContain('已阻断');
+    }
   });
 
   it('没配模型也接续（已核的裁决不依赖模型）；开关关着则不动', async () => {
@@ -1188,7 +1246,7 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
       audits: [STOPPED],
       configured: false,
       over: GONE,
-      resume: { ok: true, workflowId: `${WF}:r2`, generation: 2 },
+      resume: { ok: true, workflowId: CANON2, generation: 2 },
     });
     const out = await triageParkedTasks(r.deps);
     expect(out.noModel).toBe(true);
@@ -1202,7 +1260,7 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
     const r = rig({
       audits: [STOPPED],
       over: GONE,
-      resume: { ok: true, workflowId: `${WF}:r2`, generation: 2 },
+      resume: { ok: true, workflowId: CANON2, generation: 2 },
     });
     const out = await triageParkedTasks(r.deps);
     expect(out.claimed).toBe(0);
@@ -1235,6 +1293,7 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
     const r = rig({
       answer: verdict('redo'),
       over: {
+        tasks: async () => [{ ...ROW, workflowId: CANON }],
         redoTask: async (_row, _id, journal) => {
           await journal({ phase: 'stop-requested', trail: TRAIL });
           return { ok: false, stage: 'stop-unconfirmed', why: '叫停 x 后还没停' };
@@ -1243,7 +1302,12 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
     });
     await triageParkedTasks(r.deps);
     const row = r.audits.find((a) => a.action === COMMANDER_AUDIT_REDO);
-    expect(row?.after).toMatchObject({ workflowId: WF, parkSeq: 2, phase: 'stop-requested', trail: TRAIL });
+    expect(row?.after).toMatchObject({
+      workflowId: CANON,
+      parkSeq: 2,
+      phase: 'stop-requested',
+      trail: TRAIL,
+    });
     const next = rig({ audits: r.audits, over: GONE });
     await triageParkedTasks(next.deps);
     expect(next.resumed).toEqual([{ phase: 'stop-requested', canStart: true }]);

@@ -94,8 +94,11 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 ## 指挥官重做的受管接续（#3496）
 
-- `jobs/park-triage.ts` 的重做是多步（叫停旧代 → 等终态 → 起新代），每跨一步前先写接续账 `commander.redo`（`stop-requested` / `start-requested`，带叫停前读到的全部旧代 workflowId + runId），账写不进就不动手；等不到终态、启动没确认各记 `stop-unconfirmed` / `start-unconfirmed`，终态是 `started` / `exists` / `given-up`。不另建表、不另起巡检：同一个 10 分钟定时任务每轮先读这份账，对没到终态的按原裁决调 `real/park-triage.ts` 的 `resumeRedo`，不新认领、不占每日名额、没配模型也接续。
-- 起新代之前（首次和接续都一样）现读全部代次：旧代 run 身份须与账一致且都真实终止，已有更高一代就不再起；旧代还在跑/读不到只是这一轮不动（不写账、不发提醒），身份对不上、代数到顶、起新代试满 `PARK_TRIAGE_REDO_START_TRIES` 次、接续满 24 小时转 `given-up` 交人。叫停后读状态失败从不当成已终止。账里缺旧代身份或读不懂的记录不接续、进 problems。
+- `jobs/park-triage.ts` 的重做是多步（叫停旧代 → 等终态 → 起新代），每跨一步前先写接续账 `commander.redo`（`stop-requested` / `start-requested`，带叫停前读到的全部旧代 workflowId + runId），账写不进就不动手；等不到终态、启动没确认各记 `stop-unconfirmed` / `start-unconfirmed`，终态是 `started` / `exists` / `given-up`，另有「没核实」的 `unverified`。不另建表、不另起巡检：同一个 10 分钟定时任务每轮先读这份账，对没到终态的按原裁决调 `real/park-triage.ts` 的 `resumeRedo`，不新认领、不占每日名额、没配模型也接续。
+- 叫停前先把全部旧代的 runId 核全（缺/空/代数不连续就在任何副作用前拒绝），对全部还在跑的旧代一次发完叫停请求，叫停、查询、读状态都钉住已核 runId；接续只读证、不补发叫停。每次动手（叫停、起新代）前从现有任务/仓记录（`taskContext` + `intakeTaskRow`）重核 task id/ref、`executor=engine`、状态停着或已放弃；转本机或对不上是已核实事实 → `given-up`，读不到只是等。
+- 起新代之前（首次和接续都一样）现读全部代次：先核全部旧代（runId 一致、不少、都真实终止），旧代没核完哪怕新代已存在也不报完成；核完新代已存在才算 `exists`，不再起。旧代还在跑/读不到只是这一轮不动（不写账、不发提醒）。叫停后读状态失败从不当成已终止。
+- 约束：接续不新认领，每日认领计数、单张单防空转、代数上限都不变；一个意图只对应固定的新代编号，Start 用 FAIL + REJECT_DUPLICATE，最多创建一个新代，`PARK_TRIAGE_REDO_START_TRIES` 是对同一编号的有界重发，不是额度。24 小时窗口或次数用完只停止发起新的 Start；`given-up` 只用于已核实的事实（身份变了、归属不对、代数到顶、旧代已终止且新代确认不存在但不许再起），读不到/旧代未终止记 `unverified`：责任继续保留，每轮继续读证并在 problems 里报「未核实」，绝不把未知当结清。
+- 账本身读法严格：trail 须非空、代数连续、runId 不重复，同键后来的记录不得和起头记录的身份/代次/编号不一致；对不上就阻断该意图，每轮报 problems（「已阻断」），连键都定位不到的坏记录同样每轮报。
 - 回执分三种：叫停已发送、终态未确认；旧代已终态、新代待启动/启动未确认；新代已确认启动（或已存在、本次没再起）。什么都没发出去才写「任务没动」。测试：`test/real/park-triage.test.ts`（假 Temporal + `ParkTriageWiring.clock` 假时钟）、`test/park-triage.test.ts`（假存储）。
 
 ## 版本更新日志
