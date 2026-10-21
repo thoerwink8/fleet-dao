@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLEANUP_PAGE_LIMITS } from '@fleet-dao/adapters';
+import { type Db, recordWorktreeRemoval } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { helperWorkTrees, layout, sessionUserUids } from '../../src/real/worktrees.ts';
@@ -89,6 +90,92 @@ describe('属主', () => {
   it('【故意造出的失败】_tmp 读不了（这里是个文件）：明确报错，不当成一个都没有', async () => {
     writeFileSync(join(root, '_tmp'), 'not a dir');
     await expect(helperWorkTrees({ root }).listTmp()).rejects.toMatchObject({ code: 'WORKTREE_UNREADABLE' });
+  });
+});
+
+describe('受管删树回执（#3474：3033 的旧树经小时清扫删掉，库里查不到）', () => {
+  const tree = '/var/lib/fleet-work/thoerwink8_fleet-dao/3033-t01a14e1b';
+  const identity = { lex: tree, real: tree, dev: '2049', ino: '9191615', uid: '993' };
+  let dir: string;
+  let helper: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'fleet-remove-receipt-'));
+    helper = join(dir, 'fake-scope.mjs');
+    // 帮手：capabilities 报全协议；remove 照 mode 文件删成（回原身份和事务号）或退出 1
+    writeFileSync(
+      helper,
+      [
+        "import { readFileSync } from 'node:fs';",
+        'const [action, path, , dev, , ino, , uid] = process.argv.slice(2);',
+        "if (action === 'capabilities') { process.stdout.write(JSON.stringify({ version: 1, state: 'ok', features: ['tree-usage', 'identity-remove', 'cleanup-status', 'cleanup-rollback', 'locked-adopt', 'temporary-files'] })); process.exit(0); }",
+        `if (readFileSync(${JSON.stringify(join(dir, 'mode'))}, 'utf8') === 'fail') { process.stderr.write('helper refused'); process.exit(1); }`,
+        "process.stdout.write(JSON.stringify({ version: 1, state: 'removed', identity: { lex: path, real: path, dev, ino, uid }, transaction: 'a'.repeat(64) }));",
+      ].join('\n'),
+    );
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** 真 recordWorktreeRemoval 写进的 audit_log 行（库换成只收 insert 的假库）。 */
+  function auditSink() {
+    const rows: Record<string, unknown>[] = [];
+    const db = {
+      insert: () => ({
+        values: async (row: Record<string, unknown>) => {
+          rows.push(row);
+        },
+      }),
+    } as unknown as Db;
+    const trees = helperWorkTrees({
+      helper,
+      sudo: [process.execPath],
+      recordRemoval: (receipt) => recordWorktreeRemoval(db, receipt),
+    });
+    return { rows, trees };
+  }
+
+  it('删成了：audit_log 记一条 ok 的回执，target 和 after 都带树名，after 带 dev/ino/uid', async () => {
+    writeFileSync(join(dir, 'mode'), 'ok');
+    const { rows, trees } = auditSink();
+    expect(await trees.remove(tree, identity)).toEqual({ gone: false });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        actorKind: 'engine',
+        action: 'worktree.remove',
+        target: `worktree:${tree}`,
+        after: { dir: tree, tree: '3033-t01a14e1b', dev: '2049', ino: '9191615', uid: '993' },
+        ok: true,
+        error: null,
+      }),
+    ]);
+  });
+
+  it('帮手删失败：照样记一条回执（ok=false、带帮手原话），再报 REMOVE_FAILED', async () => {
+    writeFileSync(join(dir, 'mode'), 'fail');
+    const { rows, trees } = auditSink();
+    await expect(trees.remove(tree, identity)).rejects.toMatchObject({ code: 'REMOVE_FAILED' });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        action: 'worktree.remove',
+        target: `worktree:${tree}`,
+        after: { dir: tree, tree: '3033-t01a14e1b', dev: '2049', ino: '9191615', uid: '993' },
+        ok: false,
+        error: expect.stringContaining('helper refused'),
+      }),
+    ]);
+  });
+
+  it('删成了却记不上回执：不当成留了痕，报 REMOVE_UNRECORDED', async () => {
+    writeFileSync(join(dir, 'mode'), 'ok');
+    const trees = helperWorkTrees({
+      helper,
+      sudo: [process.execPath],
+      recordRemoval: async () => {
+        throw new Error('db down');
+      },
+    });
+    await expect(trees.remove(tree, identity)).rejects.toMatchObject({ code: 'REMOVE_UNRECORDED' });
   });
 });
 
