@@ -1228,6 +1228,14 @@ describe('重做叫停迟到：假存储上的执行意图和回执', () => {
     expect(changed.left[0]?.why).toContain('run-2');
     expect(changed.left[0]?.why).toContain(`原失败：${WHY}`);
     expect(changed.acted).toEqual([]);
+    // 身份变了不会再变回来：后面旧代就算终态了，也不再沿这条意图另起，提醒留着。
+    const identityCalls = identity.calls.length;
+    identity.setMode('terminal');
+    const afterIdentity = await triageParkedTasks(identity.r.deps);
+    expect(identity.calls).toHaveLength(identityCalls);
+    expect(identity.starts()).toBe(0);
+    expect(identity.r.sessions).toHaveLength(1);
+    expect(afterIdentity.acted).toEqual([]);
 
     const exists = machine();
     await triageParkedTasks(exists.r.deps);
@@ -1238,6 +1246,12 @@ describe('重做叫停迟到：假存储上的执行意图和回执', () => {
     expect(occupied.left[0]?.why).toContain('已经有记录');
     expect(occupied.left[0]?.why).toContain(`原失败：${WHY}`);
     expect(occupied.left[0]?.why).not.toContain(REDO_RECEIPT.started);
+    const existsCalls = exists.calls.length;
+    exists.setMode('terminal');
+    const afterExists = await triageParkedTasks(exists.r.deps);
+    expect(exists.calls).toHaveLength(existsCalls);
+    expect(exists.starts()).toBe(0);
+    expect(afterExists.acted).toEqual([]);
 
     const failed = machine();
     await triageParkedTasks(failed.r.deps);

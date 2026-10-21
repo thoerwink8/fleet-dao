@@ -713,6 +713,8 @@ const OPEN_REDO_PHASES: readonly RedoFollowPhase[] = [
   'old_terminal_pending_start',
   'start_failed',
 ];
+/** 身份变了、新代编号已被占：再查也不会变成可以另起，不再每轮接续（提醒留着，不当成完成）。 */
+const FINAL_REDO_BLOCKS: readonly RedoFollowBlock[] = ['identity', 'exists'];
 
 function isRedoIdentity(value: unknown): value is RedoExecutionIdentity {
   if (value === null || typeof value !== 'object') return false;
@@ -1462,7 +1464,11 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
   const handled = new Set<string>();
   for (const [key, n] of claims) if (n > (retries.get(key) ?? 0)) handled.add(key);
   const openRedos = [...followBest.values()]
-    .filter((slot) => OPEN_REDO_PHASES.includes(slot.open.follow.phase))
+    .filter(
+      (slot) =>
+        OPEN_REDO_PHASES.includes(slot.open.follow.phase) &&
+        !(slot.open.follow.block !== undefined && FINAL_REDO_BLOCKS.includes(slot.open.follow.block)),
+    )
     .sort((a, b) => a.at - b.at || a.open.follow.seq - b.open.follow.seq)
     .map((slot) => slot.open);
   return {
