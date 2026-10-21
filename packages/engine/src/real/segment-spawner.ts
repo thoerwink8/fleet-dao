@@ -55,6 +55,13 @@ import {
 } from './hosts.ts';
 import { type MemoryPeakDeps, type MemoryPeakResult, sampleMemoryPeak } from './memory-peak.ts';
 import {
+  MIRASIM_OOM_UNREAD,
+  type ScopeOomDeps,
+  type ScopeOomEvidence,
+  sampleScopeOom,
+  unavailableScopeOom,
+} from './scope-oom-evidence.ts';
+import {
   clearDetached,
   DETACHABLE_HOSTS,
   ensureIoRoot,
@@ -113,6 +120,12 @@ export interface SegmentSpawnerDeps {
    * Mirasim 给了也不采，事实里写 MIRASIM_CPU_UNREAD。
    */
   cpuUsage?: CpuUsageDeps;
+  /**
+   * 会话 scope 自己的内存事件见证怎么读（real/scope-oom-evidence.ts 的 productionScopeOom，#3448）：给了就边跑边读 memory.events.local，
+   * 收场把见证（scope 身份、观测时刻、本地计数、完整性）写进结局 facts.scopeOom → result.json。只证明 scope 内有事件，
+   * 不证明谁被杀。读不到、保全失败都不改结局。不给就不采；Mirasim 给了也不采，写 unsupported。
+   */
+  scopeOom?: ScopeOomDeps;
   /**
    * 会话过程记录怎么写（#1640，run_transcript）：不给就用 db 的 appendRunTranscript（有 db 才记）；测试换假的。
    * 写不进只记日志，不影响这一段的结局。
@@ -420,6 +433,44 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         if (cpuResult.why !== undefined) log('会话 CPU 没读到', { runId, why: cpuResult.why });
         return cpuResult;
       };
+      // scope 内存事件见证（#3448）：scope 一收场 cgroup 就没了，边跑边读、收场再读一次。保全失败只记日志，不改结局
+      const oomSampler =
+        sampleLocalScope && deps.scopeOom
+          ? sampleScopeOom(deps.scopeOom, {
+              runId,
+              scopeId: spec.cgroup.id,
+              ...(attach ? { window: 'attach' as const } : {}),
+            })
+          : undefined;
+      let oomResult: ScopeOomEvidence | undefined;
+      const finishOom = async (): Promise<ScopeOomEvidence | undefined> => {
+        if (oomResult) return oomResult;
+        if (!sampleLocalScope) {
+          if (!deps.scopeOom) return undefined;
+          oomResult = unavailableScopeOom(runId, spec.cgroup.id, 'unsupported', MIRASIM_OOM_UNREAD);
+        } else if (oomSampler) {
+          try {
+            oomResult = await oomSampler.stop();
+          } catch (err) {
+            oomResult = unavailableScopeOom(
+              runId,
+              spec.cgroup.id,
+              'unknown',
+              `scope 内存事件见证没保全成：${errMessage(err)}`,
+              attach ? 'attach' : 'start',
+            );
+          }
+        } else return undefined;
+        if (oomResult.verdict !== 'none_observed') {
+          log('会话 scope 内存事件见证', {
+            runId,
+            verdict: oomResult.verdict,
+            integrity: oomResult.integrity,
+            note: oomResult.note,
+          });
+        }
+        return oomResult;
+      };
       // 过程记录和调用方的流（指挥官会话推给页面）都要：调用方的抛了只记日志
       const listen = cmd.onTranscript;
       const onTranscript =
@@ -529,6 +580,8 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
               : { cpuWhy: measuredCpu.why }),
           };
         }
+        const oomEvidence = await finishOom().catch(() => undefined);
+        if (oomEvidence) outcome.facts = { ...outcome.facts, scopeOom: oomEvidence };
         if (
           deps.onCarpoolRejection &&
           route.orgKind === 'carpool' &&
@@ -590,6 +643,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         }
         await finishPeak().catch(() => undefined);
         await finishCpu().catch(() => undefined);
+        await finishOom().catch(() => undefined);
         // 放手了：临时目录、收发目录都留给接回的那个引擎
         if (!detached) await cleanup();
       }
