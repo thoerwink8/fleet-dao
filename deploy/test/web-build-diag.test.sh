@@ -164,6 +164,8 @@ EOF
   has "说清服务端那几行怎么分两头" "$out" "「连接断了，响应还没发完」是服务端处理没做完就被掐断"
   has "说清期间那行看载入服务端产物、GC、事件循环" "$out" "动态 import（预览服务头一次载入服务端产物）还有没结束的"
   has "几行都没有时不猜" "$out" "不往任何一头猜"
+  has "说清开听前会先 import 服务端产物" "$out" "先按同一条 file URL import 一次 dist/server/index.js"
+  has "预载没盖住的动态 import 不当成已经挪走" "$out" "这次预载没盖住的另一次"
   lacks "不再把比例直接解释成被抢占" "$out" "（被抢占）"
   has "构建日志末尾原样贴出" "$out" "构建日志末尾 60 行"
   has "带着探针：NODE_OPTIONS 预载这一版目录里的文件" "$SEEN_EXTRA" "NODE_OPTIONS=--import=$stage/deploy/lib/prerender-trace.mjs"
