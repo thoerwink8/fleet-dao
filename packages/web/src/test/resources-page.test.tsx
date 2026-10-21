@@ -50,6 +50,15 @@ const FULL: HomeResources = {
         units: ['fleet-agents.slice'],
         usage: { state: 'ok', running: 1, memoryMb: 900, cpuCores: 0.5 },
       },
+      {
+        id: 'unregistered:newcomer.service',
+        name: 'newcomer.service',
+        place: 'system.slice/newcomer.service',
+        units: ['newcomer.service'],
+        unregistered: true,
+        diskNote: '没登记目录',
+        usage: { state: 'ok', running: 1, memoryMb: 38, cpuCores: 0.01 },
+      },
     ],
   },
   footprint: {
@@ -102,6 +111,12 @@ test('三段都在：整机三格、每个项目一行、没有按目录的占�
   // 目录读不全：写不全，数前面带 ≥
   expect(text('[data-app="sessions"]')).toContain('≥ 1.0G');
   expect(text('[data-app="sessions"]')).toContain('不全');
+  // 没登记的服务：标「没登记」、提示去哪登记、有 CPU 内存、磁盘写没登记目录
+  expect(text('[data-app="unregistered:newcomer.service"]')).toContain('没登记');
+  expect(text('[data-app="unregistered:newcomer.service"]')).toContain('packages/api/src/vps-apps.ts');
+  expect(text('[data-app="unregistered:newcomer.service"]')).toContain('38M');
+  fireEvent.click(screen.getByRole('button', { name: /newcomer\.service/ }));
+  expect(text('[data-app-detail="unregistered:newcomer.service"]')).toContain('没登记目录');
   // 按目录的占用榜收掉了（创始人 2026-10-13）：页上没有这一段
   expect(document.querySelector('[data-resources-board]')).toBeNull();
   // 点开一行看全文（手机上没有悬停）

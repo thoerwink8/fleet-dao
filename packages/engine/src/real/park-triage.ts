@@ -35,6 +35,7 @@ import {
   COMMANDER_AUDIT_ACT,
   COMMANDER_AUDIT_CLAIM,
   COMMANDER_AUDIT_RETRY,
+  PARK_TRIAGE_CAP_ALERT_KEY,
   type ParkTriageDeps,
 } from '../jobs/park-triage.ts';
 import { taskAbandonSignal, taskContinueSignal, taskStatusQuery } from '../task-contract.ts';
@@ -179,6 +180,14 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         at: now(),
       });
     },
+    async resolveCapAlert() {
+      await resolveAlertWithReason(w.db, {
+        dedupeKey: PARK_TRIAGE_CAP_ALERT_KEY,
+        by: COMMANDER_ACTOR,
+        why: '24 小时内的有效认领回到熔断上限以下',
+        at: now(),
+      });
+    },
     tasks: () => listStalledEngineTasks(w.db),
     async status(workflowId) {
       try {
@@ -306,6 +315,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           parkSeq: item.park.seq,
           action,
           kind: item.kind ?? triageKindOf(item.park),
+          ...(item.detailHash ? { detailHash: item.detailHash } : {}),
           ...(source ? { source } : {}),
         },
         reason,

@@ -4,17 +4,23 @@
 // 手动看一趟：journalctl -u fleet-release-request -n 100；进度在 /srv/fleet-dao-releases/.train/release-train.json。
 import { spawnSync } from 'node:child_process';
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readlinkSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { reasonOf } from '../auto-release/lib.mjs';
 import {
   CHECKOUT,
@@ -28,11 +34,14 @@ import {
   notifyArgv,
   parseDrain,
   parseRepoSwitches,
+  protocolError,
   RELEASE_SH,
   RELEASES,
   runRequest,
+  SEGMENTS_DIR,
   STATE_FILE,
   safeReadRequest,
+  segmentFileName,
   TRAIN_DIR,
 } from './lib.mjs';
 
@@ -165,7 +174,107 @@ function writeAtomic(file, text) {
   renameSync(tmp, file);
 }
 
+/** 内容寻址的只增分段与可刷新 UUID 快照索引；全部持久化后由调用方 CAS 切 current。 */
+export function requestArchiveIo(directory = SEGMENTS_DIR) {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const read = (file) => {
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('请求归档不是普通文件');
+    return readFileSync(file, 'utf8');
+  };
+  const flushDirectory = (dir) => {
+    // Windows 不支持打开目录 fd；文件仍 fsync，正式 Linux 本地盘另外核目录项持久化。
+    if (process.platform === 'win32') return;
+    const fd = openSync(dir, 'r');
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  };
+  const protectedSnapshot = (state) => {
+    const result = structuredClone(state);
+    delete result.why;
+    delete result.updatedAt;
+    for (const node of result.requests) delete node.why;
+    return result;
+  };
+  const validSnapshot = (state) => {
+    const problem = protocolError(state);
+    if (!state?.requestId || problem) throw new Error(`请求索引快照不合格：${problem ?? '缺少身份'}`);
+  };
+  const writeSynced = (temp, text, mode) => {
+    const fd = openSync(temp, 'wx', mode);
+    try {
+      writeFileSync(fd, text);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  };
+  return {
+    archiveSegment(state) {
+      validSnapshot(state);
+      const name = segmentFileName(state);
+      const file = join(directory, name);
+      const text = `${JSON.stringify(state)}\n`;
+      mkdirSync(join(directory, 'by-request'), { recursive: true, mode: 0o755 });
+      // 先核所有旧索引，身份、目标、链、终态和 check 都不能被元数据刷新翻案。
+      const indexes = state.requests.map((node) => {
+        if (!uuid.test(node.identity.requestId)) throw new Error('归档索引身份不合格');
+        const index = join(directory, 'by-request', `${node.identity.requestId}.json`);
+        try {
+          const old = JSON.parse(read(index));
+          validSnapshot(old);
+          if (!isDeepStrictEqual(protectedSnapshot(old), protectedSnapshot(state)))
+            throw new Error('已存在的请求索引身份、执行状态或检查内容不同，不覆盖');
+        } catch (e) {
+          if (e.code !== 'ENOENT') throw e;
+        }
+        return index;
+      });
+      const temp = `${file}.${process.pid}.tmp`;
+      try {
+        writeSynced(temp, text, 0o444);
+        try {
+          linkSync(temp, file);
+        } catch (e) {
+          if (e.code !== 'EEXIST') throw e;
+        }
+        if (read(file) !== text) throw new Error('已存在的归档内容不同，不覆盖');
+        for (const index of indexes) {
+          const indexTemp = `${index}.${process.pid}.tmp`;
+          try {
+            // 不写旧 inode：即使旧索引是硬链接，也不能碰到不可变归档。
+            writeSynced(indexTemp, text, 0o644);
+            renameSync(indexTemp, index);
+          } finally {
+            rmSync(indexTemp, { force: true });
+          }
+          if (read(index) !== text) throw new Error('请求索引落盘回读不一致');
+        }
+        flushDirectory(join(directory, 'by-request'));
+        flushDirectory(directory);
+        flushDirectory(dirname(directory));
+      } finally {
+        rmSync(temp, { force: true });
+      }
+      return name;
+    },
+    readArchivedRequest(requestId) {
+      if (!uuid.test(requestId)) return { ok: false, why: '请求索引身份不合格' };
+      try {
+        return { ok: true, state: JSON.parse(read(join(directory, 'by-request', `${requestId}.json`))) };
+      } catch (e) {
+        if (e.code === 'ENOENT') return { ok: true, state: null };
+        return { ok: false, why: `请求索引读不了：${e.message}` };
+      }
+    },
+  };
+}
+
 export const realIo = {
+  ...requestArchiveIo(),
   now: () => new Date(),
   sleep: (ms) => delay(ms),
   pid: process.pid,

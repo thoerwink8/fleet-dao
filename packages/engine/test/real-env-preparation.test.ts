@@ -3,9 +3,11 @@ import { beforeEach, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   prepare: vi.fn(),
+  requireServer: vi.fn(),
   createLocal: vi.fn(),
   createTimeSkipping: vi.fn(),
 }));
+vi.mock('@fleet-dao/conventions/temporal-test-server', () => ({ requireTestServer: mocks.requireServer }));
 vi.mock('@fleet-dao/conventions/temporal-test-cli', async (original) => ({
   ...(await original<typeof import('@fleet-dao/conventions/temporal-test-cli')>()),
   prepareTemporalCli: mocks.prepare,
@@ -60,7 +62,19 @@ it('SDK失败保留cause和真实合并阶段，不重试或退回下载', async
 it('时间跳跃环境不做真 CLI 准备', async () => {
   const environment = {};
   mocks.createTimeSkipping.mockResolvedValue(environment);
+  mocks.requireServer.mockReturnValue('/fixture/time-skipping-server');
   expect(await createEnv()).toBe(environment);
   expect(mocks.prepare).not.toHaveBeenCalled();
   expect(mocks.createLocal).not.toHaveBeenCalled();
+  expect(mocks.createTimeSkipping).toHaveBeenCalledExactlyOnceWith({
+    server: { executable: { type: 'existing-path', path: '/fixture/time-skipping-server' } },
+  });
+});
+
+it('时间跳跃制品准备失败时不调用SDK，不隐式下载', () => {
+  mocks.requireServer.mockImplementation(() => {
+    throw new Error('time-skipping preparation 失败');
+  });
+  expect(() => createEnv()).toThrow('time-skipping preparation 失败');
+  expect(mocks.createTimeSkipping).not.toHaveBeenCalled();
 });

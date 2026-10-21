@@ -204,6 +204,8 @@ function fakeClient(
     describeFails?: Error;
     /** 工作流编号 → Temporal 状态名。没写的编号当不存在。 */
     statuses?: Record<string, string>;
+    /** 工作流编号 → 结束的时刻（Temporal describe 的 closeTime）。没写的没有这个字段。 */
+    closeTimes?: Record<string, Date>;
     /**
      * start 返回之前跑（模拟工作流第一步已经把任务行写成 running）。
      * 起失败时不跑：工作流没起来，不该有第一步。
@@ -229,7 +231,8 @@ function fakeClient(
             if (opts.describeFails) throw opts.describeFails;
             const name = opts.statuses?.[workflowId];
             if (name === undefined) throw new WorkflowNotFoundError('not found', workflowId, undefined);
-            return { status: { name } };
+            const closeTime = opts.closeTimes?.[workflowId];
+            return { status: { name }, ...(closeTime ? { closeTime } : {}) };
           },
         };
       },
@@ -678,6 +681,167 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect(run).toMatchObject({ outcome: 'ok', found: 0 });
     expect(starts).toEqual([]);
     expect((await t.db.select().from(tasks))[0]).toMatchObject({ state: 'done', title: 'Fusion 留下的标题' });
+  });
+
+  describe('本机退回法国队列后没人接的单：重新派（#3461）', () => {
+    const CLOSED = new Date('2026-10-02T08:00:00.000Z');
+    const ids = { first: 'task:acme/demo#12', second: 'task:acme/demo#12:r2' };
+
+    /** 本机领过又退回：任务行 stopped + engine，操作记录里有一条退回（租约到期或放手）。 */
+    async function seedReturned(repoId: string, returnedAt: Date, kind: 'expire' | 'release' = 'expire') {
+      const old = await seedOrphan(repoId, { state: 'stopped' });
+      await t.db.insert(auditLog).values({
+        at: returnedAt,
+        actorKind: kind === 'expire' ? 'engine' : 'agent',
+        actorId: kind === 'expire' ? 'engine:intake' : 'node:founder-pc',
+        action: kind === 'expire' ? 'task.local.expire' : 'task.local.finish',
+        target: `task:${old.id}`,
+        before: { state: 'running', executor: 'local' },
+        after:
+          kind === 'expire'
+            ? { state: 'stopped', executor: 'engine', how: 'returned' }
+            : { state: 'stopped', executor: 'engine', outcome: 'released' },
+        reason: '退回',
+        via: kind === 'expire' ? 'engine' : 'agent',
+      });
+      return old;
+    }
+
+    it('各代都已结束、退回晚于最后一代结束：起 :r2，行改回排队、记接手；起的编号和第一代不同', async () => {
+      const { repo } = await seedWorld(t.db);
+      const old = await seedReturned(repo.id, new Date('2026-10-02T12:00:00.000Z'));
+      const { client, starts } = fakeClient({
+        statuses: { [ids.first]: 'COMPLETED' },
+        closeTimes: { [ids.first]: CLOSED },
+      });
+      const run = await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+      expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+      expect(starts).toHaveLength(1);
+      expect(starts[0]?.options).toMatchObject({
+        workflowId: ids.second,
+        workflowIdReusePolicy: 'REJECT_DUPLICATE',
+        args: [{ taskId: old.id, issueNumber: 12 }],
+      });
+      const rows = await t.db.select().from(tasks);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: old.id, state: 'queued', title: '给驾驶舱加状态' });
+      const adopt = (await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION);
+      expect(adopt).toHaveLength(1);
+    });
+
+    it('本机放手（released）退回的同样重新派；已有两代都结束起第 3 代', async () => {
+      const { repo } = await seedWorld(t.db);
+      await seedReturned(repo.id, new Date('2026-10-02T12:00:00.000Z'), 'release');
+      const { client, starts } = fakeClient({
+        statuses: { [ids.first]: 'FAILED', [ids.second]: 'TERMINATED' },
+        closeTimes: { [ids.first]: new Date('2026-10-01T00:00:00.000Z'), [ids.second]: CLOSED },
+      });
+      await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+      expect(starts.map((s) => s.options.workflowId)).toEqual(['task:acme/demo#12:r3']);
+    });
+
+    it('退回早于最后一代结束（退回之后又起过一代）：不起', async () => {
+      const { repo } = await seedWorld(t.db);
+      await seedReturned(repo.id, new Date('2026-10-02T07:00:00.000Z'));
+      const { client, starts } = fakeClient({
+        statuses: { [ids.first]: 'COMPLETED', [ids.second]: 'FAILED' },
+        closeTimes: { [ids.first]: new Date('2026-10-02T06:00:00.000Z'), [ids.second]: CLOSED },
+      });
+      const run = await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+      expect(run).toMatchObject({ outcome: 'ok', found: 0 });
+      expect(starts).toEqual([]);
+    });
+
+    it('【故意造出的失败】从没退回过（做完停下的老行）、最后一代结束时刻读不到：都不起', async () => {
+      const { repo } = await seedWorld(t.db);
+      await seedOrphan(repo.id, { state: 'stopped' });
+      const noReturn = fakeClient({
+        statuses: { [ids.first]: 'COMPLETED' },
+        closeTimes: { [ids.first]: CLOSED },
+      });
+      await runIntakeJob(wire(fakeGh().gh)(noReturn.client, 'fleet'));
+      expect(noReturn.starts).toEqual([]);
+
+      await t.db.delete(auditLog);
+      const [row] = await t.db.select().from(tasks);
+      if (!row) throw new Error('没有任务行');
+      await t.db.insert(auditLog).values({
+        at: new Date('2026-10-02T12:00:00.000Z'),
+        actorKind: 'engine',
+        actorId: 'engine:intake',
+        action: 'task.local.expire',
+        target: `task:${row.id}`,
+        after: { how: 'returned' },
+        via: 'engine',
+      });
+      const noClose = fakeClient({ statuses: { [ids.first]: 'COMPLETED' } });
+      await runIntakeJob(wire(fakeGh().gh)(noClose.client, 'fleet'));
+      expect(noClose.starts).toEqual([]);
+    });
+
+    it('起 :r2 没成：行放回 stopped，不记接手；下一轮还能再试', async () => {
+      const { repo } = await seedWorld(t.db);
+      const old = await seedReturned(repo.id, new Date('2026-10-02T12:00:00.000Z'));
+      const { client, starts } = fakeClient({
+        statuses: { [ids.first]: 'COMPLETED' },
+        closeTimes: { [ids.first]: CLOSED },
+        startFails: () => new Error('14 UNAVAILABLE'),
+      });
+      const run = await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+      expect(run.outcome).toBe('partial');
+      expect(starts).toHaveLength(1);
+      expect((await t.db.select().from(tasks))[0]).toMatchObject({
+        id: old.id,
+        state: 'stopped',
+        title: 'Fusion 留下的标题',
+      });
+      expect(
+        (await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION),
+      ).toEqual([]);
+    });
+  });
+
+  it('本机租约到期、验收要 diff 外证据（法国接不了）：不摘「本机做」、行不动，驾驶舱通知只报一次（#3461）', async () => {
+    const { repo } = await seedWorld(t.db);
+    const offDiffBody = BODY.replace(
+      '1. 页面上能看到「验收中」这个状态',
+      '1. 页面上能看到「验收中」这个状态\n2. 带 1366、390 两张截图',
+    );
+    const [row] = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 12,
+        title: '本机在做',
+        rawRequest: 'x',
+        requestedBy: 'node:founder-pc',
+        priority: 1,
+        state: 'running',
+        executor: 'local',
+        claimedBy: 'founder-pc',
+        leaseUntil: new Date('2026-10-02T13:00:00.000Z'),
+      })
+      .returning();
+    if (!row) throw new Error('任务行没写进去');
+    // 假 GitHub 没有 removeIssueLabel：要是误摘标签，这里就抛错、这一轮记没查成
+    const { gh, calls } = fakeGh({ issues: [groomIssue({ body: offDiffBody, labels: ['需求', '本机做'] })] });
+    const { client, starts } = fakeClient();
+    for (let round = 0; round < 2; round += 1) {
+      const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+      expect(run.outcome).toBe('ok');
+    }
+    expect(starts).toEqual([]);
+    expect((await t.db.select().from(tasks))[0]).toMatchObject({ state: 'running', executor: 'local' });
+    expect(calls.labeled).toEqual([]);
+    const kept = (await t.db.select().from(notifications)).filter((n) =>
+      n.dedupeKey.startsWith('local-kept:'),
+    );
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ level: 'alert' });
+    expect(kept[0]?.dedupeKey).toContain('acme/demo#12:local-lease-kept:2026-10-02T13:00:00.000Z');
+    expect(kept[0]?.body).toContain('acceptance_off_diff');
+    expect(calls.comments.filter((c) => c.key.startsWith('local-lease-kept:'))).toHaveLength(2);
+    expect((await t.db.select().from(auditLog)).filter((a) => a.action === 'task.local.expire')).toEqual([]);
   });
 
   it('已经派出去的（任务行不在排队）：不再读这张单的现状、不再起', async () => {

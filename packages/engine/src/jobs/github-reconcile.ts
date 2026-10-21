@@ -55,9 +55,16 @@ export interface GitHubReconcileJobDeps {
   runs: ScheduleRunLog;
   /**
    * 上一次这一轮跑成的时刻：schedule_runs 里本任务 outcome = ok 的 ended_at（不认 partial，没查全的那一轮不能把窗口往前推）。
-   * 没有记录回 null。读库失败要抛，这一轮按没有记录退回 2 小时，不把读不到当成时刻 0。不给这个入口同样按没有记录。
+   * 没有记录回 null。真实装配启用 retainWindow，读库失败或坏时刻须失败，不能误选 initial 批次。
+   * 不装持久窗口的独立调用保留 2 小时 fallback；不给这个入口同样按没有记录。
    */
   lastSuccessAt?: () => Promise<Date | null>;
+  /** 真实装配必须持久保留同一成功水位下首次采用的窗口，避免 fallback/cap 随现在移动、丢失续扫游标。读写失败照抛。 */
+  retainWindow?: (input: {
+    lastSuccessAt: Date | null;
+    since: Date;
+    capped: boolean;
+  }) => Promise<{ since: Date; capped: boolean }>;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
@@ -78,7 +85,7 @@ export function githubReconcileSince(
 }
 
 /**
- * 读上一次成功。抛错、空、时刻 0、无效时刻都当成没有记录（回 null），并在真读失败或时刻不能用时写日志。
+ * 读上一次成功。持久窗口装配严格区分没有记录与读失败/坏时刻；无持久窗口的独立调用才退回 null 并写日志。
  * 不给入口就是没有记录，不写日志（测试和第一次跑都是这样）。
  */
 async function readLastSuccessAt(deps: GitHubReconcileJobDeps, now: Date): Promise<Date | null> {
@@ -87,12 +94,14 @@ async function readLastSuccessAt(deps: GitHubReconcileJobDeps, now: Date): Promi
   try {
     raw = (await deps.lastSuccessAt()) ?? null;
   } catch (err) {
+    if (deps.retainWindow) throw err;
     deps.log('warn', '读不到上一次 GitHub 对账成功的时刻，按没有记录处理', { error: errMessage(err) });
     return null;
   }
   const ms = raw?.getTime();
   if (raw === null) return null;
   if (ms === undefined || !Number.isFinite(ms) || ms <= 0 || ms > now.getTime()) {
+    if (deps.retainWindow) throw new Error('上一次 GitHub 对账成功的时刻不能用，不能确定续扫批次');
     deps.log('warn', '上一次 GitHub 对账成功的时刻不能用，按没有记录处理', {
       lastSuccessAt: ms !== undefined && Number.isFinite(ms) ? new Date(ms).toISOString() : String(raw),
     });
@@ -173,8 +182,14 @@ export async function runGitHubReconcileJob(deps: GitHubReconcileJobDeps): Promi
   let since = new Date(startedAt.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
   try {
     const lastSuccessAt = await readLastSuccessAt(deps, startedAt);
-    const lookback = githubReconcileSince(startedAt, lastSuccessAt);
+    const candidate = githubReconcileSince(startedAt, lastSuccessAt);
+    const lookback = deps.retainWindow ? await deps.retainWindow({ lastSuccessAt, ...candidate }) : candidate;
     since = lookback.since;
+    if (since.getTime() < startedAt.getTime() - GITHUB_RECONCILE_LOOKBACK_CAP_MS) {
+      deps.log('warn', '固定续扫窗口已超过 GitHub 投递保留期，过期部分可能有漏；保留原下限继续续扫', {
+        since: since.toISOString(),
+      });
+    }
     if (lookback.capped && lastSuccessAt) {
       deps.log(
         'warn',

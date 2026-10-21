@@ -30,6 +30,7 @@ import {
   workflowPathIn,
 } from '../src/jobs/intake.ts';
 import type { BreakerEvent, BreakerFacts } from '../src/jobs/intake-pick.ts';
+import type { LocalLeaseDeps } from '../src/jobs/local-leases.ts';
 
 const NOW = new Date('2026-10-02T14:00:00.000Z');
 const SINCE = '2026-09-30T00:00:00.000Z';
@@ -2192,5 +2193,201 @@ describe('【故意造出的失败】旧的两道硬闸删掉之后', () => {
     expect(h.logs.some((l) => l.text.includes('unscheduled') || l.text.includes('not_current_version'))).toBe(
       false,
     );
+  });
+});
+
+describe('本机退回法国队列的单（#3461）：重新派、法国接不了的留给本机', () => {
+  const T_END = new Date('2026-10-02T06:00:00.000Z');
+  const T_RETURN = new Date('2026-10-02T10:00:00.000Z');
+  const offDiffBody = bodyWith(
+    ['`packages/web/src/pages/`'],
+    ['1. 页面上能看到「验收中」', '2. 带 1366、390 两张截图'],
+  );
+  const whyOf = (h: Harness) => {
+    const r = h.finished[0]?.result;
+    return r && 'why' in r ? (r.why ?? '') : '';
+  };
+
+  /** 这张单以前在法国跑过 n 代、都结束了；退回在 returnedAt。 */
+  function returned(opts: { returnedAt?: Date; lives?: number; endedAt?: Date } = {}) {
+    const lives = Array.from({ length: opts.lives ?? 1 }, () => 'terminated' as const);
+    const calls: { generation: number | undefined; issueNumber: number }[] = [];
+    const notices: { issueNumber: number; key: string; title: string; body: string }[] = [];
+    const over: Partial<IntakeDeps> = {
+      async issueTask(): Promise<IssueTaskRow | null> {
+        return {
+          id: 'old-row',
+          state: 'stopped',
+          executor: 'engine',
+          returnedAt: opts.returnedAt ?? T_RETURN,
+        };
+      },
+      async taskGenerations(): Promise<TaskGenerationFacts> {
+        return { ok: true, lives, lastEndedAt: opts.endedAt ?? T_END };
+      },
+      async start({ issueNumber, generation }) {
+        calls.push({ issueNumber, generation });
+        return 'started';
+      },
+      async notifyLocal(n) {
+        notices.push({ issueNumber: n.issueNumber, key: n.key, title: n.title, body: n.body });
+      },
+    };
+    return { over, calls, notices };
+  }
+
+  it('stopped + engine + 已结束的一代 + 在那之后退回 → 拉单起 :r2（第 2 代），不是 already_dispatched', async () => {
+    const r = returned();
+    const h = harness(r.over);
+    const run = await runIntakeJob(h.deps);
+    expect(r.calls).toEqual([{ issueNumber: 12, generation: 2 }]);
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(h.logs.some((l) => l.text.includes('起了'))).toBe(true);
+  });
+
+  it('已经有两代都结束 → 起第 3 代', async () => {
+    const r = returned({ lives: 2 });
+    await runIntakeJob(harness(r.over).deps);
+    expect(r.calls).toEqual([{ issueNumber: 12, generation: 3 }]);
+  });
+
+  it('退回早于最后一代结束（退回之后已经又起过一代）→ 仍是 already_dispatched，不起', async () => {
+    const r = returned({ returnedAt: new Date('2026-10-02T05:00:00.000Z') });
+    const h = harness(r.over);
+    await runIntakeJob(h.deps);
+    expect(r.calls).toEqual([]);
+    expect(whyOf(h)).toContain('already_dispatched×1');
+  });
+
+  it('重新派照样走完空位限制：这一轮起满了就不起，也不绕过去直接重做', async () => {
+    const r = returned();
+    const h = harness({ ...r.over, limits: { maxStartsPerRound: 0 } });
+    await runIntakeJob(h.deps);
+    expect(r.calls).toEqual([]);
+    expect(whyOf(h)).toContain('round_cap×1');
+  });
+
+  it('重新派照样走完准入关卡：前置没等完的不起、也不贴「本机做」', async () => {
+    const r = returned();
+    const body = [BODY, '前置：#99', ''].join('\n');
+    const h = harness(r.over, { issues: [issue({ body })], prereqStates: { 99: 'open' } });
+    await runIntakeJob(h.deps);
+    expect(r.calls).toEqual([]);
+    expect(h.localMarked).toEqual([]);
+    expect(r.notices).toEqual([]);
+  });
+
+  it('本机退回来的单，验收要 diff 外证据（法国接不了）：不起，贴回「本机做」、留言、报给本机', async () => {
+    const r = returned();
+    const h = harness(r.over, { issues: [issue({ body: offDiffBody })] });
+    await runIntakeJob(h.deps);
+    expect(r.calls).toEqual([]);
+    expect(h.localMarked).toEqual([12]);
+    expect(r.notices).toHaveLength(1);
+    expect(r.notices[0]?.key).toMatch(/^intake-returned-blocked:/);
+    expect(r.notices[0]?.body).toContain('acceptance_off_diff');
+    expect(r.notices[0]?.body).toContain('截图');
+    expect(h.comments.map((c) => c.key)).toContain(r.notices[0]?.key);
+  });
+
+  it('没退回过的单验收要 diff 外证据：照旧只留一条改写的话，不贴「本机做」、不通知', async () => {
+    const r = returned({ returnedAt: new Date('2026-10-02T05:00:00.000Z'), endedAt: T_END });
+    const plain = harness(
+      {
+        async notifyLocal(n) {
+          r.notices.push({ issueNumber: n.issueNumber, key: n.key, title: n.title, body: n.body });
+        },
+      },
+      { issues: [issue({ body: offDiffBody })] },
+    );
+    await runIntakeJob(plain.deps);
+    expect(plain.localMarked).toEqual([]);
+    expect(r.notices).toEqual([]);
+    expect(plain.comments.map((c) => c.key)).toEqual([expect.stringMatching(/^intake-off-diff:/)]);
+  });
+
+  it('没有任何一代、本机领过又放手的行（接手）：法国接不了同样留给本机', async () => {
+    const r = returned();
+    const h = harness(
+      {
+        ...r.over,
+        async taskGenerations(): Promise<TaskGenerationFacts> {
+          return { ok: true, lives: [], lastEndedAt: null };
+        },
+      },
+      { issues: [issue({ body: offDiffBody })] },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.localMarked).toEqual([12]);
+    expect(r.notices).toHaveLength(1);
+  });
+});
+
+describe('本机租约到期、退回之前先判法国接不接得了（#3461）', () => {
+  const LEASE_END = new Date('2026-10-02T13:00:00.000Z');
+  const offDiffBody = bodyWith(
+    ['`packages/web/src/pages/`'],
+    ['1. 页面上能看到「验收中」', '2. 带 1366、390 两张截图'],
+  );
+
+  function withLease(body: string) {
+    const steps: string[] = [];
+    const notices: { key: string; body: string }[] = [];
+    const localLeases: LocalLeaseDeps = {
+      async expired() {
+        return [{ taskId: 't12', issueNumber: 12, leaseUntil: LEASE_END }];
+      },
+      async liveIssues() {
+        return new Set();
+      },
+      async mergedPr() {
+        return null;
+      },
+      async extend() {
+        steps.push('extend');
+      },
+      async settle({ how }) {
+        steps.push(`settle ${how}`);
+        return 1;
+      },
+      async unmarkLocal() {
+        steps.push('unmark');
+      },
+    };
+    const h = harness(
+      {
+        localLeases,
+        async notifyLocal(n) {
+          notices.push({ key: n.key, body: n.body });
+        },
+      },
+      { issues: [issue({ body, labels: ['需求', '本机做'] })] },
+    );
+    return { h, steps, notices };
+  }
+
+  it('验收要 diff 外证据的单：不摘「本机做」、不退回，通知本机、留一条话写明为什么', async () => {
+    const w = withLease(offDiffBody);
+    await runIntakeJob(w.h.deps);
+    expect(w.steps).toEqual([]);
+    expect(w.notices).toHaveLength(1);
+    expect(w.notices[0]?.key).toMatch(/^local-lease-kept:/);
+    expect(w.notices[0]?.body).toContain('acceptance_off_diff');
+    expect(w.h.comments.map((c) => c.key)).toEqual([w.notices[0]?.key]);
+    expect(w.h.started).toEqual([]);
+  });
+
+  it('法国接得了的单：照旧摘「本机做」、退回（行改成 stopped + engine）', async () => {
+    const w = withLease(BODY);
+    await runIntakeJob(w.h.deps);
+    expect(w.steps).toEqual(['unmark', 'settle returned']);
+    expect(w.notices).toEqual([]);
+  });
+
+  it('试判不留痕：不替这张单贴标签、不为它读前置之外的东西起任务', async () => {
+    const w = withLease(offDiffBody);
+    await runIntakeJob(w.h.deps);
+    expect(w.h.localMarked).toEqual([]);
+    expect(w.h.started).toEqual([]);
   });
 });

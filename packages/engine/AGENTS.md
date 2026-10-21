@@ -17,10 +17,12 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - `src/real/scope-oom-evidence.ts`（#3448）：会话 scope 自己的内存事件见证。边跑边读 `fleet-agent-<runId>.scope/memory.events.local`（层级的 `memory.events` 只作旁证），收场再读一次，经 `facts.scopeOom` 进 result.json；只证明「这个 scope 里有 OOM 事件」，被杀的是谁永远 unknown，不能拿 137/143、内存峰值、时间邻近、父 slice 或兄弟 scope 的计数顶替。每次读前后取 scope 目录的实例身份（生产 stat 的 dev:ino），同路径被同名新 scope 重建、前后对不上或取不到身份的读数不收，判 unknown 并标 `instanceChanged`（第一次读成之前就被换掉的看不出，限制写在文件头）。没读到、读不全、计数回退、首读非 0 都记 unknown 和完整性，不写 0；Mirasim 不经本机 scope，写 unsupported。文字刻意避开 `failure/rules.ts` 里 oom_killed 的文本判法，不进 stderr / failureReason；保全失败不改退出事实。只保存证据，不为旧运行补原因。
 - `packages/engine/src/real/self-check.ts`：以工作树主人身份跑测试和 tsc；各段预算统一从 `packages/engine/src/self-check-budget.ts` 取，活动总限时只由这些预算相加。
 - `packages/engine/src/decisions/`：判断（纯函数）；`packages/engine/src/routing/`：选路；`packages/engine/src/jobs/`：引擎进程里的定时器（不是 Temporal 工作流，登记表在 `real/jobs.ts`）。
+- `src/jobs/github-reconcile-window.ts`：真实对账在扫描前按上次完整成功身份把窗口封存到既有幂等账；partial、失败和重启都复用原下限，避免 fallback/cap 移动而丢游标。读写或回执异常明确失败；此账不当扫描锁。超过 GitHub 保留期仍保留原下限并警告可能有漏，持久窗口不证明过期投递已补回。
 - `src/real/migration-budget.ts`：本仓超默认体量预算时，按固定 Git blob 和发布版数据验证器识别唯一新增 PG7 快照；原始 addedLines 不换口径，未知回 raw，Git读取失败抛错。候选改动验证器、依赖声明/锁、计量判据或任意层级 `.gitattributes` 等固定信任输入时不折扣。20k行/2MiB只限自动折扣资格，不自动恢复已停任务。
 
 ## 测试
 
+- 时间跳跃用例先 `pnpm test:temporal-server` 显式准备固定 Java test-server，再走 `support.ts` 的 `createEnv()`；录重放夹具和单跑 evolution 同样先准备。缺失/坏缓存不在业务测试内下载，每个用例仍独立起停；与下面的真实 CLI 准备分开。
 - `npx vitest run packages/engine/test/<文件>`。不要 Postgres（用到库的跑在 PGlite 上）。
 - 法国工具链 `/bin/sh` 和目录 chmod 权限测试在 Linux 跑真端口；Windows 用明示的命令/阶段错误夹具验证装配与失败分类，不代表引擎支持 Windows 生产宿主。Git 归档检出在两种系统都跑真实 git/tar，归档名相对私有 scratch，避免 GNU tar 把 Windows 盘符当远端。
 - Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；真服务端先用 `pnpm temporal:install` 按 `deploy/france.sh` 固定版本准备本机 CLI，或用 `pnpm test:temporal --cli <绝对路径>` 登记已安装 CLI、设 `FLEET_TEST_TEMPORAL_CLI`，版本须一致。正规选测和创建入口都核路径/版本，不隐式下载；SDK 创建阶段只报 `start-or-connect`，内部细分状态未知。
@@ -61,6 +63,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - 自动关单收尾只走 `taskCloseClosedIssue` Update：同步核精确 run、当前停法代数和继续代数，只有 `accepted` 回执才能记成功、撤提醒。继续信号先使凭据失效，不能等公开 phase 改好。旧 worker 缺能力、Update RPC 超时或回执未知保留未核实，不能退回人类的无条件放弃信号。
 - 新 PR 创建前从需求单现读两轴（正文无需求号时认任务分支）；缺失、冲突或未知值拒开并明报，不猜分类。groom 新单显式提供 domain/nature，拆分单可逐轴继承来源单的唯一有效值，写前仍须齐全。驾驶舱会话在 modules 中独立声明两轴，后端开单前同样校验，正文移到独立查询分类节，不计入模块范围和派工规模。查询轴不参与派工、合并与版本判定；此处只保证创建的元数据齐全。报警立案贴 engine/bug，耗时表直开 PR 贴 engine/process，隔离集直开 PR 贴 engine/bug；直开 PR 贴后回读，失败不能当成功。
+- 「派出过没有」只有 `jobs/dispatch-standing.ts` 一份（拉单、点名派单共用）。本机领单不新起一代，所以本机退回法国队列（租约到期 `task.local.expire`+returned、放手 `task.local.finish`+released）的行，各代都结束后要靠操作记录里的退回时刻晚于最后一代的 Temporal `closeTime` 认成「重新派」（起 `:rN+1`，#3461）；退回时刻读不到、结束时刻读不到都不判，不猜。法国接不了的单（验收要 diff 外证据、交代不全、改标准……）不能退回：租约到期先 `franceVerdict` 试判，放手来的由拉单 `holdReturned` 贴回「本机做」；通知键只报一次（`insertAlertOnce`），别改成 `upsertAlert`（会把人处理掉的重开）。
 - 引擎自己挑单，进队条件见 design 第九节。要它接：单的四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。
 
 - 冷验收转人的待验条持久写入 `acceptance_duties`；合并前通过 `acceptance-duty-before-merge` 分支读取全部待验责任、将 PR 正文写成 Refs 分片并现读核对，失败重试或停下，不带旧正文进入合并。代码仍可正常合并，收尾有待验责任不关单。责任项原子并集，新增项递增代次并撤销旧结清；最终验收只用精确仓、单、PR、head、责任 id 和代次 CAS，不认评论文本。

@@ -3,7 +3,15 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { NOT_APPS, VPS_APPS, type VpsApp } from '../src/vps-apps.ts';
+import {
+  isSystemService,
+  isUnregisteredTimer,
+  NOT_APPS,
+  SYSTEM_SERVICES,
+  SYSTEM_TIMERS,
+  VPS_APPS,
+  type VpsApp,
+} from '../src/vps-apps.ts';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const ops = readFileSync(`${root}docs/ops.md`, 'utf8');
@@ -83,6 +91,68 @@ describe('登记表', () => {
     const m = /<!-- vps-apps:start -->([\s\S]*?)<!-- vps-apps:end -->/.exec(ops);
     expect(m, 'docs/ops.md 里没有 vps-apps 那一节').toBeTruthy();
     for (const app of VPS_APPS) expect(m?.[1]).toContain(`| ${app.name} |`);
+  });
+
+  test('法国 VPS 2026-10-21 实测的服务：要么登记、要么系统自带，只有 daihuo 是别家的登记项', () => {
+    const live = [
+      'cron',
+      'daihuo',
+      'dbus',
+      'fail2ban',
+      'fleet-api',
+      'fleet-engine',
+      'fleet-temporal',
+      'fwupd',
+      'getty@tty1',
+      'miraquota-sync',
+      'ModemManager',
+      'multipathd',
+      'polkit',
+      'postgresql@16-main',
+      'rsyslog',
+      'self-proxy-direct',
+      'self-proxy-exit',
+      'serial-getty@ttyS0',
+      'ssh',
+      'systemd-journald',
+      'systemd-logind',
+      'systemd-networkd',
+      'systemd-resolved',
+      'systemd-timesyncd',
+      'systemd-udevd',
+      'udisks2',
+      'unattended-upgrades',
+    ].map((n) => `${n}.service`);
+    const registered = new Set(VPS_APPS.flatMap((a) => a.units.map((u) => u.name)));
+    expect(live.filter((u) => !registered.has(u) && !isSystemService(u))).toEqual([]);
+    // 登记的不该同时算系统自带（否则登记项永远不会被当成没登记，两边说不清）
+    for (const u of registered) expect(isSystemService(u), u).toBe(false);
+    const daihuo = VPS_APPS.find((a) => a.id === 'daihuo');
+    expect(daihuo).toMatchObject({ external: true, dirs: ['/opt/daihuo', '/var/lib/daihuo'] });
+    expect(VPS_APPS.find((a) => a.id === 'miraquota')?.dirs).toEqual(['/opt/miraquota']);
+    // 没在名单里的不当系统自带；名单里每一项都写了为什么
+    expect(isSystemService('newcomer.service')).toBe(false);
+    expect(isSystemService('getty@tty2.service')).toBe(true);
+    for (const [k, why] of Object.entries(SYSTEM_SERVICES)) expect(why.length, k).toBeGreaterThan(3);
+  });
+
+  test('两个别家的定时任务已登记（service + timer + 目录）；定时器兜底的判断', () => {
+    for (const [id, dirs] of [
+      ['reclaude-refill', ['/opt/reclaude-refill', '/var/lib/reclaude-refill']],
+      ['mirasim-radar', ['/opt/mirasim-radar', '/var/lib/mirasim-radar']],
+    ] as const) {
+      const app = VPS_APPS.find((a) => a.id === id);
+      expect(app).toMatchObject({ external: true, scheduled: true, dirs });
+      expect(app?.units.map((u) => u.name)).toEqual([`${id}-collector.service`, `${id}-collector.timer`]);
+    }
+    expect(isUnregisteredTimer('reclaude-refill-collector.timer', VPS_APPS)).toBe(false);
+    // deploy/france 自己的定时器：同名 .service 登记了，不算没登记
+    for (const f of franceUnits.filter((n) => n.endsWith('.service')))
+      expect(isUnregisteredTimer(f.replace(/\.service$/, '.timer'), VPS_APPS) && !NOT_APPS[f], f).toBe(false);
+    expect(isUnregisteredTimer('fstrim.timer', VPS_APPS)).toBe(false);
+    expect(isUnregisteredTimer('apt-daily-upgrade.timer', VPS_APPS)).toBe(false);
+    expect(isUnregisteredTimer('newjob.timer', VPS_APPS)).toBe(true);
+    for (const [k, why] of Object.entries(SYSTEM_TIMERS)) expect(why.length, k).toBeGreaterThan(3);
   });
 
   test('【故意造红】单元名写错、漏登记、目录互相套：都报出来', () => {
