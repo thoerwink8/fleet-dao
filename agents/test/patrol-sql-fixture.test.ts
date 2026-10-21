@@ -207,6 +207,9 @@ describe('巡查 SQL 夹具：初始化各段失败、超时、清理（#3524）
     ['表没建出来', [[true, false, true]]],
     ['枚举没建出来', [[true, true, false]]],
     ['读回是空的', []],
+    ['读回只有空行', [[]]],
+    ['读回缺列', [[true]]],
+    ['读回多列', [[true, true, true, true]]],
     ['读回是 null（空库）', [[null, null, null]]],
   ])('建完读回不对（%s）：报 schema 段，不当成可用的库，库被关掉', async (_name, rows) => {
     const { db, calls } = fakeDb({ probe: async () => ({ rows: rows as unknown[][] }) });
@@ -230,6 +233,7 @@ describe('巡查 SQL 夹具：初始化各段失败、超时、清理（#3524）
     expect(error?.stage).toBe('schema');
     expect(error?.cleanup).toContain('关库失败');
     expect(error?.cleanup).toContain('已被占用');
+    expect(error?.message).toContain('关库失败');
   });
 
   it('失败后回收卡住：关库也有期限，到点写进 cleanup，不无限等', async () => {
@@ -246,6 +250,7 @@ describe('巡查 SQL 夹具：初始化各段失败、超时、清理（#3524）
     expect(error?.stage).toBe('schema');
     expect(error?.cleanup).toContain('close');
     expect(error?.cleanup).toContain(`${FIXTURE_CLOSE_MS}ms`);
+    expect(error?.message).toContain(`${FIXTURE_CLOSE_MS}ms`);
   });
 
   it('收尾关库失败：afterAll 看到的是 close 段的错', async () => {

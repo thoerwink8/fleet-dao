@@ -1,11 +1,11 @@
 // patrol.test.ts 的真实 SQL 夹具（#3524）：一份隔离的 PGlite，按生产表结构建好，供 REMOTE_SCRIPT 里的真实 SQL 执行。
-// 为什么单拆出来：完整 CI 的 lint job 里 biome、tsc、agents_test 等并行跑，PGlite 的 WASM 装载、起库比单跑慢得多，
-// 原来 beforeAll 裸 `new PGlite()` 再建表，全吃 vitest 默认 10 秒的 hook 窗：超时只报「Hook timed out」，
-// 分不出是装载、起库还是建表慢，库还在后台继续起，七条真实 SQL 用例整组被跳过（CI 39653171182、39654263648）。
+// 原来 beforeAll 裸 `new PGlite()` 再建表，依赖 vitest 默认 10 秒 hook 窗。完整 CI 两次报「Hook timed out」，
+// 没有分段耗时，无法判断装载、起库、建表或调度中哪一段慢（CI 39653171182、39654263648）。
+// 超时本身不会取消初始化；夹具需要在自己的期限内报阶段和清理结果。
 // 这里的合同：
 // - 整个初始化共用一个期限（FIXTURE_DEADLINE_MS），比 hook 窗（FIXTURE_HOOK_MS，和 packages/db/src/testing.ts 的
 //   TEST_DB_TIMEOUT_MS 同一个 60 秒）短，所以超时由这里先报，错误里写明卡在哪一段（load / construct / ready / schema）；
-// - 失败、超时一律先关库（有期限）再抛，迟到的装载或就绪不再往下建表、不再建库，不留后台资源；
+// - 失败、超时先尝试关库（有期限）再抛，迟到的装载或就绪不再往下建表、不再建库；关闭未确认时明确报未知清理责任；
 // - 建完表要读回两张表和枚举确实在，读不到当场抛，不拿一个空库去跑 SQL 用例；
 // - 关库也有期限，失败抛 close 段的错，不吞。
 // 凭证、网络都不碰。
@@ -119,7 +119,7 @@ export async function openPatrolSqlFixture<Db extends FixtureDb>(
     await created.exec(opts.schemaSql ?? PATROL_SCHEMA_SQL);
     stopIfAbandoned();
     const probe = await created.query(SCHEMA_PROBE, [], { rowMode: 'array' });
-    if (probe.rows.length !== 1 || probe.rows[0]?.some((v) => v !== true)) {
+    if (probe.rows.length !== 1 || probe.rows[0]?.length !== 3 || probe.rows[0].some((v) => v !== true)) {
       throw new PatrolSqlFixtureError(
         'schema',
         `建完表读回来不对（${JSON.stringify(probe.rows)}），不当成可用的库`,
@@ -149,6 +149,7 @@ export async function openPatrolSqlFixture<Db extends FixtureDb>(
       } catch (closeErr) {
         failure.cleanup = `关库失败：${closeErr instanceof Error ? closeErr.message : String(closeErr)}`;
       }
+      failure.message += `；清理：${failure.cleanup}`;
     }
     throw failure;
   }
