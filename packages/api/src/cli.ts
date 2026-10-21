@@ -40,6 +40,8 @@ import { parseQuoteArgs, QUOTE_USAGE, runQuote } from './quote-cli.ts';
 //   task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"（#1402）：续、放弃、重做一张单。见 task-cli.ts。
 //   task budget-remeasure <owner/仓名> <单号> --head <sha> --base <sha> [--execute --run <runId> --park <编号>] --note "<为什么>"（#3249）：
 //     体量停点只重新核这一份成果；默认只读预检，--execute 才放行这一份，不算「继续」、不授权后续。见 task-cli.ts。
+//   task correct-merged <owner/仓名> <单号> --pr <号> --head <sha> --merge <sha> --run <原 Temporal run> [--execute --task <编号> --seen <摘要>] --note "<为什么>"：
+//     已结束却误记 abandoned 的真实已合任务，受管纠正运行账；默认只读预检，--execute 才在一个事务里改任务并记操作记录。见 task-correct-merged.ts。
 //   feishu-push status|test（决定 0090）：提醒推飞书通不通；test 建一条测试提醒、等后端推出去、读回送达记录。见 feishu-push-cli.ts。
 //   attention --json（#2370）：现在要人看的事一份结论（healthz、该推的通知、推送不通、简报没到），指挥官巡检只读它。见 attention-cli.ts。
 //   release pause|continue（#2038）：release.sh 切版本前给手上有会话的任务发 hard 暂停、切完只继续这一批。见 release-pause.ts。
@@ -1754,14 +1756,20 @@ async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<n
   }
   let opened: { store: Store; close(): Promise<void> } | undefined;
   let control: OpenedTaskControl | undefined;
+  let pulls: Awaited<ReturnType<typeof openHistoricalAuditSource>> | undefined;
   try {
-    opened = await deps.openStore(databaseUrl(deps.env));
+    const url = databaseUrl(deps.env);
+    opened = await deps.openStore(url);
     control = await (deps.openTaskControl ?? openTaskControl)(deps.env);
+    // correct-merged 要现读 GitHub PR（只 GET）；别的动作不连 GitHub
+    if (args.action === 'correct-merged')
+      pulls = await (deps.openHistoricalAuditSource ?? openHistoricalAuditSource)(url);
     deps.out(
       await runTask(args, {
         store: opened.store,
         workflows: control.workflows,
         taskRedo: control.taskRedo,
+        pulls: pulls?.source,
         operator: operatorName(deps.env),
       }),
     );
@@ -1774,6 +1782,7 @@ async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<n
     deps.err(`没做成：${describeDbError(err)}`);
     return 1;
   } finally {
+    await pulls?.close().catch(() => undefined);
     await control?.close().catch(() => undefined);
     await opened?.close().catch(() => undefined);
   }
