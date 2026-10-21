@@ -8,6 +8,7 @@
 // 不打 URL、路径、查询串、片段、用户信息、端口、方法原文，也不打任意 error.message / code / name——出错只记下面 ERROR_KINDS 里的固定类别。
 // 探针自己出错一律吞掉，不能让它把构建弄红。
 import http from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 
 const TAG = '[prerender-trace]';
@@ -110,6 +111,15 @@ try {
     }
     return req;
   };
+  // http.get 在 node 里直接调内部的 request，不经 http.request；补一层同样的转手，免得走 get 的请求漏看
+  http.get = function patchedGet(...args) {
+    const req = http.request.apply(this, args);
+    req.end();
+    return req;
+  };
+  // 只改 http 对象上的属性，别处用 `import { request } from 'node:http'` 拿到的还是老函数（实测不同步），探针会整个漏看；
+  // 同步一次，ESM 命名导出才跟着换。预载在业务代码加载之前跑，之后 import 的拿到的就是包过的
+  syncBuiltinESMExports();
 
   process.on('exit', () => {
     try {

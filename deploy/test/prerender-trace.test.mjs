@@ -219,3 +219,64 @@ test('探针装在 URL 参数的 http.request(url, cb) 上也不出错、不乱�
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(lines(r.err), [], '字符串参数不是选项对象：认不出主机，不打也不崩');
 });
+
+test("别的模块用 import { request } from 'node:http' 取函数，也看得到（实测只改 http.request 属性时命名导出不同步）", () => {
+  const r = run(`
+    import http from 'node:http';
+    const { request } = await import('node:http');
+    const server = http.createServer((_, res) => res.end('shell'));
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    const { port } = server.address();
+    const body = await new Promise((ok, bad) => {
+      const req = request({ hostname: '127.0.0.1', port, path: '/', method: 'GET', agent: false }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => ok(Buffer.concat(chunks).toString()));
+      });
+      req.on('error', bad);
+      req.end();
+    });
+    process.stdout.write('body=' + body);
+    server.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, 'body=shell');
+  const l = lines(r.err);
+  assert.ok(
+    l.some((x) => /#1 GET \/ 发出/.test(x)),
+    l.join('\n'),
+  );
+  assert.ok(
+    l.some((x) => /#1 响应头 200 \+\d+ms$/.test(x)),
+    l.join('\n'),
+  );
+});
+
+test('走 http.get（命名导出 get）的本机 GET / 也看得到，响应原样', () => {
+  const r = run(`
+    import http, { get } from 'node:http';
+    const server = http.createServer((_, res) => res.end('shell'));
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    const { port } = server.address();
+    const body = await new Promise((ok, bad) => {
+      get({ hostname: '127.0.0.1', port, path: '/', agent: false }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => ok(Buffer.concat(chunks).toString()));
+      }).on('error', bad);
+    });
+    process.stdout.write('body=' + body);
+    server.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, 'body=shell');
+  const l = lines(r.err);
+  assert.ok(
+    l.some((x) => /#1 GET \/ 发出/.test(x)),
+    l.join('\n'),
+  );
+  assert.ok(
+    l.some((x) => /#1 响应收完 \+\d+ms$/.test(x)),
+    l.join('\n'),
+  );
+});

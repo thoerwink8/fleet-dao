@@ -939,7 +939,8 @@ web_build_trace_lines() { # 日志
     echo "  预渲染请求的时间点："
     printf '%s\n' "$lines"
   else
-    echo "  预渲染请求的时间点：探针没出声（没带探针，或构建没走到发请求那一步）"
+    echo "  预渲染请求的时间点：探针没出声（没带探针，或构建没走到发请求那一步，或请求不是用选项对象调 http.request / http.get 发的——" \
+      "字符串、URL 参数和 fetch 探针不看；不能据此断定请求没发）"
   fi
 }
 
