@@ -217,13 +217,9 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(records.filter((r) => r.kind === 'unknown' && r.code === 'capacity')).toHaveLength(1);
     expect(count()).toBe(256);
   }, 120000);
-  // #3414：CI 在原 15 秒处超时（run 39390033280）。整段同步、不起子进程，卡的不是收尾而是两处：
-  // 一是盘，每条约 6 次 fsync（SQLite DELETE journal + EXTRA 五次，开库同步父目录一次；strace 实数
-  // 256 条 1544 次），随盘速；二是 CPU，每次开库逐行核对全部旧行，随行数平方增长，原先打开时、事务内
-  // 各核一遍，每行多遍 schema 校验，quick_check 也扫两遍全库。后者已减到事务内一遍、每行一次校验一次规范化、
-  // quick_check 一遍，前者是耐久设计不动。同一台负载 11–14 的机器实测本体 11.6 秒降到 7.9 秒，commit 段随盘速仍占大头。
-  // 函数同步，超时也要等做完才报；失败时打印各段耗时和本进程资源读数（只有合成样本的计数），成功不打印，
-  // 没采到的写 unknown。
+  // #3414：原 CI 在 15000ms 报超时（run 39390033280）。函数同步，vitest 要等本体返回才判超时，
+  // 所以红的不是收尾、也不是子进程。失败诊断打印阶段和分段耗时：phase=done 且 recordsDone=256 表示本体做完，
+  // commit 是 exec('COMMIT')，outsideExec 是开库、路径、逐行解码和查询。成功不打印，没采到写 unknown。
   it('256个近DTO上界记录的COMMIT边界：主库和journal峰值在固定字节界内', () => {
     const original = DatabaseSync.prototype.exec;
     let mainPeak = 0,

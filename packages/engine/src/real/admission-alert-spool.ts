@@ -40,6 +40,11 @@ export const ALERT_SPOOL_LIMITS = Object.freeze({
   journalBytes: 1024 * (4096 + 8) + 2 * 65536,
 });
 const NAME = 'pending.sqlite';
+// TRUNCATE 每次提交后留下 0 字节 journal，下一次打开仍会走进恢复预检。预检要能读到上限+1 字节才抓得住
+// 读的过程中变大，但按这个上限每次清零一块 4MiB，256 次真实 COMMIT 会把内存和调度时间耗在清零上（#3414）。
+// 只分配一次，解析只用实际读到的前缀。
+let journalScratch: Buffer | undefined;
+const journalBuffer = () => (journalScratch ??= Buffer.allocUnsafe(ALERT_SPOOL_LIMITS.journalBytes + 1));
 const APP_ID = 0x46444131;
 const TABLE_SQL =
   'CREATE TABLE pending (key TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, record_hash TEXT NOT NULL) STRICT';
@@ -63,6 +68,15 @@ function errorCode(error: unknown): AlertUnknownCode {
   return 'io';
 }
 const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.uid === b.uid;
+const databaseExists = (dir: string) => {
+  try {
+    lstatSync(join(dir, NAME));
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw e;
+  }
+};
 
 class PrivatePath {
   readonly path: string;
@@ -80,9 +94,11 @@ class PrivatePath {
         next = piece ? join(next, piece) : next;
         const leaf = next === path;
         try {
+          let createdLeaf = false;
           if (leaf) {
             try {
               mkdirSync(next, { mode: 0o700 });
+              createdLeaf = true;
             } catch (e) {
               if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
             }
@@ -98,9 +114,10 @@ class PrivatePath {
           )
             fail('private_path');
           if (!same(s, lstatSync(next))) fail('private_path');
-          // 叶目录首次创建/重试都同步父目录。EXTRA不替代这一步。
+          // 父目录同步只覆盖「新叶」和「主库还没有」：同步发生在建文件之前，主库已在就说明创建那次已经同步过。
+          // 每次打开都再同步，256 次真实 COMMIT 会多 256 次目录 fsync，慢盘上把原 15 秒撑满（#3414）。
           const parent = this.anchors[this.anchors.length - 2];
-          if (leaf && parent) fsyncSync(parent.fd);
+          if (leaf && parent && (createdLeaf || !databaseExists(path))) fsyncSync(parent.fd);
         } catch (e) {
           if (e instanceof SpoolError) throw e;
           fail('private_path');
@@ -124,7 +141,7 @@ class PrivatePath {
       try {
         s = lstatSync(join(this.path, name));
       } catch (e) {
-        // 活跃的 DELETE journal 可在 enumerate/stat 之间合法消失。
+        // 活跃的 rollback journal 可在 enumerate/stat 之间合法消失。
         if (name.endsWith('-journal') && (e as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw e;
       }
@@ -179,7 +196,7 @@ class PrivatePath {
       if (!s.isFile() || s.nlink !== 1 || s.uid !== process.getuid?.() || (s.mode & 0o777) !== 0o600)
         fail('private_path');
       if (s.size > ALERT_SPOOL_LIMITS.journalBytes) fail('capacity');
-      const data = Buffer.alloc(ALERT_SPOOL_LIMITS.journalBytes + 1);
+      const data = journalBuffer();
       let length = 0;
       while (length < data.length) {
         const n = readSync(fd, data, length, data.length - length, length);
@@ -257,7 +274,10 @@ class Spool {
         one('PRAGMA page_size') !== 4096 ||
         one('PRAGMA max_page_count=1024') !== 1024 ||
         (one('PRAGMA page_count') as number) > 1024 ||
-        one('PRAGMA journal_mode=DELETE') !== 'delete' ||
+        // TRUNCATE 而不是 DELETE：热 journal 仍是同一份回滚页像，提交时把文件截成 0 再同步，
+        // 不 unlink。DELETE+EXTRA 每次提交还要再 fsync 一次目录。打开 journal 的那次目录同步省不掉，
+        // 省掉的是 unlink 和 EXTRA 这次，256 条真实 COMMIT 在慢盘上多出来的时间卡在这里（#3414）。
+        one('PRAGMA journal_mode=TRUNCATE') !== 'truncate' ||
         one('PRAGMA synchronous') !== 3 ||
         one('PRAGMA busy_timeout') !== 0 ||
         one('PRAGMA temp_store') !== 2 ||

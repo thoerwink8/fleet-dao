@@ -25,7 +25,7 @@ transfer 在 SQLite 读事务结束后才连接 PG。专用 PG 事务以 `INSERT
 
 每次打开前核现存文件长度、权限与身份；SQLite 读库可能先恢复 hot journal，故恢复前也核 journal 的固定字节界、原页数、页号、页/扇区尺寸和分段边界。过大、损坏、孤立 journal、零字节旧库均保留原件并返回 unknown。这里只做有限格式/上限预检，恢复、锁与事务仍全部由 SQLite 完成。没有自写 WAL、恢复器、VFS、TTL 清理或无限 tombstone。
 
-运行期界依赖固定 SQL 和核回的 `page_size=4096`、`max_page_count=1024`、`journal_mode=DELETE`、`synchronous=EXTRA`、`busy_timeout=0`、`temp_store=MEMORY`、`cache_spill=OFF`、`auto_vacuum=NONE`。没有 ATTACH、扩展、触发器、任意 SQL 或显式 SAVEPOINT。max_page_count 不能缩小已超额库，必须核实际返回值及 page_count，不能只执行 PRAGMA 就算设置成功。
+运行期界依赖固定 SQL 和核回的 `page_size=4096`、`max_page_count=1024`、`journal_mode=TRUNCATE`、`synchronous=EXTRA`、`busy_timeout=0`、`temp_store=MEMORY`、`cache_spill=OFF`、`auto_vacuum=NONE`。没有 ATTACH、扩展、触发器、任意 SQL 或显式 SAVEPOINT。max_page_count 不能缩小已超额库，必须核实际返回值及 page_count，不能只执行 PRAGMA 就算设置成功。事务中的回滚页像与 DELETE 模式相同；提交时把 journal 截成 0 再同步，不删除文件。DELETE 每次提交都 unlink，EXTRA 还要再同步一次目录。打开主 journal 时 VFS 仍会做一次目录同步，TRUNCATE 省掉的是 unlink 和 EXTRA 这次。256 次真实提交在慢盘上多出来的时间卡在这里。
 
 依据 SQLite 3.51.3 的 [pager 实现](https://github.com/sqlite/sqlite/blob/version-3.51.3/src/pager.c)：`pInJournal` 使每个原页像在受管事务中至多写一次；禁 spill 消除其额外 journal header，普通提交走不追加新 header 的同步路径。最大扇区 64 KiB，预算保守留两扇区余量。hot 恢复的 nRec=0 为零页，nRec=0xffffffff 才按剩余长度推算；首段原页数会用于截断，故必须在打开前限制。
 
@@ -35,4 +35,4 @@ transfer 在 SQLite 读事务结束后才连接 PG。专用 PG 事务以 `INSERT
 
 仅 Linux 非 root 服务 UID 可用。逐级 no-follow 打开目录并保持 FD/dev/ino/uid/mode；祖先仅 root/当前可信 UID 可写，叶目录当前 UID、0700，两个文件当前 UID、0600、单硬链接。SQLite 用字符串路径，并不因持 FD 而自动获得 dirfd 锚定；安全依据是祖先写权限边界及操作前后的身份复核。
 
-威胁模型排除恶意 root 和同一可信 UID。新叶同步父目录，新库同步文件和叶目录，DELETE/EXTRA 由 SQLite 保证事务同步和删除 journal 后的目录同步。强杀测试验证进程崩溃；不把它称为真实断电测试。断电耐久仍要求内核、文件系统和存储实际兑现 fsync。永久介质损坏、未来通知保留期/删除策略及生产装配均需独立验收。
+威胁模型排除恶意 root 和同一可信 UID。新叶、或主库文件还不存在时，同步父目录；主库已经在就不再同步（创建那次发生在建文件之前）。新库同步文件和叶目录。`synchronous=EXTRA` 仍由 SQLite 在写库前同步 journal、截断后同步 journal 文件，避免已提交事务被旧 journal 复活。强杀测试验证进程崩溃；不把它称为真实断电测试。断电耐久仍要求内核、文件系统和存储实际兑现 fsync。永久介质损坏、未来通知保留期/删除策略及生产装配均需独立验收。

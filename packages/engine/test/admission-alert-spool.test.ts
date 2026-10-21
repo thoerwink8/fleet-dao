@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import {
+import fs, {
   chmodSync,
   existsSync,
   linkSync,
@@ -14,6 +14,7 @@ import {
   truncateSync,
   writeFileSync,
 } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { createServer, type Socket } from 'node:net';
 import { homedir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
@@ -142,6 +143,84 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
     const three = counted(),
       four = counted();
     expect(four - three).toBe(1);
+  });
+  // #3414：DELETE+EXTRA 每次提交 unlink journal 再 fsync 目录。TRUNCATE 截断并同步同一文件，inode 不变。
+  // journal_mode 不写进库头，新连接默认仍报 delete；要看这次调用实际执行的 PRAGMA，以及提交后文件还在。
+  it('提交后 journal 留在原 inode 且长度为 0，本次连接使用 TRUNCATE 与 EXTRA', () => {
+    const exec = DatabaseSync.prototype.exec;
+    const prepare = DatabaseSync.prototype.prepare;
+    const seen: string[] = [];
+    DatabaseSync.prototype.exec = function (sql: string) {
+      seen.push(sql);
+      return exec.call(this, sql);
+    };
+    DatabaseSync.prototype.prepare = function (sql: string) {
+      seen.push(sql);
+      return prepare.call(this, sql);
+    };
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    } finally {
+      DatabaseSync.prototype.exec = exec;
+      DatabaseSync.prototype.prepare = prepare;
+    }
+    expect(seen).toContain('PRAGMA journal_mode=TRUNCATE');
+    expect(seen.some((sql) => sql.includes('PRAGMA synchronous=EXTRA'))).toBe(true);
+    const journal = join(path, 'pending.sqlite-journal');
+    const first = statSync(journal);
+    expect(first.size).toBe(0);
+    expect(first.mode & 0o777).toBe(0o600);
+    expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    const second = statSync(journal);
+    expect(second.dev).toBe(first.dev);
+    expect(second.ino).toBe(first.ino);
+    expect(second.size).toBe(0);
+  });
+  // #3414：TRUNCATE 留下 0 字节 journal，恢复预检每次都会打开它。不能按 journal 上限再清零一块缓冲。
+  it('journal 已在时再次记录不再按上限分配恢复缓冲', () => {
+    expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    const alloc = Buffer.alloc;
+    const allocUnsafe = Buffer.allocUnsafe;
+    let big = 0;
+    const note = (size: number) => {
+      if (size >= ALERT_SPOOL_LIMITS.journalBytes) big += 1;
+    };
+    Buffer.alloc = ((size: number, ...rest: unknown[]) => {
+      note(size);
+      return alloc(size, ...(rest as []));
+    }) as typeof Buffer.alloc;
+    Buffer.allocUnsafe = ((size: number) => {
+      note(size);
+      return allocUnsafe(size);
+    }) as typeof Buffer.allocUnsafe;
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+      expect(big).toBe(0);
+    } finally {
+      Buffer.alloc = alloc;
+      Buffer.allocUnsafe = allocUnsafe;
+    }
+  });
+  // #3414：父目录 fsync 只在新叶或主库还没有时做。钩子必须先看到创建时的同步，第二条才证明跳过的是真路径。
+  it('主库已在时再次记录不再 fsync 父目录', () => {
+    const original = fs.fsyncSync;
+    let calls = 0;
+    fs.fsyncSync = (fd: number) => {
+      calls += 1;
+      return original(fd);
+    };
+    syncBuiltinESMExports();
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+      expect(calls).toBeGreaterThan(0);
+      calls = 0;
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+      expect(calls).toBe(0);
+    } finally {
+      fs.fsyncSync = original;
+      syncBuiltinESMExports();
+    }
   });
   // #3414：quick_check 扫全库，原先打开时和写事务内各做一遍；只留事务内一遍。
   it('每次记录只做一遍 quick_check，且发生在写事务内', () => {
