@@ -4,6 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { localExec } from '../../src/real/exec.ts';
 import {
@@ -411,35 +412,65 @@ describe('机械解并主线冲突', { timeout: 60_000 }, () => {
   });
 });
 
-// 真的 drizzle-kit：对仓里已提交的迁移重新生成，逐字节一致；手加一行 UPDATE 就不一致
+// 真的 drizzle-kit：按schema shape选择生成迁移，不以SQL字节匹配挑正例；custom和手加SQL必须拒绝。
 describe('生成核对脚本（真 drizzle-kit）', { timeout: 120_000 }, () => {
   const dbDir = fileURLToPath(new URL('../../../db', import.meta.url));
   const journal = JSON.parse(readFileSync(join(dbDir, 'migrations/meta/_journal.json'), 'utf8')) as {
     entries: { idx: number; tag: string }[];
   };
-  const last = journal.entries.at(-1);
-  const before = journal.entries.at(-2);
-  if (!last || !before) throw new Error('仓里的迁移记录不够');
-  const arg = `${last.idx}:${last.tag}:${before.idx}`;
-  const run = (migDir: string) =>
-    runChild(process.execPath, ['--input-type=module', '-', arg], {
-      cwd: dbDir,
-      input: GENERATED_CHECK_SCRIPT,
-      env: { ...process.env, MIG_DIR: migDir },
-    });
+  const shape = (idx: number) => {
+    const {
+      id: _id,
+      prevId: _prevId,
+      ...rest
+    } = JSON.parse(
+      readFileSync(join(dbDir, `migrations/meta/${String(idx).padStart(4, '0')}_snapshot.json`), 'utf8'),
+    ) as Record<string, unknown>;
+    return rest;
+  };
+  const pairs = journal.entries.flatMap((entry, index) => {
+    const previous = journal.entries[index - 1];
+    return previous
+      ? [{ entry, previous, changed: !isDeepStrictEqual(shape(entry.idx), shape(previous.idx)) }]
+      : [];
+  });
+  const generated = pairs.filter((pair) => pair.changed).at(-1);
+  // 固定本次真实触发器custom作为负例，不假定未来最后一条custom一定含触发器。
+  const custom = pairs.find((pair) => pair.entry.tag === '0102_acceptance_candidate_triggers');
+  if (!generated || !custom) throw new Error('仓里须有schema变化的生成迁移和不变的custom迁移夹具');
+  const run = (migDir: string, pair = generated) =>
+    runChild(
+      process.execPath,
+      ['--input-type=module', '-', `${pair.entry.idx}:${pair.entry.tag}:${pair.previous.idx}`],
+      {
+        cwd: dbDir,
+        input: GENERATED_CHECK_SCRIPT,
+        env: { ...process.env, MIG_DIR: migDir },
+      },
+    );
 
-  it('已提交的最新迁移是 drizzle-kit 生成的：逐字节一致', () => {
+  it('按shape选最后一个schema变化迁移：真生成产物逐字节一致', () => {
     const r = run(join(dbDir, 'migrations'));
     expect(r.stdout).toContain('CHECKED');
     expect(r.stdout).not.toContain('MISMATCH');
   });
 
+  it('触发器custom快照没有schema变化，但真实SQL含触发器：核对器必须拒绝机械重生', () => {
+    expect(shape(custom.entry.idx)).toEqual(shape(custom.previous.idx));
+    expect(readFileSync(join(dbDir, 'migrations', `${custom.entry.tag}.sql`), 'utf8')).toContain(
+      'CREATE TRIGGER',
+    );
+    const r = run(join(dbDir, 'migrations'), custom);
+    expect(r.stdout).toContain('CHECKED');
+    expect(r.stdout).toContain(`MISMATCH ${custom.entry.tag}`);
+  });
+
   it('手加一行 UPDATE：判不一致', () => {
     const copy = join(root, 'migrations-copy');
     cpSync(join(dbDir, 'migrations'), copy, { recursive: true });
-    const file = join(copy, `${last.tag}.sql`);
+    const file = join(copy, `${generated.entry.tag}.sql`);
     writeFileSync(file, `${readFileSync(file, 'utf8')}--> statement-breakpoint\nUPDATE tasks SET id = id;\n`);
     const r = run(copy);
-    expect(r.stdout).toContain(`MISMATCH ${last.tag}`);
+    expect(r.stdout).toContain(`MISMATCH ${generated.entry.tag}`);
   });
 });

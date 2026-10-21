@@ -715,6 +715,13 @@
       "when": 1792622523483,
       "tag": "0101_acceptance_candidates",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1792624039335,
+      "tag": "0102_acceptance_candidate_triggers",
+      "breakpoints": true
     }
   ]
 }

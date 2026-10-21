@@ -2,7 +2,7 @@
 
 `acceptance_duties` 与 shared 的 `acceptanceDutyState` 是唯一状态依据。`acceptance_candidate_groups` 只派生同 task/PR 是否有 open，用于避免每轮读全部历史责任；它不能批准 settle、替代或关单。候选精确关联 task 的仓与同号 PR，保持完整责任上下文、原顺序、合并时间筛选和旧 done 任务。
 
-正式迁移同事务安装三个 statement transition trigger，insert/update/delete 的旧、新组全集按键序失效；target 换代也使旧源重新核算。批量写只为每个受影响组增加一次 revision。空组保留 clean/hasOpen=false，避免删除重建 revision 的 ABA；task 删除级联清派生组。原 duty 外键的删除限制保持。任意多事务可因各自原 duty 锁顺序发生 PostgreSQL deadlock，这会使整个写事务回滚，不能报告部分成功；刷新不持组锁等待 duty 锁。
+0101只保留Drizzle生成的schema/index SQL；三个 statement transition trigger由正规custom迁移0102安装。现有Drizzle Postgres迁移器将整批pending迁移放进同一个事务，0101与0102一起提交，对外没有表已就绪而触发器未安装的空窗。insert/update/delete 的旧、新组全集按键序失效；target 换代也使旧源重新核算。批量写只为每个受影响组增加一次 revision。空组保留 clean/hasOpen=false，避免删除重建 revision 的 ABA；task 删除级联清派生组。原 duty 外键的删除限制保持。任意多事务可因各自原 duty 锁顺序发生 PostgreSQL deadlock，这会使整个写事务回滚，不能报告部分成功；刷新不持组锁等待 duty 锁。
 
 迁移不播种控制行。第一个维护者幂等捕获 duty 主键高水位；此时 trigger 已覆盖迁移后的全部新写，包括迟到的低 id 行。历史只按 id 读键，每次最多 2048 行，cursor 持久化；登记组只 `ON CONFLICT DO NOTHING`，不覆盖并发新失效。失败或重启从 cursor 接着做，不能把第一页当索引完成。
 
