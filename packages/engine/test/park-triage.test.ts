@@ -1,6 +1,8 @@
 // 法国指挥官会话（#3294 第 2 片）：停了 15 分钟规则没解开的单交 commander 会话看，会话只交裁决，引擎白名单核了再执行。
 // 假依赖测任务本身：选哪些单、护栏（每次停下一次、每天上限、开关、没配模型报警）、白名单放行/拒绝、诊断文字带进提醒；
 // 真装配的开关、操作记录名下在 real/park-triage.test.ts。
+
+import type { AcceptanceDutyRow, CommanderAcceptanceTask } from '@fleet-dao/db';
 import { describe, expect, it, vi } from 'vitest';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
 import { allowedActions, defaultAction } from '../src/decisions/park-triage.ts';
@@ -35,6 +37,47 @@ const ROW: ParkedRetryRow = {
   workflowId: WF,
 };
 const REPO = { id: 'r1', owner: 'thoerwink8', name: 'fleet-dao', defaultBranch: 'main' } as IntakeRepo;
+
+const ACCEPTANCE_HEAD = 'a'.repeat(40);
+const ACCEPTANCE_MERGE = 'b'.repeat(40);
+const acceptanceDuty = (over: Partial<AcceptanceDutyRow> = {}): AcceptanceDutyRow =>
+  ({
+    id: 7,
+    taskId: 't-acceptance',
+    repo: 'thoerwink8/fleet-dao',
+    issueNumber: 3296,
+    prNumber: 3300,
+    head: ACCEPTANCE_HEAD,
+    generation: 1,
+    items: ['线上审计记录'],
+    source: 'cold_verify',
+    mergeCommit: ACCEPTANCE_MERGE,
+    mergedAt: new Date(NOW.getTime() - 60 * 60_000),
+    createdAt: NOW,
+    settledAt: null,
+    settledBy: null,
+    settleEvidence: null,
+    supersededAt: null,
+    supersededBy: null,
+    supersedeEvidence: null,
+    successorId: null,
+    successorGeneration: null,
+    supersedeCoverage: null,
+    ...over,
+  }) as AcceptanceDutyRow;
+const acceptanceTask = (duties: AcceptanceDutyRow[] = [acceptanceDuty()]): CommanderAcceptanceTask => ({
+  taskId: 't-acceptance',
+  owner: 'thoerwink8',
+  name: 'fleet-dao',
+  issueNumber: 3296,
+  title: '验收责任',
+  workflowId: 'task-thoerwink8-fleet-dao-3296',
+  prNumber: 3300,
+  head: ACCEPTANCE_HEAD,
+  mergedAt: new Date(NOW.getTime() - 60 * 60_000),
+  mergeCommit: ACCEPTANCE_MERGE,
+  duties,
+});
 
 const snap = (kind: ParkKind, over: Partial<NonNullable<ParkedSnapshot['park']>> = {}): ParkedSnapshot => ({
   phase: 'parked',
@@ -196,6 +239,134 @@ describe('哪些单交指挥官会话', () => {
     expect(prompt).toContain('没有 GitHub 令牌');
     expect(prompt).toContain('continue（继续）：不放行');
     expect(prompt).toContain('判成空转');
+  });
+});
+
+describe('合并后的验收责任交给指挥官', () => {
+  const acceptanceAnswer = (action: 'settle' | 'supersede' | 'leave', extra: Record<string, unknown> = {}) =>
+    fence({
+      summary: '按证据核过',
+      acceptanceVerdicts: [
+        {
+          issue: 3296,
+          dutyId: 7,
+          generation: 1,
+          prNumber: 3300,
+          head: ACCEPTANCE_HEAD,
+          action,
+          reason: '逐条核对后的结论',
+          ...extra,
+        },
+      ],
+    });
+  const acceptanceRig = (answer: string, over: Partial<ParkTriageDeps> = {}) =>
+    rig({
+      answer,
+      over: {
+        tasks: async () => [],
+        acceptanceTasks: async () => [acceptanceTask()],
+        claimAcceptance: vi.fn(async () => {}),
+        acceptanceAudit: vi.fn(async () => {}),
+        ...over,
+      },
+    });
+
+  it('结清全部责任后调用精确关单闸', async () => {
+    const settle = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+    const r = acceptanceRig(
+      acceptanceAnswer('settle', { evidence: 'GitHub 合并回执、check-runs 和主机日志均通过' }),
+      { settleAcceptance: settle, closeAcceptanceTask: close },
+    );
+    const out = await triageParkedTasks(r.deps);
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({ task: expect.objectContaining({ taskId: 't-acceptance' }) }),
+    );
+    expect(close).toHaveBeenCalledWith(expect.objectContaining({ taskId: 't-acceptance' }), ACCEPTANCE_MERGE);
+    expect(out.left).toEqual([]);
+    expect(r.notices[0]).toMatchObject({ level: 'daily' });
+  });
+
+  it('supersede 使用已结清终头和逐条 coverage，不另写一套收口逻辑', async () => {
+    const source = acceptanceDuty({ id: 7, head: 'c'.repeat(40), mergeCommit: null });
+    const target = acceptanceDuty({
+      id: 8,
+      head: ACCEPTANCE_HEAD,
+      settledAt: new Date(NOW.getTime() - 10 * 60_000),
+      settledBy: 'cold-verify',
+      settleEvidence: '最终头已验收',
+    });
+    const supersede = vi.fn(async () => {});
+    const r = rig({
+      answer: acceptanceAnswer('supersede', {
+        generation: 1,
+        head: 'c'.repeat(40),
+        evidence: '最终头已覆盖旧头',
+        target: { id: 8, generation: 1, prNumber: 3300, head: ACCEPTANCE_HEAD },
+        coverage: [{ source: '线上审计记录', target: '线上审计记录', basis: '最终头同项' }],
+      }),
+      over: {
+        tasks: async () => [],
+        acceptanceTasks: async () => [acceptanceTask([source, target])],
+        claimAcceptance: vi.fn(async () => {}),
+        acceptanceAudit: vi.fn(async () => {}),
+        supersedeAcceptance: supersede,
+        closeAcceptanceTask: vi.fn(async () => {}),
+      },
+    });
+    await triageParkedTasks(r.deps);
+    expect(supersede).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source,
+        target,
+        evidence: '最终头已覆盖旧头',
+        coverage: [{ source: '线上审计记录', target: '线上审计记录', basis: '最终头同项' }],
+      }),
+    );
+  });
+
+  it('留给创始人时不关单，只发 decision 级通知列出缺的证据', async () => {
+    const close = vi.fn(async () => {});
+    const r = acceptanceRig(
+      acceptanceAnswer('leave', { humanOnly: '只有 Contabo 控制台审计能提供这条证据' }),
+      { closeAcceptanceTask: close },
+    );
+    const out = await triageParkedTasks(r.deps);
+    expect(out).toMatchObject({ candidates: 1, claimed: 1 });
+    expect(r.sessions).toHaveLength(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(r.notices[0]).toMatchObject({ level: 'decision', reason: 'human-only' });
+    expect(r.notices[0]?.body).toContain('Contabo');
+  });
+
+  it('同一验收候选已有认领后不重复起会话，和停下任务共用全局上限', async () => {
+    const task = acceptanceTask();
+    const already = {
+      at: NOW,
+      action: COMMANDER_AUDIT_CLAIM,
+      after: {
+        workflowId: `acceptance:${task.taskId}:${task.prNumber}:${task.head}`,
+        parkSeq: 0,
+      },
+    };
+    const deduped = acceptanceRig(acceptanceAnswer('settle'), {
+      acceptanceTasks: async () => [task],
+      audits: async () => [already],
+    });
+    expect((await triageParkedTasks(deduped.deps)).candidates).toBe(0);
+    expect(deduped.sessions).toHaveLength(0);
+
+    const capped = acceptanceRig(acceptanceAnswer('settle'), {
+      audits: async () =>
+        Array.from({ length: PARK_TRIAGE_DAILY_CAP }, (_, i) => ({
+          at: new Date(NOW.getTime() - (i + 1) * 60_000),
+          action: COMMANDER_AUDIT_CLAIM,
+          after: { workflowId: `parked-${i}`, parkSeq: 1, ref: `acme/app#${i + 1}` },
+        })),
+    });
+    const cappedOut = await triageParkedTasks(capped.deps);
+    expect(cappedOut.claimed).toBe(0);
+    expect(capped.notices.find((n) => n.key === 'commander:daily-cap')?.body).toContain('验收责任 PR #3300');
   });
 });
 
