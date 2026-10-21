@@ -1,7 +1,9 @@
-// 发布构建时预载的预渲染探针（deploy/lib/prerender-trace.mjs，#3491）：
-// 发往本机的 http 请求打得出发出、连上、响应头、收完、关闭，以及进程结束时的 CPU 用量；
-// 超时被掐断的请求打得出「没拿到响应」和原因；只观察——不加 error 监听（没人接的错照样让进程崩）、不改响应、
-// 非本机请求和没发过请求的进程一个字都不多说。用法：node --test deploy/test/prerender-trace.test.mjs（run.sh 的 node-tests 里跑）。
+// 发布构建时预载的预渲染探针（deploy/lib/prerender-trace.mjs，#3491、#3494）：
+// 发往本机的 GET / 打得出发出、连上、响应头、收完、关闭，以及进程结束时的资源读数；
+// 超时被掐断的请求打得出「没拿到响应」和固定的出错类别；只观察——不加 error 监听（没人接的错照样让进程崩）、不改响应、
+// 非目标请求（别的路径、方法、查询串、非本机）和没发过请求的进程一个字都不多说；
+// 假的查询串、路径、片段、用户信息、方法、端口、error.message / code 标记一个都不能原样出现在输出里。
+// 用法：node --test deploy/test/prerender-trace.test.mjs（run.sh 的 node-tests 里跑）。
 import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -40,9 +42,9 @@ test('本机请求拿到 200：打发出、连上、响应头、响应收完、�
   assert.equal(r.code, 0, r.err);
   assert.equal(r.out, 'body=shell');
   const l = lines(r.err);
-  assert.match(l[0], /^\[prerender-trace\] #1 GET 127\.0\.0\.1:\d+\/ 发出，进程已跑 \d+ms$/);
+  assert.match(l[0], /^\[prerender-trace\] #1 GET \/ 发出，进程已跑 \d+ms$/);
   assert.ok(
-    l.some((x) => /#1 GET 127\.0\.0\.1:\d+\/ 拿到 socket \+\d+ms$/.test(x)),
+    l.some((x) => /#1 GET \/ 拿到 socket \+\d+ms$/.test(x)),
     l.join('\n'),
   );
   assert.ok(
@@ -64,11 +66,12 @@ test('本机请求拿到 200：打发出、连上、响应头、响应收完、�
   const end = l.at(-1);
   assert.match(
     end,
-    /进程结束：墙钟 \d+ms，自己用掉 CPU \d+ms，被抢占切走 \d+ 次，事件循环最长停 \d+ms，最大内存 \d+MB，系统 load [\d.]+\/[\d.]+\/[\d.]+，\d+ 核$/,
+    /进程结束（只是读数，单看比例不能当根因）：墙钟 \d+ms，自己用掉 CPU \d+ms，非自愿上下文切换 \d+ 次，事件循环最长停 \d+ms，最大内存 \d+MB，系统 load [\d.]+\/[\d.]+\/[\d.]+，\d+ 核$/,
   );
+  assert.ok(!/抢占/.test(r.err), '读数不断言被抢占');
 });
 
-test('对端不回、调用方自己超时掐断：关闭那行写没拿到响应和原因，调用方看到的错不变', () => {
+test('对端不回、调用方自己超时掐断：关闭那行写没拿到响应和固定的出错类别，调用方看到的错不变', () => {
   const r = run(`
     import http from 'node:http';
     const server = http.createServer(() => {}); // 收到不回
@@ -76,9 +79,9 @@ test('对端不回、调用方自己超时掐断：关闭那行写没拿到响�
     const { port } = server.address();
     const signal = AbortSignal.timeout(300);
     const seen = await new Promise((ok) => {
-      const req = http.request({ hostname: '127.0.0.1', port, path: '/slow', agent: false }, () => ok('response?'));
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/', agent: false }, () => ok('response?'));
       req.on('error', (e) => ok('error=' + e.message));
-      signal.addEventListener('abort', () => req.destroy(new Error('The operation was aborted due to timeout')), { once: true });
+      signal.addEventListener('abort', () => req.destroy(signal.reason), { once: true });
       req.end();
     });
     process.stdout.write(seen);
@@ -90,8 +93,85 @@ test('对端不回、调用方自己超时掐断：关闭那行写没拿到响�
   const l = lines(r.err);
   const closed = l.find((x) => /#1 关闭 /.test(x));
   assert.ok(closed, l.join('\n'));
-  assert.match(closed, /，没拿到响应，出错：The operation was aborted due to timeout$/);
+  assert.match(closed, /，没拿到响应，出错类别：TimeoutError$/);
   assert.ok(!l.some((x) => /响应头/.test(x)), '没响应头就不能打响应头');
+  assert.ok(!r.err.includes('The operation was aborted'), 'error.message 不进输出');
+});
+
+test('假标记不外泄：query / path / fragment / 用户信息 / 方法 / 端口 / error.message / code / name 都不原样出现，原错照传', () => {
+  const MARKERS = [
+    'SYNTHETIC_QUERY_MARKER',
+    'SYNTHETIC_PATH_MARKER',
+    'SYNTHETIC_FRAGMENT_MARKER',
+    'SYNTHETIC_AUTH_MARKER',
+    'SYNTHETIC_METHOD_MARKER',
+    'SYNTHETIC_PORT_MARKER',
+    'SYNTHETIC_ERROR_MARKER',
+    'SYNTHETIC_CODE_MARKER',
+    'SYNTHETIC_NAME_MARKER',
+  ];
+  const r = run(`
+    import http from 'node:http';
+    const server = http.createServer((_, res) => res.end('x'));
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    const { port } = server.address();
+    const done = (req) =>
+      new Promise((ok) => {
+        req.on('error', (e) => ok('err:' + e.message));
+        req.on('response', (res) => { res.resume(); res.on('end', () => ok('res')); });
+        req.end();
+      });
+    const results = [];
+    // 目标请求带上假的用户信息和头：探针不能把它们打出来
+    results.push(await done(http.request({ hostname: '127.0.0.1', port, path: '/', auth: 'SYNTHETIC_AUTH_MARKER:x', headers: { 'x-m': 'SYNTHETIC_AUTH_MARKER' }, agent: false })));
+    // 目标请求被自己掐断，错误带假的 message / code / name：调用方拿到的原错不变
+    const bad = http.request({ hostname: '127.0.0.1', port, path: '/', agent: false });
+    const err = Object.assign(new Error('SYNTHETIC_ERROR_MARKER'), { code: 'SYNTHETIC_CODE_MARKER', name: 'SYNTHETIC_NAME_MARKER' });
+    const pending = done(bad);
+    bad.destroy(err);
+    results.push(await pending);
+    // 非目标：带查询串 / 片段 / 别的路径 / 别的方法 / 假端口字符串的请求，一个字都不打
+    results.push(await done(http.request({ hostname: '127.0.0.1', port, path: '/?token=SYNTHETIC_QUERY_MARKER', agent: false })));
+    results.push(await done(http.request({ hostname: '127.0.0.1', port, path: '/SYNTHETIC_PATH_MARKER#SYNTHETIC_FRAGMENT_MARKER', agent: false })));
+    results.push(await done(http.request({ hostname: '127.0.0.1', port, path: '/', method: 'POST', agent: false })));
+    const weird = http.request({ hostname: '127.0.0.1', port, path: '/', method: 'SYNTHETIC_METHOD_MARKER', agent: false });
+    weird.on('error', () => {});
+    weird.destroy();
+    results.push('weird');
+    process.stdout.write(results.join('|'));
+    server.close();
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, 'res|err:SYNTHETIC_ERROR_MARKER|res|res|res|weird', '请求、响应、原错都不被探针改动');
+  for (const m of MARKERS) assert.ok(!r.err.includes(m), `${m} 不能出现在输出里：\n${r.err}`);
+  const l = lines(r.err);
+  assert.ok(
+    l.some((x) => /#1 响应头 200 /.test(x)),
+    '固定的 GET / 仍可观察：\n' + l.join('\n'),
+  );
+  assert.ok(
+    l.some((x) => /#2 关闭 .*，没拿到响应，出错类别：其他$/.test(x)),
+    '任意 code / name 只归到固定的「其他」：\n' + l.join('\n'),
+  );
+  assert.ok(!l.some((x) => /#3 /.test(x)), '非目标请求不占序号、不打字：\n' + l.join('\n'));
+});
+
+test('目标请求的端口是怪字符串：端口不进输出，探针不改 http.request 本来的行为', () => {
+  const r = run(`
+    import http from 'node:http';
+    let how = 'no-throw';
+    try {
+      const req = http.request({ hostname: '127.0.0.1', port: 'SYNTHETIC_PORT_MARKER', path: '/', agent: false });
+      req.on('error', () => {});
+      req.destroy();
+    } catch (e) {
+      how = 'threw:' + (e.code ?? 'x');
+    }
+    process.stdout.write(how);
+  `);
+  assert.equal(r.code, 0, r.err);
+  assert.ok(!r.err.includes('SYNTHETIC_PORT_MARKER'), r.err);
+  assert.ok(!lines(r.err).some((x) => /SYNTHETIC|:\d+\//.test(x)), r.err);
 });
 
 test('不吞错：没人接 error 的请求（连被拒）照样让进程带着原错崩，探针没替它接', () => {

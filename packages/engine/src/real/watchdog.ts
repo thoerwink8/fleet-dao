@@ -17,11 +17,13 @@ import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
   alertByKey,
   clearHealthzBadSince,
+  commanderAuditRows,
   type Db,
   dailyBriefStatus,
   feishuPushFacts,
   finishScheduleRun,
   latestAlertByPrefix,
+  listCommanderAcceptanceTasks,
   listCommanderStalledTasks,
   listRunningEngineTasks,
   listStalledEngineTasks,
@@ -45,6 +47,7 @@ import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { type HealthzProbe, parseHealthzResponse, type ReleaseFacts } from '../jobs/release-watch.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { WATCHDOG_ACTOR, type WatchdogDeps } from '../jobs/watchdog.ts';
+import type { CommanderWatchTask } from '../jobs/watchdog-commander.ts';
 import { taskContinueSignal, taskStatusQuery } from '../task-contract.ts';
 import { carpoolPoolsHeldReason } from './pool-holds.ts';
 import { isWorkflowGone } from './route-wake.ts';
@@ -316,7 +319,29 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
           }
         : {}),
       commander: {
-        tasks: () => listCommanderStalledTasks(w.db),
+        async tasks(at): Promise<CommanderWatchTask[]> {
+          const stalled = await listCommanderStalledTasks(w.db);
+          const acceptance = await listCommanderAcceptanceTasks(w.db, new Date(at.getTime() - 30 * 60_000));
+          const audits = await commanderAuditRows(w.db, new Date(0));
+          const tally = new Map<string, number>();
+          for (const audit of audits) {
+            if (audit.action !== 'commander.claim' && audit.action !== 'commander.retry') continue;
+            const after = audit.after;
+            if (typeof after !== 'object' || after === null) continue;
+            const value = after as { workflowId?: unknown; parkSeq?: unknown };
+            if (typeof value.workflowId !== 'string' || value.parkSeq !== 0) continue;
+            const key = value.workflowId;
+            tally.set(key, (tally.get(key) ?? 0) + (audit.action === 'commander.claim' ? 1 : -1));
+          }
+          const acceptanceTasks: CommanderWatchTask[] = acceptance.map((task) => ({
+            ...task,
+            kind: 'acceptance' as const,
+            commanderSeen: (tally.get(`acceptance:${task.taskId}:${task.prNumber}:${task.head}`) ?? 0) > 0,
+            stalledAt: task.mergedAt,
+            retry: null,
+          }));
+          return [...stalled, ...acceptanceTasks];
+        },
       },
       // 拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉。读不到照抛（不当成没暂停）。
       pausedJobs: async () => {

@@ -45,6 +45,7 @@ export type GroomGitHub = Pick<
   | 'commentIssue'
   | 'addIssueLabel'
   | 'appendIssueBody'
+  | 'readIssueState'
   | 'fetchMainline'
   | 'bundleCommits'
 > & {
