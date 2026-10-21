@@ -222,6 +222,47 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
       syncBuiltinESMExports();
     }
   });
+  // #3414：每次 record 都新开库，打开和 PRAGMA 在 COMMIT 的 fsync 之外，256 次近上限会叠上去。
+  // journal 仍是 0 字节原文件时复用连接：第二次不再跑打开期 PRAGMA，但这次插入仍有真实 COMMIT。
+  it('同一进程连续记录复用连接，第二次不再跑打开期 PRAGMA，仍真实 COMMIT', () => {
+    expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    const exec = DatabaseSync.prototype.exec;
+    const seen: string[] = [];
+    DatabaseSync.prototype.exec = function (sql: string) {
+      seen.push(sql);
+      return exec.call(this, sql);
+    };
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    } finally {
+      DatabaseSync.prototype.exec = exec;
+    }
+    expect(seen).toContain('COMMIT');
+    expect(seen.some((sql) => sql.includes('journal_mode'))).toBe(false);
+    expect(seen.filter((sql) => sql === 'BEGIN IMMEDIATE')).toEqual(['BEGIN IMMEDIATE']);
+  });
+  // #3414：复用连接时若 journal 已不是 0 字节原文件，不能让旧连接先执行 SQL（那会在预检前做恢复）。
+  it('journal 被换掉后旧连接不执行 SQL，原主库和 journal 都保留', () => {
+    expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    const dbPath = join(path, 'pending.sqlite');
+    const before = readFileSync(dbPath);
+    const journal = Buffer.from('keep-hot-journal');
+    writeFileSync(`${dbPath}-journal`, journal, { mode: 0o600 });
+    const exec = DatabaseSync.prototype.exec;
+    let calls = 0;
+    DatabaseSync.prototype.exec = function (sql: string) {
+      calls += 1;
+      return exec.call(this, sql);
+    };
+    try {
+      expect(recordAdmissionAlert(path, observation())).toEqual({ kind: 'unknown', code: 'corrupt' });
+    } finally {
+      DatabaseSync.prototype.exec = exec;
+    }
+    expect(calls).toBe(0);
+    expect(readFileSync(dbPath)).toEqual(before);
+    expect(readFileSync(`${dbPath}-journal`)).toEqual(journal);
+  });
   // #3414：quick_check 扫全库，原先打开时和写事务内各做一遍；只留事务内一遍。
   it('每次记录只做一遍 quick_check，且发生在写事务内', () => {
     for (let n = 0; n < 3; n++) expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');

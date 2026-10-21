@@ -6,7 +6,7 @@
 
 全局事件由 `version/category/namespace/workflowId/runId` 定义，首个错误码不属于全局身份。SQLite 保存规范 JSON、身份 SHA-256 key 与完整记录 SHA-256；同身份重试保留已存首码。记录已从本地移交后，允许以新首码重建本地记录，但 PG 仍归并原通知，保留通知所有字段和 delivery。
 
-`spooled` 只表示 SQLite 事务已确认提交、连接和子进程已收尾；`transferred` 只表示 PG 接手该责任，不能证明渠道送达。`empty` 表示已校验的库没有 pending；所有读取、权限、容量、退出或回执不确定均为带封闭错误码的 `unknown`。成功帧不能替代真实退出。
+`spooled` 只表示 SQLite 事务已确认提交、写锁已放开。同一进程可以留着这条空闲连接给下一条记录用；sink 的子进程在回执写出后退出，连接随之关掉。`transferred` 只表示 PG 接手该责任，不能证明渠道送达。`empty` 表示已校验的库没有 pending；所有读取、权限、容量、退出或回执不确定均为带封闭错误码的 `unknown`。成功帧不能替代真实退出。
 
 record 和 transfer 各一个子进程槽，总计最多两个，无队列。单操作总期限最多十秒，最后一秒用于 SIGKILL 和退出/管道收尾；不能确认收尾时返回 `cleanup_pending` 并继续占槽。调用方只能缩短期限；未来接线不得在已经用尽的整体准入预算后重新赠送十秒。
 
@@ -25,7 +25,7 @@ transfer 在 SQLite 读事务结束后才连接 PG。专用 PG 事务以 `INSERT
 
 每次打开前核现存文件长度、权限与身份；SQLite 读库可能先恢复 hot journal，故恢复前也核 journal 的固定字节界、原页数、页号、页/扇区尺寸和分段边界。过大、损坏、孤立 journal、零字节旧库均保留原件并返回 unknown。这里只做有限格式/上限预检，恢复、锁与事务仍全部由 SQLite 完成。没有自写 WAL、恢复器、VFS、TTL 清理或无限 tombstone。
 
-运行期界依赖固定 SQL 和核回的 `page_size=4096`、`max_page_count=1024`、`journal_mode=TRUNCATE`、`synchronous=EXTRA`、`busy_timeout=0`、`temp_store=MEMORY`、`cache_spill=OFF`、`auto_vacuum=NONE`。没有 ATTACH、扩展、触发器、任意 SQL 或显式 SAVEPOINT。max_page_count 不能缩小已超额库，必须核实际返回值及 page_count，不能只执行 PRAGMA 就算设置成功。事务中的回滚页像与 DELETE 模式相同；提交时把 journal 截成 0 再同步，不删除文件。DELETE 每次提交都 unlink，EXTRA 还要再同步一次目录。打开主 journal 时 VFS 仍会做一次目录同步，TRUNCATE 省掉的是 unlink 和 EXTRA 这次。256 次真实提交在慢盘上多出来的时间卡在这里。
+运行期界依赖固定 SQL 和核回的 `page_size=4096`、`max_page_count=1024`、`journal_mode=TRUNCATE`、`synchronous=EXTRA`、`busy_timeout=0`、`temp_store=MEMORY`、`cache_spill=OFF`、`auto_vacuum=NONE`。没有 ATTACH、扩展、触发器、任意 SQL 或显式 SAVEPOINT。max_page_count 不能缩小已超额库，必须核实际返回值及 page_count，不能只执行 PRAGMA 就算设置成功。事务中的回滚页像与 DELETE 模式相同；提交时把 journal 截成 0 再同步，不删除文件。DELETE 每次提交都 unlink，EXTRA 还要再同步一次目录。打开主 journal 时 VFS 仍会做一次目录同步，TRUNCATE 省掉的是 unlink 和 EXTRA 这次。256 次真实提交在慢盘上多出来的时间卡在这里。同一进程里，journal 仍是这条连接留下的 0 字节原文件、并且页数没有被别的连接撑过上限时，下一条记录复用已打开的连接，不再重复打开和 PRAGMA；每次提交后锁就放开。热 journal、换 inode、预检不通过或页数超限时先关掉这条连接，不让它在预检之前做恢复。
 
 依据 SQLite 3.51.3 的 [pager 实现](https://github.com/sqlite/sqlite/blob/version-3.51.3/src/pager.c)：`pInJournal` 使每个原页像在受管事务中至多写一次；禁 spill 消除其额外 journal header，普通提交走不追加新 header 的同步路径。最大扇区 64 KiB，预算保守留两扇区余量。hot 恢复的 nRec=0 为零页，nRec=0xffffffff 才按剩余长度推算；首段原页数会用于截断，故必须在打开前限制。
 

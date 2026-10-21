@@ -292,6 +292,7 @@ class Spool {
         d.exec('COMMIT');
         this.path.sync();
       }
+      this.rememberJournal();
       // 打开时只核结构；逐行解码只在随后的事务内做一次。两处都全量解码会让每次调用付两倍 O(行数)，
       // 256 行近上限时这部分占同步耗时的一半（#3414）。事务外的解码挡不住锁前的变化，不是安全界。
       this.validate(false);
@@ -363,6 +364,7 @@ class Spool {
           fail('corrupt');
         d.exec('COMMIT');
         this.path.check();
+        this.rememberJournal();
         return { kind: 'spooled', key, recordHash: row.record_hash as string };
       }
       const total = d
@@ -379,6 +381,7 @@ class Spool {
       d.prepare('INSERT INTO pending(key,payload,record_hash) VALUES(?,?,?)').run(key, payload, recordHash);
       d.exec('COMMIT');
       this.path.check();
+      this.rememberJournal();
       return { kind: 'spooled', key, recordHash };
     } catch (e) {
       try {
@@ -465,17 +468,82 @@ class Spool {
       this.path.close();
     }
   }
+  // 只在 journal 仍是本连接留下的 0 字节文件时复用。热 journal、换过 inode，或预检不通过，调用方必须先关掉，
+  // 不能让这条已经打开的连接先于预检去做恢复（#3414）。
+  prepareReuse(): 'reuse' | 'reopen' {
+    try {
+      this.path.checkRecoveryBounds();
+    } catch (e) {
+      // 预检已经定性的损坏/容量/路径不能再打开，否则 SQLite 会先恢复或改写。
+      // 认不出的 IO 交给重新打开，沿用打开路径上的错误码。
+      if (e instanceof SpoolError) throw e;
+      return 'reopen';
+    }
+    // 身份不符就还没碰 SQL。热 journal 不能先被这条旧连接恢复（#3414）。
+    let now: Stats;
+    try {
+      now = lstatSync(join(this.path.path, `${NAME}-journal`));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 'reopen';
+      throw e;
+    }
+    const id = this.journalIdentity;
+    if (!id || now.size !== 0 || !now.isFile() || now.dev !== id.dev || now.ino !== id.ino) return 'reopen';
+    const d = this.db as DatabaseSync;
+    // 别的连接可以把库撑过打开时设下的 max_page_count；SQLite 会把本连接的上限抬到实际页数。
+    // 这里重新核，不过就关掉，不带着抬高的上限继续写（#3414）。
+    const max = Object.values(d.prepare('PRAGMA max_page_count=1024').get() ?? {})[0];
+    const pages = Object.values(d.prepare('PRAGMA page_count').get() ?? {})[0];
+    if (max !== 1024 || (pages as number) > 1024) fail('capacity');
+    return 'reuse';
+  }
+  private journalIdentity: { dev: number; ino: number } | undefined;
+  private rememberJournal(): void {
+    try {
+      const now = lstatSync(join(this.path.path, `${NAME}-journal`));
+      this.journalIdentity = now.isFile() && now.size === 0 ? { dev: now.dev, ino: now.ino } : undefined;
+    } catch {
+      this.journalIdentity = undefined;
+    }
+  }
 }
 
-export function recordAdmissionAlert(path: string, input: AdmissionAlertObservation): AlertOutcome {
-  let spool: Spool | undefined;
+// 同一进程连续 record 时，打开库和 PRAGMA 不在 COMMIT 里，256 次却和 fsync 叠在一起（#3414）。
+// 只复用「journal 仍是本连接留下的 0 字节文件」的连接；锁在每次 COMMIT 后就放开，不独占到进程退出。
+let cached: { path: string; spool: Spool } | undefined;
+function dropCached(): void {
+  const current = cached;
+  cached = undefined;
+  if (!current) return;
   try {
-    spool = new Spool(path);
-    return spool.record(input);
+    current.spool.close();
+  } catch {
+    /* 关掉坏连接失败不能盖住原来的错误码 */
+  }
+}
+function openSpool(path: string): Spool {
+  if (cached && cached.path !== path) dropCached();
+  if (cached) {
+    let mode: 'reuse' | 'reopen';
+    try {
+      mode = cached.spool.prepareReuse();
+    } catch (e) {
+      dropCached();
+      throw e;
+    }
+    if (mode === 'reuse') return cached.spool;
+    dropCached();
+  }
+  const spool = new Spool(path);
+  cached = { path, spool };
+  return spool;
+}
+export function recordAdmissionAlert(path: string, input: AdmissionAlertObservation): AlertOutcome {
+  try {
+    return openSpool(path).record(input);
   } catch (e) {
+    dropCached();
     return { kind: 'unknown', code: errorCode(e) };
-  } finally {
-    spool?.close();
   }
 }
 export async function transferOneAdmissionAlert(
@@ -483,6 +551,7 @@ export async function transferOneAdmissionAlert(
   databaseUrl: string,
   deadlineAt: number,
 ): Promise<AlertOutcome> {
+  dropCached();
   let spool: Spool | undefined;
   try {
     spool = new Spool(path);

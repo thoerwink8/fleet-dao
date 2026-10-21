@@ -84,7 +84,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - `real/admission-alert-process.ts` 提供封闭的 `record` / `transferOne`，各持一个独立进程槽；尚未接入 worker、workflow、定时任务或终态释放。调用方传入父进程单调绝对期限，只能缩短单次十秒上限，最后一秒留收尾；退出或管道未核清时槽继续占用。
 - 私有 pending 使用 Node 的 experimental `node:sqlite`，仅 Linux 普通服务用户，路径祖先只允许 root/可信服务 UID 写，叶目录 0700、文件 0600。恶意 root/同一可信 UID 不属于权限隔离范围；不把 SQLite 字符串路径冒称 dirfd 锚定。
-- `real/admission-alert-spool.ts` 固定 TRUNCATE/EXTRA、4096 字节页、1024 页、关闭 spill/auto-vacuum，最多 256 条/1MiB payload。已有超额、错 schema、损坏 journal 或身份不明均保留原件并返回未知；不删库重建。移交先核 PG 真实 COMMIT 与 close，再在同一 transfer child 内按 key/hash 删除 pending，没有 caller ACK 接口。文件字节界和私有路径/耐久边界见 `docs/design/admission-alert-spool.md`。
+- `real/admission-alert-spool.ts` 固定 TRUNCATE/EXTRA、4096 字节页、1024 页、关闭 spill/auto-vacuum，最多 256 条/1MiB payload。同一进程在 journal 仍是这条连接留下的 0 字节原文件、且页数没被撑过上限时复用连接，不再重复打开；热 journal、换 inode 或预检不通过先关掉，不在预检前恢复。已有超额、错 schema、损坏 journal 或身份不明均保留原件并返回未知；不删库重建。移交先核 PG 真实 COMMIT 与 close，再在同一 transfer child 内按 key/hash 删除 pending，没有 caller ACK 接口。文件字节界和私有路径/耐久边界见 `docs/design/admission-alert-spool.md`。
 - 全局 identity 不含首诊断码；同 run 换码重建仍归并原通知。通知持久化不代表飞书送达，新前缀未加入推送白名单。本能力不接受 Start 正文、token 或任意 SQL。
 - `test/admission-alert-spool.test.ts` / `test/admission-alert-crash.test.ts` 必须用真实 Linux 普通用户；Windows 本机入口按 `local-vitest.ts` 转交明确配置的 runner。`test/admission-alert.real-pg.test.ts` 在真实 PG 台使用随机隔离库验证移交，缺配置的 CI 明确报错。
 
