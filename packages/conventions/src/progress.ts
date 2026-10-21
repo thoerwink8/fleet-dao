@@ -1,7 +1,7 @@
-// 置顶单 #1055「进度与创始人引导」现在只管两件事（决定 0093：创始人引导搬进仓里 docs/directives/，见 ./directives.ts）：
+// 置顶单 #1055「进度与创始人引导」现在只管两件事（决定 0097 #2169：创始人引导搬进仓里 docs/directives/，见 ./directives.ts）：
 // - 进度流水：pnpm progress note 贴一条【进度】评论；pnpm progress read 读最近几条。
 // - 外面来的引导的收件箱：驾驶舱「要你拍」拍完（packages/api 的 decision-handoff.ts，法国上没有仓的写权限）仍往这里贴
-//   【创始人引导·待处理】评论。开会话钩子把它和仓里的待处理引导一起列；pnpm progress directive --from-inbox <评论号> 把它搬进仓（编号沿用评论号、挂一张单），
+//   【创始人引导·待处理】评论。开会话钩子把它和仓里的待处理引导一起列；pnpm progress directive --kind <类> --from-inbox <评论号>：ai 把它搬进仓（编号沿用评论号、挂一张单），其余类别不写文件、评论改成【创始人引导·已处理】写明去处（决定 0111），
 //   评论改成【创始人引导·已迁】并写上搬到哪。旧的引导（10-14 以前的 94 条）已整批搬进仓，这里留作只读归档。
 // 读的上限：不再从第一页读全量（原来读满 2000 条就报错，约 11-01 会撞）。收件箱只看最近 INBOX_DAYS 天里改过的评论
 // （GitHub 的 since 按更新时间筛；待处理的收件超过这么久没人动，开会话钩子早在 24 小时时就交给创始人拍了）；进度流水只读最后一页。
@@ -23,10 +23,38 @@ export const ownerLine = (owner: string): string => `〔主：${owner}〕`;
 /** 收件箱看最近多少天改过的评论 */
 export const INBOX_DAYS = 30;
 
+/** 记引导前先判的类别：ai 才记引导，其余各有去处（决定 0111） */
+export const DIRECTIVE_KINDS = ['ai', 'product', 'task', 'once', 'ops'] as const;
+export type DirectiveKind = (typeof DIRECTIVE_KINDS)[number];
+export const isDirectiveKind = (v: unknown): v is DirectiveKind =>
+  typeof v === 'string' && (DIRECTIVE_KINDS as readonly string[]).includes(v);
+
+/** 判法原文。不带 --kind、值认不出时打出来；ai 记成功时也打一遍。 */
+export const KIND_JUDGE =
+  '记之前先两问：①讲的是 AI 的做法（规矩、偏好、派活、用哪个模型/CLI），还是东西该长什么样、做成什么样（驾驶舱、引擎这些 fleet-dao 自己的产品也算）；②只管这一次，还是以后都管。' +
+  '只这一次 → once；要去做的一件活 → task；以后都管的 AI 做法 → ai；产品该长什么样 → product；额度、断电、人不在这类一时调整 → ops。' +
+  '他回答你提的问题时，答案写进你正在做的那件活，不另记。';
+
+/** 非 ai 类别该去哪。对外仓的 product 不提示贴原话。 */
+export function kindDestination(kind: Exclude<DirectiveKind, 'ai'>, external: boolean): string {
+  switch (kind) {
+    case 'product':
+      return external
+        ? '那个产品的设计文档或决定记录（照那个仓的记法写成结论，原话只进私有处），跟着正在干的 PR；没有在干的活，就单开一个只改文档的 PR'
+        : '那个产品的设计文档或决定记录，跟着正在干的 PR；没有在干的活，就单开一个只改文档的 PR';
+    case 'task':
+      return '单：pnpm issue:new 开单，原话写进单里';
+    case 'once':
+      return '不记：照做就行（决定 0013）';
+    case 'ops':
+      return 'docs/PROGRESS.md「## 生效中的临时调整」';
+  }
+}
+
 export const PROGRESS_USAGE =
-  '用法：pnpm progress quotes:flush｜pnpm progress note "<一句话进度>"｜pnpm progress directive ["<创始人原话>" --at "<时间>"] [--meaning "<可公开的意思>"] [--stdin] [--owner <会话目录名|无主>] [--issue <单号>]' +
+  '用法：pnpm progress quotes:flush｜pnpm progress note "<一句话进度>"｜pnpm progress directive --kind <ai|product|task|once|ops> ["<创始人原话>" --at "<时间>"] [--meaning "<可公开的意思>"] [--stdin] [--owner <会话目录名|无主>] [--issue <单号>]' +
   '（不给原话就从 prompt-log 取本会话他最近一句；不给 --issue 就顺手开一张单，引导办没办完看这张单开着还是关了）｜' +
-  'pnpm progress directive --from-inbox <收件箱评论号> [--issue <单号>]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
+  'pnpm progress directive --kind <类> --from-inbox <收件箱评论号> [--issue <单号>]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
 
 /** 参数不对、评论不是该办的那种：拒绝。入口退出码 1。 */
 export class ProgressRefused extends Error {
@@ -199,6 +227,26 @@ export async function markMigrated(c: ProgressComment, where: string, deps: Prog
   );
   if (after.kind !== 'migrated')
     throw new ProgressUnchecked(`改完回读评论 ${c.id}：还不是「已迁」，去看一眼 ${after.url}。`);
+}
+
+/** 判成不该记引导的类别时，收件箱里的那条评论：第一行换成【创始人引导·已处理】，下面写记在哪。改完回读核对。 */
+export async function markHandled(c: ProgressComment, where: string, deps: ProgressDeps): Promise<void> {
+  const rest = c.body.trimStart().slice(c.head.length);
+  const next = `${DONE_TAG}${c.head.slice(PENDING_TAG.length)}${rest}\n\n记在 ${where}（判成不进创始人引导，决定 0111）`;
+  const res = await deps.gh([
+    'api',
+    '-X',
+    'PATCH',
+    `repos/{owner}/{repo}/issues/comments/${c.id}`,
+    '-f',
+    `body=${next}`,
+  ]);
+  if (res.code !== 0) throw new ProgressUnchecked(`gh 改评论 ${c.id} 报错：${detail(res)}。`);
+  const after = parseComment(
+    await readJson(deps.gh, ['api', `repos/{owner}/{repo}/issues/comments/${c.id}`], `改完回读评论 ${c.id}`),
+  );
+  if (after.kind !== 'done')
+    throw new ProgressUnchecked(`改完回读评论 ${c.id}：还不是「已处理」，去看一眼 ${after.url}。`);
 }
 
 // —— 内部 ——
