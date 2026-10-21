@@ -33,6 +33,8 @@ transfer 在 SQLite 读事务结束后才连接 PG。专用 PG 事务以 `INSERT
 
 `recordAdmissionAlert` 每次新开连接。已提交行的规范解码如果每次整表重做，256 条近上界记录会按行数二次放大，和 256 次真实 EXTRA 提交叠在一起会越过该测试原来的 15 秒。写锁内若暂存目录、主库 dev/ino、字节长度和文件头变更计数（偏移 24）与本进程上次提交后在锁内记下的一致，就跳过逐行解码；权限、schema、`quick_check` 和容量 SQL 仍每次做。同一连接的 `data_version` 在刷新快照时变了，说明别的连接已提交，快照作废。对不上、读不到或中途失败都整表重核。这不减少真实 COMMIT，也不放宽 EXTRA 或固定字节界。
 
+剩下的是提交本身。strace 实测 DELETE/EXTRA 下每次 COMMIT 恰好 5 次 fsync，全由 SQLite 发出：journal 内容、新 journal 的目录项、journal 头、主库、删 journal 后的目录。256 条就是约 1285 次 fsync，COMMIT 墙钟基本等于 fsync 等待（一次实测 fsync 合计 31.0 秒，COMMIT 墙钟 32.6 秒），本进程 CPU 只占约十分之一。所以多个会话共用同一块盘时，单靠提交就可能超过 15 秒。不能为此改 journal 模式、降同步级别、合并提交或放宽限时。测试失败时打印 `SPOOL_COMMIT_DIAG`，里面拆开 COMMIT 内外耗时、COMMIT 墙钟与 CPU、单次最慢提交和 1 分钟负载，用来区分是解码回退还是等盘。
+
 文件头只经打开 SQLite 前固定主库身份时留下的那个 fd 读，这个 fd 等 SQLite 关库后才关。Linux 上关掉同一文件的任何 fd，会释放本进程在该文件上的全部 POSIX 锁；事务里另开另关主库会放掉 SQLite 的 RESERVED/EXCLUSIVE 锁，别的进程就能拿到写锁，把活 journal 当 hot journal 回滚删除，本进程的 COMMIT 随后报 `SQLITE_IOERR_DELETE_NOENT`。
 
 ## 私有路径与耐久边界

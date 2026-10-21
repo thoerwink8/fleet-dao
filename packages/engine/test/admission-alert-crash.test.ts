@@ -11,7 +11,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, loadavg } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -223,6 +223,12 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     const originalExec = DatabaseSync.prototype.exec;
     const originalPrepare = DatabaseSync.prototype.prepare;
     const started = performance.now();
+    // 1 分钟负载只作宿主争用旁证；读不到（非数字）记 unknown。
+    const load = () => {
+      const value = loadavg()[0];
+      return typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 100) / 100 : 'unknown';
+    };
+    const loadAtStart = load();
     let mainPeak = 0,
       journalPeak = 0,
       blocksPeak = 0,
@@ -238,10 +244,35 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       blocks: 'unknown' as number | 'unknown',
       recordMs: 0,
       commitMs: 0,
+      commits: 0,
+      commitCpuMs: 0,
+      commitMaxMs: 0,
       slowestIndex: -1,
       slowestRecordMs: 0,
       slowestCommitMs: 0,
     };
+    // COMMIT 墙钟远大于本进程 CPU，说明 COMMIT 里是在等内核落盘（SQLite 自己的 fsync），不是算。
+    const timing = () => ({
+      observed,
+      fullScans,
+      recordMs: Math.round(diag.recordMs),
+      outsideCommitMs: Math.round(diag.recordMs - diag.commitMs),
+      commits: diag.commits,
+      commitMs: Math.round(diag.commitMs),
+      commitCpuMs: Math.round(diag.commitCpuMs),
+      commitWaitMs: Math.round(diag.commitMs - diag.commitCpuMs),
+      commitMaxMs: diag.commits ? Math.round(diag.commitMaxMs) : 'unknown',
+      slowest:
+        diag.slowestIndex < 0
+          ? 'unknown'
+          : {
+              index: diag.slowestIndex,
+              recordMs: Math.round(diag.slowestRecordMs),
+              commitMs: Math.round(diag.slowestCommitMs),
+            },
+      load1: { start: loadAtStart, end: load() },
+      elapsedMs: Math.round(performance.now() - started),
+    });
     let emitted = false;
     const emit = () => {
       if (emitted) return;
@@ -255,19 +286,7 @@ describe('SQLite真实进程崩溃与恢复界', () => {
           mainBytes: diag.mainBytes,
           journalBytes: diag.journalBytes,
           blocks: diag.blocks,
-          observed,
-          fullScans,
-          recordMs: Math.round(diag.recordMs),
-          commitMs: Math.round(diag.commitMs),
-          slowest:
-            diag.slowestIndex < 0
-              ? 'unknown'
-              : {
-                  index: diag.slowestIndex,
-                  recordMs: Math.round(diag.slowestRecordMs),
-                  commitMs: Math.round(diag.slowestCommitMs),
-                },
-          elapsedMs: Math.round(performance.now() - started),
+          ...timing(),
         })}`,
       );
     };
@@ -310,10 +329,16 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       diag.commit = 'before';
       sample();
       const mark = performance.now();
+      const cpu = process.cpuUsage();
       try {
         return originalExec.call(this, sql);
       } finally {
-        commitSlice += performance.now() - mark;
+        const spent = performance.now() - mark;
+        const used = process.cpuUsage(cpu);
+        commitSlice += spent;
+        diag.commits += 1;
+        diag.commitCpuMs += (used.user + used.system) / 1000;
+        diag.commitMaxMs = Math.max(diag.commitMaxMs, spent);
         diag.commit = 'after';
         diag.stage = 'after-commit';
         sample();
@@ -353,8 +378,16 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       const version = d.prepare('SELECT sqlite_version() version').get()?.version;
       d.close();
       // 这些是语句边界观测；运行期硬界另由固定SQL/SQLite pager不变量证明，不把采样当证明。
+      // 耗时拆成 COMMIT 内/外：通过时也看得出 15 秒花在真实提交落盘还是提交前的读写与解码。
       console.log(
-        `SPOOL_PEAK_EVIDENCE=${JSON.stringify({ uid: process.getuid?.(), version, mainPeak, journalPeak, blocksPeak, observed })}`,
+        `SPOOL_PEAK_EVIDENCE=${JSON.stringify({
+          uid: process.getuid?.(),
+          version,
+          mainPeak,
+          journalPeak,
+          blocksPeak,
+          ...timing(),
+        })}`,
       );
     } catch (error) {
       emit();
