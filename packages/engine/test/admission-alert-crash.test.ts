@@ -235,6 +235,8 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       observed = 0,
       fullScans = 0,
       commitSlice = 0;
+    // 正在写的那条的起点；失败时把它已花的时间也算进 recordMs，和已计入的 COMMIT 次数/CPU 对齐。
+    let recordMark: number | undefined;
     const diag = {
       stage: 'setup',
       index: -1,
@@ -252,27 +254,30 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       slowestCommitMs: 0,
     };
     // COMMIT 墙钟远大于本进程 CPU，说明 COMMIT 里是在等内核落盘（SQLite 自己的 fsync），不是算。
-    const timing = () => ({
-      observed,
-      fullScans,
-      recordMs: Math.round(diag.recordMs),
-      outsideCommitMs: Math.round(diag.recordMs - diag.commitMs),
-      commits: diag.commits,
-      commitMs: Math.round(diag.commitMs),
-      commitCpuMs: Math.round(diag.commitCpuMs),
-      commitWaitMs: Math.round(diag.commitMs - diag.commitCpuMs),
-      commitMaxMs: diag.commits ? Math.round(diag.commitMaxMs) : 'unknown',
-      slowest:
-        diag.slowestIndex < 0
-          ? 'unknown'
-          : {
-              index: diag.slowestIndex,
-              recordMs: Math.round(diag.slowestRecordMs),
-              commitMs: Math.round(diag.slowestCommitMs),
-            },
-      load1: { start: loadAtStart, end: load() },
-      elapsedMs: Math.round(performance.now() - started),
-    });
+    const timing = () => {
+      const recordMs = diag.recordMs + (recordMark === undefined ? 0 : performance.now() - recordMark);
+      return {
+        observed,
+        fullScans,
+        recordMs: Math.round(recordMs),
+        outsideCommitMs: Math.round(recordMs - diag.commitMs),
+        commits: diag.commits,
+        commitMs: Math.round(diag.commitMs),
+        commitCpuMs: Math.round(diag.commitCpuMs),
+        commitWaitMs: Math.round(diag.commitMs - diag.commitCpuMs),
+        commitMaxMs: diag.commits ? Math.round(diag.commitMaxMs) : 'unknown',
+        slowest:
+          diag.slowestIndex < 0
+            ? 'unknown'
+            : {
+                index: diag.slowestIndex,
+                recordMs: Math.round(diag.slowestRecordMs),
+                commitMs: Math.round(diag.slowestCommitMs),
+              },
+        load1: { start: loadAtStart, end: load() },
+        elapsedMs: Math.round(performance.now() - started),
+      };
+    };
     let emitted = false;
     const emit = () => {
       if (emitted) return;
@@ -336,6 +341,8 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         const spent = performance.now() - mark;
         const used = process.cpuUsage(cpu);
         commitSlice += spent;
+        // 直接累计：断言在某条中途失败时，这次 COMMIT 的墙钟和它的 CPU 一起进诊断。
+        diag.commitMs += spent;
         diag.commits += 1;
         diag.commitCpuMs += (used.user + used.system) / 1000;
         diag.commitMaxMs = Math.max(diag.commitMaxMs, spent);
@@ -351,13 +358,14 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         diag.commit = 'unknown';
         commitSlice = 0;
         const mark = performance.now();
+        recordMark = mark;
         const o = observation();
         o.identity.namespace = '\u0001'.repeat(300);
         o.identity.workflowId = '\u0002'.repeat(300);
         expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
         const recordMs = performance.now() - mark;
+        recordMark = undefined;
         diag.recordMs += recordMs;
-        diag.commitMs += commitSlice;
         if (recordMs >= diag.slowestRecordMs) {
           diag.slowestRecordMs = recordMs;
           diag.slowestCommitMs = commitSlice;
