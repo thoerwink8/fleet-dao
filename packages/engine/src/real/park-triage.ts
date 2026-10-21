@@ -771,8 +771,9 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         at: now(),
       });
     },
-    async acceptanceRetry({ task, attempt, why }) {
+    async acceptanceRetry({ task, attempt, why, cause }) {
       const workflowId = `acceptance:${task.taskId}:${task.prNumber}:${task.head}`;
+      const unverified = cause === 'unverified';
       await recordEngineAudit(w.db, {
         action: COMMANDER_AUDIT_RETRY,
         target: COMMANDER_AUDIT_TARGET,
@@ -786,8 +787,14 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           prNumber: task.prNumber,
           head: task.head,
           attempt,
+          // unverified：会话回了但裁决读不懂/核不过/没执行成；session：主线头读不到/会话没起成/回答认不出。
+          // 两种合用 jobs 里 24 小时 PARK_TRIAGE_SESSION_TRIES 次预算；why（限长）供用满后每轮报告原因，不另建账。
+          cause: unverified ? 'unverified' : 'session',
+          why: why.slice(0, 500),
         },
-        reason: `验收责任会话没起成（第 ${attempt} 次），下一轮再看`,
+        reason: unverified
+          ? `验收责任没核完（第 ${attempt} 次，机读或执行失败，不是创始人证据），责任仍 open，下一轮再核`
+          : `验收责任会话没起成（第 ${attempt} 次），下一轮再看`,
         ok: false,
         error: why.slice(0, 1000),
         at: now(),
@@ -893,6 +900,9 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         after: {
           taskId: task.taskId,
           ref: `${task.owner}/${task.name}#${task.issueNumber}`,
+          // workflowId + parkSeq 0 是验收候选的认领键：jobs 凭它认出「已转人」（action=leave）的那条记录。
+          workflowId: `acceptance:${task.taskId}:${task.prNumber}:${task.head}`,
+          parkSeq: 0,
           kind: 'acceptance',
           dutyId: duty.id,
           generation: duty.generation,

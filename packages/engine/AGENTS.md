@@ -101,6 +101,12 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 账本身读法严格：trail 须非空、代数连续、runId 不重复，同键后来的记录不得和起头记录的身份/代次/编号不一致；对不上就阻断该意图，每轮报 problems（「已阻断」），连键都定位不到的坏记录同样每轮报。
 - 回执分三种：叫停已发送、终态未确认；旧代已终态、新代待启动/启动未确认；新代已确认启动（或已存在、本次没再起）。什么都没发出去才写「任务没动」。测试：`test/real/park-triage.test.ts`（假 Temporal + `ParkTriageWiring.clock` 假时钟）、`test/park-triage.test.ts`（假存储）。
 
+## 验收责任巡检的责任分类（#3497）
+
+- `jobs/park-triage.ts` 的 `triageAcceptanceRepo` 把每条 open 责任分成三种结果：已结清/替代（只在核过白名单并真执行成功后）、**创始人证据**、**没核完**。模型的 `leave` 只是「证据仍缺」的自述（读不到证据时它也会写），不是转人的依据，`humanOnly`/`reason` 的自由文本和模型自填的任何字段都不算授权。只有 `deps.acceptanceFounderFacts`（引擎自己的可信来源：只读、限长、精确绑定 duty/代次/PR/head 的事实，`decisions/park-triage.ts` 的 `trustedFounderFact` 逐项核对，同责任多条或不合格都不认）给出这条责任的创始人证据，才发 decision「要你拍」（`reason: human-only`），说明用事实里的 `what` 而不是模型自述，并写一条 `commander.act`（action=leave，带认领键）作为「已转人」的凭据。**当前真装配没有这种可信来源**（旧历史里没有这种证明，不补造），所以生产上 leave 一律不转人，真实的创始人证据来源是 #3497 的欠项。
+- 没核完＝缺唯一裁决、裁决格式/身份/代次不符、缺合并回执、证据为空、supersede 目标/coverage 不满足、结清/替代口子没装配或抛错、leave 没有可信创始人事实（来源没装配、读不到、没有精确对应）；以及主线头读不到、会话没起成、回答认不出（这三种还没拿到裁决，是读取失败）。它们都不发「要你拍」，发 alert 级提醒（正文分「已按裁决收口 / 仍未收口 / 机读或执行没核完」，部分成功只报已核那部分，不关单），责任保持 open，经 `deps.acceptanceRetry` 抵销这次认领（写不进再试一次，仍不行明报），下一轮同一 head 再处理。所有原因合用一份预算：`AuditBook.acceptanceWindowRetries` 只读 `commander.retry`（`after.cause` 为 `session` / `unverified`，`after.why` 存限长原因），24 小时窗口内 `PARK_TRIAGE_SESSION_TRIES` 次；用满后不再认领、不起会话、不执行，但每轮调度仍在 problems 里报「验收责任仍未核实」和最近一次原因，窗口滚过后预算重新开始（每天有界，不是永久停摆也不是无限重试）。已认领却没被重试抵销的候选，只有「当前每条 open 责任都有精确对应（duty/代次/PR/head 四项相等）的转人记录」才算整个候选在等创始人；凭据缺字段、身份不符、只覆盖一部分、认领后才新增的责任，都逐条在 problems 里报「已认领但既没有重试记录也没有转人记录」（例如重试记账写失败），不再起会话、不被别的责任的转人遮住、不当成已处理；所在单已关闭则不报。没动每日 60 次上限和单张防空转的口径。
+- 只留给创始人的那一条与没核完的并存时，decision 卡只列创始人那条；已核结清的照实写。supersede 仍由 `checkAcceptanceVerdict` 要求同仓同单同 PR 的已结清目标和逐项 coverage，旧头没有合并回执不能 settle。引擎没有给会话新增任何读取能力或凭据：提示词只给责任身份、合并回执和 leave 不转人的约定；读不到证据只能明报机读缺口并重试，不靠编造证据过关。
+
 ## 版本更新日志
 
 - `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。

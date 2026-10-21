@@ -365,7 +365,20 @@ describe('合并后的验收责任交给指挥官', () => {
     const close = vi.fn(async () => {});
     const r = acceptanceRig(
       acceptanceAnswer('leave', { humanOnly: '只有 Contabo 控制台审计能提供这条证据' }),
-      { closeAcceptanceTask: close },
+      {
+        closeAcceptanceTask: close,
+        // 转人的依据是引擎可信来源的精确事实，不是模型的自述（#3497）
+        acceptanceFounderFacts: async () => [
+          {
+            dutyId: 7,
+            generation: 1,
+            prNumber: 3300,
+            head: ACCEPTANCE_HEAD,
+            kind: 'founder-onsite-check' as const,
+            what: '只有 Contabo 控制台审计能提供这条证据',
+          },
+        ],
+      },
     );
     const out = await triageParkedTasks(r.deps);
     expect(out).toMatchObject({ candidates: 1, claimed: 1 });
@@ -403,6 +416,687 @@ describe('合并后的验收责任交给指挥官', () => {
     const cappedOut = await triageParkedTasks(capped.deps);
     expect(cappedOut.claimed).toBe(0);
     expect(capped.notices.find((n) => n.key === 'commander:daily-cap')?.body).toContain('验收责任 PR #3300');
+  });
+
+  // —— #3497：机读/执行失败不能变成「要你拍」的人工批准 ——
+  describe('机读或执行失败不算人工批准（#3497）', () => {
+    const REF = 'thoerwink8/fleet-dao#3296';
+    const SETTLE_OK = { evidence: 'GitHub 合并回执、check-runs 和主机日志均通过' };
+    /** 模型的 leave：只是自述，转不转人看引擎可信来源。 */
+    const LEAVE = { humanOnly: '只有创始人能提供：线下合同签章确认' };
+    /** 引擎可信来源给出的创始人证据事实（精确 duty/代次/PR/head）。 */
+    const founderFactOf = (dutyId: number, what = '线下合同签章确认') => ({
+      dutyId,
+      generation: 1,
+      prNumber: 3300,
+      head: ACCEPTANCE_HEAD,
+      kind: 'founder-decision' as const,
+      what,
+    });
+    const withFounderFacts = (...ids: number[]): Partial<ParkTriageDeps> => ({
+      acceptanceFounderFacts: async () => ids.map((id) => founderFactOf(id)),
+    });
+    const claimIdOf = (t: CommanderAcceptanceTask) => `acceptance:${t.taskId}:${t.prNumber}:${t.head}`;
+    const acceptanceFence = (verdicts: Record<string, unknown>[]) =>
+      fence({ summary: '按证据核过', acceptanceVerdicts: verdicts });
+    const base = (duty: number, extra: Record<string, unknown>) => ({
+      issue: 3296,
+      dutyId: duty,
+      generation: 1,
+      prNumber: 3300,
+      head: ACCEPTANCE_HEAD,
+      reason: '逐条核对后的结论',
+      ...extra,
+    });
+    /** 认领和重试写进同一本操作记录，和真装配一样：重试抵销认领，下一轮同一 head 还在候选里。 */
+    const tracked = (
+      answer: string,
+      over: Partial<ParkTriageDeps> = {},
+      task: CommanderAcceptanceTask = acceptanceTask(),
+    ) => {
+      const r = rig({
+        answer,
+        over: {
+          tasks: async () => [],
+          acceptanceTasks: async () => [task],
+          claimAcceptance: async ({ task: t, attempt }) => {
+            r.audits.push({
+              at: NOW,
+              action: COMMANDER_AUDIT_CLAIM,
+              after: { workflowId: claimIdOf(t), parkSeq: 0, kind: 'acceptance', attempt },
+            });
+          },
+          acceptanceRetry: async ({ task: t, attempt, why, cause }) => {
+            r.audits.push({
+              at: NOW,
+              action: COMMANDER_AUDIT_RETRY,
+              after: { workflowId: claimIdOf(t), parkSeq: 0, kind: 'acceptance', attempt, cause, why },
+              ok: false,
+            });
+          },
+          acceptanceAudit: async ({ task: t, duty, action, ok }) => {
+            r.audits.push({
+              at: NOW,
+              action: COMMANDER_AUDIT_ACT,
+              after: {
+                workflowId: claimIdOf(t),
+                parkSeq: 0,
+                kind: 'acceptance',
+                action,
+                dutyId: duty.id,
+                generation: duty.generation,
+                prNumber: duty.prNumber,
+                head: duty.head,
+              },
+              ok,
+            });
+          },
+          settleAcceptance: vi.fn(async () => {}),
+          supersedeAcceptance: vi.fn(async () => {}),
+          closeAcceptanceTask: vi.fn(async () => {}),
+          ...over,
+        },
+      });
+      return r;
+    };
+    const retriesOf = (r: ReturnType<typeof tracked>) =>
+      r.audits.filter((a) => a.action === COMMANDER_AUDIT_RETRY);
+    const expectNoHumanApproval = (r: ReturnType<typeof tracked>) => {
+      expect(r.notices.filter((n) => n.level === 'decision')).toEqual([]);
+      for (const n of r.notices) {
+        expect(n.reason).toBeUndefined();
+        expect(n.options).toBeUndefined();
+        expect(n.title).not.toContain('要你拍');
+        expect(n.body).not.toContain('仍留给创始人的证据');
+      }
+    };
+    const open = (id: number, over: Partial<AcceptanceDutyRow> = {}) =>
+      acceptanceDuty({ id, items: [`验收项 ${id}`], ...over });
+    const settledTarget = acceptanceDuty({
+      id: 8,
+      items: ['验收项 7'],
+      settledAt: new Date(NOW.getTime() - 10 * 60_000),
+      settledBy: 'cold-verify',
+      settleEvidence: '最终头已验收',
+    });
+    const oldHead = 'c'.repeat(40);
+    const targetRef = { id: 8, generation: 1, prNumber: 3300, head: ACCEPTANCE_HEAD };
+
+    const failures: {
+      name: string;
+      answer: string;
+      why: string;
+      over?: Partial<ParkTriageDeps>;
+      /** 没装配的口子（操作没执行）。 */
+      omit?: 'settleAcceptance' | 'supersedeAcceptance';
+      task?: CommanderAcceptanceTask;
+    }[] = [
+      { name: '缺唯一裁决', answer: acceptanceFence([]), why: '没有唯一验收裁决' },
+      {
+        name: '同一责任交了不止一个裁决',
+        answer: acceptanceFence([
+          base(7, { action: 'settle', ...SETTLE_OK }),
+          base(7, { action: 'settle', ...SETTLE_OK }),
+        ]),
+        why: '没有唯一验收裁决',
+      },
+      {
+        name: '裁决格式不对（缺必填字段）',
+        answer: acceptanceFence([{ issue: 3296, dutyId: 7 }]),
+        why: '没有唯一验收裁决',
+      },
+      {
+        name: '身份不符（head 对不上）',
+        answer: acceptanceFence([base(7, { action: 'settle', head: 'd'.repeat(40), ...SETTLE_OK })]),
+        why: '与现读不符',
+      },
+      {
+        name: '代次不符',
+        answer: acceptanceFence([base(7, { action: 'settle', generation: 2, ...SETTLE_OK })]),
+        why: '与现读不符',
+      },
+      {
+        name: '缺合并回执',
+        answer: acceptanceFence([base(7, { action: 'settle', ...SETTLE_OK })]),
+        task: acceptanceTask([acceptanceDuty({ mergeCommit: null })]),
+        why: 'PR 没有合并回执',
+      },
+      {
+        name: '结清没写证据',
+        answer: acceptanceFence([base(7, { action: 'settle' })]),
+        why: '必须写非空证据',
+      },
+      {
+        name: '结清口子抛异常',
+        answer: acceptanceFence([base(7, { action: 'settle', ...SETTLE_OK })]),
+        over: {
+          settleAcceptance: vi.fn(async () => {
+            throw new Error('库连不上：ECONNRESET');
+          }),
+        },
+        why: '库连不上',
+      },
+      {
+        name: '结清口子没装配（操作没执行）',
+        answer: acceptanceFence([base(7, { action: 'settle', ...SETTLE_OK })]),
+        omit: 'settleAcceptance',
+        why: '结清口子未装配',
+      },
+      {
+        name: 'leave 只有自由文本、没有可信来源（字样再像创始人也不算）',
+        answer: acceptanceFence([
+          base(7, { action: 'leave', humanOnly: '只有创始人能提供：Contabo 控制台审计' }),
+        ]),
+        why: '没有可信事实证明只有创始人能提供',
+      },
+      {
+        name: '模型自己加 founder-only 声明、说明是受限会话读不到 Temporal/journal',
+        answer: acceptanceFence([
+          base(7, {
+            action: 'leave',
+            leaveKind: 'founder-only',
+            humanOnly: '受限会话不能访问Temporal/journal，请人帮忙',
+          }),
+        ]),
+        why: '没有可信事实证明只有创始人能提供',
+      },
+      {
+        name: '可信来源在，但没有精确对应这条责任的事实（别的 duty / 代次不符）',
+        answer: acceptanceFence([base(7, { action: 'leave', ...LEAVE })]),
+        over: {
+          acceptanceFounderFacts: async () => [founderFactOf(9), { ...founderFactOf(7), generation: 2 }],
+        },
+        why: '可信来源里没有精确对应这条责任的创始人证据',
+      },
+      {
+        name: '可信来源读不到：不能判成人工项',
+        answer: acceptanceFence([base(7, { action: 'leave', ...LEAVE })]),
+        over: {
+          acceptanceFounderFacts: async () => {
+            throw new Error('来源库暂时读不到');
+          },
+        },
+        why: '来源库暂时读不到',
+      },
+      {
+        name: 'supersede 的目标不是已读到的已结清责任',
+        answer: acceptanceFence([
+          base(7, {
+            action: 'supersede',
+            evidence: '最终头已覆盖旧头',
+            target: targetRef,
+            coverage: [{ source: '验收项 7', target: '验收项 7', basis: '同项' }],
+          }),
+        ]),
+        why: 'supersede 必须指向',
+      },
+      {
+        name: 'supersede 没有逐项 coverage',
+        answer: acceptanceFence([
+          base(7, { action: 'supersede', head: oldHead, evidence: '最终头已覆盖旧头', target: targetRef }),
+        ]),
+        task: acceptanceTask([open(7, { head: oldHead, mergeCommit: null }), settledTarget]),
+        why: '逐条写 coverage',
+      },
+      {
+        name: '旧头没有合并回执，不能冒充当前头直接结清',
+        answer: acceptanceFence([base(7, { action: 'settle', head: oldHead, ...SETTLE_OK })]),
+        task: acceptanceTask([open(7, { head: oldHead, mergeCommit: null })]),
+        why: 'PR 没有合并回执',
+      },
+    ];
+
+    it.each(failures)('$name：不发「要你拍」，责任保持 open，记重试，下一轮能再处理', async (c) => {
+      const settle = vi.fn(async () => {});
+      const supersede = vi.fn(async () => {});
+      const close = vi.fn(async () => {});
+      const over = { settleAcceptance: settle, supersedeAcceptance: supersede, closeAcceptanceTask: close };
+      const r = tracked(c.answer, { ...over, ...c.over }, c.task);
+      if (c.omit) delete r.deps[c.omit];
+      const out = await triageParkedTasks(r.deps);
+      expect(out.left).toEqual([]);
+      expect(out.acted).toEqual([]);
+      expect(out.retrying).toEqual([{ ref: REF, why: expect.stringContaining(c.why) }]);
+      expectNoHumanApproval(r);
+      expect(r.notices).toHaveLength(1);
+      expect(r.notices[0]).toMatchObject({ level: 'alert' });
+      expect(r.notices[0]?.body).toContain(c.why);
+      expect(r.notices[0]?.body).toContain('仍未收口');
+      expect(settle).not.toHaveBeenCalled();
+      expect(supersede).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      // 重试记账：抵销这一次认领，标明是核验没成（不是会话没起成），下一轮同一 head 仍在候选里
+      expect(retriesOf(r)).toHaveLength(1);
+      expect(retriesOf(r)[0]?.after).toMatchObject({ attempt: 1, cause: 'unverified' });
+      const second = await triageParkedTasks(r.deps);
+      expect(second.candidates).toBe(1);
+      expect(r.sessions).toHaveLength(2);
+      expectNoHumanApproval(r);
+    });
+
+    it('执行异常：先记失败审计，再不关单', async () => {
+      const audit = vi.fn(async () => {});
+      const close = vi.fn(async () => {});
+      const r = tracked(acceptanceFence([base(7, { action: 'settle', ...SETTLE_OK })]), {
+        acceptanceAudit: audit,
+        closeAcceptanceTask: close,
+        settleAcceptance: vi.fn(async () => {
+          throw new Error('库连不上：ECONNRESET');
+        }),
+      });
+      await triageParkedTasks(r.deps);
+      expect(audit).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: false, error: '库连不上：ECONNRESET' }),
+      );
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('核验一直没成：同一 head 24 小时内最多自动试 PARK_TRIAGE_SESSION_TRIES 次，用满后不再起会话，但每轮仍报未核实责任和真实原因', async () => {
+      const close = vi.fn(async () => {});
+      const r = tracked(acceptanceFence([]), { closeAcceptanceTask: close });
+      for (let i = 1; i <= PARK_TRIAGE_SESSION_TRIES; i++) {
+        const out = await triageParkedTasks(r.deps);
+        expect(out.retrying).toHaveLength(1);
+        expect(retriesOf(r)).toHaveLength(i);
+      }
+      expect(r.sessions).toHaveLength(PARK_TRIAGE_SESSION_TRIES);
+      expect(r.notices.at(-1)).toMatchObject({ level: 'alert' });
+      expect(r.notices.at(-1)?.body).toContain('已试满');
+      expect(r.notices.at(-1)?.body).toContain('仍 open');
+      // 之后每一轮：不起会话、不关单、不转人，但未核实责任带着最近一次原因报出来
+      for (let i = 0; i < 3; i++) {
+        const after = await triageParkedTasks(r.deps);
+        expect(after.candidates).toBe(0);
+        expect(after.left).toEqual([]);
+        expect(after.problems).toEqual([expect.stringContaining('没有唯一验收裁决')]);
+        expect(after.problems[0]).toContain(`${REF} 验收责任仍未核实`);
+        expect(after.problems[0]).toContain(`${PARK_TRIAGE_SESSION_TRIES}/${PARK_TRIAGE_SESSION_TRIES}`);
+        expect(r.sessions).toHaveLength(PARK_TRIAGE_SESSION_TRIES);
+      }
+      expect(retriesOf(r)).toHaveLength(PARK_TRIAGE_SESSION_TRIES);
+      expect(close).not.toHaveBeenCalled();
+      expectNoHumanApproval(r);
+    });
+
+    it('24 小时窗口滚过后预算重新开始（每天有界，不是永久停摆也不是无限重试）', async () => {
+      const r = tracked(acceptanceFence([]));
+      for (let i = 0; i < PARK_TRIAGE_SESSION_TRIES; i++) await triageParkedTasks(r.deps);
+      expect((await triageParkedTasks(r.deps)).candidates).toBe(0);
+      r.deps.now = () => new Date(NOW.getTime() + 25 * 3_600_000);
+      const later = await triageParkedTasks(r.deps);
+      expect(later.candidates).toBe(1);
+      expect(r.sessions).toHaveLength(PARK_TRIAGE_SESSION_TRIES + 1);
+    });
+
+    it('会话没起成（读取失败）仍重试，不发人工批准，记成 session 原因', async () => {
+      const r = tracked('unused', {});
+      r.deps.runSession = async () => ({ ok: false, why: '选不到路由（用途 commander）：并发满了' });
+      const out = await triageParkedTasks(r.deps);
+      expect(out.left).toEqual([]);
+      expect(out.retrying).toEqual([{ ref: REF, why: expect.stringContaining('并发满了') }]);
+      expectNoHumanApproval(r);
+      expect(retriesOf(r)).toHaveLength(1);
+      expect(retriesOf(r)[0]?.after).toMatchObject({ cause: 'session' });
+      expect((await triageParkedTasks(r.deps)).candidates).toBe(1);
+    });
+
+    it('持续的读取失败（会话没起成、主线头读不到）同样受 PARK_TRIAGE_SESSION_TRIES 约束，不无限重新认领', async () => {
+      let reads = 0;
+      const r = tracked('unused');
+      r.deps.mainHead = async () => {
+        reads += 1;
+        throw new Error('持续读取失败');
+      };
+      for (let i = 0; i < PARK_TRIAGE_SESSION_TRIES + 2; i++) {
+        const out = await triageParkedTasks(r.deps);
+        expect(out.left).toEqual([]);
+        expect(out.retrying.length + out.problems.length).toBeGreaterThan(0);
+      }
+      expect(reads).toBe(PARK_TRIAGE_SESSION_TRIES);
+      expect(r.sessions).toHaveLength(0);
+      expect(retriesOf(r)).toHaveLength(PARK_TRIAGE_SESSION_TRIES);
+      // 用满后：不再认领，但每轮仍报原因
+      const stuck = await triageParkedTasks(r.deps);
+      expect(stuck.problems).toEqual([expect.stringContaining('持续读取失败')]);
+      expect(r.notices.at(-1)).toMatchObject({ level: 'alert' });
+      expectNoHumanApproval(r);
+
+      const s = tracked('unused');
+      s.deps.runSession = async () => ({ ok: false, why: '会话报错' });
+      for (let i = 0; i < PARK_TRIAGE_SESSION_TRIES + 2; i++) await triageParkedTasks(s.deps);
+      expect(s.sessions).toHaveLength(0);
+      expect(retriesOf(s)).toHaveLength(PARK_TRIAGE_SESSION_TRIES);
+    });
+
+    it('读取失败和核验失败混合共用一份预算，不分原因绕过总上限', async () => {
+      const r = tracked(acceptanceFence([]));
+      const good = r.deps.runSession;
+      let calls = 0;
+      r.deps.mainHead = async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('主线读不到');
+        return 'f'.repeat(40);
+      };
+      r.deps.runSession = async (input) => (calls === 2 ? { ok: false, why: '选不到路由' } : good(input));
+      for (let i = 0; i < PARK_TRIAGE_SESSION_TRIES + 3; i++) await triageParkedTasks(r.deps);
+      // 3 次预算：主线读失败 1 + 会话没起成 1 + 核验没成 1，之后不再认领
+      expect(retriesOf(r)).toHaveLength(PARK_TRIAGE_SESSION_TRIES);
+      expect(retriesOf(r).map((a) => (a.after as { cause: string }).cause)).toEqual([
+        'session',
+        'session',
+        'unverified',
+      ]);
+      expect(calls).toBe(PARK_TRIAGE_SESSION_TRIES);
+      // 真正拿到会话回答的只有第 3 轮那一次
+      expect(r.sessions).toHaveLength(1);
+    });
+
+    it('重试记录写不进：试第二次；仍写不进就报出来，不当成已处理', async () => {
+      const r = tracked(acceptanceFence([]));
+      let tries = 0;
+      r.deps.acceptanceRetry = async () => {
+        tries += 1;
+        throw new Error('库写入失败');
+      };
+      const out = await triageParkedTasks(r.deps);
+      expect(tries).toBe(2);
+      expect(out.retrying).toEqual([]);
+      expect(out.problems).toEqual([expect.stringContaining('重试记录没写进（库写入失败）')]);
+      expect(out.problems[0]).toContain('责任仍 open');
+      expect(r.notices[0]).toMatchObject({ level: 'alert' });
+      expect(r.notices[0]?.body).toContain('重试记录没写进');
+      expectNoHumanApproval(r);
+    });
+
+    it('只有引擎可信来源证明只有创始人能提供，leave 才发「要你拍」，责任保持 open、不重复起会话', async () => {
+      const close = vi.fn(async () => {});
+      const r = tracked(acceptanceFence([base(7, { action: 'leave', ...LEAVE })]), {
+        closeAcceptanceTask: close,
+        ...withFounderFacts(7),
+      });
+      const out = await triageParkedTasks(r.deps);
+      // 说明来自可信事实，不是模型自述
+      expect(out.left).toEqual([{ ref: REF, why: expect.stringContaining('线下合同签章确认') }]);
+      expect(out.left[0]?.why).toContain('可信来源：founder-decision');
+      expect(out.retrying).toEqual([]);
+      expect(r.notices[0]).toMatchObject({ level: 'decision', reason: 'human-only' });
+      expect(r.notices[0]?.body).toContain('仍留给创始人的证据');
+      expect(r.notices[0]?.body).toContain('仍未收口');
+      expect(close).not.toHaveBeenCalled();
+      expect(retriesOf(r)).toEqual([]);
+      // 转人记录 = 有结论：之后每轮不再起会话，也不当成「没结论」重复报
+      const again = await triageParkedTasks(r.deps);
+      expect(again.candidates).toBe(0);
+      expect(again.problems).toEqual([]);
+      expect(r.sessions).toHaveLength(1);
+    });
+
+    it('重试记账一直写不进：认领留着没有结论，之后每一轮仍报这条未核实的 open 责任，不再起会话、不冒充已处理', async () => {
+      const r = tracked(acceptanceFence([]));
+      r.deps.acceptanceRetry = async () => {
+        throw new Error('重试账写失败');
+      };
+      const first = await triageParkedTasks(r.deps);
+      expect(first.problems[0]).toContain('重试记录没写进');
+      for (let i = 0; i < PARK_TRIAGE_SESSION_TRIES + 1; i++) {
+        const out = await triageParkedTasks(r.deps);
+        expect(out.candidates).toBe(0);
+        expect(out.left).toEqual([]);
+        expect(out.problems).toEqual([expect.stringContaining('验收责任仍未核实：已认领')]);
+      }
+      expect(r.sessions).toHaveLength(1);
+      expectNoHumanApproval(r);
+    });
+
+    it('一条真转人加另一条机读失败且重试记账写不进：转人只覆盖它自己，另一条每轮仍报，不能全单跳过', async () => {
+      const close = vi.fn(async () => {});
+      const task = acceptanceTask([open(7), open(9)]);
+      const r = tracked(
+        acceptanceFence([base(7, { action: 'leave', ...LEAVE }), base(9, { action: 'settle' })]),
+        { closeAcceptanceTask: close, ...withFounderFacts(7) },
+        task,
+      );
+      r.deps.acceptanceRetry = async () => {
+        throw new Error('retry写账失败');
+      };
+      const first = await triageParkedTasks(r.deps);
+      expect(first.left).toHaveLength(1);
+      expect(first.problems.join('；')).toContain('重试记录没写进');
+      for (let i = 0; i < PARK_TRIAGE_SESSION_TRIES + 1; i++) {
+        const next = await triageParkedTasks(r.deps);
+        expect(next.candidates).toBe(0);
+        expect(next.problems).toEqual([expect.stringContaining('duty 9（第 1 代）既没有重试记录')]);
+        expect(next.problems[0]).not.toContain('duty 7');
+      }
+      expect(r.sessions).toHaveLength(1);
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('同一头认领并转人之后新增的 open 责任，不能被旧转人记录遮掉', async () => {
+      let duties = [open(7)];
+      const r = tracked(acceptanceFence([base(7, { action: 'leave', ...LEAVE })]), withFounderFacts(7));
+      r.deps.acceptanceTasks = async () => [acceptanceTask(duties)];
+      const first = await triageParkedTasks(r.deps);
+      expect(first.left).toHaveLength(1);
+      // 所有 open 责任都有精确凭据：整单在等创始人，不报
+      expect((await triageParkedTasks(r.deps)).problems).toEqual([]);
+      duties = [open(7), open(9)];
+      const next = await triageParkedTasks(r.deps);
+      expect(next.problems).toEqual([expect.stringContaining('duty 9（第 1 代）')]);
+      expect(r.sessions).toHaveLength(1);
+    });
+
+    it('转人记录缺字段或身份、代次不符：不算凭据，不遮住该责任', async () => {
+      const bad = [
+        { dutyId: 7 }, // 缺代次/PR/head
+        { dutyId: 7, generation: 2, prNumber: 3300, head: ACCEPTANCE_HEAD }, // 代次不符
+        { dutyId: 7, generation: 1, prNumber: 3301, head: ACCEPTANCE_HEAD }, // PR 不符
+        { dutyId: 7, generation: 1, prNumber: 3300, head: 'd'.repeat(40) }, // head 不符
+        { dutyId: 8, generation: 1, prNumber: 3300, head: ACCEPTANCE_HEAD }, // 别的责任
+      ];
+      for (const extra of bad) {
+        const r = tracked(acceptanceFence([]));
+        r.audits.push({
+          at: NOW,
+          action: COMMANDER_AUDIT_CLAIM,
+          after: { workflowId: claimIdOf(acceptanceTask()), parkSeq: 0, kind: 'acceptance' },
+        });
+        r.audits.push({
+          at: NOW,
+          action: COMMANDER_AUDIT_ACT,
+          ok: true,
+          after: {
+            workflowId: claimIdOf(acceptanceTask()),
+            parkSeq: 0,
+            kind: 'acceptance',
+            action: 'leave',
+            ...extra,
+          },
+        });
+        const out = await triageParkedTasks(r.deps);
+        expect(out.problems, JSON.stringify(extra)).toEqual([expect.stringContaining('duty 7（第 1 代）')]);
+        expect(r.sessions).toHaveLength(0);
+      }
+    });
+
+    it('已认领、没有结论的验收责任所在单已关闭：不再报（只报还开着的单）', async () => {
+      let issueOpen = true;
+      const r = tracked(acceptanceFence([]), { acceptanceIssueOpen: async () => issueOpen });
+      r.deps.acceptanceRetry = async () => {
+        throw new Error('重试账写失败');
+      };
+      await triageParkedTasks(r.deps);
+      expect((await triageParkedTasks(r.deps)).problems).toHaveLength(1);
+      issueOpen = false;
+      expect((await triageParkedTasks(r.deps)).problems).toEqual([]);
+    });
+
+    it('可信事实在，但模型这条不是 leave（例如证据不全的 settle）：仍按核验失败处理，不凭事实转人', async () => {
+      const r = tracked(acceptanceFence([base(7, { action: 'settle' })]), withFounderFacts(7));
+      const out = await triageParkedTasks(r.deps);
+      expect(out.left).toEqual([]);
+      expect(out.retrying).toHaveLength(1);
+      expectNoHumanApproval(r);
+    });
+
+    it('可信来源只在需要时读一次：没有 leave 就不读', async () => {
+      const facts = vi.fn(async () => [founderFactOf(7)]);
+      const r = tracked(acceptanceFence([base(7, { action: 'settle', ...SETTLE_OK })]), {
+        acceptanceFounderFacts: facts,
+      });
+      await triageParkedTasks(r.deps);
+      expect(facts).not.toHaveBeenCalled();
+    });
+
+    it('部分结清、部分机读失败：只报已核的那一部分，不关单，失败的不改成人批准', async () => {
+      const settle = vi.fn(async () => {});
+      const close = vi.fn(async () => {});
+      const task = acceptanceTask([open(7), open(9)]);
+      const r = tracked(
+        acceptanceFence([
+          base(7, { action: 'settle', ...SETTLE_OK }),
+          base(9, { action: 'settle', evidence: '' }),
+        ]),
+        { settleAcceptance: settle, closeAcceptanceTask: close },
+        task,
+      );
+      const out = await triageParkedTasks(r.deps);
+      expect(settle).toHaveBeenCalledTimes(1);
+      expect(settle).toHaveBeenCalledWith(
+        expect.objectContaining({ duty: expect.objectContaining({ id: 7 }) }),
+      );
+      expect(close).not.toHaveBeenCalled();
+      expect(out.acted).toEqual([{ ref: `${REF}/duty-7`, action: 'continue', source: 'verdict' }]);
+      expect(out.left).toEqual([]);
+      expect(out.retrying).toEqual([{ ref: REF, why: expect.stringContaining('duty 9') }]);
+      expectNoHumanApproval(r);
+      expect(r.notices[0]).toMatchObject({ level: 'alert' });
+      const body = r.notices[0]?.body ?? '';
+      expect(body).toContain('duty 7（第 1 代，PR #3300');
+      expect(body).toMatch(/duty 7[^\n]*已按裁决收口/);
+      expect(body).toMatch(/duty 9[^\n]*仍未收口/);
+      expect(retriesOf(r)).toHaveLength(1);
+    });
+
+    it('部分结清、部分是创始人证据：人工批准只列创始人那一条，已结清的照实报告', async () => {
+      const close = vi.fn(async () => {});
+      const task = acceptanceTask([open(7), open(9)]);
+      const r = tracked(
+        acceptanceFence([
+          base(7, { action: 'settle', ...SETTLE_OK }),
+          base(9, { action: 'leave', ...LEAVE }),
+        ]),
+        { closeAcceptanceTask: close, ...withFounderFacts(9) },
+        task,
+      );
+      const out = await triageParkedTasks(r.deps);
+      expect(out.left).toHaveLength(1);
+      expect(out.retrying).toEqual([]);
+      expect(r.notices[0]).toMatchObject({ level: 'decision', reason: 'human-only' });
+      const body = r.notices[0]?.body ?? '';
+      expect(body).toMatch(/duty 7[^\n]*已按裁决收口/);
+      expect(body).toMatch(/duty 9[^\n]*仍未收口/);
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('创始人证据和机读失败并存：只有创始人那条进人工批准，失败那条单独保留并重试', async () => {
+      const task = acceptanceTask([open(7), open(9)]);
+      const r = tracked(
+        acceptanceFence([base(7, { action: 'leave', ...LEAVE }), base(9, { action: 'settle' })]),
+        withFounderFacts(7),
+        task,
+      );
+      const out = await triageParkedTasks(r.deps);
+      expect(out.left).toEqual([{ ref: REF, why: expect.stringContaining('线下合同签章确认') }]);
+      expect(out.retrying).toEqual([{ ref: REF, why: expect.stringContaining('duty 9') }]);
+      expect(r.notices[0]).toMatchObject({ level: 'decision', reason: 'human-only' });
+      const body = r.notices[0]?.body ?? '';
+      const humanPart = body.slice(body.indexOf('仍留给创始人的证据'));
+      expect(humanPart).toContain('线下合同签章确认');
+      expect(humanPart.split('机读或执行没核完')[0]).not.toContain('必须写非空证据');
+      expect(body).toContain('机读或执行没核完');
+      expect(retriesOf(r)).toHaveLength(1);
+    });
+
+    it('supersede 仍要求同单同 PR 已结清目标和逐项 coverage：目标满足才调用，旧头不会被当成当前头', async () => {
+      const supersede = vi.fn(async () => {});
+      const source = open(7, { head: oldHead, mergeCommit: null });
+      const task = acceptanceTask([source, settledTarget]);
+      const good = tracked(
+        acceptanceFence([
+          base(7, {
+            action: 'supersede',
+            head: oldHead,
+            evidence: '最终头已覆盖旧头',
+            target: targetRef,
+            coverage: [{ source: '验收项 7', target: '验收项 7', basis: '最终头同项' }],
+          }),
+        ]),
+        { supersedeAcceptance: supersede },
+        task,
+      );
+      const out = await triageParkedTasks(good.deps);
+      expect(supersede).toHaveBeenCalledTimes(1);
+      expect(out.retrying).toEqual([]);
+      expect(out.left).toEqual([]);
+    });
+
+    it('证据仍欠或结清/替代入口没装配：结果明确未核实（保留责任重试），不调结清入口', async () => {
+      const close = vi.fn(async () => {});
+      const noSupersede = tracked(
+        acceptanceFence([
+          base(7, {
+            action: 'supersede',
+            head: oldHead,
+            evidence: '最终头已覆盖旧头',
+            target: targetRef,
+            coverage: [{ source: '验收项 7', target: '验收项 7', basis: '同项' }],
+          }),
+        ]),
+        { closeAcceptanceTask: close },
+        acceptanceTask([open(7, { head: oldHead, mergeCommit: null }), settledTarget]),
+      );
+      delete noSupersede.deps.supersedeAcceptance;
+      const out = await triageParkedTasks(noSupersede.deps);
+      expect(out.retrying).toEqual([{ ref: REF, why: expect.stringContaining('未装配') }]);
+      expect(close).not.toHaveBeenCalled();
+      expectNoHumanApproval(noSupersede);
+    });
+
+    it('主线头读不到：会话没起，抵销认领留待下一轮，不是静默丢掉、也不发人工批准', async () => {
+      const r = tracked('unused');
+      r.deps.mainHead = async () => {
+        throw new Error('GitHub 暂时不可用');
+      };
+      const out = await triageParkedTasks(r.deps);
+      expect(r.sessions).toHaveLength(0);
+      expect(out.retrying).toEqual([{ ref: REF, why: expect.stringContaining('GitHub 暂时不可用') }]);
+      expect(retriesOf(r)[0]?.after).toMatchObject({ cause: 'session' });
+      expectNoHumanApproval(r);
+      r.deps.mainHead = async () => 'f'.repeat(40);
+      expect((await triageParkedTasks(r.deps)).candidates).toBe(1);
+      expect(r.sessions).toHaveLength(1);
+    });
+
+    it('提示词只发有限的精确事实：责任身份、合并回执、leave 不转人的约定，不含凭据或可执行命令', async () => {
+      const r = tracked(acceptanceFence([]), {}, acceptanceTask([open(7, { mergeCommit: null })]));
+      await triageParkedTasks(r.deps);
+      const prompt = r.sessions[0]?.prompt ?? '';
+      expect(prompt).toContain('duty 7（第 1 代）');
+      expect(prompt).toContain(`责任 head：${ACCEPTANCE_HEAD}`);
+      expect(prompt).toContain('合并回执：没有');
+      expect(prompt).toContain('leave 不会把责任转给创始人');
+      expect(prompt).toContain('只由引擎自己的可信来源认定');
+      expect(prompt).not.toContain('leaveKind');
+      expect(prompt).not.toMatch(/token|密钥|ssh |sudo|DROP |DELETE /i);
+      expect(Object.keys(r.sessions[0] ?? {}).sort()).toEqual([
+        'mainHead',
+        'prompt',
+        'repo',
+        'requestId',
+        'timeoutMinutes',
+      ]);
+    });
   });
 });
 

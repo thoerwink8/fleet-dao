@@ -322,7 +322,48 @@ export interface RawAcceptanceVerdict {
       }
     | undefined;
   coverage?: readonly unknown[] | undefined;
+  /** 模型自述缺什么：只是说明，不是授权，也不是转人的依据。 */
   humanOnly?: string | undefined;
+}
+
+/**
+ * 引擎自己的可信来源给出的「这条责任的证据只有创始人能提供」事实：精确绑定 duty / 代次 / PR / head，
+ * 由装配侧只读、限长、脱敏后给出。受限模型会话不能产生它；自由文本（humanOnly、reason）也不是它。
+ * 当前真装配没有这种来源（旧历史里没有这种证明，不补造），所以生产上 leave 一律不转人。
+ */
+export const FOUNDER_EVIDENCE_KINDS = ['founder-decision', 'founder-onsite-check'] as const;
+export interface AcceptanceFounderFact {
+  dutyId: number;
+  generation: number;
+  prNumber: number;
+  head: string;
+  kind: (typeof FOUNDER_EVIDENCE_KINDS)[number];
+  /** 缺的是什么（给创始人看）。 */
+  what: string;
+}
+const FOUNDER_WHAT_MAX = 300;
+
+/**
+ * 这条责任有没有可信的创始人证据事实：duty/代次/PR/head 都要精确相等，种类认得，说明非空且不超长；
+ * 同一责任有不止一条、或有一条不合格，都不算（不猜，按没有处理，调用方保留机读责任）。
+ */
+export function trustedFounderFact(
+  duty: AcceptanceDutyIdentityView,
+  facts: readonly AcceptanceFounderFact[],
+): AcceptanceFounderFact | undefined {
+  const mine = facts.filter((f) => f.dutyId === duty.id);
+  const only = mine.length === 1 ? mine[0] : undefined;
+  if (
+    !only ||
+    only.generation !== duty.generation ||
+    only.prNumber !== duty.prNumber ||
+    only.head !== duty.head ||
+    !FOUNDER_EVIDENCE_KINDS.includes(only.kind) ||
+    !only.what.trim() ||
+    only.what.length > FOUNDER_WHAT_MAX
+  )
+    return undefined;
+  return only;
 }
 
 export type AcceptanceVerdictCheck =
