@@ -122,7 +122,8 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       return { child, ready: once(child, 'message'), closed: once(child, 'close') };
     });
     try {
-      for (const message of await bounded(Promise.all(processes.map((p) => p.ready)), 45000))
+      // 整段 test:changed 里 32 个进程的 ready 会超过 45 秒（这次约 48 秒撞上界）。这是等它们起来，不是产品时限。
+      for (const message of await bounded(Promise.all(processes.map((p) => p.ready)), 90000))
         expect(message[0]).toEqual({ ready: true });
       const finished = processes.map(async ({ child, closed }) => {
         const result = once(child, 'message');
@@ -152,7 +153,7 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         5000,
       );
     }
-  }, 65000);
+  }, 150000);
   it('真实sink冷启动未就绪仍按总deadline强杀，close后不留槽或假承接', async () => {
     let child: ChildProcess | undefined;
     let closed: Promise<unknown> | undefined;
@@ -188,6 +189,8 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(sink.status()).toEqual({ active: 0, cleanupPending: 0 });
     expect(existsSync(path)).toBe(false);
   }, 10000);
+  // 先同步写入 255 行，每行都重开库做 quick_check。整段 test:changed 里这一段超过 15 秒
+  // （这次约 19 秒）。同步写完才返回，时限必须盖住做完。后面两个 sink 的 10 秒期限不变。
   it('不同identity争最后一格：busy可有界重试，只承接一个且保全全部旧行', async () => {
     for (let n = 0; n < 255; n++) expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
     const a = observation(),
@@ -206,7 +209,9 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(records.filter((r) => r.kind === 'spooled')).toHaveLength(1);
     expect(records.filter((r) => r.kind === 'unknown' && r.code === 'capacity')).toHaveLength(1);
     expect(count()).toBe(256);
-  }, 15000);
+  }, 120000);
+  // 每条都走 recordAdmissionAlert：开库、quick_check、重读已有行。256 条近上限记录在整段
+  // test:changed 里超过 15 秒（本机约 20–28 秒）。函数是同步的，到点杀不掉，时限必须盖住做完。
   it('256个近DTO上界记录的COMMIT边界：主库和journal峰值在固定字节界内', () => {
     const original = DatabaseSync.prototype.exec;
     let mainPeak = 0,
@@ -256,7 +261,7 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       'SPOOL_PEAK_EVIDENCE=' +
         JSON.stringify({ uid: process.getuid?.(), version, mainPeak, journalPeak, blocksPeak, observed }),
     );
-  }, 15000);
+  }, 120_000);
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
     (mode) => {
