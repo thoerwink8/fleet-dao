@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import {
@@ -32,6 +31,7 @@ import {
   recordAdmissionAlert,
   transferOneAdmissionAlert,
 } from '../src/real/admission-alert-spool.ts';
+import { runChild } from './child.ts';
 
 let root: string, path: string;
 const observation = (): AdmissionAlertObservation => ({
@@ -154,8 +154,12 @@ describe('专用SQLite持久pending', () => {
     const original = DatabaseSync.prototype.prepare;
     const probes: string[] = [];
     // POSIX 锁按进程算，同进程第二个连接看不出锁被放掉，必须真起一个进程去抢。
-    const probe = () =>
-      spawnSync(
+    // 经 child.ts 起。10 秒是探针自己的杀死上限，不是放宽这条用例的时限。
+    const probe = (): string => {
+      // 父进程常带着 FORCE_COLOR。console.log(数字) 会被 inspect 上色，5 变成带转义的黄字，锁码对不上。
+      const env: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1' };
+      delete env.FORCE_COLOR;
+      const result = runChild(
         process.execPath,
         [
           '--no-warnings',
@@ -164,13 +168,16 @@ describe('专用SQLite持久pending', () => {
           `import { DatabaseSync } from 'node:sqlite';
            const d = new DatabaseSync(process.argv[1]);
            d.exec('PRAGMA busy_timeout=0');
-           try { d.exec('BEGIN IMMEDIATE'); d.exec('ROLLBACK'); console.log('acquired'); }
-           catch (e) { console.log(e.errcode & 255); }
+           try { d.exec('BEGIN IMMEDIATE'); d.exec('ROLLBACK'); process.stdout.write('acquired\\n'); }
+           catch (e) { process.stdout.write(String(e.errcode & 255) + '\\n'); }
            finally { d.close(); }`,
           join(path, 'pending.sqlite'),
         ],
-        { encoding: 'utf8', timeout: 10000 },
-      ).stdout.trim();
+        { limitMs: 10000, env },
+      );
+      if (result.status !== 0) throw new Error(`抢锁探针退出 ${result.status}：${result.stderr.trim()}`);
+      return result.stdout.trim();
+    };
     // validate 在 record 的 BEGIN IMMEDIATE 和 mainStamp 之后才查 application_id；rememberCommitted 不查。
     DatabaseSync.prototype.prepare = function (sql: string) {
       if (sql === 'PRAGMA application_id') probes.push(probe());
