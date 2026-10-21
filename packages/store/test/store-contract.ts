@@ -11,6 +11,7 @@ import {
   type NewIssueTask,
   type Store,
 } from '../src/ports.ts';
+import { describeCorrectMergedContract } from './store-contract-correct-merged.ts';
 
 export const T0 = new Date('2026-09-25T08:00:00.000Z');
 const MIN = 60_000;
@@ -2191,4 +2192,5 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       });
     });
   });
+  describeCorrectMergedContract(make);
 }

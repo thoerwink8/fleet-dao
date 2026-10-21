@@ -181,6 +181,19 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         acceptance: t.acceptance ?? [],
         // 暂停的单：引擎写 phase='paused'、doing 是那句话（和 db 的 toTask 读回去一致）
         ...(t.paused === undefined ? {} : { phase: 'paused', doing: t.paused }),
+        // 本机领单（决定 0096）：三列一起写
+        ...(t.executor === 'local'
+          ? { executor: 'local' as const, claimedBy: t.claimedBy ?? null, leaseUntil: dateOpt(t.leaseUntil) }
+          : {}),
+        // 任务账（phase / doing / last_problem / updated_at）：内存版放在 taskLedgers，没给的列保持库默认
+        ...(data.taskLedgers?.has(t.id)
+          ? {
+              phase: data.taskLedgers.get(t.id)?.phase ?? null,
+              doing: data.taskLedgers.get(t.id)?.doing ?? null,
+              lastProblem: data.taskLedgers.get(t.id)?.lastProblem ?? null,
+              updatedAt: dateOpt(data.taskLedgers.get(t.id)?.updatedAt ?? undefined),
+            }
+          : {}),
         createdAt: date(t.createdAt),
       })),
     );
@@ -252,6 +265,7 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         prNumber: r.prNumber ?? null,
         branch: r.branch ?? null,
         workflowId: r.workflowId ?? null,
+        temporalRunId: (r as { temporalRunId?: string }).temporalRunId ?? null,
       })),
     );
   }
