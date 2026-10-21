@@ -25,12 +25,25 @@ const events = (oom: number, kill: number) =>
 
 type Step = string | Error;
 /** 每个路径一串读数，读一次出一个，最后一个一直重复；没脚本的路径读出 ENOENT。 */
-function fake(script: Record<string, Step[]>): { deps: ScopeOomDeps; seen: string[] } {
+function fake(
+  script: Record<string, Step[]>,
+  /** scope 目录实例身份的脚本：每次取一个，最后一个一直重复；不给 = 一直是同一个 scope。 */
+  ids: Step[] = ['cg:1'],
+): { deps: ScopeOomDeps; seen: string[]; dirs: string[] } {
   const seen: string[] = [];
+  const dirs: string[] = [];
   const index = new Map<string, number>();
+  let idIndex = 0;
   const deps: ScopeOomDeps = {
     ...SLICE,
     intervalMs: 3_600_000,
+    async instanceId(dir) {
+      dirs.push(dir);
+      const step = ids[Math.min(idIndex, ids.length - 1)] as Step;
+      idIndex += 1;
+      if (step instanceof Error) throw step;
+      return step;
+    },
     now: () => new Date('2026-10-21T01:02:03.000Z'),
     async readText(path) {
       seen.push(path);
@@ -43,7 +56,7 @@ function fake(script: Record<string, Step[]>): { deps: ScopeOomDeps; seen: strin
       return step;
     },
   };
-  return { deps, seen };
+  return { deps, seen, dirs };
 }
 
 const sample = (deps: ScopeOomDeps, window?: 'start' | 'attach') =>
@@ -204,6 +217,7 @@ describe('sampleScopeOom', () => {
     const deps: ScopeOomDeps = {
       ...SLICE,
       intervalMs: 5,
+      instanceId: async () => 'cg:1',
       async readText(path) {
         if (path !== LOCAL) throw enoent();
         reads += 1;
@@ -217,6 +231,46 @@ describe('sampleScopeOom', () => {
     expect(ev).toMatchObject({ verdict: 'unknown', integrity: 'partial' });
     expect(ev.problems.join()).toContain('成功读数之间有文件读不成');
     expect(ev.delta).toEqual({ oomEvents: 1, killedProcs: 1 });
+  });
+
+  it('【故意造出的失败】旧 scope 消失后同路径被重建、两次采样之间没有可见缺口、新 scope 计数从相同值接着长：实例身份变了，unknown，不把新 scope 的事件归给本次运行', async () => {
+    // 起读 0/0（旧 scope cg:1）；收场那一读路径还在、计数 1/1，但目录已是另一个 cgroup（cg:2）
+    const { deps } = fake({ [LOCAL]: [events(0, 0), events(1, 1)] }, ['cg:1', 'cg:1', 'cg:2', 'cg:2']);
+    const ev = await sample(deps).stop();
+    expect(ev).toMatchObject({
+      verdict: 'unknown',
+      integrity: 'partial',
+      instanceChanged: true,
+      instanceId: 'cg:1',
+      finalRead: 'failed',
+      // 新 scope 的计数不收：last 还是旧 scope 的最后一次读成
+      last: { oomEvents: 0, killedProcs: 0 },
+      delta: { oomEvents: 0, killedProcs: 0 },
+    });
+    expect(ev.problems.join()).toContain('实例身份变了');
+    expect(ev.note).toContain('终止来源未知');
+  });
+
+  it('【故意造出的失败】同一次读的前后身份就不一致（读的当口 scope 被换）：不收这次的计数', async () => {
+    const { deps } = fake({ [LOCAL]: [events(5, 5)] }, ['cg:1', 'cg:2']);
+    const ev = await sample(deps).stop();
+    expect(ev).toMatchObject({ verdict: 'unknown', instanceChanged: true });
+    expect(ev.problems.join()).toContain('实例身份变了');
+  });
+
+  it('【故意造出的失败】取不到实例身份（拒绝读取）：这次读数不认，unknown，不当成没有事件', async () => {
+    const { deps } = fake({ [LOCAL]: [events(0, 0)] }, [eacces()]);
+    const ev = await sample(deps).stop();
+    expect(ev).toMatchObject({ verdict: 'unknown', integrity: 'unknown', reads: 0 });
+    expect(ev.problems.join()).toContain('EACCES');
+  });
+
+  it('实例身份全程一致：记在见证里，不标 instanceChanged；身份取自本 scope 自己的目录', async () => {
+    const { deps, dirs } = fake({ [LOCAL]: [events(0, 0)] }, ['cg:7']);
+    const ev = await sample(deps).stop();
+    expect(ev).toMatchObject({ verdict: 'none_observed', instanceChanged: false, instanceId: 'cg:7' });
+    expect(dirs.length).toBeGreaterThan(0);
+    expect(dirs.every((d) => d === SCOPE)).toBe(true);
   });
 
   it('【故意造出的失败】首读计数就不是 0（scope 重用，或首读前已发生）：不认作这次运行的事件，计数照记', async () => {
@@ -248,6 +302,7 @@ describe('sampleScopeOom', () => {
     const deps: ScopeOomDeps = {
       ...SLICE,
       intervalMs: 5,
+      instanceId: async () => 'cg:1',
       async readText(path) {
         if (path !== LOCAL) throw enoent();
         n += 1;

@@ -1468,6 +1468,7 @@ describe('hostSegmentSpawner · scope 内存事件见证（#3448）', () => {
   const events = (oom: number, kill: number) => `low 0\nhigh 0\nmax ${oom}\noom ${oom}\noom_kill ${kill}\n`;
   const FAKE_OOM = (readText: ScopeOomDeps['readText'], intervalMs = 5): ScopeOomDeps => ({
     readText,
+    instanceId: async () => 'cg:1',
     cgroupRoot: '/sys/fs/cgroup',
     slicePath: 'fleet.slice/fleet-agents.slice',
     intervalMs,

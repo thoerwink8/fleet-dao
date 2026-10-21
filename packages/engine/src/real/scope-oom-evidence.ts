@@ -9,11 +9,15 @@
 //   判断只看 local；层级那份只作旁证单列，不顶替 local。
 // - scope 是 --collect 起的，收场后文件会消失，所以边跑边读、收场再读一次。读不到的每一种（还没建出来、收场后没了、拒绝读取、
 //   内容非法、计数缺项或回退）都记进 problems 和完整性，不吞成「没有事件」。
+// - scope 实例身份：同一路径在两次采样之间可能被另一个同名 scope 重建，计数从相同或更大的值接着长，光看路径和计数看不出缺口。
+//   所以每次读计数前后都取 scope 目录的实例身份（生产是 cgroupfs 目录的 dev:ino：同一个 cgroup 生命周期内不变，重建出的是新 cgroup、新号），
+//   第一次读成时记下，之后任何一次对不上（或同一次读前后取的不一致）就判 unknown、不收那次的计数；取不到身份的读数不认。
+//   限制：第一次读成之前就已被换掉的 scope 看不出来，只有首读非 0、首读前文件不在这些旁证。
 // - 首读时计数就不是 0：分不清是 scope 重用、还是首读前就发生了，判 unknown，计数照记；计数中途回退同样判 unknown。
 // - 文字刻意不写会触发 failure/rules.ts 里 oom_killed 文本判法的词（含「oom」后紧跟「kill」的写法）：字段叫 oomEvents / killedProcs。
 //   这份见证只进 result.json 和日志，不进 stderr、failureReason、detail。
 // - 读不成、保全失败都不改会话的退出事实，调用方（segment-spawner）兜住所有抛错。
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { posix } from 'node:path';
 import { AGENT_SLICE_PATH, CGROUP_ROOT } from './memory-admission.ts';
 
@@ -25,12 +29,18 @@ export interface ScopeOomDeps {
   cgroupRoot: string;
   slicePath: string;
   intervalMs: number;
+  /** scope 目录的实例身份（生产：stat 的 dev:ino）；同一个 scope 恒定，同名重建会变。取不到就抛（ENOENT 算文件不在）。 */
+  instanceId(dir: string): Promise<string>;
   now?: () => Date;
 }
 
 export function productionScopeOom(overrides: Partial<ScopeOomDeps> = {}): ScopeOomDeps {
   return {
     readText: (path) => readFile(path, 'utf8'),
+    instanceId: async (dir) => {
+      const st = await stat(dir, { bigint: true });
+      return `${st.dev}:${st.ino}`;
+    },
     cgroupRoot: CGROUP_ROOT,
     slicePath: AGENT_SLICE_PATH,
     intervalMs: SCOPE_OOM_INTERVAL_MS,
@@ -73,6 +83,10 @@ export interface ScopeOomEvidence {
   sourcePath?: string;
   /** 从哪个时刻起看：start = 跟着会话一起起的采样；attach = 引擎接回后才开始（之前的事件看不到）。 */
   window: 'start' | 'attach';
+  /** 第一次读成时 scope 目录的实例身份：之后的读数都得是它，才算同一个 scope。 */
+  instanceId?: string;
+  /** 采样期间发现同一路径下换了一个 scope（或同一次读前后身份不一致）：那次的计数不收，结论 unknown。 */
+  instanceChanged: boolean;
   firstReadAt?: string;
   /** 最后一次读成本地计数的时刻（观测时刻）。 */
   observedAt?: string;
@@ -156,6 +170,7 @@ export function unavailableScopeOom(
     scope: `fleet-agent-${scopeId}.scope`,
     window,
     reads: 0,
+    instanceChanged: false,
     finalRead: 'failed',
     missingBeforeFirstRead: 0,
     killTarget: 'unknown',
@@ -176,6 +191,7 @@ export function sampleScopeOom(
   const window = ids.window ?? 'start';
   const now = deps.now ?? (() => new Date());
   const localPath = scopeEventsPath(deps, scopeId, 'memory.events.local');
+  const scopeDir = posix.dirname(localPath);
   const treePath = scopeEventsPath(deps, scopeId, 'memory.events');
   let reads = 0;
   let missingBeforeFirstRead = 0;
@@ -187,6 +203,8 @@ export function sampleScopeOom(
   let regressed = false;
   let unreadBetweenReads = false;
   let continuityBroken = false;
+  let instanceId: string | undefined;
+  let instanceChanged = false;
   const problems: string[] = [];
   let lastReadOutcome: 'ok' | 'gone' | 'failed' = 'failed';
   let stopped = false;
@@ -200,8 +218,19 @@ export function sampleScopeOom(
 
   const readOnce = async (): Promise<void> => {
     try {
+      const idBefore = await deps.instanceId(scopeDir);
       const counts = parseScopeOomCounts(await deps.readText(localPath));
+      const idAfter = await deps.instanceId(scopeDir);
       const at = now().toISOString();
+      if (idBefore !== idAfter || (instanceId !== undefined && idAfter !== instanceId)) {
+        instanceChanged = true;
+        lastReadOutcome = 'failed';
+        unreadBetweenReads = true;
+        problem(
+          `同一路径下的 scope 实例身份变了（${instanceId ?? idBefore}→${idAfter}）：旧 scope 已被收走、同名重建，这次读数不认作本次运行的`,
+        );
+        return;
+      }
       reads += 1;
       lastReadOutcome = 'ok';
       if (unreadBetweenReads) {
@@ -215,6 +244,7 @@ export function sampleScopeOom(
       unreadBetweenReads = false;
       if (!last) {
         baseline = counts;
+        instanceId = idAfter;
         firstReadAt = at;
       } else if (counts.oomEvents < last.oomEvents || counts.killedProcs < last.killedProcs) {
         regressed = true;
@@ -271,6 +301,8 @@ export function sampleScopeOom(
       reads,
       finalRead,
       missingBeforeFirstRead,
+      instanceChanged,
+      ...(instanceId !== undefined ? { instanceId } : {}),
       killTarget: 'unknown' as const,
     };
     if (!baseline || !last) {
@@ -302,7 +334,7 @@ export function sampleScopeOom(
     const complete = finalRead === 'ok' && problems.length === 0;
     let verdict: ScopeOomVerdict;
     let note: string;
-    if (regressed || continuityBroken || missingBeforeFirstRead > 0 || !baselineZero) {
+    if (instanceChanged || regressed || continuityBroken || missingBeforeFirstRead > 0 || !baselineZero) {
       verdict = 'unknown';
       note = `这个 scope 的计数窗口对不上，不能认作这一次运行的事件：${problems.join('；')}；${NOTE_KILL_UNKNOWN}`;
     } else if (delta.oomEvents > 0 || delta.killedProcs > 0) {
