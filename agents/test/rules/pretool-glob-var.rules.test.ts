@@ -37,6 +37,11 @@ const blocked: [string, string][] = [
   ['for o in "-H a" "--noproxy *"\ndo\n  curl $o https://example.com/\ndone', 'o'],
   ["n='file[12]'; cat $n", 'n'],
   ['x=\\*; ls $x', 'x'],
+  // 同一天修这条时又写出来一次（赋值在 if 分支里）
+  [
+    'for via in direct proxy; do if [ "$via" = direct ]; then o="--noproxy *"; else o="-x http://127.0.0.1:7890"; fi; curl -s -o /dev/null $o -m 10 https://api.github.com/; done',
+    'o',
+  ],
 ];
 
 const allowed: string[] = [
