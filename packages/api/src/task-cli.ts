@@ -5,6 +5,8 @@
 // 挂起且上一代还停在 parked：重做入口自己先叫停再另起。真在跑仍由入口拒绝。
 // 继续次数用满（停住原因是「已继续 N 次仍没过」）时不发信号，退出码 1，写明要重开用 redo。
 // 每条都写一条操作记录（谁、哪张单、note、结果）。找不到任务工作流时退出码 1，不把成功话交出去。
+// correct-merged：已结束却误记 abandoned 的真实已合任务，受管纠正运行账，不发信号、不重做；预检只读不记，
+// 执行成功的那条记录由 Store 在改任务的同一事务里写（见 task-correct-merged.ts）。
 // 退出码：0 做成了；1 没做成（被拒、找不到、没查成）；2 参数不对（不连库）。
 
 import { continueExhausted, TASK_SIGNAL_NAMES, type TaskState, taskWorkflowId } from '@fleet-dao/shared';

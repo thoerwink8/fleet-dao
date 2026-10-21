@@ -181,7 +181,8 @@ function setup(options: Options = {}) {
     breakAudit: (on = true) => {
       breakAudit = on;
     },
-    changeEvidence: (pull: Record<string, unknown>) => {
+    /** 换 GitHub 回的 PR 字段；不给就回到原样的已合 PR。 */
+    changeEvidence: (pull?: Record<string, unknown>) => {
       currentPull = pull;
     },
     changeClosure: (c: Partial<ClosedTaskWorkflow>) => {
@@ -388,7 +389,7 @@ describe('fleet-api task correct-merged（#3114 反例）', () => {
       ['--pr', '3137', '--head', HEAD, '--merge', 'c'.repeat(40), '--run', TEMPORAL_RUN],
       ['--pr', '3137', '--head', HEAD, '--merge', MERGE, '--run', '01a14fd8-fb57-741a-8c14-42e3fdba8888'],
     ]) {
-      h.changeEvidence(undefined as never);
+      h.changeEvidence();
       expect(await h.run([...flags, '--note', NOTE]), flags.join(' ')).toBe(1);
     }
     expect(audits(h)).toHaveLength(1);
