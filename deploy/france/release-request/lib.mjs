@@ -32,7 +32,7 @@
 //   restore 从没成在第 7 步「恢复」的那一趟把引擎总开关开回（只认我们关过的：发版前开着、pausedMaster 不是 false）、abort 撤掉暂停（等价 release-train abort：
 //   我们关过的、还没动手发版就开回暂停前的样子，已动手发过版保持关）；不认识的 kind 拒绝并写原因，不当成发布。各种都落 last-request.json（kind、by）。
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
 import {
   ciVerdict,
@@ -116,6 +116,21 @@ export function ignoredAlert(a) {
   return a.level !== 'alert' || /:park:/.test(a.key) || a.key.startsWith('remind:');
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+export const MAX_REQUEST_ATTEMPTS = 16;
+export const SEGMENTS_DIR = `${TRAIN_DIR}/request-segments`;
+const SEGMENT_NAME = new RegExp(
+  `^${UUID.source.slice(1, -1)}--${UUID.source.slice(1, -1)}--[0-9a-f]{64}\\.json$`,
+);
+export const validSegmentName = (name) => typeof name === 'string' && SEGMENT_NAME.test(name);
+export function segmentFileName(state) {
+  const hash = createHash('sha256')
+    .update(`${JSON.stringify(state)}\n`)
+    .digest('hex');
+  const name = `${state.rootRequestId}--${state.requestId}--${hash}.json`;
+  if (!validSegmentName(name)) throw new Error('归档分段身份不合格');
+  return name;
+}
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const WHO = /^[\p{L}\p{N}_.@ -]{1,64}$/u;
 const AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
@@ -209,7 +224,10 @@ export function parseRequest(text) {
   if (o === null || typeof o !== 'object' || Array.isArray(o)) {
     return { ok: false, why: '请求文件不是一个对象', sha: null, by: null };
   }
-  const keys = Object.keys(o).sort().join(',');
+  const keys = Object.keys(o)
+    .filter((key) => key !== 'requestId' && key !== 'supersedes' && key !== 'expectedAttempt')
+    .sort()
+    .join(',');
   const sha = typeof o.sha === 'string' && FULL_SHA.test(o.sha) ? o.sha : null;
   const by = typeof o.by === 'string' && WHO.test(o.by) ? o.by : null;
   const kind = o.kind === undefined ? 'release' : o.kind;
@@ -231,7 +249,171 @@ export function parseRequest(text) {
   if (typeof o.at !== 'string' || !AT.test(o.at) || Number.isNaN(Date.parse(o.at))) {
     return { ok: false, why: '请求里的时间不是 UTC 的 ISO 时间', sha, by };
   }
-  return { ok: true, kind, sha: needSha ? sha : null, at: o.at, by };
+  if (o.requestId !== undefined && (typeof o.requestId !== 'string' || !UUID.test(o.requestId)))
+    return { ok: false, why: 'requestId 不是 UUID v4', sha, by };
+  if (
+    o.supersedes !== undefined &&
+    (!o.requestId || kind !== 'release' || !validIdentity(o.supersedes) || o.supersedes.sha !== sha)
+  )
+    return { ok: false, why: 'supersedes 必须是同目标的完整前驱身份', sha, by };
+  if (
+    o.expectedAttempt !== undefined &&
+    (!o.requestId || kind === 'release' || !validIdentity(o.expectedAttempt))
+  )
+    return { ok: false, why: 'expectedAttempt 必须是恢复或撤销的完整目标身份', sha, by };
+  return {
+    ok: true,
+    kind,
+    sha: needSha ? sha : null,
+    at: o.at,
+    by,
+    ...(o.requestId ? { requestId: o.requestId } : {}),
+    ...(o.supersedes ? { supersedes: o.supersedes } : {}),
+    ...(o.expectedAttempt ? { expectedAttempt: o.expectedAttempt } : {}),
+  };
+}
+
+function identity(req) {
+  return { requestId: req.requestId, kind: req.kind, sha: req.sha, at: req.at, by: req.by };
+}
+function validIdentity(o) {
+  return (
+    o &&
+    Object.keys(o).sort().join(',') === 'at,by,kind,requestId,sha' &&
+    typeof o.requestId === 'string' &&
+    UUID.test(o.requestId) &&
+    REQUEST_KINDS.includes(o.kind) &&
+    (['release', 'retry'].includes(o.kind) ? FULL_SHA.test(o.sha) : o.sha === null) &&
+    typeof o.at === 'string' &&
+    AT.test(o.at) &&
+    !Number.isNaN(Date.parse(o.at)) &&
+    typeof o.by === 'string' &&
+    WHO.test(o.by)
+  );
+}
+function sameIdentity(a, b) {
+  return (
+    validIdentity(a) &&
+    validIdentity(b) &&
+    ['requestId', 'kind', 'sha', 'at', 'by'].every((k) => a[k] === b[k])
+  );
+}
+function sameOptionalIdentity(a, b) {
+  return (!a && !b) || sameIdentity(a, b);
+}
+function expectedAttemptError(state, req) {
+  const invalid = protocolError(state);
+  if (invalid) return invalid;
+  if (
+    req.requestId &&
+    ((state?.requestId && !sameIdentity(state.requests.at(-1).identity, req.expectedAttempt)) ||
+      (req.expectedAttempt && !state?.requestId))
+  )
+    return 'expectedAttempt 目标已变化，不能恢复或撤销另一 attempt';
+  return null;
+}
+function receiptIdentity(req) {
+  return req?.requestId
+    ? { requestId: req.requestId, requestAt: req.at, requestKind: req.kind, requestSha: req.sha }
+    : {};
+}
+export function protocolError(state, writing = false) {
+  if (state?.previousSegment !== undefined && !validSegmentName(state.previousSegment))
+    return '归档分段指针不合格';
+  if (!state?.requestId) return null; // 旧记录可以继续发布，不补造身份。
+  if (state.schema !== 1) return '发布请求进度格式不合格';
+  if (
+    !Array.isArray(state.requests) ||
+    !state.requests.length ||
+    state.requests.length > MAX_REQUEST_ATTEMPTS
+  )
+    return '发布请求身份链缺失或超限';
+  const seen = new Set();
+  for (let i = 0; i < state.requests.length; i++) {
+    const node = state.requests[i];
+    if (
+      !node ||
+      !validIdentity(node.identity) ||
+      !['running', 'blocked', 'failed', 'done', 'aborted'].includes(node.status) ||
+      seen.has(node.identity.requestId) ||
+      node.target !== state.target?.value ||
+      (node.identity.sha !== null && node.identity.sha !== node.target)
+    )
+      return '发布请求身份链损坏';
+    seen.add(node.identity.requestId);
+    const previous = state.requests[i - 1];
+    if (
+      (node.parent ?? null) !== (previous?.identity.requestId ?? null) ||
+      (previous && previous.supersededBy !== node.identity.requestId)
+    )
+      return '发布请求身份链边不一致';
+  }
+  const active = state.requests.at(-1);
+  if (
+    active.identity.requestId !== state.requestId ||
+    active.supersededBy != null ||
+    (!writing &&
+      (active.status !== state.status ||
+        JSON.stringify(active.check ?? null) !== JSON.stringify(state.check ?? null))) ||
+    state.rootRequestId !== state.requests[0].identity.requestId
+  )
+    return '发布请求当前 attempt 不一致';
+  return null;
+}
+function attachAttempt(state, req, prev = null) {
+  if (!req.requestId) return;
+  const nodes = prev?.requestId ? structuredClone(prev.requests) : [];
+  if (nodes.length >= MAX_REQUEST_ATTEMPTS) throw new Error('发布请求身份链已满，不丢弃旧身份');
+  const parent = nodes.at(-1);
+  if (parent) parent.supersededBy = req.requestId;
+  nodes.push({
+    identity: identity(req),
+    target: state.target.value,
+    parent: parent?.identity.requestId ?? null,
+    supersededBy: null,
+    supersedes: req.supersedes ?? null,
+    expectedAttempt: req.expectedAttempt ?? null,
+    status: 'running',
+    startedAt: state.updatedAt,
+    why: null,
+  });
+  state.requests = nodes;
+  state.requestId = req.requestId;
+  state.rootRequestId = nodes[0].identity.requestId;
+  if (prev?.previousSegment) state.previousSegment = prev.previousSegment;
+  state.attemptStartedAt = state.updatedAt;
+  state.check = null;
+}
+function recoveryAttempt(io, prev, req) {
+  const state = structuredClone(prev);
+  let parent = prev;
+  if (prev.requests?.length >= MAX_REQUEST_ATTEMPTS) {
+    if (typeof io.archiveSegment !== 'function') throw new Error('恢复所需归档口未接通');
+    const pointer = io.archiveSegment(prev);
+    if (pointer !== segmentFileName(prev)) throw new Error('归档回执身份不一致');
+    const current = io.readState();
+    if (!current.ok || JSON.stringify(current.state) !== JSON.stringify(prev))
+      throw new Error('归档后原状态快照已变化，不用陈旧状态恢复');
+    state.previousSegment = pointer;
+    parent = null;
+    state.resumes = [];
+  }
+  state.updatedAt = iso(io);
+  attachAttempt(state, req.requestId ? req : { ...req, requestId: randomUUID() }, parent);
+  state.status = 'running';
+  state.why = null;
+  state.pid = io.pid;
+  io.writeState(state); // 先切新 segment，再允许通知/恢复动作；这里没有 await 窗口。
+  return state;
+}
+function syncAttempt(state) {
+  if (!state.requestId) return;
+  const problem = protocolError(state, true);
+  if (problem) throw new Error(problem);
+  Object.assign(state.requests.at(-1), { status: state.status, why: state.why, check: state.check });
+}
+function checkIdentity(state) {
+  return state.requestId ? { attemptId: state.requestId, sha: state.target.value } : {};
 }
 
 /**
@@ -377,6 +559,7 @@ async function refuse(io, req, why) {
       v: 1,
       at: iso(io),
       outcome: 'refused',
+      ...receiptIdentity(req),
       sha,
       by: req?.by ?? null,
       ...(req?.kind && req.kind !== 'release' ? { kind: req.kind } : {}),
@@ -484,6 +667,7 @@ function ownsHealthState(read, state) {
     read.ok &&
     s?.target?.value === state.target.value &&
     s.startedAt === state.startedAt &&
+    (s.requestId ?? null) === (state.requestId ?? null) &&
     s.release?.healthAttempt === state.release.healthAttempt &&
     s.phase === state.phase &&
     (s.status === 'running' || s.status === 'blocked')
@@ -967,7 +1151,12 @@ async function phaseVerify(io, state) {
     );
     await io.sleep(io.limits.pollMs);
   }
-  state.check = { ok: items.every((x) => x.ok), items: items.map(({ retry, ...x }) => x), at: iso(io) };
+  state.check = {
+    ...checkIdentity(state),
+    ok: items.every((x) => x.ok),
+    items: items.map(({ retry, ...x }) => x),
+    at: iso(io),
+  };
   io.writeState(state);
   for (const x of items) say(io, `体检：${x.ok ? '[通过]' : '[没过]'} ${x.name}：${x.text}`);
   return { ok: true };
@@ -1009,7 +1198,7 @@ async function checkSwitches(io, state) {
   }
   const prev = state.check ?? { items: [] };
   const all = [...prev.items, ...items.map(({ retry, ...x }) => x)];
-  state.check = { ok: all.every((x) => x.ok), items: all, at: iso(io) };
+  state.check = { ...checkIdentity(state), ok: all.every((x) => x.ok), items: all, at: iso(io) };
   io.writeState(state);
   for (const x of items) say(io, `体检：${x.ok ? '[通过]' : '[没过]'} ${x.name}：${x.text}`);
 }
@@ -1025,7 +1214,17 @@ async function checkSwitches(io, state) {
  */
 async function phaseRestore(io, state) {
   const r = await restoreMaster(io, state);
-  if (r.ok) await checkSwitches(io, state);
+  if (r.ok) {
+    const active = state.requests?.at(-1);
+    // 恢复开关优先；新 restore attempt 才重新体检，不能继承旧 attempt 的 check。
+    if (
+      active?.identity.requestId === state.requestId &&
+      active?.identity.kind === 'restore' &&
+      state.check === null
+    )
+      await phaseVerify(io, state);
+    await checkSwitches(io, state);
+  }
   return r;
 }
 
@@ -1213,6 +1412,7 @@ function writeOutcome(io, state, req, outcome) {
       v: 1,
       at: iso(io),
       outcome,
+      ...receiptIdentity(req),
       sha: state.target?.value ?? req.sha,
       by: req.by,
       ...(req.kind !== 'release' ? { kind: req.kind } : {}),
@@ -1244,7 +1444,15 @@ function writeOutcome(io, state, req, outcome) {
  * }。返回退出码。
  */
 export async function runRequest(io) {
-  io = { ...io, limits: { ...LIMITS, ...(io.limits ?? {}) } };
+  const writeState = io.writeState;
+  io = {
+    ...io,
+    limits: { ...LIMITS, ...(io.limits ?? {}) },
+    writeState(state) {
+      syncAttempt(state);
+      writeState(state);
+    },
+  };
   const raw = io.readRequest();
   if (raw.kind === 'none') {
     say(io, '没有发布请求');
@@ -1253,6 +1461,63 @@ export async function runRequest(io) {
   if (raw.kind === 'unsafe') return refuse(io, null, raw.why);
   const req = parseRequest(raw.text);
   if (!req.ok) return refuse(io, req, req.why);
+  const initial = io.readState();
+  if (!initial.ok) return refuse(io, req, `进度记录读不了：${initial.why}`);
+  const invalid = protocolError(initial.state);
+  if (invalid) return refuse(io, req, invalid);
+  let duplicate = initial.state?.requests?.find((node) => node.identity.requestId === req.requestId);
+  if (req.requestId && !duplicate && typeof io.readArchivedRequest === 'function') {
+    let archived;
+    try {
+      archived = io.readArchivedRequest(req.requestId);
+    } catch (e) {
+      return refuse(io, req, `请求归档读不了：${e.message}`);
+    }
+    if (!archived.ok) return refuse(io, req, `请求归档读不了：${archived.why}`);
+    if (archived.state) {
+      const problem = protocolError(archived.state);
+      if (problem) return refuse(io, req, problem);
+      duplicate = archived.state.requests?.find((node) => node.identity.requestId === req.requestId);
+      if (!duplicate) return refuse(io, req, '请求归档没有对应身份');
+    }
+  }
+  if (req.requestId && duplicate) {
+    if (
+      !sameIdentity(duplicate.identity, identity(req)) ||
+      !sameOptionalIdentity(duplicate.supersedes, req.supersedes) ||
+      !sameOptionalIdentity(duplicate.expectedAttempt, req.expectedAttempt)
+    )
+      return refuse(io, req, '同一 requestId 的参数不同');
+    io.writeLast({
+      v: 1,
+      at: iso(io),
+      ...receiptIdentity(req),
+      by: req.by,
+      sha: duplicate.target,
+      outcome: duplicate.status,
+      why: duplicate.why,
+      check: duplicate.check,
+    });
+    say(
+      io,
+      duplicate.status === 'running' ? '这个请求已接收，仍在走；不重复执行' : '这个请求已接收，不重复执行',
+    );
+    return (duplicate.status === 'done' &&
+      duplicate.check?.ok === true &&
+      duplicate.check.attemptId === duplicate.identity.requestId &&
+      duplicate.check.sha === duplicate.target &&
+      Number.isFinite(Date.parse(duplicate.check.at)) &&
+      Date.parse(duplicate.check.at) >= Date.parse(duplicate.startedAt)) ||
+      (duplicate.status === 'aborted' && req.kind === 'abort')
+      ? EXIT.done
+      : duplicate.status === 'blocked'
+        ? EXIT.blocked
+        : EXIT.failed;
+  }
+  if (req.kind !== 'release') {
+    const mismatch = expectedAttemptError(initial.state, req);
+    if (mismatch) return refuse(io, req, mismatch);
+  }
   if (req.kind === 'abort') return runAbort(io, req);
   if (req.kind === 'retry' || req.kind === 'restore') return runResume(io, req);
 
@@ -1263,7 +1528,21 @@ export async function runRequest(io) {
   // 老现场：上一回停在「卡住」「没成」、发版前总开关开着、且那一趟关过总开关（老版本的记录没有 pausedMaster＝关过）：
   // 带过来（见 phasePauseFrance）；新版本那一趟没关过的、做完的、撤销的不带，这一回重新读
   const prevRead = io.readState();
-  const prev = prevRead.ok ? prevRead.state : null;
+  if (!prevRead.ok) return refuse(io, req, `进度记录读不了：${prevRead.why}`);
+  const prev = prevRead.state;
+  if (req.supersedes) {
+    const active = prev?.requests?.at(-1);
+    if (
+      protocolError(prev) ||
+      prev?.status !== 'failed' ||
+      prev.target?.value !== req.sha ||
+      !sameIdentity(active?.identity, req.supersedes) ||
+      active?.status !== 'failed'
+    )
+      return refuse(io, req, 'supersedes 前驱已变化或不是同目标 failed attempt');
+    if (prev.requests.length >= MAX_REQUEST_ATTEMPTS) return refuse(io, req, '发布请求身份链已满');
+  }
+  attachAttempt(state, req, req.supersedes ? prev : null);
   if (
     (prev?.status === 'blocked' || prev?.status === 'failed') &&
     prev.before?.master === true &&
@@ -1275,7 +1554,15 @@ export async function runRequest(io) {
   if (prev?.target?.value === req.sha) state.untouchedFails = untouchedFails(prev);
   // 上一趟发版动手之后没成（不论哪个提交）：动手后连败趟数带过来
   state.startedFails = startedFails(prev);
-  io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
+  io.writeLast({
+    v: 1,
+    at: iso(io),
+    ...receiptIdentity(req),
+    outcome: 'accepted',
+    sha: req.sha,
+    by: req.by,
+    why: null,
+  });
   say(io, `收到驾驶舱的发布请求：${req.sha.slice(0, 12)}，${req.by} 在 ${req.at} 点的`);
   await push(io, state, 'start');
   return runPhases(io, state, req, 0);
@@ -1385,7 +1672,17 @@ async function runResume(io, req) {
   const why = await preflight(io, retry ? req : { ...req, sha: prev.target?.value }, retry);
   if (why !== null) return refuse(io, req, why);
 
-  const state = prev;
+  const current = io.readState();
+  if (!current.ok) return refuse(io, req, `进度记录读不了：${current.why}`);
+  const mismatch = expectedAttemptError(current.state, req);
+  if (mismatch || current.state?.status !== want.status || current.state?.phase !== want.phase)
+    return refuse(io, req, mismatch || '恢复目标状态已变化');
+  let state;
+  try {
+    state = req.requestId || prev.requestId ? recoveryAttempt(io, prev, req) : prev;
+  } catch (e) {
+    return refuse(io, req, `恢复归档没成，现场没动：${e.message}`);
+  }
   state.status = 'running';
   state.why = null;
   state.laggards = [];
@@ -1393,8 +1690,8 @@ async function runResume(io, req) {
   state.via = 'cockpit';
   state.pid = io.pid;
   state.resumes = [
-    ...(Array.isArray(prev.resumes) ? prev.resumes : []),
-    { kind: req.kind, by: req.by, at: req.at },
+    ...(Array.isArray(state.resumes) ? state.resumes : []),
+    { kind: req.kind, by: req.by, at: req.at, ...(req.requestId ? { requestId: req.requestId } : {}) },
   ];
   if (!Array.isArray(state.pushes)) state.pushes = [];
   if (!retry) state.marker = true; // 上面核过：这一趟关过总开关，第 7 步要开回
@@ -1402,6 +1699,7 @@ async function runResume(io, req) {
     v: 1,
     at: iso(io),
     outcome: 'accepted',
+    ...receiptIdentity(req),
     sha: state.target.value,
     by: req.by,
     kind: req.kind,
@@ -1417,7 +1715,16 @@ async function runResume(io, req) {
 
 function writeAbortOutcome(io, req, sha, why, outcome = 'aborted') {
   try {
-    io.writeLast({ v: 1, at: iso(io), outcome, sha, by: req.by, kind: 'abort', why });
+    io.writeLast({
+      v: 1,
+      at: iso(io),
+      ...receiptIdentity(req),
+      outcome,
+      sha,
+      by: req.by,
+      kind: 'abort',
+      why,
+    });
   } catch (e) {
     io.err(`结局没写进 ${LAST_FILE}：${e instanceof Error ? e.message : String(e)}`);
   }
@@ -1431,7 +1738,7 @@ function writeAbortOutcome(io, req, sha, why, outcome = 'aborted') {
 async function runAbort(io, req) {
   const read = io.readState();
   if (!read.ok) return refuse(io, req, `进度记录读不了，不敢动它：${read.why}`);
-  const s = read.state;
+  let s = read.state;
   if (s?.status === 'running' && Number.isInteger(s.pid) && s.pid !== io.pid && io.pidAlive(s.pid)) {
     return refuse(io, req, `发版还在走（进程 ${s.pid}，第 ${s.phase} 步）：不能撤，等它停下`);
   }
@@ -1442,14 +1749,27 @@ async function runAbort(io, req) {
     return refuse(io, req, `看发布锁没成（${e instanceof Error ? e.message : String(e)}），按有发布在跑算`);
   }
   if (busy) return refuse(io, req, '已有发布在跑（发布锁被占着）：不动');
+  const current = io.readState();
+  if (!current.ok) return refuse(io, req, `进度记录读不了：${current.why}`);
+  const mismatch = expectedAttemptError(current.state, req);
+  if (mismatch) return refuse(io, req, mismatch);
+  s = current.state;
   const open = s !== null && s !== undefined && s.status !== 'done' && s.status !== 'aborted';
   if (!open && !io.markerExists()) {
     return refuse(io, req, '没有暂停标记，也没有没了结的一趟：没什么要撤的');
+  }
+  if (open && (req.requestId || s.requestId)) {
+    try {
+      s = recoveryAttempt(io, s, req);
+    } catch (e) {
+      return refuse(io, req, `撤销归档没成，现场没动：${e.message}`);
+    }
   }
   io.writeLast({
     v: 1,
     at: iso(io),
     outcome: 'accepted',
+    ...receiptIdentity(req),
     sha: s?.target?.value ?? null,
     by: req.by,
     kind: 'abort',
@@ -1480,6 +1800,7 @@ async function runAbort(io, req) {
       `撤销发版暂停，恢复暂停前的样子（驾驶舱点击撤掉暂停，${req.by}，目标 ${target}）`,
     );
     if (!on.ok) {
+      s.status = 'failed';
       s.why = `撤掉暂停没成：总开关没能开回去（${on.why}）；暂停标记还留着，再点一次，或到环境页点开`;
       io.writeState(s);
       io.err(s.why);

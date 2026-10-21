@@ -8,10 +8,9 @@
 // - 请求文件归法国上的接活单元（fleet-release-request.path 盯着 request.json）。键和样子跟驾驶舱后端一致，
 //   法国 parseRequest 才认：发布不带 kind（缺省就是 release），retry 带提交号，restore / abort 不带。
 //   by 固定写 commander。先写临时文件再 ln 到 request.json，已经有一份就失败，不盖掉。
-// - 进度以法国那两份文件为准，不在本机记一趟。上一份还在文件里时，要看到 last-request.json 变了、
-//   而且对得上这一次的种类和提交，才算这一趟。release-train.json 没变时，不拿里面上一趟的状态当这次的
-//   （刚写上 accepted 时，不把上一趟的「做完了」当成这次的）。例外：撤孤立的暂停标记时法国只写
-//   last-request.json（outcome aborted），故意不写进度文件，这时以这份结局为准。
+// - 新请求带随机 requestId；只消费完整请求身份匹配的 attempt。train.requests 保留有界的显式前后继，
+//   原 failed/blocked 即使后继成功也保持非 0。last 只提供自身精确拒绝或 abort 结果，不与 foreign train 拼体检。
+//   成功还须本 attempt 的 check 绑定目标和时点，再经 ssh 独立读取 current；旧无身份记录不能补造关联。
 // - 读进度：文件不存在当成空；文件在但读不了（权限不够等）整条命令失败，不当成没有发版。
 // - 一键预检借 start，--founder-ok 是占位那句时不写请求：只读查主线 CI、发布锁（.lock）、法国现状。
 //   锁被占着或 CI 不是绿的，回 2，输出里有「预检没过」。过了才打「—— 第 1 步」，给一键预检的哨兵拦住，到此为止。
@@ -21,6 +20,7 @@
 // - 退出码和法国接活脚本一致：0 做完了（发后体检通过，或 abort 做完了）；1 用法不对或被拒；
 //   2 没做成（ssh 失败、读不到、命令失败）；3 卡住（进度是 blocked，或做完了但发后体检没通过）。
 // - 打出来的字过 scrubText。提交号只印前 12 位（整串 40 位会被抹成「长串」）。ssh 的名字不进输出。
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { scrubText } from './france-lib.mjs';
@@ -96,12 +96,13 @@ const fail = (io, why) => {
  * 请求文件的正文。键的先后和驾驶舱后端一致：发布不带 kind（法国按缺省认成 release）；
  * retry 带提交号；restore、abort 不带。末尾一个换行，同 requestText / recoverRequestText。
  * @param {'release' | 'retry' | 'restore' | 'abort'} kind
- * @param {{ sha?: string | null, at: string, by?: string }} fields
+ * @param {{ sha?: string | null, at: string, by?: string, requestId?: string, expectedAttempt?: object }} fields
  */
-export function requestText(kind, { sha, at, by = COMMANDER_BY }) {
-  if (kind === 'release') return `${JSON.stringify({ v: 1, sha, at, by })}\n`;
-  if (kind === 'retry') return `${JSON.stringify({ v: 1, kind, sha, at, by })}\n`;
-  if (kind === 'restore' || kind === 'abort') return `${JSON.stringify({ v: 1, kind, at, by })}\n`;
+export function requestText(kind, { sha, at, by = COMMANDER_BY, requestId, expectedAttempt }) {
+  const id = { ...(requestId ? { requestId } : {}), ...(expectedAttempt ? { expectedAttempt } : {}) };
+  if (kind === 'release') return `${JSON.stringify({ v: 1, sha, at, by, ...id })}\n`;
+  if (kind === 'retry') return `${JSON.stringify({ v: 1, kind, sha, at, by, ...id })}\n`;
+  if (kind === 'restore' || kind === 'abort') return `${JSON.stringify({ v: 1, kind, at, by, ...id })}\n`;
   throw new Error(`不认识的请求种类：${kind}`);
 }
 
@@ -164,14 +165,91 @@ async function readProgress(io) {
   return parseProgressReply(r.stdout);
 }
 
-/** 这份 last-request 是不是我们刚递的这一次。发布请求法国不写 kind。 */
-function matchesRequest(last, kind, sha) {
-  if (!last || typeof last !== 'object') return false;
-  if (last.by !== COMMANDER_BY) return false;
-  if (kind === 'restore' || kind === 'abort') return last.kind === kind;
-  if (typeof last.sha !== 'string' || last.sha !== sha) return false;
-  if (kind === 'retry') return last.kind === 'retry';
-  return last.kind === undefined || last.kind === 'release';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const FULL_SHA = /^[0-9a-f]{40}$/;
+const SEGMENT_NAME = new RegExp(
+  `^${UUID.source.slice(1, -1)}--${UUID.source.slice(1, -1)}--[0-9a-f]{64}\\.json$`,
+);
+export function readArchivedRequestCommand(requestId) {
+  if (!UUID.test(requestId)) throw new Error('请求归档身份不合格');
+  const file = shq(`/srv/fleet-dao-releases/.train/request-segments/by-request/${requestId}.json`);
+  return `if [ -L ${file} ]; then exit 1; elif [ -f ${file} ]; then cat ${file} || exit 1; elif [ -e ${file} ]; then exit 1; else exit 44; fi`;
+}
+async function archivedNode(io, req, deadline) {
+  const remaining = deadline - io.now().getTime();
+  if (remaining <= 0) return { error: '跟随总时限已到，归档结果未知' };
+  const result = await io.ssh(readArchivedRequestCommand(req.requestId), {
+    timeoutMs: Math.min(60_000, remaining),
+  });
+  if (didNotRun(result)) return { error: `请求归档读不到：${tailOf(result)}` };
+  if (io.now().getTime() > deadline) return { error: '跟随总时限已到，归档结果未知' };
+  if (result.status === 44) return { node: null };
+  if (result.status !== 0) return { error: `请求归档读不到：${tailOf(result)}` };
+  const parsed = parseJsonObject(String(result.stdout ?? '').trim());
+  if (parsed.error || !parsed.value) return { error: '请求归档不是有效进度对象' };
+  const view = requestNode(parsed.value, req);
+  if (view.error || !view.node) return { error: view.error || '请求归档缺少对应身份' };
+  return { ...view, archived: true, train: parsed.value };
+}
+const sameIdentity = (a, b) =>
+  a && b && ['requestId', 'kind', 'sha', 'at', 'by'].every((key) => a[key] === b[key]);
+function matchesRequest(last, req) {
+  return (
+    last?.requestId === req.requestId &&
+    last.requestAt === req.at &&
+    last.requestKind === req.kind &&
+    last.requestSha === req.sha &&
+    last.by === req.by
+  );
+}
+
+/** 当前文件中的有界 attempt 链是唯一承接证据；不以 SHA 或文本变动推断。 */
+function requestNode(train, req) {
+  if (
+    train?.previousSegment !== undefined &&
+    (typeof train.previousSegment !== 'string' || !SEGMENT_NAME.test(train.previousSegment))
+  )
+    return { error: '归档分段指针不合格' };
+  if (!train?.requestId) return { node: null };
+  if (train.schema !== 1) return { error: '发布请求进度格式不合格' };
+  const nodes = train.requests;
+  if (!Array.isArray(nodes) || !nodes.length || nodes.length > 16)
+    return { error: '发布请求身份链缺失或超限' };
+  const seen = new Set();
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    const id = node?.identity;
+    const previous = nodes[i - 1];
+    if (
+      !id ||
+      Object.keys(id).sort().join(',') !== 'at,by,kind,requestId,sha' ||
+      !UUID.test(id.requestId) ||
+      seen.has(id.requestId) ||
+      !['release', 'retry', 'restore', 'abort'].includes(id.kind) ||
+      (['release', 'retry'].includes(id.kind) ? id.sha !== node.target : id.sha !== null) ||
+      typeof id.at !== 'string' ||
+      !Number.isFinite(Date.parse(id.at)) ||
+      typeof id.by !== 'string' ||
+      !FULL_SHA.test(node.target) ||
+      node.target !== train.target?.value ||
+      (node.parent ?? null) !== (previous?.identity.requestId ?? null) ||
+      (previous && previous.supersededBy !== id.requestId)
+    )
+      return { error: '发布请求身份链损坏或边不一致' };
+    seen.add(id.requestId);
+  }
+  const active = nodes.at(-1);
+  if (
+    active.identity.requestId !== train.requestId ||
+    active.supersededBy != null ||
+    JSON.stringify(active.check ?? null) !== JSON.stringify(train.check ?? null) ||
+    train.rootRequestId !== nodes[0].identity.requestId ||
+    active.status !== train.status
+  )
+    return { error: '发布请求当前 attempt 不一致' };
+  const node = nodes.find((item) => item.identity.requestId === req.requestId);
+  if (node && !sameIdentity(node.identity, req)) return { error: '同一 requestId 的参数不同' };
+  return { node, active };
 }
 
 const STATUS_WORD = {
@@ -198,24 +276,32 @@ function describeProgress(train) {
   return bits.join('，');
 }
 
-/** 这一趟见到结局了就回退出码；还在走回 null。体检没过算卡住（退出码 3，同法国 EXIT.blocked）。 */
-function finishCode(train, last) {
-  const outcome = last?.outcome;
-  if (outcome === 'refused') return { code: 1, why: last.why || '被拒' };
-  const status = train?.status;
-  if (status === 'blocked' || outcome === 'blocked')
-    return { code: 3, why: train?.why || last?.why || '卡住了' };
-  if (status === 'failed' || outcome === 'failed') return { code: 2, why: train?.why || last?.why || '没成' };
-  if (status === 'aborted' || outcome === 'aborted')
-    return { code: 0, why: train?.why || last?.why || '已撤销' };
-  if (status === 'done' || outcome === 'done') {
-    const check = train?.check ?? last?.check;
-    if (check?.ok === true) return { code: 0, why: '' };
-    const bad = Array.isArray(check?.items)
-      ? check.items.filter((x) => x && x.ok === false && x.name).map((x) => x.name)
-      : [];
-    return { code: 3, why: bad.length > 0 ? `发后体检没通过：${bad.join('、')}` : '发后体检没通过' };
-  }
+/** 每个结局和体检只读同一个 attempt，不跨 last/train 拼装。 */
+function finishCode(node, kind) {
+  const status = node?.status ?? node?.outcome;
+  if (status === 'refused') return { code: 1, why: node.why || '被拒' };
+  if (status === 'blocked') return { code: 3, why: node.why || '卡住了' };
+  if (status === 'failed') return { code: 2, why: node.why || '没成' };
+  if (status === 'aborted') return { code: kind === 'abort' ? 0 : 2, why: node.why || '原发布已撤销' };
+  return null;
+}
+function validCheck(node) {
+  const check = node?.check;
+  return (
+    check?.ok === true &&
+    check.attemptId === node.identity.requestId &&
+    check.sha === node.target &&
+    FULL_SHA.test(check.sha) &&
+    Number.isFinite(Date.parse(check.at)) &&
+    Number.isFinite(Date.parse(node.startedAt)) &&
+    Date.parse(check.at) >= Date.parse(node.startedAt)
+  );
+}
+async function verifyCurrent(io, sha) {
+  const result = await france(io, 'readlink /srv/fleet-dao-releases/current');
+  if (didNotRun(result) || result.status !== 0) return `在用版本没读到：${tailOf(result)}`;
+  const current = String(result.stdout ?? '').trim();
+  if (!FULL_SHA.test(current) || current !== sha) return '在用版本与本次精确目标不一致';
   return null;
 }
 
@@ -236,32 +322,74 @@ function report(io, fin) {
   return 2;
 }
 
-async function follow(io, kind, sha, base) {
+async function follow(io, req, base) {
   const started = io.now().getTime();
   let lastLine = '';
+  let observed = false;
   for (;;) {
     const view = await readProgress(io);
     if (!view.ok) return fail(io, `没做成：${view.why}`);
-    const lastChanged = view.lastText !== base.lastText;
-    const trainChanged = view.trainText !== base.trainText;
-    if (lastChanged && matchesRequest(view.last, kind, sha)) {
-      if (view.last.outcome === 'refused') return report(io, { code: 1, why: view.last.why || '被拒' });
-      // 进度文件还是上一趟的：不拿它的状态当这次的。孤立暂停标记的撤销只写 last-request
-      // （outcome aborted，runAbort 里 push 的 persist 是 false），进度文件故意不动，这里就算做完。
-      if (!trainChanged) {
-        if (view.last.outcome === 'aborted') return report(io, { code: 0, why: view.last.why || '已撤销' });
-      } else {
-        const line = describeProgress(view.train);
+    const ownLast = matchesRequest(view.last, req) ? view.last : null;
+    if (ownLast) {
+      observed = true;
+      const fin = finishCode(ownLast, req.kind);
+      if (fin) return report(io, fin);
+    }
+    let association = requestNode(view.train, req);
+    if (!association.error && !association.node && view.train?.requestId)
+      association = await archivedNode(io, req, started + io.limits.followMs);
+    if (association.error) return fail(io, `没做成：${association.error}`);
+    const { node, active } = association;
+    if (node) {
+      observed = true;
+      const fin = finishCode(node, req.kind);
+      if (fin) {
+        if (association.archived) fin.why += '；原请求已归档，当前发布与它的承接关系未核实';
+        if (node.supersededBy) {
+          fin.why += `；原请求终态保留，显式后继 ${active.identity.requestId.slice(0, 8)}（${active.identity.at}，${active.identity.by}）`;
+          if (active?.status === 'done' && validCheck(active)) {
+            const currentError = await verifyCurrent(io, active.target);
+            fin.why += currentError ? `（后继结果未核实：${currentError}）` : '（后继已完成并核实在用版本）';
+          }
+        }
+        return report(io, fin);
+      }
+      if (association.archived && node.status !== 'done')
+        return fail(io, '没做成：原请求已归档，但未记录可核实终态；当前发布承接关系未知');
+      if (node === active) {
+        const line = describeProgress(association.archived ? association.train : view.train);
         if (line && line !== lastLine) {
           sayTo(io, line);
           lastLine = line;
         }
-        const fin = finishCode(view.train, view.last);
-        if (fin) return report(io, fin);
-      }
+        if (node.status === 'done') {
+          if (!validCheck(node))
+            return report(io, { code: 3, why: '发后体检未通过或未绑定当前 attempt/目标/时点' });
+          const currentError = await verifyCurrent(io, node.target);
+          return currentError ? fail(io, `没做成：${currentError}`) : report(io, { code: 0, why: '' });
+        }
+      } else return fail(io, '没做成：原请求已被取代，但没有可核实的原请求终态');
+    } else if (ownLast?.outcome === 'done') {
+      return fail(io, '没做成：本请求结局缺少对应 attempt 进度和体检证据');
+    } else if (
+      observed &&
+      view.trainText !== base.trainText &&
+      ['done', 'failed', 'blocked', 'aborted'].includes(view.train?.status)
+    ) {
+      return fail(io, '没做成：发布已换成另一请求，找不到本请求或显式承接证据');
+    } else if (
+      view.lastText !== base.lastText &&
+      view.last?.by === req.by &&
+      (view.last.sha === req.sha || view.last.kind === req.kind) &&
+      !view.last.requestId
+    ) {
+      return fail(io, '没做成：法国回执缺少本次 requestId，不能核实关联');
     }
     if (io.now().getTime() - started >= io.limits.followMs)
-      return fail(io, `没做成：等了 ${minutes(io.now().getTime() - started)} 分钟还没看到这一趟结束`);
+      return fail(
+        io,
+        `没做成：等了 ${minutes(io.now().getTime() - started)} 分钟还没看到这一趟结束（缺少本次请求的可核实结局）`,
+      );
     await io.sleep(io.limits.pollMs);
   }
 }
@@ -318,12 +446,19 @@ async function legacyBlockedStart(io, sha) {
 
 async function submitAndFollow(io, kind, sha) {
   const at = io.now().toISOString();
-  const text = requestText(kind, { sha, at, by: COMMANDER_BY });
+  const req = { requestId: (io.uuid ?? randomUUID)(), kind, sha, at, by: COMMANDER_BY };
   const base = await readProgress(io);
   if (!base.ok) {
     if (kind === 'release' && unrecognizedFrance(base.why)) return legacyBlockedStart(io, sha);
     return fail(io, `没做成：${base.why}`);
   }
+  if (kind !== 'release' && base.train?.requestId) {
+    const active = base.train.requests?.at(-1);
+    if (!active?.identity || active.identity.requestId !== base.train.requestId)
+      return fail(io, '没做成：当前 attempt 身份缺失，不能恢复或撤销');
+    req.expectedAttempt = active.identity;
+  }
+  const text = requestText(kind, req);
   const short = sha ? sha.slice(0, 12) : '';
   sayTo(io, `递请求：kind ${kind}${short ? `，提交 ${short}` : ''}，by ${COMMANDER_BY}`);
   const wr = await france(io, writeRequestCommand(text));
@@ -337,7 +472,7 @@ async function submitAndFollow(io, kind, sha) {
     return fail(io, `没做成：请求没写到法国：${why}`);
   }
   sayTo(io, `已写到法国 ${REQUEST_FILE}，跟着进度`);
-  return follow(io, kind, sha, base);
+  return follow(io, req, base);
 }
 
 function parseArgs(argv, valueOptions, flagNames = []) {
