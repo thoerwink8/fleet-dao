@@ -181,7 +181,7 @@ test.describe('其余页面', () => {
   test('没做的页不占侧栏：账单仍写「还没做」；模型目录在路由页', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: '主导航' });
-    await expect(nav.getByRole('link', { name: '主页' })).toBeVisible();
+    await expect(nav.getByRole('link', { name: '工作台' })).toBeVisible();
     // 思考档位并进路由页（#1914 第 5 轮），侧栏不再单列
     for (const label of ['模型目录', '账单', '战绩', 'Jev 判断', '思考档位']) {
       await expect(nav.getByRole('link', { name: label })).toHaveCount(0);
@@ -196,20 +196,20 @@ test.describe('其余页面', () => {
     await expect(page.getByRole('heading', { name: '账单' })).toBeVisible();
   });
 
-  test('外壳尺寸生效：顶栏 52、侧栏 232（收起 60）乘根字号倍数（尺寸 token 放错命名空间时类名会静默失效）', async ({
+  test('外壳尺寸生效：顶栏 60、侧栏 220（收起 48），根字号不放大（尺寸 token 放错命名空间时类名会静默失效）', async ({
     page,
   }) => {
     await page.goto('/schedules');
     await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible();
     const header = await page.locator('main').evaluate((m) => {
-      const top = m.parentElement?.querySelector('header')?.getBoundingClientRect().height;
+      const top = document.querySelector('header')?.getBoundingClientRect().height; // 顶栏是文档里的第一个 header（页头在正文区里，在它后面）
       const side = document.querySelector('aside')?.getBoundingClientRect().width;
       const scale = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) / 16;
-      return { top, side, scale, wide: window.innerWidth >= 1440 };
+      return { top, side, scale, wide: window.innerWidth >= 1280 };
     });
-    // 桌面根字号放大到 125%（#1937），壳的尺寸写 rem 跟着放大；侧栏 ≥1440 默认展开
-    expect(header.scale).toBe(1.25);
-    expect(header.top).toBe(52 * header.scale);
-    expect(header.side).toBe((header.wide ? 232 : 60) * header.scale);
+    // 根字号不放大（#3509，照 Arco：16px）；壳的尺寸写 rem：顶栏 60，左菜单 ≥1280 默认展开 220、窄一点收成 48 宽的图标条
+    expect(header.scale).toBe(1);
+    expect(header.top).toBe(60 * header.scale);
+    expect(header.side).toBe((header.wide ? 220 : 48) * header.scale);
   });
 });

@@ -49,7 +49,7 @@ test.describe('后端不可用', () => {
     await request.post(`${stack.controlOrigin}/mode/down`);
     // 站内跳到「通知中心」：外壳角标和这一页共用一份缓存。进页会自己重读
     // （新鲜期内不跟缓存、在飞的那次先取消），不用再点「刷新」才看得到没读成。
-    await page.getByRole('link', { name: /通知中心/ }).click();
+    await page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '通知' }).click();
     await expect(page.getByRole('heading', { name: '通知中心' })).toBeVisible();
     const alert = page
       .getByRole('alert')
@@ -65,10 +65,12 @@ test.describe('后端不可用', () => {
   });
 
   test('后端回 500：同样写明没读成、给重试', async ({ page, request, stack, shot }) => {
-    await page.goto('/quota');
-    await expect(page.getByText('claude-carpool').first()).toBeVisible();
+    // 定时任务不进左菜单（#3509），站内入口是法国页「定时任务」区块的「全部定时任务」
+    await page.goto('/france');
+    const all = page.getByRole('link', { name: /全部定时任务/ });
+    await expect(all).toBeVisible();
     await request.post(`${stack.controlOrigin}/mode/error`);
-    await page.getByRole('link', { name: '定时任务' }).click();
+    await all.click();
     const alert = page
       .getByRole('alert')
       .filter({ hasText: /没读成|没查成/ })
@@ -88,7 +90,7 @@ test.describe('后端不可用', () => {
     await page.goto('/quota');
     await expect(page.getByText('claude-carpool').first()).toBeVisible();
     await request.post(`${stack.controlOrigin}/mode/error`);
-    await page.getByRole('link', { name: '主页' }).first().click();
+    await page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '工作台' }).click();
     const alert = page.getByRole('alert').filter({ hasText: '主页没读成' });
     await expect(alert).toBeVisible({ timeout: 30_000 });
     await expect(page.locator('[data-flow-board]')).toHaveCount(0);
