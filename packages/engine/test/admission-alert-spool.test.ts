@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import {
@@ -117,6 +118,71 @@ describe('专用SQLite持久pending', () => {
     const before = readFileSync(join(path, 'pending.sqlite'));
     expect(recordAdmissionAlert(path, o)).toEqual({ kind: 'unknown', code: 'corrupt' });
     expect(readFileSync(join(path, 'pending.sqlite')).equals(before)).toBe(true);
+  });
+  it('提交后、记快照前别的连接改坏旧行：快照作废，下次整表重核报corrupt', () => {
+    const first = observation();
+    expect(recordAdmissionAlert(path, first).kind).toBe('spooled');
+    const original = DatabaseSync.prototype.exec;
+    let tampered = false;
+    DatabaseSync.prototype.exec = function (sql: string) {
+      const result = original.call(this, sql);
+      if (sql === 'COMMIT' && !tampered) {
+        tampered = true;
+        // 落在本次 COMMIT 与 rememberCommitted 之间；prepare().run 不经过被替换的 exec。
+        const other = database();
+        try {
+          other
+            .prepare('UPDATE pending SET record_hash=? WHERE key=?')
+            .run('c'.repeat(64), admissionAlertKey(first.identity));
+        } finally {
+          other.close();
+        }
+      }
+      return result;
+    };
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    } finally {
+      DatabaseSync.prototype.exec = original;
+    }
+    expect(tampered).toBe(true);
+    // 若快照记下了别的连接提交后的文件头，这里会只跑容量 SQL、冒称 spooled。
+    expect(recordAdmissionAlert(path, observation())).toEqual({ kind: 'unknown', code: 'corrupt' });
+  });
+  it('写事务里读完主库文件头后，另一进程仍拿不到写锁（不另开另关主库fd放掉POSIX锁）', () => {
+    expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    const original = DatabaseSync.prototype.prepare;
+    const probes: string[] = [];
+    // POSIX 锁按进程算，同进程第二个连接看不出锁被放掉，必须真起一个进程去抢。
+    const probe = () =>
+      spawnSync(
+        process.execPath,
+        [
+          '--no-warnings',
+          '--input-type=module',
+          '-e',
+          `import { DatabaseSync } from 'node:sqlite';
+           const d = new DatabaseSync(process.argv[1]);
+           d.exec('PRAGMA busy_timeout=0');
+           try { d.exec('BEGIN IMMEDIATE'); d.exec('ROLLBACK'); console.log('acquired'); }
+           catch (e) { console.log(e.errcode & 255); }
+           finally { d.close(); }`,
+          join(path, 'pending.sqlite'),
+        ],
+        { encoding: 'utf8', timeout: 10000 },
+      ).stdout.trim();
+    // validate 在 record 的 BEGIN IMMEDIATE 和 mainStamp 之后才查 application_id；rememberCommitted 不查。
+    DatabaseSync.prototype.prepare = function (sql: string) {
+      if (sql === 'PRAGMA application_id') probes.push(probe());
+      return original.call(this, sql);
+    };
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    } finally {
+      DatabaseSync.prototype.prepare = original;
+    }
+    expect(probes).toEqual(['5']);
+    expect(probe()).toBe('acquired');
   });
   it('max_page_count不能缩既有超额真库，产品在打开前拒绝并保留', () => {
     recordAdmissionAlert(path, observation());

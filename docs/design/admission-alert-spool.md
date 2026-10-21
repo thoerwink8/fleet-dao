@@ -33,6 +33,8 @@ transfer 在 SQLite 读事务结束后才连接 PG。专用 PG 事务以 `INSERT
 
 `recordAdmissionAlert` 每次新开连接。已提交行的规范解码如果每次整表重做，256 条近上界记录会按行数二次放大，和 256 次真实 EXTRA 提交叠在一起会越过该测试原来的 15 秒。写锁内若暂存目录、主库 dev/ino、字节长度和文件头变更计数（偏移 24）与本进程上次提交后在锁内记下的一致，就跳过逐行解码；权限、schema、`quick_check` 和容量 SQL 仍每次做。同一连接的 `data_version` 在刷新快照时变了，说明别的连接已提交，快照作废。对不上、读不到或中途失败都整表重核。这不减少真实 COMMIT，也不放宽 EXTRA 或固定字节界。
 
+文件头只经打开 SQLite 前固定主库身份时留下的那个 fd 读，这个 fd 等 SQLite 关库后才关。Linux 上关掉同一文件的任何 fd，会释放本进程在该文件上的全部 POSIX 锁；事务里另开另关主库会放掉 SQLite 的 RESERVED/EXCLUSIVE 锁，别的进程就能拿到写锁，把活 journal 当 hot journal 回滚删除，本进程的 COMMIT 随后报 `SQLITE_IOERR_DELETE_NOENT`。
+
 ## 私有路径与耐久边界
 
 仅 Linux 非 root 服务 UID 可用。逐级 no-follow 打开目录并保持 FD/dev/ino/uid/mode；祖先仅 root/当前可信 UID 可写，叶目录当前 UID、0700，两个文件当前 UID、0600、单硬链接。SQLite 用字符串路径，并不因持 FD 而自动获得 dirfd 锚定；安全依据是祖先写权限边界及操作前后的身份复核。

@@ -83,6 +83,7 @@ class PrivatePath {
   readonly path: string;
   private anchors: { path: string; fd: number; initial: Stats }[] = [];
   private dbIdentity: Stats | undefined;
+  private dbFd: number | undefined;
   constructor(path: string) {
     if (process.platform !== 'linux' || !process.getuid || process.getuid() === 0) fail('unsupported');
     if (!isAbsolute(path) || resolve(path) !== path || path === parse(path).root) fail('private_path');
@@ -174,16 +175,15 @@ class PrivatePath {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
       fd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW);
     }
-    try {
-      this.dbIdentity = fstatSync(fd);
-      this.check();
-      if (!created && this.dbIdentity.size === 0) fail('corrupt');
-      if (created) {
-        fsyncSync(fd);
-        this.sync();
-      }
-    } finally {
-      closeSync(fd);
+    // 这个 fd 要留到 SQLite 关库之后：Linux 上关掉同一文件的任何 fd 会释放本进程在它上面的全部 POSIX 锁，
+    // 事务中途关就把 SQLite 的 RESERVED/EXCLUSIVE 锁一并放掉，别的进程会把活 journal 当 hot journal 回滚删除。
+    this.dbFd = fd;
+    this.dbIdentity = fstatSync(fd);
+    this.check();
+    if (!created && this.dbIdentity.size === 0) fail('corrupt');
+    if (created) {
+      fsyncSync(fd);
+      this.sync();
     }
     return created;
   }
@@ -246,26 +246,28 @@ class PrivatePath {
     }
   }
   // 文件头偏移 24 的变更计数随每次真实提交加一；空事务不加。调用时须已挡住其他写入。
+  // 只读 pinDatabase 留着的 fd，不在事务里另开另关（见 pinDatabase）；路径被换由 check 的 lstat 身份核出。
   mainStamp(): SpoolStamp {
     this.check();
-    const fd = openSync(join(this.path, NAME), constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const s = fstatSync(fd);
-      if (!s.isFile() || (this.dbIdentity && !same(this.dbIdentity, s))) fail('private_path');
-      const buf = Buffer.alloc(100);
-      if (readSync(fd, buf, 0, buf.length, 0) < 100 || !buf.subarray(0, 16).equals(SQLITE_MAGIC))
-        fail('corrupt');
-      return { path: this.path, dev: s.dev, ino: s.ino, size: s.size, counter: buf.readUInt32BE(24) };
-    } finally {
-      closeSync(fd);
-    }
+    const fd = this.dbFd;
+    if (fd === undefined) return fail('private_path');
+    const s = fstatSync(fd);
+    if (!s.isFile() || (this.dbIdentity && !same(this.dbIdentity, s))) fail('private_path');
+    const buf = Buffer.alloc(100);
+    if (readSync(fd, buf, 0, buf.length, 0) < 100 || !buf.subarray(0, 16).equals(SQLITE_MAGIC))
+      fail('corrupt');
+    return { path: this.path, dev: s.dev, ino: s.ino, size: s.size, counter: buf.readUInt32BE(24) };
   }
   sync(): void {
     const leaf = this.anchors[this.anchors.length - 1];
     if (!leaf) throw new SpoolError('private_path');
     fsyncSync(leaf.fd);
   }
+  // 须在 SQLite 关库之后调用（Spool.close 的顺序）。
   close(): void {
+    const fd = this.dbFd;
+    this.dbFd = undefined;
+    if (fd !== undefined) closeSync(fd);
     for (const a of this.anchors.splice(0).reverse()) closeSync(a.fd);
   }
 }
