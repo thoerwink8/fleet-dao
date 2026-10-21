@@ -9,7 +9,7 @@
 // - 只在「这台装过完整同步」的机器上动手：~/.fleet-dao/synced.json 在（新办法同步过），或者还挂着以前手装的 fleet-guard（更老的一代）。
 //   法国的会话用户（agents-sync --user）两样都没有——它们的开会话钩子是故意不登记的，引擎起的会话又读项目级设置，
 //   这里要是见到「没登记」就去同步，等于绕过那条故意的安排。FLEET_BOOTSTRAP=off 也直接不动。
-// - 判得出「旧」才动手，判不出（读不了设置文件）也要明说，不装作没事，也不拿它当「旧」去覆盖。
+// - 判得出「旧」才动手，判不出（读不了设置文件或源依赖）也要明说，不装作没事，也不拿它当「旧」去覆盖。
 // - 一律退出 0、不抛：这是开会话时的兜底，不是新的故障点。
 // 规矩由 agents/test/bootstrap.test.ts 钉住（含故意造出的失败）。
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
@@ -62,7 +62,7 @@ function settingsCommands(file) {
 }
 
 const unreadableLine = (why) =>
-  `引导钩子没核成：${why}；这台的钩子是不是最新判不了，先不动，修好设置文件再开会话，或手动跑 pnpm agents:sync。`;
+  `引导钩子没核成：${why}；这台的钩子是不是最新判不了，先不动，修好读不到的文件再开会话，或手动跑 pnpm agents:sync。`;
 
 /** 这台该不该由引导钩子管：{ manage: true } 或 { manage: false, why } 或 { manage: false, unreadable }（读不了，要明说） */
 export function shouldManage({ home, env = process.env }) {
@@ -82,7 +82,7 @@ export function shouldManage({ home, env = process.env }) {
 
 /**
  * 用户级钩子为什么算旧：一条一句话；空数组 = 是现在这一代。离线、只读。
- * 读不了设置文件返回 { unreadable }，让调用方明说，不当成旧也不当成新。
+ * 读不了设置文件或源依赖返回 { unreadable }，让调用方明说，不当成旧也不当成新。
  */
 export function healthReasons({ home }) {
   const reasons = [];
@@ -109,13 +109,27 @@ export function healthReasons({ home }) {
   const source = readFlat(join(home, SYNC_REL, 'agents', 'hooks'));
   if (source === null) {
     reasons.push('没有同步专用检出（~/.fleet-dao/origin-main，新办法才有），说明钩子是老办法装的');
-  } else if (installed !== null) {
-    const names = new Set([...source.keys(), ...installed.keys()]);
-    const diff = [...names].filter((n) => source.get(n) !== installed.get(n)).sort();
-    if (diff.length > 0)
-      reasons.push(
-        `装着的钩子脚本和主线不一样（${diff.slice(0, 3).join('、')}${diff.length > 3 ? ` 等 ${diff.length} 个` : ''}）`,
-      );
+  } else {
+    // 主线应装的文件集 = agents/hooks/ + 额外装的 _detach.mjs。这条映射和 packages/agents-sync/src/sync.ts 的 readHooks
+    // 是同一条（那边是 TS、没法静态 import 这个 .mjs，所以两处各写一份）：改一处必须改另一处。
+    if (source.has('background-launch.mjs')) {
+      try {
+        const detach = join(home, SYNC_REL, 'agents', 'local-sessions', 'detach.mjs');
+        source.set('_detach.mjs', readFileSync(detach, 'utf8').replace(/\r\n/g, '\n'));
+      } catch (err) {
+        return {
+          unreadable: `主线的后台钩子依赖 agents/local-sessions/detach.mjs，专用检出里读不了（${err?.code ?? '读不了'}），装着的 _detach.mjs 没法核`,
+        };
+      }
+    }
+    if (installed !== null) {
+      const names = new Set([...source.keys(), ...installed.keys()]);
+      const diff = [...names].filter((n) => source.get(n) !== installed.get(n)).sort();
+      if (diff.length > 0)
+        reasons.push(
+          `装着的钩子脚本和主线不一样（${diff.slice(0, 3).join('、')}${diff.length > 3 ? ` 等 ${diff.length} 个` : ''}）`,
+        );
+    }
   }
   return { reasons };
 }

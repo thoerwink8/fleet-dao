@@ -17,7 +17,9 @@ Nice=19
 IOSchedulingClass=idle
 CPUSchedulingPolicy=idle
 CPUQuota=50%
-MemoryMax=256M
+# du 遍历几十万个文件会把目录项缓存记在这个 cgroup 上（可回收，但 256M 时实测顶到上限还用了交换，2026-10-21 首轮 428 秒）
+MemoryMax=768M
+MemorySwapMax=0
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 ProtectSystem=strict

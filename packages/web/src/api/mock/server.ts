@@ -609,8 +609,45 @@ function mockApps(
       place: '不归本仓管（等 miraquota-win#3 发版后停）',
       units: ['miraquota-sync.service'],
       external: true,
-      diskNote: '不归本仓管，没登记目录',
       usage: { state: 'ok', running: 1, memoryMb: Math.round(71 + w(0.7, 4)), cpuCores: cores(0.01, 0.7) },
+    },
+    {
+      id: 'daihuo',
+      name: 'daihuo',
+      place: '/opt/daihuo（程序）、/var/lib/daihuo（数据），不归本仓管',
+      units: ['daihuo.service'],
+      external: true,
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(24 + w(0.8, 2)), cpuCores: cores(0.02, 0.8) },
+    },
+    {
+      id: 'reclaude-refill',
+      name: 'reclaude-refill',
+      place:
+        '/opt/reclaude-refill（程序）、/var/lib/reclaude-refill（数据），不归本仓管；systemd 定时任务，每分钟跑一次',
+      units: ['reclaude-refill-collector.service', 'reclaude-refill-collector.timer'],
+      external: true,
+      scheduled: true,
+      usage: { state: 'idle', why: '定时任务：跑完进程就没了，此刻没在跑' },
+    },
+    {
+      id: 'mirasim-radar',
+      name: 'mirasim-radar',
+      place:
+        '/opt/mirasim-radar（程序）、/var/lib/mirasim-radar（数据），不归本仓管；systemd 定时任务，每 5 分钟跑一次',
+      units: ['mirasim-radar-collector.service', 'mirasim-radar-collector.timer'],
+      external: true,
+      scheduled: true,
+      usage: { state: 'idle', why: '定时任务：跑完进程就没了，此刻没在跑' },
+    },
+    // 兜底扫出来的：机器上在跑、登记表里没有（#3457）
+    {
+      id: 'unregistered:newcomer.service',
+      name: 'newcomer.service',
+      place: 'system.slice/newcomer.service（机器上在跑，登记表里没有它）',
+      units: ['newcomer.service'],
+      unregistered: true,
+      diskNote: '没登记目录',
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(38 + w(0.9, 3)), cpuCores: cores(0.01, 0.9) },
     },
   ];
 }
@@ -637,6 +674,15 @@ function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): D
     measuredAt: new Date(at.getTime() - 4 * 60_000).toISOString(),
     everyMs: 10 * 60_000,
     tookMs: 18_400,
+    // 定时任务近 24 小时的账：reclaude-refill 有，mirasim-radar 没给（页面写「近 24 小时没给」）
+    timers: [
+      {
+        unit: 'reclaude-refill-collector.service',
+        runs24h: 1440,
+        cpuSeconds24h: 1180,
+        peakMemoryBytes: 61 * MIB,
+      },
+    ],
     dirs: [
       { path: '/srv/fleet-dao-releases', appId: 'releases', appName: '发布版本', size: ok(g(6.4 * big)) },
       { path: '/srv/fleet-dao', appId: 'releases', appName: '发布版本', size: ok(g(1.2)) },
@@ -670,6 +716,36 @@ function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): D
       { path: '/var/log/fleet-dao', appId: 'engine', appName: '引擎', size: ok(48 * MIB) },
       { path: '/opt/fleet-dao/temporal', appId: 'temporal', appName: 'Temporal', size: ok(412 * MIB) },
       { path: '/usr/local/lib/fleet-dao', appId: 'release', appName: '自动发布', size: ok(2 * MIB) },
+      { path: '/opt/miraquota', appId: 'miraquota', appName: 'MiraQuota 同步', size: ok(368 * 1024) },
+      {
+        path: '/opt/reclaude-refill',
+        appId: 'reclaude-refill',
+        appName: 'reclaude-refill',
+        size: ok(83 * MIB),
+      },
+      {
+        path: '/var/lib/reclaude-refill',
+        appId: 'reclaude-refill',
+        appName: 'reclaude-refill',
+        size: ok(115 * MIB),
+      },
+      { path: '/opt/mirasim-radar', appId: 'mirasim-radar', appName: 'mirasim-radar', size: ok(64 * MIB) },
+      {
+        path: '/var/lib/mirasim-radar',
+        appId: 'mirasim-radar',
+        appName: 'mirasim-radar',
+        size: ok(80 * MIB),
+      },
+      { path: '/opt/daihuo', appId: 'daihuo', appName: 'daihuo', size: ok(28 * MIB) },
+      {
+        path: '/var/lib/daihuo',
+        appId: 'daihuo',
+        appName: 'daihuo',
+        size: {
+          state: 'unread',
+          why: '读不了 /var/lib/daihuo：EACCES: permission denied（归 daihuo 用户、750）',
+        },
+      },
     ],
     databases:
       mode === 'unread'

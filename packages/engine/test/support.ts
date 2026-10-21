@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { prepareTemporalCli, startTemporalTestEnvironment } from '@fleet-dao/conventions/temporal-test-cli';
+import { requireTestServer } from '@fleet-dao/conventions/temporal-test-server';
 import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
@@ -25,7 +26,9 @@ export function engineBundle(): Promise<WorkflowBundle> {
 }
 
 export function createEnv(): Promise<TestWorkflowEnvironment> {
-  return TestWorkflowEnvironment.createTimeSkipping();
+  return TestWorkflowEnvironment.createTimeSkipping({
+    server: { executable: { type: 'existing-path', path: requireTestServer() } },
+  });
 }
 
 /**

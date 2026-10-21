@@ -190,6 +190,47 @@ describe('每个上线项目一行', () => {
     expect(out.kind === 'ok' && out.rows.map((r) => r.id).at(-1)).toBe('self-proxy');
   });
 
+  test('定时任务没在跑：CPU、内存写近 24 小时；没给写「近 24 小时没给」，不写没在占用也不写 0', () => {
+    const base = resources();
+    if (base.apps?.state !== 'ok') throw new Error('夹具没有 apps');
+    const idle = { state: 'idle' } as const;
+    const out = appRows(
+      resources({
+        apps: {
+          ...base.apps,
+          items: [app('missing', idle, { scheduled: true })],
+        },
+      }),
+      [],
+    );
+    if (out.kind !== 'ok') throw new Error('不该没读到');
+    const by = Object.fromEntries(out.rows.map((r) => [r.id, r]));
+    expect(by.missing?.cpu).toMatchObject({ kind: 'unread', word: '近 24 小时没给' });
+    expect(by.missing?.memory).toMatchObject({ kind: 'unread', word: '近 24 小时没给' });
+  });
+
+  test('没登记的（兜底扫出来的）排在最后，连别家的也在它前面；老后端没有这个字段照常', () => {
+    const base = resources();
+    if (base.apps?.state !== 'ok') throw new Error('夹具没有 apps');
+    const withExtra = resources({
+      apps: {
+        ...base.apps,
+        items: [
+          app('newcomer', { state: 'ok', running: 1, memoryMb: 20, cpuCores: 0.01 }, { unregistered: true }),
+          ...base.apps.items,
+        ],
+      },
+    });
+    const out = appRows(withExtra, []);
+    if (out.kind !== 'ok') throw new Error('不该没读到');
+    expect(out.rows.map((r) => r.id).slice(-2)).toEqual(['self-proxy', 'newcomer']);
+    expect(out.rows.at(-1)).toMatchObject({
+      unregistered: true,
+      disk: { kind: 'none', why: '名下没登记目录' },
+    });
+    expect(out.rows[0]?.unregistered).toBe(false);
+  });
+
   test('AI 会话按仓折成子行；对不上单的归「别的会话」，压在最后', () => {
     const rows = rowsOf(resources(), [running('acme/a', ['r2']), running('acme/b', ['r1'])]);
     expect(rows.sessions?.children?.map((c) => [c.name, c.memory, c.cpu])).toEqual([

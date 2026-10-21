@@ -16,6 +16,7 @@ import {
   expiredLocalClaims,
   extendLocalLease,
   finishLocalTask,
+  lastLocalReturnAt,
   listLocalClaims,
   mergedPrForIssue,
   renewLocalTask,
@@ -208,6 +209,95 @@ describe('claimLocalTask：接手引擎已停下的单（stalled / running + par
       }),
     ).toBe(1);
     expect(await row(repo.id, 1)).toMatchObject({ state: 'done', executor: 'local' });
+  });
+});
+
+describe('lastLocalReturnAt：最近一次退回法国队列的时刻（#3461，读操作记录，不加列）', () => {
+  const claimAt = (issueNumber: number, now: Date) =>
+    claimLocalTask(t.db, { repo: 'acme/app', issueNumber, title: 'x', nodeId: NODE, now });
+
+  it('租约到期退回（expire + returned）：回退回那一刻', async () => {
+    const repo = await addRepo(t.db, 'app');
+    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'failed' });
+    await claimAt(1, NOW);
+    const at = later(LOCAL_LEASE_MS + HOUR);
+    await settleExpiredLocalClaim(t.db, { taskId: task.id, how: 'returned', why: '到期', now: at });
+    expect((await lastLocalReturnAt(t.db, task.id))?.getTime()).toBe(at.getTime());
+  });
+
+  it('本机放手（finish + released）：回放手那一刻', async () => {
+    const repo = await addRepo(t.db, 'app');
+    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'failed' });
+    await claimAt(1, NOW);
+    const at = later(HOUR);
+    await finishLocalTask(t.db, {
+      repo: 'acme/app',
+      issueNumber: 1,
+      outcome: 'released',
+      reason: '要法国做',
+      nodeId: NODE,
+      now: at,
+    });
+    expect((await lastLocalReturnAt(t.db, task.id))?.getTime()).toBe(at.getTime());
+  });
+
+  it('退回过好几次：取最近一次', async () => {
+    const repo = await addRepo(t.db, 'app');
+    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'failed' });
+    await claimAt(1, NOW);
+    await finishLocalTask(t.db, {
+      repo: 'acme/app',
+      issueNumber: 1,
+      outcome: 'released',
+      nodeId: NODE,
+      now: later(HOUR),
+    });
+    await claimAt(1, later(2 * HOUR));
+    const last = later(LOCAL_LEASE_MS + 3 * HOUR);
+    await settleExpiredLocalClaim(t.db, { taskId: task.id, how: 'returned', why: '到期', now: last });
+    expect((await lastLocalReturnAt(t.db, task.id))?.getTime()).toBe(last.getTime());
+  });
+
+  it('不算退回：领、续、做完（done）、记没做成（failed）、单关了收成 done / closed；从没退回过回 null', async () => {
+    const repo = await addRepo(t.db, 'app');
+    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'failed' });
+    expect(await lastLocalReturnAt(t.db, task.id)).toBeNull();
+    await claimAt(1, NOW);
+    await claimAt(1, later(HOUR)); // 续租
+    expect(await lastLocalReturnAt(t.db, task.id)).toBeNull();
+    await finishLocalTask(t.db, {
+      repo: 'acme/app',
+      issueNumber: 1,
+      outcome: 'failed',
+      reason: '测不过',
+      nodeId: NODE,
+      now: later(2 * HOUR),
+    });
+    expect(await lastLocalReturnAt(t.db, task.id)).toBeNull();
+    await claimAt(1, later(3 * HOUR));
+    await settleExpiredLocalClaim(t.db, {
+      taskId: task.id,
+      how: 'closed',
+      why: '单关了',
+      now: later(LOCAL_LEASE_MS + 4 * HOUR),
+    });
+    expect(await lastLocalReturnAt(t.db, task.id)).toBeNull();
+  });
+
+  it('别的任务的退回不串', async () => {
+    const repo = await addRepo(t.db, 'app');
+    const a = await addTask(t.db, repo.id, { issueNumber: 1, state: 'failed' });
+    const b = await addTask(t.db, repo.id, { issueNumber: 2, state: 'failed' });
+    await claimAt(1, NOW);
+    await finishLocalTask(t.db, {
+      repo: 'acme/app',
+      issueNumber: 1,
+      outcome: 'released',
+      nodeId: NODE,
+      now: later(HOUR),
+    });
+    expect(await lastLocalReturnAt(t.db, a.id)).not.toBeNull();
+    expect(await lastLocalReturnAt(t.db, b.id)).toBeNull();
   });
 });
 
