@@ -29,7 +29,7 @@
 ## 测试
 
 - `npx vitest run packages/conventions/test/<文件>`。读仓里文件的检查都经 `packages/conventions/src/repo.ts` 的 `RepoView`，测试换成内存假仓（`test/helpers.ts` 的 `memRepo`）。
-- `packages/conventions/test/doc-pointers.test.ts` 对全仓的活文档跑指针检查：design、ops、README、仓根和各包的 AGENTS.md、`docs/design/` 下的模块文件。
+- `packages/conventions/test/doc-pointers.test.ts` 对全仓的活文档跑指针检查：design、ops、README、仓根和各包的 AGENTS.md、`docs/design/` 下的模块文件。 `_tmp` 的具体子路径不受临时目录是否已创建影响；仅说明根目录位置不要求预建，目标缺失和目录读不到分别报错。
 
 ## 常见坑
 

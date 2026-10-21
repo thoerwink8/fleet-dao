@@ -167,7 +167,8 @@ class Checker {
     if (root === undefined) this.problem('.', 0, '列不出仓根下的文件：路径、链接指针都没法查');
     const entries = (root ?? []).filter((name) => !IGNORED_TOP.has(name));
     this.tops = new Set(entries);
-    const dirs = entries.filter((name) => repo.isDir(name));
+    // _tmp 的具体子路径不依赖临时目录是否已创建，裸写的路径也要查。
+    const dirs = [...new Set(['_tmp', ...entries.filter((name) => repo.isDir(name))])];
     // 正文里不带反引号的路径只认「顶层目录/…」，而且只认 ASCII：specs 的目录名带中文，截不准的宁可不查
     this.barePath = dirs.length
       ? new RegExp(`(?<![A-Za-z0-9_./@-])((?:${dirs.map(escapeRe).join('|')})/[A-Za-z0-9_./*@-]*)`, 'g')
@@ -202,7 +203,8 @@ class Checker {
     const t = token.replace(/[，。；：、,;:)）」]+$/, '');
     if (!t || /[<>{}$|"'=\\]/.test(t) || /^[~/]/.test(t) || t.startsWith('..')) return;
     if (/^[a-z][a-z0-9+.-]*:/i.test(t)) return; // 网址、host:port
-    if (!this.tops.has(t.split('/')[0] ?? '')) return;
+    // 单写 _tmp 或 _tmp/ 只说明暂存位置；有具体子路径才补认缺失的临时目录。
+    if (!this.tops.has(t.split('/')[0] ?? '') && !/^_tmp\/.+/.test(t)) return;
     this.note('path', file, line, t);
     const found = this.locate(t);
     if (found === 'missing') this.problem(file, line, `${t} 在仓里没有`);

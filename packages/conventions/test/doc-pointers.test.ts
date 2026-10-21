@@ -406,6 +406,16 @@ describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
   it('都指得到', () => {
     expect(report.problems.map(formatProblem)).toEqual([]);
   });
+
+  it('干净检出没有临时目录时，全仓文档也不误报根位置说明', () => {
+    const repo = fsRepo(ROOT);
+    const withoutTmp = {
+      ...repo,
+      list: (dir: string) =>
+        dir === '' ? repo.list(dir)?.filter((name) => name !== '_tmp') : repo.list(dir),
+    };
+    expect(checkDocPointers(withoutTmp).problems.map(formatProblem)).toEqual([]);
+  });
 });
 
 describe('文档指针：docs/design/ 下的模块文件也在要查的名单里', () => {
@@ -531,6 +541,40 @@ describe('文档指针：「「X」一节」只在 X 像本文档标题时才查
     });
     expect(report.problems).toEqual([
       { file: 'docs/design.md', line: first, message: '_tmp/rethink/PLAN.md 在仓里没有' },
+    ]);
+  });
+
+  it.each([
+    ['反引号', '方案见 `_tmp/rethink/PLAN.md`。'],
+    ['正文', '方案见 _tmp/rethink/PLAN.md。'],
+  ])('%s：临时目录尚未创建也报告缺失路径', (_kind, text) => {
+    for (const extra of [{}, { '_tmp/other.md': '' }]) {
+      const { report, first } = withLines('docs/design.md', [text], extra);
+      expect(report.problems).toEqual([
+        { file: 'docs/design.md', line: first, message: '_tmp/rethink/PLAN.md 在仓里没有' },
+      ]);
+      expect(report.pointers).toContainEqual({
+        kind: 'path',
+        file: 'docs/design.md',
+        line: first,
+        text: '_tmp/rethink/PLAN.md',
+      });
+    }
+  });
+
+  it('仅说明临时目录位置不要求干净检出提前创建目录', () => {
+    const { report } = withLines('docs/design.md', ['临时资料放 `_tmp` 或 `_tmp/`，也可写成 _tmp/。']);
+    expect(report.problems).toEqual([]);
+  });
+
+  it('临时目录中的真实目标仍通过，读不到目录仍报没法查', () => {
+    const file = 'docs/design.md';
+    const path = '_tmp/rethink/PLAN.md';
+    const repo = memRepo({ ...BASE, [file]: `# 设计\n方案见 \`${path}\`。\n`, [path]: '# 临时方案\n' });
+    expect(checkDocPointers(repo, [file]).problems).toEqual([]);
+    const unreadable = { ...repo, list: (dir: string) => (dir === '_tmp' ? undefined : repo.list(dir)) };
+    expect(checkDocPointers(unreadable, [file]).problems.map(formatProblem)).toEqual([
+      'docs/design.md:2  _tmp/rethink/PLAN.md 在不在没查成：读不到 _tmp/',
     ]);
   });
 
