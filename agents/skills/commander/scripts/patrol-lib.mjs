@@ -12,7 +12,9 @@
 // - /healthz 非 200（连不上是 0）是 BROKEN，列出红的检查；服务 active 不再单独判（发版切版本那几十秒服务不 active，healthz 才是准的）。
 // - feishuPushProblem、dailyBriefProblem 非空是 ALERT（原话照搬）；新出现的「该推的通知」（和基线比）是 ALERT。
 //   日报级（发版开始、发版成功、每日简报）不进 ALERT 和变化。
-// - 本机另外只读几样引擎不判的：磁盘、可用内存、负载、总开关、卡住的单、最近失败的定时任务。
+// - 本机另外只读几样引擎不判的：磁盘、可用内存、负载、总开关、卡住的单、最近一次已结束不是 ok 的定时任务。
+//   定时任务读每个还登记着的任务最近一次已结束的结局（较新的在途不盖住它）：partial（部分没查成）和 failed、unscanned 一样报，
+//   ok 只记名字（okJobs）。「恢复了」只认本轮读到该任务最近一次已结束真是 ok；从列表里消失（退役、摘除）不算恢复（#3513）。
 // - 基线只由这份脚本写（模型不写）：OK、ALERT 都把这一次的读数写成新基线，BROKEN 不写（不拿坏读数盖掉好基线）。
 // - 读不到法国（ssh 没读成、输出空、解析失败、采集时间和本机差太多，facts 是空的）：VERDICT 前多一行显眼中文，
 //   写明读不到的原因，并指向香港状态页（上面有「法国失联自 xx:xx」）；本机配了香港状态页地址就顺手 curl 一次，结果另起一行（不改结论）。
@@ -22,14 +24,15 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
 
 /** @typedef {{ ok: false, kind: string, why: string }} Failure 没做成：kind 同 france-lib；why 给人看 */
 /** @typedef {{ n: number, repo: string, state: string, phase: string, minutes: number, doing: string }} TaskFact 一张没做完的单 */
-/** @typedef {{ job: string, outcome: string, minutes: number, why: string }} JobFact 最近一次跑完不是 ok 的定时任务 */
+/** @typedef {{ job: string, outcome: string, minutes: number, why: string }} JobFact 最近一次跑完不是 ok 的定时任务（partial 部分没查成也算，#3513） */
 /** @typedef {{ key: string, title: string, level?: string }} NoteFact 一条开着且该推的通知；level 是 decision | alert | daily（老基线里没有） */
 /** @typedef {{ code: number, red: string[] }} HealthzFact /healthz 的状态码（连不上是 0）和红的检查名 */
 /**
  * 一次巡查读到的。at 是法国的采集时间（ISO）。healthz、notes、pushProblem、briefProblem 都是 fleet-api attention 的结论
  * （pushProblem、briefProblem：没问题是 null）。
  * @typedef {{ repo: string, issue: number, labeledFor: string, reason: string }} LocalOrphanFact
- * @typedef {{ at: string, release: string, healthz: HealthzFact, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notes: NoteFact[], pushProblem: string | null, briefProblem: string | null, localOrphans: LocalOrphanFact[] }} Facts
+ * jobs 是还登记着的任务里最近一次已结束不是 ok 的；okJobs 是最近一次已结束就是 ok 的任务名（旧基线里没有这一项）。
+ * @typedef {{ at: string, release: string, healthz: HealthzFact, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], okJobs: string[], notes: NoteFact[], pushProblem: string | null, briefProblem: string | null, localOrphans: LocalOrphanFact[] }} Facts
  */
 /** @typedef {'OK' | 'ALERT' | 'BROKEN'} Verdict */
 /** @typedef {{ verdict: Verdict, facts: Facts | null, alerts: string[], delta: string[], broken: string | null, notes: string[] }} Report */
@@ -86,7 +89,7 @@ export const REMOTE_SCRIPT = [
   `echo "load|$(cut -d' ' -f1 /proc/loadavg)"`,
   `q master "select 'master', coalesce((select value::text from settings where key = 'engine.master'), 'none')"`,
   `q tasks "select 'task', t.issue_number, r.name, t.state, coalesce(t.phase, ''), floor(extract(epoch from now() - coalesce(t.updated_at, t.created_at)) / 60)::int, replace(left(coalesce(t.doing, ''), 80), ${NO_NEWLINE}, ' ') from tasks t join repos r on r.id = t.repo_id where t.state not in ('done', 'stopped', 'failed', 'queued') order by t.issue_number"`,
-  `q jobs "select 'job', r.job, r.outcome, floor(extract(epoch from now() - coalesce(r.ended_at, r.started_at)) / 60)::int, replace(left(coalesce(r.why, ''), 100), ${NO_NEWLINE}, ' ') from schedule_runs r join scheduled_jobs j on j.id = r.job and j.removed_at is null where r.id in (select max(id) from schedule_runs where outcome is not null group by job) and r.outcome not in ('ok', 'partial') order by r.job"`,
+  `q jobs "select 'job', r.job, r.outcome, floor(extract(epoch from now() - coalesce(r.ended_at, r.started_at)) / 60)::int, replace(left(coalesce(r.why, ''), 100), ${NO_NEWLINE}, ' ') from schedule_runs r join scheduled_jobs j on j.id = r.job and j.removed_at is null where r.id in (select max(id) from schedule_runs where outcome is not null group by job) order by r.job"`,
   `att=$(bash ${FLEET_API} attention --json </dev/null 2>&1); rc=$?`,
   `json=$(printf '%s\\n' "$att" | grep '^{' | tail -n 1)`,
   `if [ -n "$json" ]; then printf 'attention|%s\\n' "$json"; else echo "attention-err|$rc|$(printf '%s' "$att" | tr '\\n|' '  ' | cut -c1-300)"; fi`,
@@ -205,6 +208,8 @@ export function parseRaw(text) {
   const tasks = [];
   /** @type {JobFact[]} */
   const jobs = [];
+  /** @type {string[]} */
+  const okJobs = [];
   /** @type {Set<string>} */
   const blocksOk = new Set();
   /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, attention?: Extract<ReturnType<typeof parseAttention>, { ok: true }> }} */
@@ -244,14 +249,23 @@ export function parseRaw(text) {
         minutes: Number(p[5]),
         doing: scrubText(p.slice(6).join('|')),
       });
-    else if (kind === 'job' && p.length >= 5 && isInt(p[3] ?? ''))
-      jobs.push({
-        job: p[1] ?? '',
-        outcome: p[2] ?? '',
-        minutes: Number(p[3]),
-        why: scrubText(p.slice(4).join('|')),
-      });
-    else return { ok: false, why: `认不出这一行：${shown(line)}` };
+    else if (
+      kind === 'job' &&
+      p.length >= 5 &&
+      isInt(p[3] ?? '') &&
+      (p[1] ?? '') !== '' &&
+      (p[2] ?? '') !== ''
+    ) {
+      // 每个还登记着的任务最近一次已结束的结局都在这里：ok 记进 okJobs（恢复只认它），其余（partial、unscanned、failed）进 jobs
+      if (p[2] === 'ok') okJobs.push(p[1] ?? '');
+      else
+        jobs.push({
+          job: p[1] ?? '',
+          outcome: p[2] ?? '',
+          minutes: Number(p[3]),
+          why: scrubText(p.slice(4).join('|')),
+        });
+    } else return { ok: false, why: `认不出这一行：${shown(line)}` };
   }
   /** @type {string[]} */
   const missing = [];
@@ -272,6 +286,7 @@ export function parseRaw(text) {
       master: one.master ?? '',
       tasks,
       jobs,
+      okJobs,
       notes: att.notes,
       pushProblem: att.pushProblem,
       briefProblem: att.briefProblem,
@@ -355,7 +370,16 @@ export function delta(f, base) {
     if (!o) out.push(`+ 定时任务 ${j.job} ${j.outcome}`);
     else if (o.outcome !== j.outcome) out.push(`~ 定时任务 ${j.job} ${o.outcome} → ${j.outcome}`);
   }
-  for (const o of base.jobs) if (!newJobs.has(o.job)) out.push(`- 定时任务 ${o.job}（恢复了）`);
+  // 恢复只认本轮读到该任务最近一次已结束的真是 ok；从异常列表里消失（退役、摘除、还没有已结束的跑）不算
+  const okNow = new Set(f.okJobs);
+  for (const o of base.jobs) {
+    if (newJobs.has(o.job)) continue;
+    out.push(
+      okNow.has(o.job)
+        ? `- 定时任务 ${o.job}（恢复了：最近一次已结束的是 ok）`
+        : `- 定时任务 ${o.job}（本轮不再出现，没读到当前 ok，不算恢复）`,
+    );
+  }
   // 日报不逐条进变化（每轮都会多几条发版通知）。老基线里已经记成 daily 的，消失了也不报。
   const watch = (/** @type {NoteFact[]} */ notes) => notes.filter((n) => n.level !== 'daily');
   const oldNotes = new Set(watch(base.notes).map((n) => n.key));
@@ -627,6 +651,18 @@ export function selftest(now) {
       },
       'ALERT',
       7,
+    ],
+    [
+      '定时任务最近一次是 partial（部分没查成，旁边另一个任务是 ok）',
+      {
+        ok: true,
+        stdout: sampleRaw({
+          at: now,
+          jobs: ['job|hourly-reconcile|partial|30|46 处没查成', 'job|healthy-job|ok|60|'],
+        }),
+      },
+      'ALERT',
+      1,
     ],
     [
       '/healthz 503',

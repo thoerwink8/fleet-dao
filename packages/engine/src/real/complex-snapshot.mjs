@@ -76,6 +76,9 @@ function gitEnv() {
     'GIT_ALTERNATE_OBJECT_DIRECTORIES',
     'GIT_INDEX_FILE',
     'GIT_NAMESPACE',
+    // 浅边界文件在真实 common-dir 里；继承来的这两个变量能让浅仓读成完整仓，或让完整仓读成浅仓。
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
   ]) {
     delete env[key];
   }
@@ -754,6 +757,16 @@ function rejectSplitIndex(cwd) {
   }
 }
 
+// v3 不保留 shallow 边界：浅仓的对象闭包不完整，只会晚到独立恢复才缺对象。采集前就拒绝，不支持浅历史保全。
+// 读不到、命令失败、输出认不出都当失败，不把空输出或 0 当完整仓。
+function rejectShallow(cwd) {
+  const probe = spawnSync(gitBin, ['rev-parse', '--is-shallow-repository'], { cwd, env: gitEnv() });
+  if (probe.error || probe.status !== 0) fail('浅仓判定没看成，保留原树');
+  const answer = probe.stdout.toString('utf8').trim();
+  if (answer === 'true') fail('浅仓不能自包含保全，保留原树');
+  if (answer !== 'false') fail('浅仓判定认不出，保留原树');
+}
+
 function readIndexBytes(cwd) {
   rejectSplitIndex(cwd);
   const format = git(['rev-parse', '--show-object-format'], cwd).toString('utf8').trim();
@@ -793,6 +806,7 @@ function collect(cwd, keepBytes) {
   CLOSED.clear();
   metadataRead = 0;
   visitedPaths = 0;
+  rejectShallow(cwd);
   const blobs = keepBytes ? new Map() : null;
   const head = git(['rev-parse', 'HEAD'], cwd).toString('utf8').trim();
   if (!/^[0-9a-f]{40}$/.test(head)) fail(`HEAD 认不出：${head}`);
