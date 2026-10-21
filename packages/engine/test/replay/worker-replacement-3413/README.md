@@ -17,3 +17,11 @@
 同一份 protobuf 用现在的工作流代码离线重放，稳定报 `DeterminismViolationError`，正文仍是上面那句 TMPRL1100。这钉的是「对不上」，不是修复。单次把原用例跑绿不能当成这次超时已修，也不许为了让重放变绿而改写这些字节。#3258 若改了标记行为、让同一份字节重放通过，只改 `worker-replacement-capture.test.ts` 里那条断言。
 
 同文件里别的用例在并行负载下也可能停在查停点，工作流任务失败的标记是 `park-kind`。那是别的 run，不是这份 `6385a827-f825-4d12-8bd9-d3e2351b6db6`，不能拿来替换或解释这份取证。
+
+## 机制（`la-query-split.test.ts` 钉住）
+
+事件 4 交的第一个工作流任务只带本地活动标记（事件 5，limits 的 `decide`），同一毫秒强开事件 6 的新任务，`self-check-own-timeout` 的补丁标记（事件 9）落在新任务里。SDK core 1.24.0 只在两种情况下这样强开：心跳（工作流任务超时 10 秒的 80%；这个任务从开到交 0.3 秒，不是），或回查询时手上还有没交给工作流的本地活动结果（core-bridge `sdk-core/crates/sdk-core/src/worker/workflow/managed_run.rs`）。当时用例正在轮询停点查询。重放时 core 只往前看到下一个工作流任务为止（同目录 `machines/workflow_machines.rs` 的 lookahead），本地活动在第一个任务里就解开，工作流当场问补丁，看不到再下一个任务里的标记，于是 TMPRL1100。`maxCachedWorkflows: 0` 的工人每个任务都重放，所以一直失败、超时，用例在查停点等满。
+
+`la-query-split.test.ts` 用最小工作流真跑出历史，再照这份字节的形状切开：本地活动之后问补丁，切开就报同一句 TMPRL1100；本地活动之后不问补丁、或在本地活动之前问，切开也重放得过。`worker-replacement-capture.test.ts` 另钉这份字节的事件 2–9 形状。这是机制，不是修复：`task.ts` 开头 `limitsFor` 回来后 `activitiesFor` 才问补丁，生产代码怎么改归 #3258，这里不动。查询撞上本地活动结果的窗口很窄，单跑难碰上，CI 负载下偶发；生产里驾驶舱查询撞上之后，换工人或驱逐缓存同样会重放对不上。
+
+CI run 39392992046 没留历史；PR #3488 那次（`test (5/8)`，同一处查停点 20 秒超时、phase 停在 brief）日志里若有取证帧，这里也还没解出来。两次都不能断言是这个机制，只是症状一致。

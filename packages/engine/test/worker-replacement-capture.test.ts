@@ -138,6 +138,49 @@ describe('#3413 原用例停在查停点的取证', () => {
     expect(events.some((event) => event.workflowExecutionSignaledEventAttributes)).toBe(false);
   });
 
+  // 机制见 la-query-split.test.ts：第一个工作流任务只交了本地活动标记，同一毫秒强开新任务，补丁标记落在新任务里。
+  // 不是心跳强开：第一个任务从开到交不到 1 秒，心跳要到工作流任务超时 10 秒的 80%。那时用例在轮询停点查询。
+  it('原字节的形状：本地活动结果被强开的新任务隔开，补丁标记不在本地活动标记那个任务里', () => {
+    const events = History.decode(readFileSync(`${directory}park-query-timeout.history.bin`)).events ?? [];
+    const json = JSON.parse(historyToJSON({ events } as unknown as Parameters<typeof historyToJSON>[0])) as {
+      events: ({ eventId: string; eventTime: string; eventType: string } & Record<string, unknown>)[];
+    };
+    const view = json.events.map(({ eventId, eventTime, eventType }) => ({ eventId, eventTime, eventType }));
+    expect(view.slice(1, 9)).toEqual([
+      {
+        eventId: '2',
+        eventTime: '2026-10-20T14:22:00.686Z',
+        eventType: 'EVENT_TYPE_WORKFLOW_TASK_SCHEDULED',
+      },
+      { eventId: '3', eventTime: '2026-10-20T14:22:00.880Z', eventType: 'EVENT_TYPE_WORKFLOW_TASK_STARTED' },
+      {
+        eventId: '4',
+        eventTime: '2026-10-20T14:22:01.179Z',
+        eventType: 'EVENT_TYPE_WORKFLOW_TASK_COMPLETED',
+      },
+      { eventId: '5', eventTime: '2026-10-20T14:22:01.179Z', eventType: 'EVENT_TYPE_MARKER_RECORDED' },
+      {
+        eventId: '6',
+        eventTime: '2026-10-20T14:22:01.179Z',
+        eventType: 'EVENT_TYPE_WORKFLOW_TASK_SCHEDULED',
+      },
+      { eventId: '7', eventTime: '2026-10-20T14:22:01.182Z', eventType: 'EVENT_TYPE_WORKFLOW_TASK_STARTED' },
+      {
+        eventId: '8',
+        eventTime: '2026-10-20T14:22:01.241Z',
+        eventType: 'EVENT_TYPE_WORKFLOW_TASK_COMPLETED',
+      },
+      { eventId: '9', eventTime: '2026-10-20T14:22:01.241Z', eventType: 'EVENT_TYPE_MARKER_RECORDED' },
+    ]);
+    expect(
+      (json.events[0]?.workflowExecutionStartedEventAttributes as { workflowTaskTimeout?: string })
+        ?.workflowTaskTimeout,
+    ).toBe('10s');
+    expect(events[4]?.markerRecordedEventAttributes?.markerName).toBe('core_local_activity');
+    expect(events[8]?.markerRecordedEventAttributes?.markerName).toBe('core_patch');
+    expect(patchId(events[8] ?? {})).toBe('self-check-own-timeout');
+  });
+
   // 钉的是现在的代码对不上这份原字节，不是修复。不改 kit.ts（那条标记归 #3258）。
   // 若那边的改动让同一份字节重放通过，改这条断言，不许重录覆盖。
   it('现在的代码离线重放这份原字节仍报 self-check-own-timeout 的 TMPRL1100', async () => {
