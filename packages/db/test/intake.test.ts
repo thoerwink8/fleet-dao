@@ -3,14 +3,16 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   findRepoProfile,
+  intakeTaskRow,
   listIntakeRepos,
   registerRepo,
   setRepoProfile,
   taskStateByIssue,
 } from '../src/queries/intake.ts';
+import { claimLocalTask, finishLocalTask } from '../src/queries/local-claims.ts';
 import { auditLog, repos } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addTask, ago, DAY } from './helpers.ts';
+import { addRepo, addTask, ago, DAY, HOUR, NOW } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -73,6 +75,41 @@ describe('一张单的任务行（taskStateByIssue）', () => {
     expect(await taskStateByIssue(t.db, a.id, 7)).toEqual({ id: queued.id, state: 'queued' });
     expect(await taskStateByIssue(t.db, b.id, 7)).toMatchObject({ state: 'done' });
     expect(await taskStateByIssue(t.db, a.id, 8)).toBeNull();
+  });
+});
+
+describe('拉单判「派出过没有」要的任务行（intakeTaskRow，#3461）', () => {
+  const NODE = 'founder-pc';
+
+  it('没有任务行是 null；有就回编号、状态、执行方；不是 stopped + engine 的行不去找退回记录', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    expect(await intakeTaskRow(t.db, a.id, 7)).toBeNull();
+    const done = await addTask(t.db, a.id, { issueNumber: 7, state: 'done' });
+    expect(await intakeTaskRow(t.db, a.id, 7)).toEqual({
+      id: done.id,
+      state: 'done',
+      executor: 'engine',
+      returnedAt: null,
+    });
+  });
+
+  it('stopped + engine 且退回过：带最近一次退回的时刻；没退回过是 null', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    const stopped = await addTask(t.db, a.id, { issueNumber: 8, state: 'stopped' });
+    expect(await intakeTaskRow(t.db, a.id, 8)).toMatchObject({ state: 'stopped', returnedAt: null });
+    await claimLocalTask(t.db, { repo: 'acme/aaa', issueNumber: 8, title: 'x', nodeId: NODE, now: NOW });
+    expect(await intakeTaskRow(t.db, a.id, 8)).toMatchObject({ executor: 'local', returnedAt: null });
+    const at = new Date(NOW.getTime() + HOUR);
+    await finishLocalTask(t.db, {
+      repo: 'acme/aaa',
+      issueNumber: 8,
+      outcome: 'released',
+      nodeId: NODE,
+      now: at,
+    });
+    const row = await intakeTaskRow(t.db, a.id, 8);
+    expect(row).toMatchObject({ id: stopped.id, state: 'stopped', executor: 'engine' });
+    expect(row?.returnedAt?.getTime()).toBe(at.getTime());
   });
 });
 

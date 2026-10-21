@@ -6,6 +6,8 @@ import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   type ExpiredLease,
+  type FranceVerdict,
+  type LeaseNotice,
   type LocalLeaseDeps,
   liveLocalIssues,
   sweepLocalLeases,
@@ -30,9 +32,12 @@ function world(o: {
   unmarkFails?: boolean;
   /** 任务行 → 还开着的验收责任（#3037）；Error = 读不到。不给 = 没装这个口子。 */
   duties?: Record<string, { prNumber: number; head: string; items: string[] }[]> | Error;
+  /** 法国接不接得了（#3461）：单号 → 判决；没写的算接得了；Error = 判不了。不给 = 没装这个口子，照旧退回。 */
+  verdicts?: Record<number, FranceVerdict> | Error;
 }) {
   const steps: string[] = [];
   const bodies: string[] = [];
+  const notices: string[] = [];
   const duties = o.duties;
   const deps: LocalLeaseDeps = {
     ...(duties === undefined
@@ -69,6 +74,7 @@ function world(o: {
       steps.push(`unmark ${issueNumber}`);
     },
   };
+  const verdicts = o.verdicts;
   const run = () =>
     sweepLocalLeases(deps, REPO, {
       open: new Map(Object.entries(o.open).map(([k, v]) => [Number(k), v] as const)),
@@ -78,10 +84,22 @@ function world(o: {
         bodies.push(body);
         return { created: true };
       },
+      ...(verdicts === undefined
+        ? {}
+        : {
+            async franceVerdict(issueNumber: number): Promise<FranceVerdict> {
+              if (verdicts instanceof Error) throw verdicts;
+              return verdicts[issueNumber] ?? { ok: true };
+            },
+            async notify({ issueNumber, key, title }: LeaseNotice) {
+              steps.push(`notify ${issueNumber} ${key.split(':')[0]}`);
+              notices.push(title);
+            },
+          }),
       now: NOW,
       log: () => {},
     });
-  return { steps, bodies, run };
+  return { steps, bodies, notices, run };
 }
 
 describe('sweepLocalLeases', () => {
@@ -155,6 +173,70 @@ describe('sweepLocalLeases', () => {
     const w = world({ expired: [lease(7)], open: { 7: [] } });
     await w.run();
     expect(w.steps).toEqual(['comment 7 local-lease-expired', 'settle t7 returned']);
+  });
+});
+
+describe('sweepLocalLeases：法国接不了的单不退回（#3461）', () => {
+  const offDiff: FranceVerdict = {
+    ok: false,
+    reason: 'acceptance_off_diff',
+    why: '「怎么算做完」要 diff 外证据：截图',
+  };
+
+  it('验收要 diff 外证据（法国接不了）：不摘「本机做」、不退回、行不动；先通知本机再留言写明为什么', async () => {
+    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] }, verdicts: { 7: offDiff } });
+    const r = await w.run();
+    expect(r).toMatchObject({ keptLocal: 1, returned: 0, extended: 0, closed: 0, unchecked: [] });
+    expect(w.steps).toEqual(['notify 7 local-lease-kept', 'comment 7 local-lease-kept']);
+    expect(w.notices[0]).toContain('#7');
+    expect(w.bodies[0]).toContain('acceptance_off_diff');
+    expect(w.bodies[0]).toContain('截图');
+    expect(w.bodies[0]).toContain('没摘');
+  });
+
+  it('法国接得了：照旧摘标签、留言、退回', async () => {
+    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] }, verdicts: {} });
+    const r = await w.run();
+    expect(r).toMatchObject({ returned: 1, keptLocal: 0 });
+    expect(w.steps).toEqual(['unmark 7', 'comment 7 local-lease-expired', 'settle t7 returned']);
+  });
+
+  it('一次到期两张：接不了的留着，接得了的退回，互不影响', async () => {
+    const w = world({
+      expired: [lease(7), lease(8)],
+      open: { 7: [LOCAL_LABEL], 8: [LOCAL_LABEL] },
+      verdicts: { 7: offDiff },
+    });
+    const r = await w.run();
+    expect(r).toMatchObject({ keptLocal: 1, returned: 1 });
+    expect(w.steps).toEqual([
+      'notify 7 local-lease-kept',
+      'comment 7 local-lease-kept',
+      'unmark 8',
+      'comment 8 local-lease-expired',
+      'settle t8 returned',
+    ]);
+  });
+
+  it('还活着（心跳、开着的 PR）的照旧顺延，不去判法国接不接得了', async () => {
+    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] }, live: [7], verdicts: { 7: offDiff } });
+    const r = await w.run();
+    expect(r).toMatchObject({ extended: 1, keptLocal: 0 });
+    expect(w.steps).toEqual([`extend t7 ${LOCAL_LEASE_MS}`]);
+  });
+
+  it('【故意造出的失败】判不了（试判读不到东西）：这一条记没查成，不摘标签、不退回、行不动', async () => {
+    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] }, verdicts: new Error('GitHub 502') });
+    const r = await w.run();
+    expect(r).toMatchObject({ returned: 0, keptLocal: 0 });
+    expect(r.unchecked).toEqual([expect.stringContaining('GitHub 502')]);
+    expect(w.steps).toEqual([]);
+  });
+
+  it('不给判口子（老装配）：和原来一样退回', async () => {
+    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] } });
+    const r = await w.run();
+    expect(r).toMatchObject({ returned: 1, keptLocal: 0 });
   });
 });
 
