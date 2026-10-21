@@ -127,6 +127,23 @@ describe('#3413 公开 CI 注解里的等待点', () => {
     expect(message).not.toContain(':305:');
   });
 
+  it('原头的测试源码没有接取证，那次 run 的 workflow/run 和历史从没被记下，事后绑不回来', () => {
+    // 快照与 raw.githubusercontent.com/<仓>/d45207791e21…/packages/engine/test/push-handback.test.ts 逐字节相同。
+    // 测试服务端在内存里、用例结束就关；没有帧、没有 artifact，注解是唯一公开的东西。
+    const source = text('push-handback.d45207791e21.txt');
+    expect(source).not.toContain('history-diagnostics');
+    expect(source).not.toContain('SyntheticHistoryDiagnostics');
+    expect(source).not.toContain('FLEET_SYNTHETIC_HISTORY');
+    // 301 行：workflowId 用随机 UUID 现起，日志外没有别处记它。
+    const id = linesOf('push-handback.d45207791e21.txt')[300]?.trim() ?? '';
+    expect(id.startsWith('workflowId: `handback-')).toBe(true);
+    expect(id).toContain('randomUUID()');
+    // 现在这份同一条用例接了取证，Actions 里取证时另打公开注解（history-diagnostics.test.ts 钉住）。
+    const current = readFileSync(new URL('./push-handback.test.ts', import.meta.url), 'utf8');
+    expect(current).toContain('new SyntheticHistoryDiagnostics(');
+    expect(current).toContain('const output = new DiagnosticOutput();');
+  });
+
   it('run 39588087499 停在第一个工人的 await parked，查询有回包，phase 仍是 brief，注解没有 run', () => {
     const message = text('ci-job-119181973185.annotation.txt');
     expect(sha256(message)).toBe(BRIEF_MESSAGE_SHA256);

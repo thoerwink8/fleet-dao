@@ -42,4 +42,12 @@ Actions 日志在这台机器上是 HTTP 403，注解里也没有 `FLEET_SYNTHET
 | run 39588087499 / job 119181973185 / head `6c4d389277f9`（PR #3488，`test (5/8)`），`ci-job-119181973185.annotation.txt` | `等了 20000 毫秒还没等到：permission push park`。栈是 `support.ts:181`（抛出带最后状态的错误）和 `push-handback.test.ts:343:21`。源码快照 `push-handback.6c4d389277f9.txt` 与 `a6c7739001a4` 字节相同（SHA-256 `c754d861…`，也是 `slow-parked-query` 的 testSha256）：342 行 mark `wait:first-worker:parked-query`，343 行 `await parked(h)`。最后状态 `phase` 为 `brief`、`doing` 为读单子和需求文档、`round` 为 1，凭据是 null。查询有回包。注解没有 workflow/run，帧仍未解出。这不是 60 秒原超时，也不是 run `6385a827…`（TMPRL1100）或 `d8500003…`（implement / selfCheck） |
 | 同一次原 run 的 job 118528847602（`test (8/8 · temporal)`），`ci-job-118528847602.annotation.txt` | 另一条 `60000ms`，栈在 `push-handback-contract.test.ts:233:3`。该头这一行是 `wrong H0 and exhausted original budget…` 的 `it`。注解里没有 park-kind，也没有本用例的文件名。不能拿来解释 worker replacement |
 
-原 60 秒那次的内部 await 和 workflow/run 仍然没有。查询撞上未交本地活动结果的生产修复仍归 #3258。
+原 60 秒那次的内部 await 和 workflow/run 仍然没有，事后也补不回来：
+
+- 那个头的测试源码（快照与 `raw.githubusercontent.com/thoerwink8/fleet-dao/d45207791e21faa6c7c166f5023b49fe18f21264/packages/engine/test/push-handback.test.ts` 逐字节相同）没有接取证，workflowId 用 `randomUUID()` 现起，测试服务端在内存里，用例结束就关。
+- 那次 run 只有 e2e 的 artifact，`test (6/8)` 没有。步骤日志匿名读是 403/404，本机没有 GitHub 凭据。
+- 60 秒的 vitest 超时只指 `it` 行，所有内部 await（启工人、查停点、Update、`result()`）都没留下各自的报错，靠注解分不出来。
+
+所以接下来只能靠下一次 CI 复现时的取证。现在这条用例接着 `SyntheticHistoryDiagnostics`，在 Actions 里（`GITHUB_ACTIONS=true`，用默认输出的 `DiagnosticOutput()`）每次 watchdog/失败取证另打一条 `::warning title=FLEET_SYNTHETIC_HISTORY_V1::` 公开注解，内容是 test、workflowId、runId、固定阶段标签、reason、`ciSha`（`GITHUB_SHA`）、testSha256、bundleSha256，以及所取字节的长度和 SHA-256。读不成就写 unknown 和错误码，不带 hash。帧仍只进日志，注解不带 protobuf、describe 正文或业务文字；每文件最多 8 条；通过的用例不出注解。`history-diagnostics.test.ts` 钉住这些。下次 CI 再红，注解上的 runId 和 sha256 就能跟日志帧、runner 上的 `_tmp/synthetic-history` 对上，不用读日志也知道停在哪一步、是哪个 run。
+
+查询撞上未交本地活动结果的生产修复仍归 #3258。
