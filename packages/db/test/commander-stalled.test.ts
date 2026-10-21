@@ -73,6 +73,10 @@ describe('listCommanderStalledTasks', () => {
       error: '选不到路由',
     });
     expect((await listCommanderStalledTasks(t.db)).map((r) => r.commanderSeen)).toEqual([false]);
+    // 看门狗要写「为什么没人看」：最近一条没起成的第几次和原文
+    expect((await listCommanderStalledTasks(t.db)).map((r) => r.retry)).toEqual([
+      { attempt: 1, why: '选不到路由' },
+    ]);
     await claim('wf-retry', 1);
     expect((await listCommanderStalledTasks(t.db)).map((r) => r.commanderSeen)).toEqual([true]);
   });

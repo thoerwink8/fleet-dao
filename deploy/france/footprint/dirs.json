@@ -12,7 +12,14 @@
     "/usr/local/lib/fleet-dao",
     "/var/lib/fleet-dao/cli-upgrade",
     "/srv/fleet-dao-releases",
-    "/srv/fleet-dao"
+    "/srv/fleet-dao",
+    "/opt/miraquota",
+    "/opt/daihuo",
+    "/var/lib/daihuo",
+    "/opt/reclaude-refill",
+    "/var/lib/reclaude-refill",
+    "/opt/mirasim-radar",
+    "/var/lib/mirasim-radar"
   ],
-  "timers": []
+  "timers": ["reclaude-refill-collector.service", "mirasim-radar-collector.service"]
 }

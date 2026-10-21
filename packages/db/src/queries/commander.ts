@@ -151,6 +151,8 @@ export interface CommanderStalledTask {
   stalledAt: Date;
   /** 这一次停下是否已经记过 commander.claim。 */
   commanderSeen: boolean;
+  /** 这一次停下最近一条「会话没起成」（commander.retry）：第几次、为什么。没有是 null。 */
+  retry: { attempt: number | null; why: string } | null;
 }
 
 /**
@@ -189,25 +191,33 @@ export async function listCommanderStalledTasks(db: Db): Promise<CommanderStalle
       )
       .orderBy(asc(notifications.raisedAt), asc(notifications.id)),
     db
-      .select({ action: auditLog.action, after: auditLog.after })
+      .select({ action: auditLog.action, after: auditLog.after, error: auditLog.error })
       .from(auditLog)
       .where(
         and(
           eq(auditLog.target, COMMANDER_AUDIT_TARGET),
           inArray(auditLog.action, [COMMANDER_CLAIM, COMMANDER_RETRY]),
         ),
-      ),
+      )
+      .orderBy(asc(auditLog.at), asc(auditLog.id)),
   ]);
 
   // 认领数多于「会话没起成」数才算看过（#3423：没起成的那次认领不消耗这一次停下，下一轮还会再看）
   const tally = new Map<string, number>();
+  const lastRetry = new Map<string, { attempt: number | null; why: string }>();
   for (const claim of claims) {
     const after = claim.after;
     if (typeof after !== 'object' || after === null) continue;
-    const value = after as { workflowId?: unknown; parkSeq?: unknown };
+    const value = after as { workflowId?: unknown; parkSeq?: unknown; attempt?: unknown };
     if (typeof value.workflowId !== 'string' || typeof value.parkSeq !== 'number') continue;
     const key = `${value.workflowId}#${value.parkSeq}`;
     tally.set(key, (tally.get(key) ?? 0) + (claim.action === COMMANDER_CLAIM ? 1 : -1));
+    // 按时间从早到晚读：最后一条没起成的记录留下，看门狗报「没人看」时写出原因
+    if (claim.action === COMMANDER_RETRY)
+      lastRetry.set(key, {
+        attempt: typeof value.attempt === 'number' ? value.attempt : null,
+        why: claim.error?.trim() || '没写原因',
+      });
   }
   const seen = new Set([...tally].filter(([, n]) => n > 0).map(([key]) => key));
 
@@ -230,6 +240,7 @@ export async function listCommanderStalledTasks(db: Db): Promise<CommanderStalle
       parkSeq,
       stalledAt: park.stalledAt,
       commanderSeen: seen.has(`${workflowId}#${parkSeq}`),
+      retry: lastRetry.get(`${workflowId}#${parkSeq}`) ?? null,
     };
     const old = byTask.get(park.taskId);
     if (!old || old.stalledAt.getTime() <= item.stalledAt.getTime()) byTask.set(park.taskId, item);

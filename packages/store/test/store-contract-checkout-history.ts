@@ -361,12 +361,11 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       for (const run of [
         { segment: 'manual' },
         { endedAt: undefined, outcome: undefined },
-        // 成功收场或没进到放检出那一步、切号重跑的段都不是这张检出失败卡的原执行
-        { outcome: 'done', failureReason: undefined },
+        // 没进到放检出那一步、切号重跑的段都不是这张检出失败卡的原执行
         { outcome: 'admission_blocked' },
         { outcome: 'org_switch' },
-        // 报警时刻在这一段之外：别的段报的
-        { startedAt: '2026-10-19T03:10:00.001Z', endedAt: '2026-10-19T03:20:00.000Z' },
+        // 报警时刻在这一段之外：别的段报的（起点前只容忍一分钟）
+        { startedAt: '2026-10-19T03:11:00.001Z', endedAt: '2026-10-19T03:20:00.000Z' },
         { startedAt: '2026-10-19T02:00:00.000Z', endedAt: '2026-10-19T03:09:59.999Z' },
         { issueNumber: 12 },
         { prNumber: 38 },
@@ -378,6 +377,68 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
         expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
       }
+    });
+
+    // #3067 真实形状：检出失败在 prepareCwd，之后会话照常跑完（outcome=done）；旧 run 没记 temporal_run_id；
+    // runs 行比报警晚 46ms 才开始。
+    const REAL_3067_RUN = {
+      outcome: 'done',
+      failureReason: undefined,
+      temporalRunId: undefined,
+      startedAt: '2026-10-19T03:10:00.046Z',
+      endedAt: '2026-10-19T03:40:00.000Z',
+    } as unknown as RunPatch;
+    const real3067Input = () =>
+      baseInput({
+        temporalRunId: '',
+        runOutcome: 'done',
+        runStartedAt: '2026-10-19T03:10:00.046Z',
+        runEndedAt: '2026-10-19T03:40:00.000Z',
+      });
+
+    it('#3067 真实形状（outcome=done、temporal_run_id 为空、报警早于 run 起点 46ms）：预检可归档，归档写出完整记录', async () => {
+      const other = await make(data({ run: REAL_3067_RUN }));
+      const input = real3067Input();
+      const facts = await other.store.readHistoricalCheckout(input);
+      expect(facts.run).toMatchObject({ id: RUN_ID, outcome: 'done' });
+      expect(facts.run.temporalRunId ?? '').toBe('');
+      expect(facts.activeRunIds).toEqual([]);
+      const entry = auditFor(input);
+      entry.after = { ...(entry.after as object), runFailureReason: null };
+      expect(await other.store.archiveHistoricalCheckout(input, entry)).toBe('ok');
+      const archived = await notificationOf(other.store, NID);
+      expect(archived.resolvedBy).toBe('ops:checkout-history');
+      expect(archived.body).toBe(alertBody());
+      const [record, ...rest] = await auditsOf(other.store, NID);
+      expect(rest).toEqual([]);
+      expect(record).toMatchObject({
+        action: 'notification.checkout_history_archive',
+        ok: true,
+        before: { workflowId: WF, runId: RUN_ID, temporalRunId: '', raisedAt: RAISED_AT },
+        after: {
+          conclusion: 'historical_unproven',
+          notificationBody: alertBody(),
+          runOutcome: 'done',
+          runStartedAt: '2026-10-19T03:10:00.046Z',
+          temporalRunId: '',
+          runFailureReason: null,
+        },
+      });
+      // 重放同一份完整请求幂等
+      expect(await other.store.archiveHistoricalCheckout(input, entry)).toBe('already_archived');
+    });
+
+    it('旧 run 没记 temporal_run_id 时，处置输入也只能是空串；run 记了编号就必须对上', async () => {
+      const legacy = await make(data({ run: REAL_3067_RUN }));
+      const claimed = real3067Input();
+      claimed.temporalRunId = TEMPORAL_RUN_ID;
+      await expect(legacy.store.readHistoricalCheckout(claimed)).rejects.toThrow();
+      expect(await legacy.store.archiveHistoricalCheckout(claimed, auditFor(claimed))).toBe('conflict');
+      expect((await notificationOf(legacy.store, NID)).resolvedAt).toBeUndefined();
+      const recorded = await make(data());
+      const blank = baseInput({ temporalRunId: '' });
+      await expect(recorded.store.readHistoricalCheckout(blank)).rejects.toThrow();
+      expect(await recorded.store.archiveHistoricalCheckout(blank, auditFor(blank))).toBe('conflict');
     });
 
     it('别的失败收场（超时、被杀、起不来）的原执行同样可归档', async () => {

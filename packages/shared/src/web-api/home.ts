@@ -221,6 +221,10 @@ export const HostAppSchema = z.object({
   external: z.boolean().optional(),
   /** 磁盘那一格的补充：名下没登记目录时说算在哪（例如「代码在发布版本目录里」）。 */
   diskNote: z.string().min(1).optional(),
+  /** 机器上在跑、但登记表里没有的服务（#3457，兜底扫 system.slice 扫出来的）：页面排在最后、标「没登记」。老后端没有这个字段。 */
+  unregistered: z.boolean().optional(),
+  /** systemd 定时任务（oneshot）：跑完 cgroup 就没了，页面这一格看 footprint.timers 里近 24 小时的账（#3456），没有就写没给，不画 0。 */
+  scheduled: z.boolean().optional(),
   usage: AppUsageSchema,
 });
 
@@ -327,7 +331,12 @@ export const HomeResourcesSchema = z.object({
   /** 每个上线项目此刻的 CPU、内存（每 everyMs 随这一回一起读），按登记表的先后；整块读不到是 unread。 */
   apps: z
     .discriminatedUnion('state', [
-      z.object({ state: z.literal('ok'), items: z.array(HostAppSchema) }),
+      z.object({
+        state: z.literal('ok'),
+        items: z.array(HostAppSchema),
+        /** 扫「没登记的服务」没扫成（system.slice 读不了）：原因。有它就说明可能还有没列出来的服务。老后端没有。 */
+        unregisteredScanWhy: z.string().min(1).optional(),
+      }),
       ResourceUnreadSchema,
     ])
     .optional(),

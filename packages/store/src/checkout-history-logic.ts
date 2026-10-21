@@ -145,19 +145,21 @@ export function checkoutNotificationProblem(
 }
 
 /**
- * 原 checkout 失败那一段能有的结局：真失败收场的。done（会话照常跑完）不算失败执行；admission_blocked 没进到放检出那一步；
- * org_switch 是切号后在原分支重跑，原执行没有收场。
+ * 原 checkout 失败那一段不能有的结局：admission_blocked 没进到放检出那一步；org_switch 是切号后在原分支重跑，原执行没有收场。
+ * done 可以：检出失败发生在 prepareCwd，之后会话照常跑完（真实旧卡 #3067），失败由受管通知本身作证，不看这一段的收场好坏。
  */
-export const CHECKOUT_FAILED_RUN_OUTCOMES: readonly string[] = [
-  'failed',
-  'timeout',
-  'killed',
-  'spawn_failed',
-];
+export const CHECKOUT_RUN_OUTCOMES_REJECTED: readonly string[] = ['admission_blocked', 'org_switch'];
 
 /**
- * 原执行必须是这个任务这个 PR 的、已真实失败终态的 verify 段（冷验收放检出的那一段），
- * 且这条报警的事故时刻（raisedAt）落在这一段起止之内：别的段、成功收场的段都不是这张卡的原执行。
+ * 报警比这一段起点早的容忍：检出在 prepareCwd 里失败，runs 行在这之后才写，起点会晚于报警几十毫秒（#3067 晚了 46ms）。
+ * 只放宽到一分钟，再早就是别的段报的。
+ */
+export const CHECKOUT_RAISED_BEFORE_RUN_TOLERANCE_MS = 60_000;
+
+/**
+ * 原执行必须是这个任务这个 PR 的、已终态的 verify 段（冷验收放检出的那一段），
+ * 且这条报警的事故时刻（raisedAt）落在这一段起止之内（起点前允许 CHECKOUT_RAISED_BEFORE_RUN_TOLERANCE_MS）：别的段、没进到放检出那步的段都不是这张卡的原执行。
+ * 旧 run 的 temporal_run_id 可以为空：此时处置输入的 temporalRunId 也必须是空串，不能拿别的 run 编号去配。
  */
 export function checkoutRunProblem(
   run: {
@@ -174,16 +176,16 @@ export function checkoutRunProblem(
   raisedAt: string | undefined,
 ): string | undefined {
   if (run.segment !== 'verify') return '原执行不是 verify 段';
-  if (run.workflowId !== target.workflowId || run.temporalRunId !== target.temporalRunId)
+  if (run.workflowId !== target.workflowId || (run.temporalRunId ?? '') !== target.temporalRunId)
     return '原执行工作流或 Temporal run 不匹配';
   if (run.issueNumber !== target.issueNumber) return '原执行任务单号不匹配';
   if (run.endedAt === undefined || run.outcome === undefined) return '原执行未终态或结局缺失';
-  if (!CHECKOUT_FAILED_RUN_OUTCOMES.includes(run.outcome))
-    return `原执行结局是 ${run.outcome}，不是失败收场的执行`;
+  if (CHECKOUT_RUN_OUTCOMES_REJECTED.includes(run.outcome))
+    return `原执行结局是 ${run.outcome}，没进到放检出那一步或没有收场`;
   if (run.prNumber !== target.pr) return '原执行的 PR 关联不匹配';
   const raised = raisedAt === undefined ? Number.NaN : Date.parse(raisedAt);
   const started = run.startedAt === undefined ? Number.NaN : Date.parse(run.startedAt);
-  if (!(started <= raised && raised <= Date.parse(run.endedAt)))
+  if (!(started - CHECKOUT_RAISED_BEFORE_RUN_TOLERANCE_MS <= raised && raised <= Date.parse(run.endedAt)))
     return '报警时刻不在原执行起止之内，不是这一段报的';
   return undefined;
 }

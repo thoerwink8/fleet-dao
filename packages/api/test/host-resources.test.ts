@@ -429,3 +429,191 @@ describe('每个上线项目的 CPU、内存（各单元的 cgroup）', () => {
     });
   });
 });
+
+describe('兜底：system.slice 下没登记的在跑服务（#3457）', () => {
+  const APPS: VpsApp[] = [
+    {
+      id: 'api',
+      name: '驾驶舱',
+      place: '/srv/x',
+      units: [{ name: 'a.service', cgroup: 'system.slice/a.service' }],
+      dirs: [],
+      diskNote: 'x',
+    },
+    {
+      id: 'pg',
+      name: '数据库',
+      place: '/srv/pg',
+      units: [
+        {
+          name: 'postgresql@16-main.service',
+          cgroup: 'system.slice/system-postgresql.slice/postgresql@16-main.service',
+        },
+      ],
+      dirs: [],
+      diskNote: 'x',
+    },
+  ];
+  const MB = 1024 * 1024;
+  const unitFiles = (rel: string, mb: number, usec: number) => ({
+    [`/cg/${rel}/memory.current`]: String(mb * MB),
+    [`/cg/${rel}/memory.max`]: 'max\n',
+    [`/cg/${rel}/cpu.stat`]: `usage_usec ${usec}\n`,
+  });
+  const machine = (
+    usec: number,
+    files: Record<string, string> = {},
+    dirs: Record<string, string[]> = {},
+  ) => ({
+    ...fakeMachine(
+      {
+        '/cg/cgroup.controllers': 'cpu memory\n',
+        ...unitFiles('system.slice/a.service', 100, usec),
+        ...unitFiles('system.slice/system-postgresql.slice/postgresql@16-main.service', 300, usec),
+        // 没登记的：一个在 system.slice 下，一个是模板实例在 system-foo.slice 下
+        ...unitFiles('system.slice/newcomer.service', 20, usec),
+        ...unitFiles('system.slice/system-worker.slice/worker@1.service', 7, usec),
+        // 系统自带的（含模板实例）
+        ...unitFiles('system.slice/ssh.service', 5, usec),
+        ...unitFiles('system.slice/system-getty.slice/getty@tty1.service', 1, usec),
+        // cgroup 在、里面没进程
+        ...unitFiles('system.slice/ghost.service', 0, usec),
+        ...files,
+      },
+      {
+        '/cg/system.slice': [
+          'a.service',
+          'newcomer.service',
+          'ssh.service',
+          'ghost.service',
+          'system-postgresql.slice',
+          'system-worker.slice',
+          'system-getty.slice',
+          'cgroup.procs',
+          'run-x.scope',
+        ],
+        '/cg/system.slice/system-postgresql.slice': ['postgresql@16-main.service'],
+        '/cg/system.slice/system-worker.slice': ['worker@1.service'],
+        '/cg/system.slice/system-getty.slice': ['getty@tty1.service'],
+        ...dirs,
+      },
+    ),
+    apps: APPS,
+  });
+
+  test('没登记的在跑服务各出一项（含子层里的模板实例）：给 CPU、内存、「没登记目录」；登记的、系统自带的、memory.current 为 0 的不出', async () => {
+    const first = await readHostResources(machine(1_000_000), undefined, new Date(10_000));
+    const { resources } = await readHostResources(machine(3_500_000), first.next, new Date(15_000));
+    expect(HomeResourcesSchema.parse(resources)).toEqual(resources);
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    expect(resources.apps.items.map((i) => i.id)).toEqual([
+      'api',
+      'pg',
+      'unregistered:newcomer.service',
+      'unregistered:worker@1.service',
+    ]);
+    const [, , newcomer, worker] = resources.apps.items;
+    expect(newcomer).toMatchObject({
+      name: 'newcomer.service',
+      units: ['newcomer.service'],
+      unregistered: true,
+      diskNote: '没登记目录',
+      usage: { state: 'ok', running: 1, memoryMb: 20, cpuCores: 0.5 },
+    });
+    expect(worker?.usage).toMatchObject({ state: 'ok', memoryMb: 7, cpuCores: 0.5 });
+    expect(resources.apps.items[0]?.unregistered).toBeUndefined();
+    expect(resources.apps.unregisteredScanWhy).toBeUndefined();
+  });
+
+  test('没登记的服务的 memory.current 认不出：这一项 unread 带原因，不丢', async () => {
+    const { resources } = await readHostResources(
+      machine(1, { '/cg/system.slice/newcomer.service/memory.current': '乱码' }),
+      undefined,
+      new Date(1_000),
+    );
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    const row = resources.apps.items.find((i) => i.id === 'unregistered:newcomer.service');
+    expect(row?.usage.state).toBe('unread');
+    expect(row?.usage.state === 'unread' && row.usage.why).toContain('newcomer.service/memory.current');
+  });
+
+  test('【故意造出读不到】system.slice 目录读不了（不是没有）：整段照常，unregisteredScanWhy 写原因', async () => {
+    const deps = machine(1);
+    const { resources } = await readHostResources(
+      {
+        ...deps,
+        async readDir(path) {
+          if (path === '/cg/system.slice') throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+          return deps.readDir(path);
+        },
+      },
+      undefined,
+      new Date(1_000),
+    );
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    expect(resources.apps.unregisteredScanWhy).toContain('/cg/system.slice 没读成');
+    expect(resources.apps.items.map((i) => i.id)).toEqual(['api', 'pg']);
+  });
+
+  test('没登记的定时器（/etc/systemd/system/*.timer）出一行定时任务；登记的、同名 .service 登记的、系统自带的不出', async () => {
+    const deps = machine(
+      1,
+      {},
+      {
+        '/etc/systemd/system': [
+          'newjob.timer',
+          'a.timer', // 同名 a.service 登记了
+          'fstrim.timer', // 系统自带
+          'newjob.service',
+          'multi-user.target.wants',
+        ],
+      },
+    );
+    const { resources } = await readHostResources(
+      { ...deps, systemdDir: '/etc/systemd/system' },
+      undefined,
+      new Date(1_000),
+    );
+    expect(HomeResourcesSchema.parse(resources)).toEqual(resources);
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    const timers = resources.apps.items.filter((i) => i.id.endsWith('.timer'));
+    expect(timers).toHaveLength(1);
+    expect(timers[0]).toMatchObject({
+      id: 'unregistered:newjob.timer',
+      unregistered: true,
+      scheduled: true,
+      diskNote: '没登记目录',
+      usage: { state: 'idle' },
+    });
+  });
+
+  test('登记的定时任务带 scheduled；单元都没在跑时用量是 idle（不是 0）', async () => {
+    const apps: VpsApp[] = [
+      {
+        id: 'job',
+        name: 'job',
+        place: '/opt/job',
+        units: [
+          { name: 'job.service', cgroup: 'system.slice/job.service' },
+          { name: 'job.timer', cgroup: 'system.slice/job.timer' },
+        ],
+        dirs: ['/opt/job'],
+        external: true,
+        scheduled: true,
+      },
+    ];
+    const { resources } = await readHostResources({ ...machine(1), apps }, undefined, new Date(1_000));
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    expect(resources.apps.items[0]).toMatchObject({ scheduled: true, usage: { state: 'idle' } });
+  });
+
+  test('system.slice 下一个服务都没有：不出没登记的行，也不写 scanWhy', async () => {
+    const { resources } = await readHostResources(
+      machine(1, {}, { '/cg/system.slice': [] }),
+      undefined,
+      new Date(1_000),
+    );
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    expect(resources.apps.unregisteredScanWhy).toBeUndefined();
+  });
+});

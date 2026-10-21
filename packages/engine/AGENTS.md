@@ -63,6 +63,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - 自动关单收尾只走 `taskCloseClosedIssue` Update：同步核精确 run、当前停法代数和继续代数，只有 `accepted` 回执才能记成功、撤提醒。继续信号先使凭据失效，不能等公开 phase 改好。旧 worker 缺能力、Update RPC 超时或回执未知保留未核实，不能退回人类的无条件放弃信号。
 - 新 PR 创建前从需求单现读两轴（正文无需求号时认任务分支）；缺失、冲突或未知值拒开并明报，不猜分类。groom 新单显式提供 domain/nature，拆分单可逐轴继承来源单的唯一有效值，写前仍须齐全。驾驶舱会话在 modules 中独立声明两轴，后端开单前同样校验，正文移到独立查询分类节，不计入模块范围和派工规模。查询轴不参与派工、合并与版本判定；此处只保证创建的元数据齐全。报警立案贴 engine/bug，耗时表直开 PR 贴 engine/process，隔离集直开 PR 贴 engine/bug；直开 PR 贴后回读，失败不能当成功。
+- 「派出过没有」只有 `jobs/dispatch-standing.ts` 一份（拉单、点名派单共用）。本机领单不新起一代，所以本机退回法国队列（租约到期 `task.local.expire`+returned、放手 `task.local.finish`+released）的行，各代都结束后要靠操作记录里的退回时刻晚于最后一代的 Temporal `closeTime` 认成「重新派」（起 `:rN+1`，#3461）；退回时刻读不到、结束时刻读不到都不判，不猜。法国接不了的单（验收要 diff 外证据、交代不全、改标准……）不能退回：租约到期先 `franceVerdict` 试判，放手来的由拉单 `holdReturned` 贴回「本机做」；通知键只报一次（`insertAlertOnce`），别改成 `upsertAlert`（会把人处理掉的重开）。
 - 引擎自己挑单，进队条件见 design 第九节。要它接：单的四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。
 
 - 冷验收转人的待验条持久写入 `acceptance_duties`；合并前通过 `acceptance-duty-before-merge` 分支读取全部待验责任、将 PR 正文写成 Refs 分片并现读核对，失败重试或停下，不带旧正文进入合并。代码仍可正常合并，收尾有待验责任不关单。责任项原子并集，新增项递增代次并撤销旧结清；最终验收只用精确仓、单、PR、head、责任 id 和代次 CAS，不认评论文本。
@@ -102,3 +103,5 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 复杂快照的 capture、verify、recheck 统一走专用有界流，普通 `UserExec` 仍限 110MiB；v3 帧和拆组件归档字节保持兼容。状态元数据限 32MiB，整帧（含帧头）和单轮临时组件各限 1GiB，文件路径最多 100000、对象最多 250000；PACK 与 BUNDLE 内的 PACK 各先逐块检查单对象及 delta 目标不超过 256MiB、实际 inflate 和目标总量各不超过 1GiB，再独立核验。完整 END 前只落隔离组件，原树不写；恢复目标文件累计不超过 1GiB。准备和主命令共用 240 秒，取消或失败后的临时事务按本次 token 与已确认 dev/ino/uid 清理，共享原 10 秒收尾；身份变或收尾读不全明确留待核验，不生成成功回执。
 
 - 完整检出成功回执由 `placeVerifyCheckout.onCompleted` 在 ensureHead、checkout、最终取消守卫后独立写入，不借撤卡证明成功；写失败诊断证据未知，不改 full 或验收裁决。每次物理调用新 receiptId，调用者确实已分配才传 verifier runId。
+- 看门狗提醒的受控修复（#3033，`packages/api/src/alert-repair.ts`）按看门狗的提醒键、标题和撤卡口径现算动作、核验：改 `jobs/watchdog.ts`、`jobs/idle-running.ts`、`real/watchdog.ts` 里的键格式（`watchdog:idle-running:<任务编号>`、`watchdog:release:train:<提交>:running|failed`）、阈值或撤卡条件，要同步 api 的 `IDLE_PREFIX`、`RELEASE_KEY` 和 core 的 idle-running 判据；`packages/api/test/alert-repair.test.ts` 用真看门狗造提醒，会因此变红。
+- 看门狗只负责报和撤卡，不执行修复；修复动作、幂等、核验和交给修复开单都在 api 里，引擎这边不为它加开关，也不改合并闸、冷验收、改标准路径这些护栏。

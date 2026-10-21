@@ -3,6 +3,7 @@
 // 令牌按 GITHUB_TOKEN → GH_TOKEN → 本机 `gh auth token` 的顺序找，都没有就不带（公开仓不带令牌也读得到，
 // 只是每小时 60 次）。令牌只放进请求头，报错里不带。读不到、认不出一律抛，由调用方判「没查成」，不当成没问题。
 import { execFileSync } from 'node:child_process';
+import { appendResponseEvidence, appendTransportEvidence } from './gh-api.ts';
 import type { QueryMetadataPort } from './query-metadata.ts';
 
 export interface IssueInfo {
@@ -360,7 +361,7 @@ export function liveGitHub(
         signal: AbortSignal.timeout(20_000),
       });
     } catch (e) {
-      throw new Error(`连不上 GitHub（${message(e)}）`);
+      throw new Error(appendTransportEvidence('连不上 GitHub', e));
     }
     return res;
   };
@@ -373,7 +374,8 @@ export function liveGitHub(
           ? '：被限流了'
           : '：被限流了（没带令牌时每小时 60 次；设 GITHUB_TOKEN，或本机 gh auth login）'
         : '';
-    return new Error(`${what.startsWith('在') ? what : `读${what}`}，GitHub 回了 ${res.status}${hint}`);
+    const base = `${what.startsWith('在') ? what : `读${what}`}，GitHub 回了 ${res.status}${hint}`;
+    return new Error(appendResponseEvidence(base, res.headers));
   };
 
   /** 逐页读完（按 Link 头的 next）。 */

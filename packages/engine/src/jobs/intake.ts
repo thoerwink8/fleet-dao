@@ -9,7 +9,8 @@
 //   作者在白名单里（公开仓陌生人能开单，白名单是唯一的门；本仓工作流用 GITHUB_TOKEN 开的单，作者是 github-actions[bot]，也算可信）→
 //   不是母单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→
 //   还没派过（和点名派单共用 readDispatchStanding：没有任务行，或行是 queued/stopped 且 Temporal 里没有任何一代；
-//   有一代在跑或已结束算派过。问不清抛错，不当成没派过）→ 历史失败不超过 2 次 →
+//   有一代在跑或已结束算派过，例外「重新派」：本机退回法国队列后没人接的行（stopped + engine、各代都结束、操作记录里最近一条退回晚于最后一代结束），
+//   走完后面全部关卡和空位限制后起下一代 :rN+1；问不清抛错，不当成没派过）→ 历史失败不超过 2 次 →
 //   前置没等完（#2783：正文里以「前置：」开头的那一行，认法只有一份，conventions 的 parsePrerequisites，本机 pnpm work queue 同用：
 //   写的单号里还有开着的就不拉、原因写「等前置 #N」；写了日期的，北京时间到那天之前不拉、原因写「等到 <日期>」；
 //   前置单开没开着读不到，按「等前置」算、记没查成。不留言、不贴「本机做」，前置合了下一轮自然拉。
@@ -39,7 +40,10 @@
 // - 同一张单任何时候最多一条任务工作流：工作流编号定死（taskWorkflowId），起的时候由真实现用 REJECT_DUPLICATE；这里再用
 //   readDispatchStanding 先挡一道，省得每 5 分钟为已经派出去的单多读一次 GitHub。有一代在跑或已结束的，重开也不会自己重来：
 //   要再做，在驾驶舱点「重做」（jobs/redo.ts 另起一代）。只有任务行、Temporal 里没有任何一代、行还是 queued 或 stopped 的，
-//   不算派过，这一轮会接手那一行再起（不另建一行）。
+//   不算派过，这一轮会接手那一行再起（不另建一行）。本机领单不新起一代，所以本机领过又退回（租约到期、放手）的行也不算派过（重新派，
+//   jobs/dispatch-standing.ts，#3461）：照样先改行再起，只是编号是下一代。
+// - 本机退回来的单（接手或重新派）被后面哪一关挡住（法国接不了）：不能两边都没人做，贴回「本机做」、留言、报给本机（holdReturned）；
+//   本机租约到期时退回之前也先照这些关卡试判一遍（franceVerdict），接不了的不摘标签（local-leases.ts）。
 // - 交代不全的单只留一次言：留言的幂等键由缺的内容算出来，同一处缺法不会每 5 分钟再留一条；缺的变了才是新的一条。
 // - 每轮最多起 MAX_STARTS_PER_ROUND 条、同时在跑的任务工作流不超过 MAX_RUNNING_TASKS 条、每小时最多起 MAX_STARTS_PER_HOUR 条：
 //   开关刚打开、一堆单同时合格时，一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
@@ -117,7 +121,12 @@ import {
   serialOf,
   sortCandidates,
 } from './intake-pick.ts';
-import { type LocalLeaseDeps, sweepLocalLeases } from './local-leases.ts';
+import {
+  type FranceVerdict,
+  type LeaseNotice,
+  type LocalLeaseDeps,
+  sweepLocalLeases,
+} from './local-leases.ts';
 import { clip } from './reconcile-common.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查）。 */
@@ -516,7 +525,20 @@ export interface IntakeDeps {
     body: string;
     author: IntakeIssue['author'];
     tier?: 'fast' | 'medium' | 'heavyweight';
+    /** 起第几代（`:rN`）。不给是第一代；退回法国队列后没人接的单（重新派）给已有代数 + 1。 */
+    generation?: number;
   }): Promise<'started' | 'already_exists'>;
+  /**
+   * 法国接不了、单子留给本机时报给本机（驾驶舱通知）。同一个 key 只报一次（人处理掉了不再重开）。
+   * 写不进照抛：这一轮这张单记没查成，下一轮重来。不给（测试）就不报。
+   */
+  notifyLocal?(input: {
+    repo: IntakeRepo;
+    issueNumber: number;
+    key: string;
+    title: string;
+    body: string;
+  }): Promise<void>;
   /** 在单子上留言（同一个键只留一条）；以前留过回 created: false。 */
   comment(input: {
     repo: IntakeRepo;
@@ -585,13 +607,39 @@ interface Tally {
   waiting: Map<string, number>;
   /** 按仓留一份跳过原因，避免公平交错后把别的仓的原因算进整理触发。 */
   skippedByRepo: Map<string, Map<IntakeSkipReason, number>>;
+  /** 最近一次跳过的原因和话：试判（法国接不接得了）时读它，不算数。 */
+  lastSkip?: IntakeSkip | undefined;
   /** 档案缺项、这一轮不拉的仓（「仓：缺哪几项」）。不是没查成。 */
   notReady: string[];
   /** 这一轮在等前置的单：「仓#单号 等前置 #N」或「仓#单号 等到 <日期>」（写进结局和日志，驾驶舱里看得到是哪张等哪张）。 */
   blocked: string[];
 }
 
+function newTally(scanned: number): Tally {
+  return {
+    scanned,
+    started: 0,
+    commented: 0,
+    skipped: new Map(),
+    unready: [],
+    unchecked: [],
+    reposFailed: 0,
+    reposOn: 0,
+    running: 0,
+    stalled: 0,
+    workingAtStart: 0,
+    hourStarted: 0,
+    breakerAllow: new Map(),
+    breakerWhy: new Map(),
+    waiting: new Map(),
+    skippedByRepo: new Map(),
+    notReady: [],
+    blocked: [],
+  };
+}
+
 function skip(t: Tally, slug: string, issue: number, s: IntakeSkip): void {
+  t.lastSkip = s;
   t.skipped.set(s.reason, (t.skipped.get(s.reason) ?? 0) + 1);
   const byRepo = t.skippedByRepo.get(slug) ?? new Map<IntakeSkipReason, number>();
   byRepo.set(s.reason, (byRepo.get(s.reason) ?? 0) + 1);
@@ -628,11 +676,86 @@ async function holdForLocal(
   skip(t, slug, issue.number, { reason: hold.reason, why: hold.why });
 }
 
+/** 本机退回来的单，法国这一关又接不了：留言里的话（拉单这边：放手或租约到期退回之后）。 */
+export function returnedBlockedComment(blocked: IntakeSkip): string {
+  return [
+    `这张单是本机退回法国队列的，可引擎这边接不了：${blocked.why}（拉单这一关：${blocked.reason}）。`,
+    '',
+    `退回去只会两边都没人做，已把「${LOCAL_LABEL}」贴回，留给本机：要本机接着做，\`pnpm work claim\` 重新领；要引擎做，先把挡着的地方改好，再摘掉「${LOCAL_LABEL}」。`,
+  ].join('\n');
+}
+
+/** 本机退回来的单被法国某一关挡住：报给本机（通知、留言、贴回「本机做」），记跳过。三步都幂等，哪步没成下一轮整件事重来。 */
+async function holdReturned(
+  deps: IntakeDeps,
+  t: Tally,
+  repo: IntakeRepo,
+  issue: IntakeIssue,
+  returnedAt: Date,
+  blocked: IntakeSkip,
+): Promise<void> {
+  const slug = `${repo.owner}/${repo.name}`;
+  const key = `intake-returned-blocked:${returnedAt.toISOString()}`;
+  const body = returnedBlockedComment(blocked);
+  await deps.notifyLocal?.({
+    repo,
+    issueNumber: issue.number,
+    key,
+    title: `${slug}#${issue.number} 本机退回的单，引擎接不了，留给本机做`,
+    body,
+  });
+  const posted = await deps.comment({ repo, issueNumber: issue.number, key, body });
+  await deps.markLocal({ repo, issueNumber: issue.number });
+  if (posted.created) {
+    t.commented += 1;
+    deps.log(
+      'info',
+      `拉单：${slug}#${issue.number} 本机退回的单引擎接不了（${blocked.why}），已贴回「${LOCAL_LABEL}」并留言`,
+      {
+        reason: blocked.reason,
+      },
+    );
+  }
+  skip(t, slug, issue.number, blocked);
+}
+
+/**
+ * 法国接不接得了这张单（本机租约到期、退回之前先判一次，#3461）：把「本机做」标签拿掉之后，照拉单的准入关卡试判一遍，不留言、不贴标签、不看「派出过没有」
+ * （这张单的任务行此刻正是本机在做）。过了，或只是前置没等完（等完照拉）→ 接得了；别的关卡挡着 → 接不了，带原因。
+ */
+async function franceVerdict(
+  deps: IntakeDeps,
+  repo: IntakeRepo,
+  issue: IntakeIssue,
+  ctx: Parameters<typeof admitIssue>[3],
+  whitelist: GithubWhitelist,
+  prClaims: () => Promise<Map<number, number>>,
+): Promise<FranceVerdict> {
+  const quiet: IntakeDeps = {
+    ...deps,
+    comment: async () => ({ created: false }),
+    markLocal: async () => undefined,
+    log: () => undefined,
+  };
+  const trial = newTally(0);
+  const labels = issue.labels.filter((l) => l !== LOCAL_LABEL);
+  const admitted = await admitIssue(quiet, repo, { ...issue, labels }, ctx, whitelist, prClaims, trial, {
+    trial: true,
+  });
+  if (admitted) return { ok: true };
+  const blocked = trial.lastSkip;
+  if (!blocked) throw new Error('试判没挡住也没放行，没给出原因');
+  if (blocked.reason === 'waiting_prerequisite') return { ok: true };
+  return { ok: false, reason: blocked.reason, why: blocked.why };
+}
+
 /** 过了准入、等排序和空位的一张单。 */
 interface Candidate {
   issue: IntakeIssue;
   brief: TaskBrief;
   key: PickKey;
+  /** 重新派（退回法国队列后没人接的单）要起的代数；第一代不给。 */
+  generation?: number;
 }
 
 /** 单子「已知的模块」里列了多少个不同的路径（超过 50 个算最重档，见 tier.ts）。 */
@@ -729,6 +852,8 @@ async function admitIssue(
   whitelist: GithubWhitelist,
   prClaims: () => Promise<Map<number, number>>,
   t: Tally,
+  /** trial：试判法国接不接得了（本机租约到期退回之前用，见 franceVerdict）：不看「派出过没有」，也不留言、不贴标签。 */
+  opts: { trial?: boolean } = {},
 ): Promise<Candidate | null> {
   const slug = `${repo.owner}/${repo.name}`;
   const early = listedSkip(repo, issue, whitelist);
@@ -736,19 +861,31 @@ async function admitIssue(
     skip(t, slug, issue.number, early);
     return null;
   }
-  const standing = await readDispatchStanding(deps, repo, issue.number);
-  if (standing.kind === 'uncertain') throw new Error(standing.why);
-  if (standing.kind === 'dispatched') {
-    skip(t, slug, issue.number, { reason: 'already_dispatched', why: '已经派出过' });
-    return null;
+  // 重新派的单要起下一代；本机退回的行（接手或重新派）后面哪一关把它挡了，要把单留给本机，不能让它两边都没人做
+  let generation: number | undefined;
+  let returnedAt: Date | null = null;
+  if (!opts.trial) {
+    const standing = await readDispatchStanding(deps, repo, issue.number);
+    if (standing.kind === 'uncertain') throw new Error(standing.why);
+    if (standing.kind === 'dispatched') {
+      skip(t, slug, issue.number, { reason: 'already_dispatched', why: '已经派出过' });
+      return null;
+    }
+    if (standing.kind === 'redispatch') generation = standing.generation;
+    if (standing.kind === 'redispatch' || standing.kind === 'adopt') returnedAt = standing.returnedAt ?? null;
   }
+  /** 法国接不了的一关：本机退回来的行留给本机并报给本机，其余只记跳过。 */
+  const cannotTake = async (s: IntakeSkip): Promise<null> => {
+    if (returnedAt !== null) await holdReturned(deps, t, repo, issue, returnedAt, s);
+    else skip(t, slug, issue.number, s);
+    return null;
+  };
   const failures = await deps.failures(repo, issue.number);
   if (failures > MAX_ISSUE_FAILURES) {
-    skip(t, slug, issue.number, {
+    return cannotTake({
       reason: 'too_many_failures',
       why: `这张单的任务已经失败过 ${failures} 次（上限 ${MAX_ISSUE_FAILURES}）：人看过原因后在驾驶舱点「重做」`,
     });
-    return null;
   }
   // 前置没等完：不拉，不留言、不贴「本机做」（前置合了下一轮自然拉）。排在改工作流、改标准、PR 挂单这些会贴「本机做」的关前面：
   // 前置没合的单不该先被永久留给本机（#2783）
@@ -822,11 +959,10 @@ async function admitIssue(
         problems: brief.problems.map((p) => p.field),
       });
     }
-    skip(t, slug, issue.number, {
+    return cannotTake({
       reason: 'brief_incomplete',
       why: brief.problems.map((p) => p.field).join('、'),
     });
-    return null;
   }
 
   // 验收条要 diff 外证据（截图、线上、现场、审计……）：引擎做不出、冷验收验不过，不拉，留一次言（决定 0093）
@@ -844,21 +980,19 @@ async function admitIssue(
         words: offDiff.flatMap((h) => h.words),
       });
     }
-    skip(t, slug, issue.number, {
+    return cannotTake({
       reason: 'acceptance_off_diff',
       why: `「怎么算做完」要 diff 外证据：${offDiff.flatMap((h) => h.words).join('、')}`,
     });
-    return null;
   }
 
   // 规模：单子列的路径超过 50 个算最重档（tier.ts），改动面太大，引擎不拉
   const moduleCount = listedModuleCount(brief.brief);
   if (moduleCount > TIER_HEAVYWEIGHT_FILE_THRESHOLD) {
-    skip(t, slug, issue.number, {
+    return cannotTake({
       reason: 'too_large',
       why: `单子「已知的模块」列了 ${moduleCount} 处（超过 ${TIER_HEAVYWEIGHT_FILE_THRESHOLD}），规模是最重档：先拆小再交给引擎`,
     });
-    return null;
   }
   // 验收条看不看得见：只判结构（有没有代码、路径、文件名、引号里的界面文字、数字）。一条信号都没有是「拿不准」：照拉，只记一笔
   if (!hasVisibleSignal(brief.brief.acceptance)) {
@@ -884,6 +1018,7 @@ async function admitIssue(
       failures,
       createdAtMs: created,
     },
+    ...(generation === undefined ? {} : { generation }),
   };
 }
 
@@ -942,6 +1077,7 @@ async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, 
     body: issue.body,
     author: issue.author,
     tier: c.brief.tier.tier,
+    ...(c.generation === undefined ? {} : { generation: c.generation }),
   });
   if (got === 'already_exists') {
     skip(t, slug, issue.number, { reason: 'already_exists', why: '任务工作流的编号已经用过' });
@@ -1041,17 +1177,6 @@ async function prepareRepo(
     claims ??= deps.openPrClaims(repo);
     return claims;
   };
-  // 本机领单到期的租约先收（决定 0096）：退回的单下一轮按「stopped 且没有任何一代」接手
-  if (deps.localLeases) {
-    const swept = await sweepLocalLeases(deps.localLeases, repo, {
-      open: new Map(listed.issues.map((i) => [i.number, i.labels] as const)),
-      prClaims,
-      comment: (c) => deps.comment({ repo, ...c }),
-      now: deps.now(),
-      log: deps.log,
-    });
-    t.unchecked.push(...swept.unchecked);
-  }
   // 版本里的先后和当前版本：排序用。先后认不出的版本，它的单算「没排进去」，原因只记日志（先后的对错归每天的 GitHub 对账管）
   const withOrder = listed.openMilestones.filter((m) => milestoneNeedsOrder(m, listed.issues));
   const { book, problems } = readOrderBook(
@@ -1106,6 +1231,26 @@ async function prepareRepo(
       return out;
     },
   };
+
+  // 本机领单到期的租约先收（决定 0096）：退回的单下一轮按「重新派」或「接手」接回。退回之前先按上面这些准入关卡判一次法国接不接得了（#3461），
+  // 接不了的不摘「本机做」、不退回，报给本机。要用 ctx，所以放在它后面、准入循环前面。
+  if (deps.localLeases) {
+    const notify = deps.notifyLocal;
+    const swept = await sweepLocalLeases(deps.localLeases, repo, {
+      open: new Map(listed.issues.map((i) => [i.number, i.labels] as const)),
+      prClaims,
+      comment: (c) => deps.comment({ repo, ...c }),
+      franceVerdict: async (issueNumber) => {
+        const found = listed.issues.find((i) => i.number === issueNumber);
+        if (!found) throw new Error(`开着的单列表里找不到 #${issueNumber}，判不了法国接不接得了`);
+        return franceVerdict(deps, repo, found, ctx, whitelist, prClaims);
+      },
+      ...(notify ? { notify: (n: LeaseNotice) => notify({ repo, ...n }) } : {}),
+      now: deps.now(),
+      log: deps.log,
+    });
+    t.unchecked.push(...swept.unchecked);
+  }
 
   const admitted: Candidate[] = [];
   for (const issue of listed.issues) {
@@ -1281,26 +1426,7 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     return { outcome: 'failed', why: `受管的仓读不到：${errMessage(err)}` };
   }
   if (repos.length === 0) return { outcome: 'unscanned', why: '库里没有受管的仓' };
-  const t: Tally = {
-    scanned: repos.length,
-    started: 0,
-    commented: 0,
-    skipped: new Map(),
-    unready: [],
-    unchecked: [],
-    reposFailed: 0,
-    reposOn: 0,
-    running: 0,
-    stalled: 0,
-    workingAtStart: 0,
-    hourStarted: 0,
-    breakerAllow: new Map(),
-    breakerWhy: new Map(),
-    waiting: new Map(),
-    skippedByRepo: new Map(),
-    notReady: [],
-    blocked: [],
-  };
+  const t = newTally(repos.length);
   if (repos.some((r) => r.autoDispatchSince !== null)) {
     if (!(deps.gateLive ?? MERGE_GATE_REQUIRES_COLD_VERIFY)) {
       return {

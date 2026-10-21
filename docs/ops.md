@@ -14,7 +14,7 @@
 | 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端、经隧道探法国 healthz |
 | 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
-| 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
+| 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停）；`daihuo.service`（程序 `/opt/daihuo`、数据 `/var/lib/daihuo`）；两个 systemd 定时任务：`reclaude-refill-collector.timer`（每分钟，程序 `/opt/reclaude-refill`、数据 `/var/lib/reclaude-refill`）、`mirasim-radar-collector.timer`（每 5 分钟，程序 `/opt/mirasim-radar`、数据 `/var/lib/mirasim-radar`） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
 两机之间走 WireGuard 隧道 `10.99.0.0/24`：香港 `10.99.0.1` 是服务端；法国 `10.99.0.2` 是客户端，主动连、每 25 秒保活，所以法国不用开任何入站端口。
 
@@ -325,7 +325,14 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | 自动发布 | `fleet-auto-release.service`、`fleet-release-request.service`、`fleet-cli-upgrade.service` | `/usr/local/lib/fleet-dao`、`/var/lib/fleet-dao/cli-upgrade` |
 | 发布版本 | 没有进程 | `/srv/fleet-dao-releases`、`/srv/fleet-dao` |
 | self-proxy | `self-proxy-direct.service`、`self-proxy-exit.service` | 不归本仓管 |
-| MiraQuota 同步 | `miraquota-sync.service` | 不归本仓管 |
+| MiraQuota 同步 | `miraquota-sync.service` | `/opt/miraquota`（不归本仓管） |
+| daihuo | `daihuo.service` | `/opt/daihuo`、`/var/lib/daihuo`（不归本仓管；后者归 daihuo 用户、750，后端读不到时写「没读到」带原因） |
+| reclaude-refill | `reclaude-refill-collector.service`、`reclaude-refill-collector.timer` | `/opt/reclaude-refill`、`/var/lib/reclaude-refill`（不归本仓管；定时任务，每分钟跑一次，跑完进程就没了，CPU、内存看「近 24 小时」） |
+| mirasim-radar | `mirasim-radar-collector.service`、`mirasim-radar-collector.timer` | `/opt/mirasim-radar`、`/var/lib/mirasim-radar`（不归本仓管；定时任务，每 5 分钟跑一次，同上） |
+
+采样器还列 `/etc/systemd/system/*.timer` 兜底：定时器本身和同名 `.service` 都没登记、也不在 `vps-apps.ts` 的 `SYSTEM_TIMERS`（系统自带定时器：apt-daily、fstrim、logrotate 等，每个写了为什么不算）里的，资源页也出一行「没登记」。定时任务的「近 24 小时」用量（跑了几次、CPU 秒数、单次峰值内存）由 root 采集器从 journal 读，没给时页面写「近 24 小时用量没给」，不画 0。
+
+表里没有、`vps-apps.ts` 的 `SYSTEM_SERVICES`（系统自带服务，每个写了为什么不算）也没有的在跑服务，采样器每 5 秒扫 `system.slice` 兜底：资源页在最后单独列一行标「没登记」，照样给 CPU、内存，磁盘写没登记目录；要么在 `vps-apps.ts` 登记，要么写进 `SYSTEM_SERVICES`。
 
 <!-- vps-apps:end -->
 
@@ -1370,7 +1377,7 @@ pnpm machine join <编号> [--name 显示名] --url https://<法国看板域名>
 - 每台开发机使用独立环境编号和通行证；Windows 的 `founder-pc` 不能给另一台 Mac 共用。先按上节「加一台机器」为新机器安装本机会话上报，再 `pnpm work claim <单号>`；领单成功后用 `pnpm work queue` 核实领者是这台机器的环境编号。没配置、法国拒收或没查成时不能当作已登记，也不能只贴「本机做」标签就开始写码。
 - 本机会话做一张单先 `pnpm work claim <单号>`（`pnpm issue:new --local` 开完自动领）：查过没有开着的 PR 在做，POST 到法国 `/api/nodes/claims` 在 `tasks` 登记（`executor = local`、`lease_until` 两小时、`claimed_by` 是通行证认出的环境编号），再贴「本机做」，打出分支名 `local/<单号>-<短名>`。通行证和地址用本机会话上报那份 `~/.fleet-dao/local-sessions/config.json`（下面一节装的），没装就领不了、退出码 1。引擎手上排队、在跑的回 409（原因写明状态和现在在干什么），不领；引擎已经停下等人的（`stalled`，或 `running` 而 `phase = parked`）一步接手：后端在同一事务里锁行、给任务工作流发 `taskAbandon`（by = `node:<环境>`，note「本机接手」）、把 `executor` 改成 `local`、记租约和操作记录（`task.local.claim`，reason「本机接手」）；叫停信号发不出去（Temporal 连不上）整个领单回滚、回 409。接手后工作流收尾写的 `stopped` 快照被 `saveTaskSnapshot` 挡掉（本机的行不让引擎写），引擎遗留行对账和拉单都不碰这行；租约到期、单关且 PR 合了照常收。
 - 续租不用人记：拉单每轮看本机会话心跳（`node_sessions`），有会话在 `local/<单号>-` 分支上、不到两小时前动过就顺延；有开着的 PR 挂着这张单也顺延。跑超过两小时、期间不调工具的长活前手动 `pnpm work renew <单号>`。
-- 结束：有 PR 合并且单已关，拉单下一轮自动记做完（租约没到期也收，PR 镜像晚几分钟到就晚一轮），不用手动。无 PR 的运维成功，凭真实验证先 `pnpm issue:close <单号> --note "验证结果"`，再 `pnpm work done <单号>` 收租约账；只关单不会立即收未过期的无 PR 租约。未完成验收责任仍保留开放，不能用 done 代替验收结清或绕过关单检查。没做成用 `pnpm work done <单号> --failed "原因"`（还是本机的账，法国不自动接）；放手用 `pnpm work done <单号> --release "原因"`，摘「本机做」、退回法国队列。
+- 结束：有 PR 合并且单已关，拉单下一轮自动记做完（租约没到期也收，PR 镜像晚几分钟到就晚一轮），不用手动。无 PR 的运维成功，凭真实验证先 `pnpm issue:close <单号> --note "验证结果"`，再 `pnpm work done <单号>` 收租约账；只关单不会立即收未过期的无 PR 租约。未完成验收责任仍保留开放，不能用 done 代替验收结清或绕过关单检查。没做成用 `pnpm work done <单号> --failed "原因"`（还是本机的账，法国不自动接）；放手用 `pnpm work done <单号> --release "原因"`，摘「本机做」、退回法国队列（拉单下一轮按重新派或接手接回；法国某一关接不了的，拉单会把「本机做」贴回、留言并在驾驶舱通知，不让单两边都没人做）。租约到期没续上同理：法国接不了的单不摘「本机做」、不退回，只通知本机。
 - 到期没续上：拉单摘「本机做」、在单上留一句话（同一次到期只留一次），行改成 `stopped` + `engine`，下一轮引擎接。总开关关着时拉单不跑，租约也不收。
 - 脱离聊天进程的本机工人（#2761）：`pnpm work run <单号> [--brief <交代文件>] [--worktree <路径>] [--again]` 先过本机容量（`agents/hooks/capacity.mjs`），本机没租约才领单，建或复用 `<主检出>/.claude/worktrees/<单号>-<短名>`，经 `detach.mjs`（WMI）起看护进程 `packages/conventions/src/bin/work-supervisor.ts`；它经 reclaude 起无头 `general-purpose` 工人（`-p --output-format json --session-id`），每 30 秒写心跳、每 20 分钟续租，网关或网络断了按 1、2、4……最多 10 分钟等一会儿用 `--resume` 同一个会话续（最多 12 次），登录坏了不续。记录在 `~/.fleet-dao/work-runs/<owner>__<name>__<单号>/`（`state.json`、`result.json`、每次的 `attempt-*.out.json` / `.err.log`、`supervisor.log`）。收尾钩子 `agents/hooks/work-watch.mjs` 在 `result.json` 写出来、心跳 3 分钟不动、或等待已 park 时各叫醒一次；已 park 的写明不是做完。审查返工用 `pnpm work rework <单号>`，`pnpm work run` 在 waiting 上只复核。`pnpm work runs` 看全部；看护进程没了再跑一次 `pnpm work run <单号>` 接着同一个会话续。
 - 看别的机器领了哪些单（#3388）：`GET /api/nodes/claims`（请求头 `X-Fleet-Node-Token`，只认机器通行证，和 `POST` 同一个认人，浏览器登录态不认）。返回所有仓里 `executor = local` 且租约没到期的行：`{"claims":[{"repo":"owner/name","issue":123,"claimedBy":"founder-pc","leaseUntil":"…"}]}`，只这四个字段（仓名是库里的原样）；无通行证或通行证不对 401，读库失败 503，不拿空列表冒充。协议和解析函数在 `packages/shared/src/node-claims.ts`。

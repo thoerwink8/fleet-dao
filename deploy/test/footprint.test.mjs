@@ -158,10 +158,12 @@ test('journal 汇总：次数、CPU 秒相加、内存取单次最大；旧版�
     'Consumed 2.0s CPU time, 68.2M memory peak, 0B memory swap peak.',
     'Consumed 1min 1s CPU time, 116.0M memory peak, 0B memory swap peak, 1.1M read from disk.',
     'Consumed 850ms CPU time.',
+    // 真机上 -o cat 的样子：带单元名前缀
+    'x.service: Consumed 1.5s CPU time.',
   ].join('\n');
   const s = summarizeJournal(lines);
-  assert.equal(s.runs24h, 3);
-  assert.equal(s.cpuSeconds24h, 63.85);
+  assert.equal(s.runs24h, 4);
+  assert.equal(s.cpuSeconds24h, 65.35);
   assert.equal(s.peakMemoryBytes, Math.round(116 * 1024 * 1024));
   assert.equal(summarizeJournal('Consumed 1s CPU time.').peakMemoryBytes, null);
   assert.equal(summarizeJournal('Starting...\n'), undefined);
@@ -172,7 +174,7 @@ test('journal 汇总：次数、CPU 秒相加、内存取单次最大；旧版�
       return u === 'a.service' ? lines : '';
     },
   });
-  assert.equal(r[0].runs24h, 3);
+  assert.equal(r[0].runs24h, 4);
   assert.match(r[1].why, /超过 60 秒/);
   assert.match(r[2].why, /没有一回/);
 });

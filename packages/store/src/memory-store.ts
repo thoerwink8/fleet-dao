@@ -826,7 +826,7 @@ export function createMemoryStore(
         facts.task.id !== input.taskId ||
         facts.task.issueNumber !== input.issueNumber ||
         facts.run.workflowId !== input.workflowId ||
-        facts.run.temporalRunId !== input.temporalRunId ||
+        (facts.run.temporalRunId ?? '') !== input.temporalRunId ||
         facts.run.segment !== input.runSegment ||
         facts.run.startedAt !== input.runStartedAt ||
         facts.run.endedAt !== input.runEndedAt ||
