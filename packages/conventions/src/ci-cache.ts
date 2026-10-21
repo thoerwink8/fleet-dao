@@ -223,6 +223,8 @@ export const EXTERNAL_INPUT_DIRS: readonly string[] = [
   'agents',
   '.githooks',
   'docs/decisions',
+  // specs-index.test.ts 通读 specs/ 各目录主文件的头部（#3498），头部改了键要变，不然复用旧的绿结果
+  'specs',
 ];
 
 /**
