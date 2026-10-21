@@ -323,7 +323,24 @@ export interface RawAcceptanceVerdict {
     | undefined;
   coverage?: readonly unknown[] | undefined;
   humanOnly?: string | undefined;
+  /** leave 的结构化声明；只有 founder-only 才可能是创始人责任，其余（含没写）都不是。 */
+  leaveKind?: string | undefined;
 }
+
+/**
+ * leave 的两种结构化声明：
+ * - founder-only：证据只有创始人能提供（他的决定、线下确认……），humanOnly 写清是什么；
+ * - read-unavailable：只读会话自己读不到证据（法国 journal、数据库、Temporal……），这是机读缺口不是创始人责任，
+ *   引擎保留责任并重试。
+ */
+export const ACCEPTANCE_LEAVE_KINDS = ['founder-only', 'read-unavailable'] as const;
+
+/**
+ * 一条已通过 checkAcceptanceVerdict 的 leave 是不是创始人责任：只认结构化声明 founder-only 加非空 humanOnly，
+ * 不从 humanOnly/reason 的自由文本里猜；没声明、声明别的、认不出的一律不是。
+ */
+export const acceptanceLeaveIsFounderOnly = (verdict: RawAcceptanceVerdict): boolean =>
+  verdict.action === 'leave' && verdict.leaveKind === 'founder-only' && !!verdict.humanOnly?.trim();
 
 export type AcceptanceVerdictCheck =
   | { ok: true; action: AcceptanceVerdictAction; coverage?: AcceptanceCoverage[] }

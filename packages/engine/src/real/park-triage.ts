@@ -771,8 +771,9 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         at: now(),
       });
     },
-    async acceptanceRetry({ task, attempt, why }) {
+    async acceptanceRetry({ task, attempt, why, cause }) {
       const workflowId = `acceptance:${task.taskId}:${task.prNumber}:${task.head}`;
+      const unverified = cause === 'unverified';
       await recordEngineAudit(w.db, {
         action: COMMANDER_AUDIT_RETRY,
         target: COMMANDER_AUDIT_TARGET,
@@ -786,8 +787,12 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           prNumber: task.prNumber,
           head: task.head,
           attempt,
+          // unverified：会话回了但裁决读不懂/核不过/没执行成，jobs 按它有界；缺省是会话没起成。
+          cause: unverified ? 'unverified' : 'session',
         },
-        reason: `验收责任会话没起成（第 ${attempt} 次），下一轮再看`,
+        reason: unverified
+          ? `验收责任没核完（第 ${attempt} 次，机读或执行失败，不是创始人证据），责任仍 open，下一轮再核`
+          : `验收责任会话没起成（第 ${attempt} 次），下一轮再看`,
         ok: false,
         error: why.slice(0, 1000),
         at: now(),

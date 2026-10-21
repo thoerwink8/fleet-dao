@@ -101,6 +101,12 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 账本身读法严格：trail 须非空、代数连续、runId 不重复，同键后来的记录不得和起头记录的身份/代次/编号不一致；对不上就阻断该意图，每轮报 problems（「已阻断」），连键都定位不到的坏记录同样每轮报。
 - 回执分三种：叫停已发送、终态未确认；旧代已终态、新代待启动/启动未确认；新代已确认启动（或已存在、本次没再起）。什么都没发出去才写「任务没动」。测试：`test/real/park-triage.test.ts`（假 Temporal + `ParkTriageWiring.clock` 假时钟）、`test/park-triage.test.ts`（假存储）。
 
+## 验收责任巡检的责任分类（#3497）
+
+- `jobs/park-triage.ts` 的 `triageAcceptanceRepo` 把每条 open 责任分成三种结果：已结清/替代（只在核过白名单并真执行成功后）、**创始人证据**、**没核完**。只有裁决 `leave` 带结构化 `leaveKind: "founder-only"` 且 `humanOnly` 非空（`decisions/park-triage.ts` 的 `acceptanceLeaveIsFounderOnly`）才发 decision「要你拍」（`reason: human-only`）；不从 `humanOnly`/`reason` 自由文本猜授权，没带 `leaveKind`、或声明 `read-unavailable`（只读会话读不到法国 journal/库/Temporal，会话本来没有这些读取能力也拿不到凭据）都不是创始人证据。
+- 没核完＝缺唯一裁决、裁决格式/身份/代次不符、缺合并回执、证据为空、supersede 目标/coverage 不满足、结清/替代口子没装配或抛错、leave 没有创始人声明；以及主线头读不到、会话没起成、回答认不出（这三种还没拿到裁决，是读取失败）。它们都不发「要你拍」，发 alert 级提醒（正文分「已按裁决收口 / 仍未收口 / 机读或执行没核完」，部分成功只报已核那部分，不关单），责任保持 open，经 `deps.acceptanceRetry` 抵销这次认领，下一轮同一 head 再处理。重试记 `commander.retry`，`after.cause` 区分 `session`（没拿到裁决，沿原来的重试）和 `unverified`（拿到了裁决但核不过/没执行成）；后者在 `AuditBook.unverifiedRetries` 里按 `PARK_TRIAGE_SESSION_TRIES` 有界，试满不再记重试、不再起会话（认领留着，每日上限和单张防空转的口径不变），提醒和 problems 如实写「试满、责任仍 open」，没有结清也没有关单。
+- 只留给创始人的那一条与没核完的并存时，decision 卡只列创始人那条；已核结清的照实写。supersede 仍由 `checkAcceptanceVerdict` 要求同仓同单同 PR 的已结清目标和逐项 coverage，旧头没有合并回执不能 settle。引擎没有给会话新增任何读取能力或凭据：提示词只给责任身份、合并回执和 `leaveKind` 约定；读不到证据只能明报机读缺口并重试，不靠编造证据过关。
+
 ## 版本更新日志
 
 - `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。

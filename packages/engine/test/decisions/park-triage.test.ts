@@ -2,6 +2,8 @@
 // 留给人只认三种理由类别；白名单外的裁决不放行；额度超预算按空转判，不按钱；老历史的停法从提醒正文认。
 import { describe, expect, it } from 'vitest';
 import {
+  ACCEPTANCE_LEAVE_KINDS,
+  acceptanceLeaveIsFounderOnly,
   allowedActions,
   COMMANDER_ACTIONS,
   type CommanderAction,
@@ -389,5 +391,36 @@ describe('验收责任裁决白名单', () => {
         evidence: '只有未合并的 PR 记录',
       }),
     ).toEqual({ ok: false, why: 'PR 没有合并回执，不能结清验收责任' });
+  });
+
+  it('创始人责任只认结构化 founder-only 加非空说明：自由文本、只读受限、认不出的声明都不是（#3497）', () => {
+    const leave = { ...base, action: 'leave', reason: '证据仍缺' };
+    const founder = '只有创始人能提供：线下合同签章确认';
+    expect(acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'founder-only', humanOnly: founder })).toBe(
+      true,
+    );
+    expect(ACCEPTANCE_LEAVE_KINDS).toEqual(['founder-only', 'read-unavailable']);
+    // 说明里再像「只有创始人」也不算：没声明、声明读不到、声明认不出、说明为空
+    expect(acceptanceLeaveIsFounderOnly({ ...leave, humanOnly: founder })).toBe(false);
+    expect(
+      acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'read-unavailable', humanOnly: founder }),
+    ).toBe(false);
+    expect(acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'Founder-Only', humanOnly: founder })).toBe(
+      false,
+    );
+    expect(acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'founder-only', humanOnly: '  ' })).toBe(
+      false,
+    );
+    expect(acceptanceLeaveIsFounderOnly({ ...leave, leaveKind: 'founder-only' })).toBe(false);
+    // 不是 leave 的裁决不可能是创始人责任
+    expect(
+      acceptanceLeaveIsFounderOnly({
+        ...base,
+        action: 'settle',
+        evidence: '有证据',
+        leaveKind: 'founder-only',
+        humanOnly: founder,
+      }),
+    ).toBe(false);
   });
 });
