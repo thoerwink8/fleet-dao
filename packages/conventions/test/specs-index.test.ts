@@ -7,8 +7,8 @@ import {
   generateSpecsIndex,
   headerLines,
   mainFile,
+  planBackfill,
   readSpecs,
-  SHARED_NUMBERS,
   SPECS_GENERATE_COMMAND,
   SPECS_INDEX_PATH,
   withStatusLine,
@@ -105,14 +105,32 @@ describe('方案索引生成', () => {
     expect(one).toEqual([]);
   });
 
-  it('存量撞号名单只认写死的那几个目录，同号再来一个照样报红', () => {
-    const [a, b] = SHARED_NUMBERS['902'] ?? [];
+  it('没有撞号白名单：两个 902- 目录都没标被取代照样报红，三个同号报三个目录', () => {
     const base = {
-      [`specs/${a}/需求.md`]: spec('a', ['- 状态：做完']),
-      [`specs/${b}/需求.md`]: spec('b', ['- 状态：做完']),
+      'specs/902-驾驶舱用户视角e2e/缺陷清单.md': spec('a', ['- 状态：做完']),
+      'specs/902-驾驶舱首页流程图/方案.md': spec('b', ['- 状态：做完']),
     };
-    expect(problems(base)).toEqual([]);
-    expect(problems({ ...base, 'specs/902-新的/需求.md': spec('c', ['- 状态：在做']) })).toHaveLength(1);
+    const two = problems(base);
+    expect(two).toHaveLength(1);
+    expect(two[0]).toContain('编号 902');
+    const three = problems({ ...base, 'specs/902-新的/需求.md': spec('c', ['- 状态：在做']) });
+    expect(three).toHaveLength(1);
+    expect(three[0]).toContain('有 3 个目录');
+  });
+
+  it('子编号：555-2-x 和 555-y 不是同一个编号；同是 555-2 照样报红；排序 555 在 555-2 前', () => {
+    const files = {
+      'specs/555-验收/需求.md': spec('验收', ['- 状态：做完']),
+      'specs/555-2-冷调用/需求.md': spec('冷调用', ['- 状态：做完']),
+      'specs/598-555-4-x/需求.md': spec('x', ['- 状态：做完']),
+    };
+    expect(problems(files)).toEqual([]);
+    const { text = '' } = generateSpecsIndex(memRepo(files));
+    expect(text.indexOf('555-验收/')).toBeLessThan(text.indexOf('555-2-冷调用/'));
+    expect(text.indexOf('555-2-冷调用/')).toBeLessThan(text.indexOf('598-555-4-x/'));
+    expect(problems({ ...files, 'specs/555-2-另一个/需求.md': spec('另', ['- 状态：在做']) })[0]).toContain(
+      '编号 555-2',
+    );
   });
 
   it('目录名不是「编号-短名」报红；读不到目录是没查成', () => {
@@ -135,6 +153,59 @@ describe('存量回填', () => {
     expect(withStatusLine('# 甲\n\n- 母单 #1\n', '做完')).toBe('# 甲\n\n- 状态：做完\n\n- 母单 #1\n');
     expect(withStatusLine('# 甲\n\n- 状态：在做\n', '做完')).toBeUndefined();
   });
+
+  const repo = memRepo({
+    'specs/1-关了/需求.md': '# 关了\n\n正文\n',
+    'specs/2-开着/需求.md': '# 开着\n\n正文\n',
+    'specs/3-对不上/方案.md': '# 对不上\n\n正文\n',
+    'specs/4-已有/需求.md': spec('已有', ['- 状态：做完']),
+    'specs/555-2-子编号/需求.md': '# 子编号\n\n正文\n',
+    'specs/6-只有附件/截图/a.png': '',
+  });
+
+  it('planBackfill：按单的开关给状态，已有状态、只有附件的不动；不猜被取代', () => {
+    const { changes, problems: p } = planBackfill(
+      repo,
+      new Map([
+        [1, 'closed'],
+        [2, 'open'],
+        [555, 'closed'],
+      ]),
+    );
+    expect(p).toEqual([]);
+    expect(changes.map((c) => [c.dir, c.status])).toEqual([
+      ['1-关了', '做完'],
+      ['2-开着', '在做'],
+      ['3-对不上', '未复核'],
+      ['555-2-子编号', '做完'],
+    ]);
+    expect(changes[0]?.next).toBe('# 关了\n\n- 状态：做完\n\n正文\n');
+  });
+
+  it('读不到单的状态（states 是 undefined）：每份都回填「未复核」，不整批放弃', () => {
+    const { changes, problems: p } = planBackfill(repo, undefined);
+    expect(p).toEqual([]);
+    expect(changes.map((c) => c.status)).toEqual(['未复核', '未复核', '未复核', '未复核']);
+    expect(changes.every((c) => c.why.includes('读不到单的状态'))).toBe(true);
+  });
+
+  it('读不到某份主文件：记没查成，别的照回填，不静默跳过', () => {
+    const files = {
+      'specs/1-好/需求.md': '# 好\n\n正文\n',
+      'specs/2-坏/需求.md': '# 坏\n\n正文\n',
+    };
+    const base = memRepo(files);
+    const broken: typeof base = {
+      ...base,
+      read: (p: string) => (p === 'specs/2-坏/需求.md' ? undefined : base.read(p)),
+    };
+    const { changes, problems: p } = planBackfill(broken, new Map());
+    expect(changes.map((c) => c.dir)).toEqual(['1-好']);
+    expect(p).toHaveLength(1);
+    expect(p[0]).toContain('没查成');
+    expect(p[0]).toContain('specs/2-坏/需求.md');
+    expect(planBackfill(memRepo({}), new Map()).problems[0]).toContain('没查成');
+  });
 });
 
 describe('真仓', () => {
@@ -142,10 +213,12 @@ describe('真仓', () => {
     expect(checkSpecsIndex(fsRepo(ROOT)).map((p) => p.text)).toEqual([]);
   });
 
-  it('存量撞号名单里的目录都还在（删了就从名单里去掉）', () => {
-    const repo = fsRepo(ROOT);
-    for (const dirs of Object.values(SHARED_NUMBERS)) {
-      for (const d of dirs) expect(repo.isDir(`specs/${d}`), d).toBe(true);
+  it('没有两个目录共用一个编号（被取代的除外）：真仓不靠白名单', () => {
+    const { entries } = readSpecs(fsRepo(ROOT));
+    const seen = new Map<string, string>();
+    for (const e of entries.filter((x) => x.status !== '被取代')) {
+      expect(seen.get(e.number), `${e.number} 重复：${e.dir}`).toBeUndefined();
+      seen.set(e.number, e.dir);
     }
   });
 });

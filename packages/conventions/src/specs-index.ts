@@ -5,10 +5,12 @@
 // 头部：有 `# 标题` 就从标题下一行起、没有就从第一行起，跳过开头的空行，连着的 `- ` 行；第一个空行或别的行就结束。要有：
 //   - 状态：在做 | 做完 | 被取代 | 未复核
 //   - 被取代：specs/<目录>     （状态是「被取代」才写、也必须写；指向的目录要在 specs/ 下，不能是自己）
-// 编号是目录名开头的数字。两个目录编号相同、都没标「被取代」就报红；SHARED_NUMBERS 里写死的是加这道检查前就撞了号、
-// 又谁也没取代谁的几组（同一母单下的不同题目、母单的切片），只认名单里那几个目录，再来一个照样报红。
+// 编号是目录名开头的数字，后面紧跟「-一两位数字-」的是子编号（555-2-冷调用进合并闸 的编号是 555-2，对的是 #555-2，
+// 和 555-验收 的 555 不是同一个）。两个目录编号相同、都没标「被取代」就报红，没有白名单；撞了号的换个编号，
+// 真是后来的推翻了先前的，在先前那份头部标「被取代」。
 // 生成：pnpm specs:index；核对：pnpm specs:index --check（进 pnpm check；specs-index.test.ts 拿真仓核对，CI 会跑）。
-// 存量的状态由 bin/specs-backfill.ts 按单的开关机械回填过一次（关了 → 做完，开着 → 在做，对不上单 → 未复核）。
+// 存量的状态由 bin/specs-backfill.ts 按单的开关机械回填过一次（planBackfill：关了 → 做完，开着 → 在做，
+// 对不上单、读不到单的状态、读不到方案文件 → 未复核，不猜「被取代」）。
 import type { RepoView } from './repo.ts';
 
 export const SPECS_DIR = 'specs';
@@ -22,14 +24,13 @@ export type SpecStatus = (typeof SPEC_STATUSES)[number];
 /** 还在管事的状态；其余进「历史」一节。 */
 const ACTIVE: readonly SpecStatus[] = ['在做', '未复核'];
 
-/** 加检查前就撞了号、谁也没取代谁的目录（见文件开头）。只许减，不许加：新方案换个编号。 */
-export const SHARED_NUMBERS: Readonly<Record<string, readonly string[]>> = {
-  '555': ['555-2-冷调用进合并闸', '555-验收'],
-  '902': ['902-驾驶舱用户视角e2e', '902-驾驶舱首页流程图'],
-  '1798': ['1798-探针重做', '1798-驾驶舱重排'],
-};
+const DIR_NAME = /^(\d+(?:-\d{1,2})?)-.+$/;
 
-const DIR_NAME = /^(\d+)-.+$/;
+/** 目录名对的单号（编号开头的整数，子编号 555-2 对 #555）；认不出是 undefined。 */
+export function specIssueNumber(dir: string): number | undefined {
+  const n = /^(\d+)-/.exec(dir)?.[1];
+  return n === undefined ? undefined : Number(n);
+}
 const PREFERRED_MAIN = ['需求.md', '方案.md'];
 
 export interface SpecEntry {
@@ -175,8 +176,7 @@ export function readSpecs(repo: RepoView): {
     byNumber.set(e.number, [...(byNumber.get(e.number) ?? []), e.dir]);
   }
   for (const [number, same] of byNumber) {
-    const shared = SHARED_NUMBERS[number] ?? [];
-    if (same.length > 1 && !same.every((d) => shared.includes(d))) {
+    if (same.length > 1) {
       problems.push({
         text: `${SPECS_DIR}/：编号 ${number} 有 ${same.length} 个目录都没标「被取代」（${same.join('、')}）。新方案换个编号；真是后来的推翻了先前的，在先前那份头部标「被取代」。`,
       });
@@ -207,6 +207,61 @@ export function withStatusLine(text: string, status: SpecStatus): string | undef
   return [lines[0] ?? '', ...added, ...lines.slice(1)].join(nl);
 }
 
+export interface BackfillChange {
+  dir: string;
+  /** 仓内相对路径。 */
+  rel: string;
+  status: SpecStatus;
+  /** 为什么是这个状态（给人看）。 */
+  why: string;
+  /** 加好状态行的全文。 */
+  next: string;
+}
+
+/**
+ * 存量回填的计划（bin/specs-backfill.ts 照它写）：每个还没有状态的主文件给一个状态。
+ * states 是 单号 → open / closed；undefined = 读不到单的状态，这时每份都标「未复核」，不整批放弃、不猜。
+ * 读不到的主文件没法往里加行：记进 problems（没查成），调用方照样把能写的写了、最后退出 2。
+ */
+export function planBackfill(
+  repo: RepoView,
+  states: ReadonlyMap<number, string> | undefined,
+): { changes: BackfillChange[]; problems: string[] } {
+  const changes: BackfillChange[] = [];
+  const problems: string[] = [];
+  const names = repo.list(SPECS_DIR);
+  if (names === undefined) return { changes, problems: [`没查成：读不到 ${SPECS_DIR}/ 目录。`] };
+  for (const dir of names.filter((n) => repo.isDir(`${SPECS_DIR}/${n}`)).sort(byCodePoint)) {
+    const files = repo.list(`${SPECS_DIR}/${dir}`);
+    if (files === undefined) {
+      problems.push(`没查成：列不出 ${SPECS_DIR}/${dir}/，补不上状态。`);
+      continue;
+    }
+    const file = mainFile(files);
+    if (file === undefined) continue;
+    const rel = `${SPECS_DIR}/${dir}/${file}`;
+    const text = repo.read(rel);
+    if (text === undefined) {
+      problems.push(`没查成：读不到 ${rel}，补不上状态。`);
+      continue;
+    }
+    const number = specIssueNumber(dir);
+    let status: SpecStatus;
+    let why: string;
+    if (states === undefined) {
+      status = '未复核';
+      why = '读不到单的状态';
+    } else {
+      const state = number === undefined ? undefined : states.get(number);
+      status = backfillStatus(state === undefined ? undefined : { state });
+      why = number === undefined ? '目录名认不出单号' : `#${number} ${state ?? '对不上单'}`;
+    }
+    const next = withStatusLine(text, status);
+    if (next !== undefined) changes.push({ dir, rel, status, why, next });
+  }
+  return { changes, problems };
+}
+
 function cell(s: string): string {
   return s.replaceAll('|', '\\|');
 }
@@ -225,8 +280,12 @@ function table(rows: readonly SpecEntry[]): string[] {
   return out;
 }
 
+/** 编号按数字排：555 在 555-2 前面（没有子编号的排前），再往后比目录名。 */
 function byNumberThenDir(a: { number: string; dir: string }, b: { number: string; dir: string }): number {
-  return Number(a.number) - Number(b.number) || byCodePoint(a.dir, b.dir);
+  const parts = (n: string) => n.split('-').map(Number);
+  const [a1 = 0, a2 = 0] = parts(a.number);
+  const [b1 = 0, b2 = 0] = parts(b.number);
+  return a1 - b1 || a2 - b2 || byCodePoint(a.dir, b.dir);
 }
 
 /** 整份索引文件的内容（同一批目录两次调用逐字相同）。 */
