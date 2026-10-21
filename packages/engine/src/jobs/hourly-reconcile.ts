@@ -321,6 +321,23 @@ export function witnessWorktreeCalls(deps: HourlyReconcileJobDeps, runId: number
       witness(name('leftovers', dir), () => deps.leftovers(dir, user, known, scratch)),
     remove: (dir) => witness(name('remove', dir), () => deps.remove(dir)),
     keepShots: (dir, user, at) => witness(name('keep-shots', dir), () => deps.keepShots(dir, user, at)),
+    // 判树有没有人在用、报撤和树有关的提醒：库和 Temporal 的口子，卡住时一样要看得出是哪一个
+    issue: (ref) =>
+      witness(name('issue', `${ref.owner}_${ref.name}/${ref.issueNumber}`), () => deps.issue(ref)),
+    prHeads: (ref) =>
+      witness(name('pr-heads', `${ref.owner}_${ref.name}/${ref.branch}`), () => deps.prHeads(ref)),
+    subtaskTrees: (ids) => witness(name('subtask-trees'), () => deps.subtaskTrees(ids)),
+    openSessions: () => witness(name('open-sessions'), () => deps.openSessions()),
+    workflows: {
+      state: (id) => witness(name('workflow-state', id), () => deps.workflows.state(id)),
+      view: (id) => deps.workflows.view(id),
+    },
+    alerts: {
+      ...deps.alerts,
+      byKey: (key) => witness(name('alert-by-key', key), () => deps.alerts.byKey(key)),
+      resolve: (input) => witness(name('alert-resolve', input.dedupeKey), () => deps.alerts.resolve(input)),
+    },
+    repos: () => witness(name('repos'), () => deps.repos()),
   };
   const { cleanupNamespace, size, lastSessions, mirrorBytes } = deps;
   if (cleanupNamespace) wrapped.cleanupNamespace = () => witness(name('cleanup-namespace'), cleanupNamespace);
