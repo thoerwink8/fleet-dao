@@ -121,9 +121,49 @@ describe('后台钩子额外装的 _detach.mjs（与 sync.ts 的 readHooks 同�
     expect(r.join('；')).toMatch(/_detach\.mjs/);
   });
 
-  it('故意造的失败：主线有 background-launch.mjs 却没有 detach.mjs：照实报出，不静默当一致', () => {
-    const r = lib.healthReasons({ home: withDetach('d\n', null) }).reasons ?? [];
-    expect(r.join('；')).toMatch(/agents\/local-sessions\/detach\.mjs/);
+  it('主线缺 detach.mjs：明确没核成，不拿已安装内容代替源，也不触发同步', () => {
+    const home = withDetach('d\n', null);
+    const f = fakeSync(home);
+    const out = lib.bootstrap({ home, projectDir: '/p', syncFleet: f.syncFleet });
+    expect(f.calls).toHaveLength(0);
+    expect(lib.healthReasons({ home })).toEqual({
+      unreadable:
+        '主线的后台钩子依赖 agents/local-sessions/detach.mjs，专用检出里读不了（ENOENT），装着的 _detach.mjs 没法核',
+    });
+    expect(out.join('')).toMatch(/没核成.*detach\.mjs.*ENOENT.*先不动/);
+  });
+
+  it('源路径是目录、内容读不了：保留错误码，不触发同步', () => {
+    const home = withDetach('d\n', null);
+    mkdirSync(join(home, '.fleet-dao', 'origin-main', 'agents', 'local-sessions', 'detach.mjs'), {
+      recursive: true,
+    });
+    const f = fakeSync(home);
+    const out = lib.bootstrap({ home, projectDir: '/p', syncFleet: f.syncFleet });
+    expect(f.calls).toHaveLength(0);
+    expect(lib.healthReasons({ home })).toEqual({
+      unreadable:
+        '主线的后台钩子依赖 agents/local-sessions/detach.mjs，专用检出里读不了（EISDIR），装着的 _detach.mjs 没法核',
+    });
+    expect(out.join('')).toMatch(/没核成.*detach\.mjs.*EISDIR.*先不动/);
+  });
+
+  it('安装目录也缺失时仍先核源依赖：源缺失不能触发同步', () => {
+    const home = withDetach('d\n', null);
+    rmSync(join(home, '.fleet-dao', 'hooks'), { recursive: true });
+    const f = fakeSync(home);
+    const out = lib.bootstrap({ home, projectDir: '/p', syncFleet: f.syncFleet });
+    expect(f.calls).toHaveLength(0);
+    expect(lib.healthReasons({ home }).unreadable).toMatch(/detach\.mjs.*ENOENT/);
+    expect(out.join('')).toMatch(/没核成.*先不动/);
+  });
+
+  it('主线没有后台启动器：多余的 _detach.mjs 仍报差异', () => {
+    const home = currentMachine();
+    write(join(home, '.fleet-dao', 'hooks', '_detach.mjs'), 'd\n');
+    expect(lib.healthReasons({ home })).toEqual({
+      reasons: ['装着的钩子脚本和主线不一样（_detach.mjs）'],
+    });
   });
 });
 

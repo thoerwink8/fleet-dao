@@ -103,7 +103,8 @@ export function summarizeJournal(text) {
   let cpu = 0;
   let peak;
   for (const line of String(text).split('\n')) {
-    const m = /^Consumed (.+?) CPU time(?:, ([0-9.]+[BKMGT]) memory peak)?/.exec(line.trim());
+    // -o cat 的行带单元名前缀：「xxx.service: Consumed 1.4s CPU time, 87.9M memory peak, …」；内存峰值不是每回都有（systemd 只在读到时才打）
+    const m = /(?:^|: )Consumed (.+?) CPU time(?:, ([0-9.]+[BKMGT]) memory peak)?/.exec(line.trim());
     if (!m) continue;
     const secs = parseCpuTime(m[1]);
     if (secs === undefined) continue;
