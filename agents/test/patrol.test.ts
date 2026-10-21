@@ -556,6 +556,9 @@ const { PGlite } = (await import(pathToFileURL(dbRequire.resolve('@electric-sql/
  */
 describe('巡查脚本：定时任务最近结局，partial 要报、恢复要有真实 ok（#3513）', () => {
   let db: InstanceType<typeof PGlite>;
+  // #3520 lint：agents_test 一次起几十个隔离进程，PGlite 冷启动超过 vitest 默认 10 秒钩子时限
+  // （Hook timed out）。等的是内存库起来，不是巡查时限；和测试库 TEST_DB_TIMEOUT_MS 一样给 60 秒。
+  // 关掉同样可能慢。beforeAll 没跑完时 db 还没有，收尾不要再抛一次。
   beforeAll(async () => {
     db = new PGlite();
     await db.exec(`
@@ -571,10 +574,10 @@ describe('巡查脚本：定时任务最近结局，partial 要报、恢复要�
         check ((ended_at is null) = (outcome is null)),
         check (outcome is null or outcome = 'ok' or why is not null)
       );`);
-  });
+  }, 60_000);
   afterAll(async () => {
-    await db.close();
-  });
+    await db?.close();
+  }, 60_000);
   beforeEach(async () => {
     await db.exec('truncate schedule_runs restart identity; truncate scheduled_jobs cascade;');
   });
