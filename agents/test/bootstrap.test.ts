@@ -98,6 +98,75 @@ describe('是现在这一代：一个字不说、不同步', () => {
   });
 });
 
+describe('后台钩子额外装的 _detach.mjs（与 sync.ts 的 readHooks 同一条映射）', () => {
+  const withDetach = (installedDetach: string | null, mainDetach: string | null) => {
+    const home = currentMachine({ 'session-start.mjs': 'new\n', 'background-launch.mjs': 'bg\n' });
+    if (installedDetach !== null) write(join(home, '.fleet-dao', 'hooks', '_detach.mjs'), installedDetach);
+    if (mainDetach !== null)
+      write(join(home, '.fleet-dao', 'origin-main', 'agents', 'local-sessions', 'detach.mjs'), mainDetach);
+    return home;
+  };
+
+  it('装着的 _detach.mjs 与 local-sessions/detach.mjs 一致（CRLF 不算差）：不报', () => {
+    expect(lib.healthReasons({ home: withDetach('d\n', 'd\r\n') })).toEqual({ reasons: [] });
+  });
+
+  it('内容不同：报 _detach.mjs', () => {
+    const r = lib.healthReasons({ home: withDetach('old\n', 'd\n') }).reasons ?? [];
+    expect(r.join('；')).toMatch(/主线不一样（_detach\.mjs）/);
+  });
+
+  it('没装 _detach.mjs：报 _detach.mjs', () => {
+    const r = lib.healthReasons({ home: withDetach(null, 'd\n') }).reasons ?? [];
+    expect(r.join('；')).toMatch(/_detach\.mjs/);
+  });
+
+  it('主线缺 detach.mjs：明确没核成，不拿已安装内容代替源，也不触发同步', () => {
+    const home = withDetach('d\n', null);
+    const f = fakeSync(home);
+    const out = lib.bootstrap({ home, projectDir: '/p', syncFleet: f.syncFleet });
+    expect(f.calls).toHaveLength(0);
+    expect(lib.healthReasons({ home })).toEqual({
+      unreadable:
+        '主线的后台钩子依赖 agents/local-sessions/detach.mjs，专用检出里读不了（ENOENT），装着的 _detach.mjs 没法核',
+    });
+    expect(out.join('')).toMatch(/没核成.*detach\.mjs.*ENOENT.*先不动/);
+  });
+
+  it('源路径是目录、内容读不了：保留错误码，不触发同步', () => {
+    const home = withDetach('d\n', null);
+    mkdirSync(join(home, '.fleet-dao', 'origin-main', 'agents', 'local-sessions', 'detach.mjs'), {
+      recursive: true,
+    });
+    const f = fakeSync(home);
+    const out = lib.bootstrap({ home, projectDir: '/p', syncFleet: f.syncFleet });
+    expect(f.calls).toHaveLength(0);
+    expect(lib.healthReasons({ home })).toEqual({
+      unreadable:
+        '主线的后台钩子依赖 agents/local-sessions/detach.mjs，专用检出里读不了（EISDIR），装着的 _detach.mjs 没法核',
+    });
+    expect(out.join('')).toMatch(/没核成.*detach\.mjs.*EISDIR.*先不动/);
+  });
+
+  it('安装目录也缺失时仍先核源依赖：源缺失不能触发同步', () => {
+    const home = withDetach('d\n', null);
+    rmSync(join(home, '.fleet-dao', 'hooks'), { recursive: true });
+    const f = fakeSync(home);
+    const out = lib.bootstrap({ home, projectDir: '/p', syncFleet: f.syncFleet });
+    expect(f.calls).toHaveLength(0);
+    expect(lib.healthReasons({ home }).unreadable).toMatch(/detach\.mjs.*ENOENT/);
+    expect(out.join('')).toMatch(/没核成.*先不动/);
+  });
+
+  it('主线没有后台启动器：多余的 _detach.mjs 仍报差异', () => {
+    const home = currentMachine();
+    write(join(home, '.fleet-dao', 'hooks', '_detach.mjs'), 'd\n');
+    expect(lib.healthReasons({ home })).toEqual({
+      reasons: ['装着的钩子脚本和主线不一样（_detach.mjs）'],
+    });
+  });
+});
+
 describe('发现旧钩子 → 说为什么 → 强制同步换新', () => {
   it('更老的一代：还挂着 fleet-guard 手装的，开会话钩子没登记到新位置', () => {
     const home = currentMachine();

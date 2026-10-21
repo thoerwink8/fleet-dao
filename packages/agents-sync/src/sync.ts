@@ -188,6 +188,7 @@ function readHooks(repo: string): Sources['hooks'] {
   try {
     if (!statSync(dir).isDirectory()) return { ok: false, why: '仓里的 agents/hooks 不是目录' };
     const tree = readTree(dir).files;
+    // 这条映射在 agents/hooks/bootstrap.mjs 的 healthReasons 里有一份同样的（核「装着的和主线一样吗」）：改一处必须改另一处。
     if (tree.has('background-launch.mjs')) {
       try {
         tree.set('_detach.mjs', readFileSync(join(repo, 'agents', 'local-sessions', 'detach.mjs')));

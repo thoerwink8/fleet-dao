@@ -111,6 +111,30 @@ describe('real/park-triage', () => {
     expect(!unknown.on && unknown.why).toContain('认不出');
   });
 
+  it('commander:daily-cap：回到上限以下撤掉，没有这张卡时撤也不报错；执行记录带原文指纹', async () => {
+    const d = deps();
+    await d.resolveCapAlert();
+    await d.notify({
+      level: 'alert',
+      key: 'commander:daily-cap',
+      title: '到了上限',
+      body: '等着的单……',
+      taskId: null,
+    });
+    await d.resolveCapAlert();
+    const card = (await t.db.select().from(notifications)).find((n) => n.dedupeKey === 'commander:daily-cap');
+    expect(card).toMatchObject({ resolvedAt: NOW, resolvedBy: COMMANDER_ACTOR });
+    const task = await seedTask();
+    await d.audit({
+      item: { ...itemOf(task.id), detailHash: 'abc123' },
+      action: 'continue',
+      reason: '测试',
+      ok: true,
+    });
+    const act = (await t.db.select().from(auditLog)).find((a) => a.action === COMMANDER_AUDIT_ACT);
+    expect(act?.after).toMatchObject({ ref: 'acme/app#7', detailHash: 'abc123' });
+  });
+
   it('用途 commander 下一个模型都没有：认成没配模型', async () => {
     expect(await deps().purposeConfigured()).toBe(false);
   });

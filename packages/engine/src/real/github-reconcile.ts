@@ -26,6 +26,7 @@ import {
 import type { Client } from '@temporalio/client';
 import { reposKnownNotInstalled } from '../jobs/github-app-check.ts';
 import { GITHUB_RECONCILE_JOB, type GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
+import { retainGitHubReconcileWindow } from '../jobs/github-reconcile-window.ts';
 import { sweepIssueGroom } from '../jobs/issue-groom.ts';
 import { type GroomGitHub, type IssueGroomWiring, issueGroomJob } from './issue-groom.ts';
 import { policySourceOrigin } from './policy-source-origin.ts';
@@ -142,8 +143,9 @@ export function githubReconcileJob(
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
       },
-      // 回看起点读 schedule_runs 里上一次 ok 的结束时刻；读不到由这一轮按没有记录处理，不在这里把失败当成时刻 0。
+      // 成功身份读 schedule_runs；先封存该身份首次选择的窗口再扫描，读写失败本轮失败，不把读不到当成 initial。
       lastSuccessAt: () => lastSuccessfulScheduleRunEndedAt(w.db, GITHUB_RECONCILE_JOB.id),
+      retainWindow: (input) => retainGitHubReconcileWindow(w.gh.deps.ledger.idempotency, input, now),
       now,
       log: (level, message, fields) => log[level](message, fields),
     };

@@ -18,6 +18,7 @@ interface CmdResult {
   error?: string | null | undefined;
 }
 interface TrainIo {
+  uuid?: () => string;
   now: () => Date;
   sleep: (ms: number) => Promise<void>;
   out: (t: string) => void;
@@ -35,9 +36,13 @@ interface Train {
   REQUEST_FILE: string;
   TRAIN_FILE: string;
   LAST_FILE: string;
-  requestText(kind: string, fields: { sha?: string | null; at: string; by?: string }): string;
+  requestText(
+    kind: string,
+    fields: { sha?: string | null; at: string; by?: string; requestId?: string },
+  ): string;
   writeRequestCommand(text: string): string;
   readProgressCommand(): string;
+  readArchivedRequestCommand(requestId: string): string;
   parseProgressReply(stdout: string): {
     ok: boolean;
     why?: string;
@@ -94,6 +99,7 @@ const { parseRequest } = releaseRequest;
 
 const SHA = 'ab12cd34'.repeat(5);
 const FOUNDER = '发版吧';
+const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
 const T0 = Date.parse('2026-10-16T05:00:00.000Z');
 
 /** 跟 readProgressCommand 同一份切法：文件之间有一个空行。 */
@@ -103,7 +109,61 @@ function frame(trainBody: unknown, lastBody: unknown): string {
   return `---TRAIN---\n${t}\n\n---LAST---\n${l}\n`;
 }
 
+function receipt(kind = 'release', sha: string | null = SHA) {
+  return { requestId: REQUEST_ID, requestAt: new Date(T0).toISOString(), requestKind: kind, requestSha: sha };
+}
+interface AttemptCheck extends Record<string, unknown> {
+  attemptId: string;
+  sha: string;
+  at: string;
+  ok: boolean;
+}
+interface AttemptNode {
+  identity: { requestId: string; kind: string; sha: string | null; at: string; by: string };
+  parent: string | null;
+  supersededBy: string | null;
+  target: string;
+  status: string;
+  why: string | null;
+  startedAt: string;
+  check: AttemptCheck | null;
+}
+interface SignedTrain extends Record<string, unknown> {
+  requestId: string;
+  rootRequestId: string;
+  requests: AttemptNode[];
+  target: { kind: string; value: string };
+  check: AttemptCheck | null;
+}
+function signed(body: Record<string, unknown>, kind = 'release', sha: string | null = SHA): SignedTrain {
+  const identity = { requestId: REQUEST_ID, kind, sha, at: new Date(T0).toISOString(), by: 'commander' };
+  const check = body.check
+    ? ({ ...(body.check as object), attemptId: REQUEST_ID, sha: SHA } as AttemptCheck)
+    : null;
+  return {
+    schema: 1,
+    ...body,
+    target: { kind: 'sha', value: SHA },
+    check,
+    requestId: REQUEST_ID,
+    rootRequestId: REQUEST_ID,
+    requests: [
+      {
+        identity,
+        parent: null,
+        supersededBy: null,
+        target: SHA,
+        status: String(body.status),
+        why: typeof body.why === 'string' ? body.why : null,
+        startedAt: new Date(T0).toISOString(),
+        check,
+      },
+    ],
+  };
+}
+
 const accepted = {
+  ...receipt(),
   v: 1,
   at: '2026-10-16T05:00:01.000Z',
   outcome: 'accepted',
@@ -113,7 +173,7 @@ const accepted = {
 };
 
 function running(phase: number) {
-  return {
+  return signed({
     schema: 1,
     status: 'running',
     phase,
@@ -121,7 +181,7 @@ function running(phase: number) {
     why: null,
     target: { kind: 'sha', value: SHA },
     check: null,
-  };
+  });
 }
 
 function world(opts: { ssh?: (cmd: string, w: { reads: number }) => CmdResult; frames?: string[] }) {
@@ -135,6 +195,9 @@ function world(opts: { ssh?: (cmd: string, w: { reads: number }) => CmdResult; f
   const ssh = (cmd: string): CmdResult => {
     w.sshCalls.push(cmd);
     if (opts.ssh) return opts.ssh(cmd, w);
+    if (cmd === 'readlink /srv/fleet-dao-releases/current')
+      return { status: 0, stdout: `${SHA}\n`, stderr: '' };
+    if (cmd.includes('/request-segments/by-request/')) return { status: 44, stdout: '', stderr: '' };
     if (cmd.includes(train.REQUEST_FILE)) return { status: 0, stdout: '', stderr: '' };
     if (cmd.includes('---TRAIN---')) {
       const frames = opts.frames ?? [frame(null, null)];
@@ -145,6 +208,7 @@ function world(opts: { ssh?: (cmd: string, w: { reads: number }) => CmdResult; f
     return { status: 127, stdout: '', stderr: `假法国不认识：${cmd}` };
   };
   const io = (): TrainIo => ({
+    uuid: () => REQUEST_ID,
     now: () => new Date(w.t),
     sleep: async (ms) => {
       w.t += ms;
@@ -200,7 +264,7 @@ describe('薄壳：递请求、跟着法国进度', () => {
   const start = ['start', '--sha', SHA, '--founder-ok', FOUNDER];
 
   it('递请求：ssh 写到法国的正文就是 release，by 是 commander，parseRequest 认', async () => {
-    const done = {
+    const done = signed({
       schema: 1,
       status: 'done',
       phase: 8,
@@ -208,14 +272,14 @@ describe('薄壳：递请求、跟着法国进度', () => {
       why: null,
       target: { kind: 'sha', value: SHA },
       check: { ok: true, items: [], at: '2026-10-16T05:10:00.000Z' },
-    };
+    });
     const { w, io } = world({
       frames: [frame(null, null), frame(done, { ...accepted, outcome: 'done', check: done.check })],
     });
     const code = await train.runTrain(start, io());
     expect(code).toBe(0);
     const at = new Date(T0).toISOString();
-    const text = train.requestText('release', { sha: SHA, at, by: 'commander' });
+    const text = train.requestText('release', { sha: SHA, at, by: 'commander', requestId: REQUEST_ID });
     const write = w.sshCalls.find((c) => c.includes(train.REQUEST_FILE));
     expect(write).toBe(train.writeRequestCommand(text));
     expect(parseRequest(payloadOf(write ?? ''))).toMatchObject({
@@ -229,7 +293,7 @@ describe('薄壳：递请求、跟着法国进度', () => {
   });
 
   it('跟进度到成功：中间步打出来，做完了退出码 0', async () => {
-    const done = {
+    const done = signed({
       schema: 1,
       status: 'done',
       phase: 8,
@@ -240,7 +304,7 @@ describe('薄壳：递请求、跟着法国进度', () => {
         items: [{ name: '在用', ok: true, text: '是这个提交' }],
         at: '2026-10-16T05:10:00.000Z',
       },
-    };
+    });
     const { w, io } = world({
       frames: [
         frame(null, null),
@@ -261,14 +325,14 @@ describe('薄壳：递请求、跟着法国进度', () => {
 
   it('跟进度到卡住：退出码 3，和法国接活脚本的卡住一致', async () => {
     const why = '等收尾到点还有拖后腿的';
-    const blocked = {
+    const blocked = signed({
       schema: 1,
       status: 'blocked',
       phase: 3,
       waiting: null,
       why,
       target: { kind: 'sha', value: SHA },
-    };
+    });
     const { w, io } = world({
       frames: [
         frame(null, null),
@@ -296,8 +360,24 @@ describe('薄壳：递请求、跟着法国进度', () => {
     const { w, io } = world({
       frames: [
         frame(prev, { v: 1, outcome: 'done', sha: SHA, by: 'cockpit', why: '上一趟做完了' }),
-        frame(prev, { v: 1, outcome: 'accepted', sha: null, by: 'commander', kind: 'abort', why: null }),
-        frame(prev, { v: 1, outcome: 'aborted', sha: null, by: 'commander', kind: 'abort', why }),
+        frame(prev, {
+          v: 1,
+          ...receipt('abort', null),
+          outcome: 'accepted',
+          sha: null,
+          by: 'commander',
+          kind: 'abort',
+          why: null,
+        }),
+        frame(prev, {
+          v: 1,
+          ...receipt('abort', null),
+          outcome: 'aborted',
+          sha: null,
+          by: 'commander',
+          kind: 'abort',
+          why,
+        }),
       ],
     });
     const code = await train.runTrain(['abort'], io());
@@ -622,5 +702,211 @@ describe('release.sh 发完不再置关（决定 0032 第 4 条、#1256）', () 
     expect(tracesIn(`${releaseSh}\n"$NODE" packages/api/src/bin/fleet-api.ts engine off\n`)).toEqual([
       'fleet-api.ts engine',
     ]);
+  });
+});
+
+describe('#3409 仅消费本请求的 attempt 与体检', () => {
+  const start = ['start', '--sha', SHA, '--founder-ok', FOUNDER];
+  const foreignId = '22222222-2222-4222-8222-222222222222';
+  const done = () =>
+    signed({ status: 'done', phase: 8, check: { ok: true, items: [], at: '2026-10-16T05:10:00.000Z' } });
+  const foreign = () => JSON.parse(JSON.stringify(done()).replaceAll(REQUEST_ID, foreignId));
+
+  it('本请求 done 即使 last 已被别的发布覆盖仍成功；不依赖文本变化', async () => {
+    const state = done();
+    const { w, io } = world({
+      frames: [frame(state, null), frame(state, { ...accepted, requestId: foreignId, outcome: 'done' })],
+    });
+    expect(await train.runTrain(start, io())).toBe(0);
+    expect(w.sshCalls).toContain('readlink /srv/fleet-dao-releases/current');
+  });
+
+  it.each([
+    ['accepted 加 foreign train', () => foreign(), { ...accepted }],
+    [
+      '本请求 done last 加 foreign train',
+      () => foreign(),
+      { ...accepted, outcome: 'done', check: { ok: true } },
+    ],
+    [
+      'foreign done last 加本请求 running',
+      () => running(4),
+      { ...accepted, requestId: foreignId, outcome: 'done', check: { ok: true } },
+    ],
+  ])('%s 不串线', async (_label, state, last) => {
+    const { w, io } = world({ frames: [frame(null, null), frame(state(), last)] });
+    expect(await train.runTrain(start, io())).toBe(2);
+    expect(w.out.join('\n')).not.toContain('做完了');
+  });
+
+  it.each(['metadata', 'different-sha', 'old-same-sha'])('旧记录 %s 不能变成本次成功', async (scenario) => {
+    const stale = foreign();
+    if (scenario === 'metadata') stale.updatedAt = '2026-10-16T05:11:00.000Z';
+    if (scenario === 'different-sha') {
+      stale.target.value = 'b'.repeat(40);
+      stale.requests[0].target = 'b'.repeat(40);
+      stale.requests[0].identity.sha = 'b'.repeat(40);
+    }
+    const { w, io } = world({ frames: [frame(null, null), frame(stale, accepted)] });
+    expect(await train.runTrain(start, io())).toBe(2);
+    expect(w.out.join('\n')).not.toContain('做完了');
+  });
+
+  it.each(['attemptId', 'sha', 'at', 'ok'])('done 的 check.%s 不合格必须非 0', async (field) => {
+    const state = done();
+    const check = state.requests[0]?.check;
+    if (!check) throw new Error('测试缺少体检');
+    check[field] = field === 'ok' ? false : field === 'at' ? '2026-10-15T00:00:00Z' : 'wrong';
+    const { w, io } = world({ frames: [frame(null, null), frame(state, accepted)] });
+    expect(await train.runTrain(start, io())).toBe(3);
+    expect(w.sshCalls).not.toContain('readlink /srv/fleet-dao-releases/current');
+  });
+
+  it.each(['wrong-sha', 'unreadable', 'malformed'])('独立 current 复核 %s 都明确失败', async (problem) => {
+    const state = done();
+    const { w, io } = world({ frames: [frame(null, null), frame(state, accepted)] });
+    const inner = io();
+    const ssh = inner.ssh;
+    inner.ssh = (cmd) =>
+      cmd.startsWith('readlink')
+        ? {
+            status: problem === 'unreadable' ? 1 : 0,
+            stdout: problem === 'wrong-sha' ? 'b'.repeat(40) : problem === 'malformed' ? './current' : '',
+            stderr: problem === 'unreadable' ? 'Permission denied' : '',
+          }
+        : ssh(cmd);
+    expect(await train.runTrain(start, inner)).toBe(2);
+    expect(w.out.join('\n')).not.toContain('这一趟做完了');
+  });
+
+  it('本请求拒绝优先；另一趟相同目标成功不翻案', async () => {
+    const { w, io } = world({
+      frames: [frame(null, null), frame(foreign(), { ...accepted, outcome: 'refused', why: '已有发布' })],
+    });
+    expect(await train.runTrain(start, io())).toBe(1);
+    expect(w.err.join('\n')).toContain('已有发布');
+  });
+
+  it('显式多跳后继可核实成功，原失败仍返回 2 且标明哪次后继', async () => {
+    const state = done();
+    const original = state.requests[0];
+    if (!original || !state.check) throw new Error('测试缺少 attempt/体检');
+    original.status = 'failed';
+    original.why = '原发布失败';
+    original.supersededBy = foreignId;
+    const successor = structuredClone(original);
+    successor.identity.requestId = foreignId;
+    successor.identity.by = '自动发版 决定0088';
+    successor.parent = REQUEST_ID;
+    successor.supersededBy = '33333333-3333-4333-8333-333333333333';
+    const third = structuredClone(successor);
+    third.identity.requestId = successor.supersededBy;
+    third.parent = foreignId;
+    third.supersededBy = null;
+    third.status = 'done';
+    third.check = { ...state.check, attemptId: third.identity.requestId };
+    state.requests.push(successor, third);
+    state.requestId = third.identity.requestId;
+    state.check = third.check;
+    const { w, io } = world({
+      frames: [
+        frame(null, null),
+        frame(state, { ...accepted, requestId: third.identity.requestId, outcome: 'done' }),
+      ],
+    });
+    expect(await train.runTrain(start, io())).toBe(2);
+    expect(w.err.join('\n')).toContain('原发布失败');
+    expect(w.err.join('\n')).toContain('33333333');
+    expect(w.err.join('\n')).toContain('后继已完成并核实在用版本');
+  });
+
+  it.each(['cycle', 'limit', 'one-way'])('身份链 %s 明确失败', async (problem) => {
+    const state = done();
+    const original = state.requests[0];
+    if (!original) throw new Error('测试缺少 attempt');
+    if (problem === 'cycle') original.parent = REQUEST_ID;
+    if (problem === 'one-way') original.supersededBy = foreignId;
+    if (problem === 'limit') state.requests = Array.from({ length: 17 }, () => structuredClone(original));
+    const { io } = world({ frames: [frame(null, null), frame(state, accepted)] });
+    expect(await train.runTrain(start, io())).toBe(2);
+  });
+
+  it('已 accepted 后读失败不能当成空或成功', async () => {
+    const { io } = world({ frames: [frame(null, null), frame(running(4), accepted)] });
+    const inner = io();
+    const ssh = inner.ssh;
+    let reads = 0;
+    inner.ssh = (cmd) =>
+      cmd.includes('---TRAIN---') && ++reads > 2
+        ? { status: 1, stdout: '', stderr: 'Permission denied' }
+        : ssh(cmd);
+    expect(await train.runTrain(start, inner)).toBe(2);
+  });
+});
+
+describe('#3409 UUID 直读归档', () => {
+  const start = ['start', '--sha', SHA, '--founder-ok', FOUNDER];
+  const foreignId = '22222222-2222-4222-8222-222222222222';
+  function currentSegment() {
+    const state = JSON.parse(
+      JSON.stringify(
+        signed({ status: 'done', phase: 8, check: { ok: true, items: [], at: '2026-10-16T05:10:00.000Z' } }),
+      ).replaceAll(REQUEST_ID, foreignId),
+    );
+    state.previousSegment = `${REQUEST_ID}--${REQUEST_ID}--${'a'.repeat(64)}.json`;
+    return state;
+  }
+  it('跨段原失败来自真实归档，保留非 0；不把当前同 SHA 成功说成其后继', async () => {
+    const current = currentSegment();
+    const old = signed({ status: 'failed', phase: 7, why: '归档里的原失败', check: null });
+    const { w, io } = world({
+      frames: [frame(null, null), frame(current, { ...accepted, requestId: foreignId, outcome: 'done' })],
+    });
+    const inner = io();
+    const ssh = inner.ssh;
+    inner.ssh = (cmd) =>
+      cmd.includes('/request-segments/by-request/')
+        ? { status: 0, stdout: JSON.stringify(old), stderr: '' }
+        : ssh(cmd);
+    expect(await train.runTrain(start, inner)).toBe(2);
+    expect(w.err.join('\n')).toContain('归档里的原失败');
+    expect(w.err.join('\n')).toContain('承接关系未核实');
+    expect(w.sshCalls).not.toContain('readlink /srv/fleet-dao-releases/current');
+  });
+  it.each(['bad-pointer', 'unreadable', 'wrong-identity', 'bad-json'])(
+    '归档 %s 明确失败',
+    async (problem) => {
+      const current = currentSegment();
+      if (problem === 'bad-pointer') current.previousSegment = '../../somewhere';
+      const { io } = world({ frames: [frame(null, null), frame(current, accepted)] });
+      const inner = io();
+      const ssh = inner.ssh;
+      inner.ssh = (cmd) =>
+        cmd.includes('/request-segments/by-request/')
+          ? {
+              status: problem === 'unreadable' ? 1 : 0,
+              stdout: problem === 'bad-json' ? '{' : JSON.stringify(current),
+              stderr: 'archive unavailable',
+            }
+          : ssh(cmd);
+      expect(await train.runTrain(start, inner)).toBe(2);
+    },
+  );
+  it('归档读取受同一总截止约束，路径只收小写 UUID', async () => {
+    expect(() => train.readArchivedRequestCommand('../escape')).toThrow();
+    expect(() => train.readArchivedRequestCommand('AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA')).toThrow();
+    const current = currentSegment();
+    const { w, io } = world({ frames: [frame(null, null), frame(current, accepted)] });
+    const inner = io();
+    const ssh = inner.ssh;
+    inner.ssh = (cmd) => {
+      if (cmd.includes('/request-segments/by-request/')) {
+        w.t += 60_001;
+        return { status: 0, stdout: JSON.stringify(signed({ status: 'failed', why: '旧失败' })), stderr: '' };
+      }
+      return ssh(cmd);
+    };
+    expect(await train.runTrain(start, inner)).toBe(2);
+    expect(w.err.join('\n')).toContain('总时限已到');
   });
 });

@@ -3,9 +3,10 @@
 // 引擎按下表核过才动手。「留给人」只剩三种理由类别；没带类别的、没给裁决的、交了表外动作的，一律改按这种停法的默认动作执行。
 //
 //   停法                    继续      重做      拆单      停掉      默认动作
-//   运行环境                ✓         ✓         ✗         ✗         继续（同一种停下继续过一次还停 → 重做）
+//   运行环境                ✓*        ✓         ✗*        ✗*        继续（同一种停下继续过一次还停 → 重做）
 //   认不出按临时的办 / 自动合并没挂上
-//                           ✓         ✓         ✗         ✗         同上
+//                           ✓*        ✓         ✗*        ✗*        同上
+//   （带 * 的：单张单防空转生效时继续 ✗、拆单 ✓、停掉 ✓，默认动作改重做，见下）
 //   轮数用尽                ✓         ✓         ✗         ✗         重做（已经继续满三次交指挥官的：继续没用，只许重做）
 //   体量超预算              ✓         ✗         ✓         ✗         继续（照这一版推，工作流不再按预算打回）
 //   额度超预算·没空转        ✓+放宽    ✓         ✓         ✗         继续并放宽一档（看 decisions/spin.ts：判的是空转，不是钱）
@@ -13,6 +14,9 @@
 //   额度超预算·没法判        ✗         ✓         ✗         ✗         重做（回合没读到：不拿「没读到」当「没有空转」）
 //   改标准等人闸            ✗         ✗         ✗         ✗         留给人·改标准（贴「本机做」交本机指挥官）
 //   没权限等人闸、别的       ✗         ✗         ✗         ✗         留给人并写卡（只有人能做）
+//
+// 单张单防空转（#3460，ParkFacts.noContinue）：上表里放行「继续」的停法，只要这张单 24 小时内指挥官已经处理满 3 次，
+// 或这次停下的原文和上一次判「继续」时一字不差，就不放行「继续」，只放行重做、拆单（2~5 张）、停掉；默认动作不再是继续，改成重做。
 //
 // 「留给人」只放行带这三种理由类别的（LEAVE_REASONS），哪种停法都可以：
 //   要掏新钱、删了找不回又没备份 → 写「要你拍」卡（带选项），任务不动；
@@ -137,6 +141,11 @@ export interface ParkFacts {
   kind: TriageKind;
   handoff: boolean;
   legacy?: boolean;
+  /**
+   * 单张单防空转（#3460）：有值就不放行「继续」（值是原因，写进白名单核对结果）。两种情况：这张单 24 小时内指挥官已经
+   * 处理满 PARK_TRIAGE_SPIN_HANDLED 次；这次停下的原文和上一次判「继续」时一字不差。
+   */
+  noContinue?: string | undefined;
 }
 
 /** 「留给人」的三种理由类别。 */
@@ -155,6 +164,15 @@ export type ActionTable = Record<CommanderAction, true | string>;
  * 按停法列出放行的动作。spin 只有额度停法用得上：null＝回合没读到，没法判（不许继续，只许重做）。
  */
 export function allowedActions(park: ParkFacts, spin: SpinJudgement | null): ActionTable {
+  const table = allowedByKind(park, spin);
+  // 防空转：本来放行继续的，继续换成不放行，只留重做、拆单、停掉（本来就不放行继续的停法，不替它放开别的）
+  if (park.noContinue !== undefined && table.continue === true) {
+    return { ...table, continue: park.noContinue, redo: true, split: true, stop: true };
+  }
+  return table;
+}
+
+function allowedByKind(park: ParkFacts, spin: SpinJudgement | null): ActionTable {
   const base: ActionTable = {
     continue: '这种停法不许继续',
     redo: '这种停法不许重做',
@@ -263,6 +281,17 @@ export type DefaultAction =
  * continuedBefore＝同一张单同一种停下已经继续过一次还停（引擎续停续过同一原文，或指挥官之前对同一种停下判过继续）。
  */
 export function defaultAction(
+  park: ParkFacts & { continuedBefore: boolean },
+  spin: SpinJudgement | null,
+): DefaultAction {
+  const action = defaultByKind(park, spin);
+  // 防空转生效时默认动作不能是继续：换一代重做
+  if (action.action === 'continue' && park.noContinue !== undefined)
+    return { action: 'redo', why: `${park.noContinue}，不再原样继续，换一代重做` };
+  return action;
+}
+
+function defaultByKind(
   park: ParkFacts & { continuedBefore: boolean },
   spin: SpinJudgement | null,
 ): DefaultAction {

@@ -39,9 +39,12 @@ export interface VpsApp {
   /** 这一项没有进程（只占磁盘）时，CPU、内存那一格的补充。 */
   idleNote?: string;
   external?: true;
+  /** systemd 定时任务（oneshot 跑完 cgroup 就没了）：5 秒一采基本是 0，资源页这一格改看「近 24 小时」的用量。 */
+  scheduled?: true;
 }
 
 const service = (name: string): VpsUnit => ({ name, cgroup: `system.slice/${name}` });
+const timer = service;
 
 export const VPS_APPS: readonly VpsApp[] = [
   {
@@ -128,11 +131,100 @@ export const VPS_APPS: readonly VpsApp[] = [
     name: 'MiraQuota 同步',
     place: '不归本仓管（等 miraquota-win#3 发版后停）',
     units: [service('miraquota-sync.service')],
-    dirs: [],
-    diskNote: '不归本仓管，没登记目录',
+    dirs: ['/opt/miraquota'],
     external: true,
   },
+  {
+    id: 'daihuo',
+    name: 'daihuo',
+    place: '/opt/daihuo（程序）、/var/lib/daihuo（数据），不归本仓管',
+    units: [service('daihuo.service')],
+    dirs: ['/opt/daihuo', '/var/lib/daihuo'],
+    external: true,
+  },
+  {
+    id: 'reclaude-refill',
+    name: 'reclaude-refill',
+    place:
+      '/opt/reclaude-refill（程序）、/var/lib/reclaude-refill（数据），不归本仓管；systemd 定时任务，每分钟跑一次',
+    units: [service('reclaude-refill-collector.service'), timer('reclaude-refill-collector.timer')],
+    dirs: ['/opt/reclaude-refill', '/var/lib/reclaude-refill'],
+    external: true,
+    scheduled: true,
+  },
+  {
+    id: 'mirasim-radar',
+    name: 'mirasim-radar',
+    place:
+      '/opt/mirasim-radar（程序）、/var/lib/mirasim-radar（数据），不归本仓管；systemd 定时任务，每 5 分钟跑一次',
+    units: [service('mirasim-radar-collector.service'), timer('mirasim-radar-collector.timer')],
+    dirs: ['/opt/mirasim-radar', '/var/lib/mirasim-radar'],
+    external: true,
+    scheduled: true,
+  },
 ];
+
+/**
+ * 机器上自带的定时器（不是上线项目）和为什么不算：采样器列 /etc/systemd/system/*.timer 兜底（#3457），
+ * 不在 VPS_APPS 里、对应的 .service 也没登记、也不在这里的，出一行「没登记」。键是定时器名去掉 .timer。
+ */
+export const SYSTEM_TIMERS: Readonly<Record<string, string>> = {
+  'apt-daily': '定期刷新 apt 软件包索引，Ubuntu 自带',
+  'apt-daily-upgrade': '定期装安全更新，Ubuntu 自带',
+  'dpkg-db-backup': '每天备份 dpkg 数据库，Ubuntu 自带',
+  e2scrub_all: '定期检查 ext4 文件系统，Ubuntu 自带',
+  'fwupd-refresh': '定期刷新固件更新清单，Ubuntu 自带',
+  fstrim: '每周对 SSD 做 trim，Ubuntu 自带',
+  logrotate: '每天轮转日志，Ubuntu 自带',
+  'man-db': '每天更新 man 手册索引，Ubuntu 自带',
+  'motd-news': '登录欢迎语的新闻，Ubuntu 自带',
+  'sysstat-collect': 'sysstat 的系统指标采集，系统自带',
+  'sysstat-summary': 'sysstat 的每日汇总，系统自带',
+  'systemd-tmpfiles-clean': '清理临时文件，systemd 自带',
+  'update-notifier-download': '下载更新提示，Ubuntu 自带',
+  'update-notifier-motd': '更新提示写进登录欢迎语，Ubuntu 自带',
+};
+
+/** 这个定时器要不要出「没登记」行：登记过的（定时器本身或同名 .service）、系统自带的不出。 */
+export function isUnregisteredTimer(timer: string, apps: readonly VpsApp[]): boolean {
+  const base = timer.replace(/\.timer$/, '');
+  const registered = new Set(apps.flatMap((a) => a.units.map((u) => u.name)));
+  if (registered.has(timer) || registered.has(`${base}.service`)) return false;
+  return !Object.hasOwn(SYSTEM_TIMERS, base) && !isSystemService(`${base}.service`);
+}
+
+/**
+ * 机器上自带的系统服务（不是上线项目）和为什么不算：采样器扫 system.slice 时，不在 VPS_APPS 里、也不在这里的
+ * 在跑服务，会在资源页单独出一行「没登记」（#3457）。键是单元名去掉 .service；模板实例按模板名匹配（getty@ 管 getty@tty1）。
+ */
+export const SYSTEM_SERVICES: Readonly<Record<string, string>> = {
+  cron: '系统定时任务守护进程，Ubuntu 自带',
+  dbus: '系统消息总线，Ubuntu 自带',
+  fail2ban: 'ssh 防爆破，装机时装的系统服务，不是上线项目',
+  fwupd: '固件更新守护进程，Ubuntu 自带',
+  'getty@': '本地控制台登录（getty@tty1），系统自带',
+  ModemManager: '调制解调器管理，Ubuntu 自带',
+  multipathd: '多路径存储守护进程，Ubuntu 自带',
+  polkit: '权限策略服务，Ubuntu 自带',
+  rsyslog: '系统日志，Ubuntu 自带',
+  'serial-getty@': '串口控制台登录（serial-getty@ttyS0，云主机的控制台口），系统自带',
+  ssh: '远程登录 sshd，Ubuntu 自带',
+  'systemd-journald': 'systemd 日志服务，系统自带',
+  'systemd-logind': 'systemd 登录管理，系统自带',
+  'systemd-networkd': 'systemd 网络配置，系统自带',
+  'systemd-resolved': 'systemd 域名解析，系统自带',
+  'systemd-timesyncd': 'systemd 对时，系统自带',
+  'systemd-udevd': 'systemd 设备管理，系统自带',
+  udisks2: '磁盘管理守护进程，Ubuntu 自带',
+  'unattended-upgrades': '自动安全更新，Ubuntu 自带',
+};
+
+/** 这个单元是不是系统自带的（在 SYSTEM_SERVICES 里；模板实例按模板名）。 */
+export function isSystemService(unit: string): boolean {
+  const base = unit.replace(/\.service$/, '');
+  const at = base.indexOf('@');
+  return Object.hasOwn(SYSTEM_SERVICES, at < 0 ? base : base.slice(0, at + 1));
+}
 
 /** deploy/france 下不算「上线项目」的常驻单元和为什么（.socket、.timer、.path 只是触发器，按后缀整类不算）。 */
 export const NOT_APPS: Readonly<Record<string, string>> = {

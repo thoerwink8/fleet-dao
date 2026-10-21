@@ -19,7 +19,7 @@
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；HUMAN_TIER_PATHS 要盖住人工档（deploy/lib/human-tier.sh）读的仓里文件（测试都核对）。
 // - 驾驶舱按钮的接活脚本（deploy/france/release-request/lib.mjs）import 这里的 ciVerdict 判 CI：它是对外的发布闸，改判法要两边的测试一起看。
 // - 读不到、认不出的一律记成「没查成」，不拿空、0 当没事（agents/shared-rules.md「底线」）。
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DESIRED_FILE, judgeConfig } from './config.mjs';
 import { assessRunningRelease } from './running-release.mjs';
 
@@ -805,7 +805,21 @@ async function releaseStep(io, st, now, current) {
   const hold = await batchStep(io, st, now, current, target, gateFacts);
   if (hold) return note(`${hold}${reason}`);
   try {
-    await io.requestRelease({ sha: target, at: iso(now), by: AUTO_RELEASE_BY });
+    const active = train?.requests?.at(-1);
+    const supersedes =
+      train?.status === 'failed' &&
+      active?.status === 'failed' &&
+      train.requestId === active.identity?.requestId &&
+      trainTarget(train) === target
+        ? active.identity
+        : null;
+    await io.requestRelease({
+      sha: target,
+      at: iso(now),
+      by: AUTO_RELEASE_BY,
+      requestId: randomUUID(),
+      ...(supersedes ? { supersedes } : {}),
+    });
   } catch (e) {
     note(`发版请求没写成：${why(e)}${reason}`);
     raise(
@@ -1023,7 +1037,13 @@ async function healthRetryStep(io, st, now, train) {
   }
   if (typeof io.requestRetry !== 'function') return '这台没接上自动复核，到驾驶舱「法国」页发版卡点「重试」';
   try {
-    await io.requestRetry({ sha, at: iso(now), by: AUTO_RELEASE_BY });
+    await io.requestRetry({
+      sha,
+      at: iso(now),
+      by: AUTO_RELEASE_BY,
+      requestId: randomUUID(),
+      ...(train?.requestId ? { expectedAttempt: train.requests?.at(-1)?.identity } : {}),
+    });
   } catch (e) {
     return `只读复核的请求没写成（${why(e)}），下一轮再试`;
   }

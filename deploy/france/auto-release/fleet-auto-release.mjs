@@ -243,6 +243,20 @@ function pidAlive(pid) {
   }
 }
 
+/** 真实请求 adapter 的序列化边界；测试注入写入器，不写生产路径。 */
+export function requestWriters(write = writeRequest) {
+  return {
+    /** 写发版请求：{ v, sha, at, by }（writeRequest）。 */
+    async requestRelease({ sha, at, by, requestId, supersedes }) {
+      write({ v: 1, sha, at, by, requestId, ...(supersedes ? { supersedes } : {}) });
+    },
+    /** 写只读复核请求（发版卡「重试」同一份：kind retry，键的先后同 packages/api/src/release-request.ts）：健康没核实那一趟用。 */
+    async requestRetry({ sha, at, by, requestId, expectedAttempt }) {
+      write({ v: 1, kind: 'retry', sha, at, by, requestId, ...(expectedAttempt ? { expectedAttempt } : {}) });
+    },
+  };
+}
+
 export const realIo = {
   now: () => new Date(),
   async readMain() {
@@ -385,14 +399,7 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
   async clearTrainMarker() {
     unlinkSync(TRAIN_MARKER);
   },
-  /** 写发版请求：{ v, sha, at, by }（writeRequest）。 */
-  async requestRelease({ sha, at, by }) {
-    writeRequest({ v: 1, sha, at, by });
-  },
-  /** 写只读复核请求（发版卡「重试」同一份：kind retry，键的先后同 packages/api/src/release-request.ts）：健康没核实那一趟用。 */
-  async requestRetry({ sha, at, by }) {
-    writeRequest({ v: 1, kind: 'retry', sha, at, by });
-  },
+  ...requestWriters(),
   /**
    * 开急修单（lib.mjs 的 emergencyStep）：current 那一版的 fleet-api emergency-issue，正文从标准输入喂；它经「引擎」机器人开单、
    * 过卫生检查、按 key 幂等，最后一行打 { number, url, created }。退出码不是 0、回话认不出都抛（lib.mjs 报警、下一轮再试）。

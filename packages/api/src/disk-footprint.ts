@@ -94,9 +94,11 @@ export function footprintFromSizes(input: {
   }
   const everyMs = parsed.everyMs ?? FOOTPRINT_EVERY_MS;
   const age = input.now.getTime() - Date.parse(parsed.measuredAt);
+  // 两次写文件之间隔 间隔 + 一轮耗时（定时器按「跑完之后」算；法国首轮量了 7 分钟）：两个这样的周期没动静才算旧了
+  const cycleMs = everyMs + parsed.tookMs;
   const fileStale =
-    age > 2 * everyMs
-      ? `量磁盘的单元已经 ${minutes(age)} 分钟没更新（上次写文件在 ${parsed.measuredAt}，该每 ${minutes(everyMs)} 分钟一回）`
+    age > 2 * cycleMs
+      ? `量磁盘的单元已经 ${minutes(age)} 分钟没更新（上次写文件在 ${parsed.measuredAt}，该每 ${minutes(cycleMs)} 分钟一回）`
       : undefined;
   const byPath = new Map(parsed.dirs.map((d) => [d.path, d]));
   const dirs: Dirs = [];

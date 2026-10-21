@@ -18,7 +18,8 @@ export type Cell =
   /** 会话 scope 都还在、里面没进程（memory.current 是 0，#1992）：写「空 scope」，不写 0M / 0 核。 */
   | { kind: 'empty'; why: string }
   | { kind: 'none'; why: string }
-  | { kind: 'unread'; why: string };
+  /** word：格子上写的字，默认「没读到」（定时任务写「近 24 小时没给」）。 */
+  | { kind: 'unread'; why: string; word?: string };
 
 export type DiskCell =
   | { kind: 'ok'; text: string; bytes: number; gaps: Gaps; incomplete?: string }
@@ -36,6 +37,10 @@ export interface AppRow {
   place: string;
   units: readonly string[];
   external: boolean;
+  /** 机器上在跑、登记表里没有（#3457）：排在最后，标「没登记」，提示去哪登记。 */
+  unregistered: boolean;
+  /** 定时任务：此刻没在跑时 CPU、内存格写近 24 小时。 */
+  scheduled: boolean;
   cpu: Cell;
   memory: Cell;
   disk: DiskCell;
@@ -127,8 +132,16 @@ function timerCells(app: HostApp, footprint: Footprint | undefined): { cpu: Cell
   };
 }
 
+/** 定时任务此刻没在跑、footprint 里也没有它的近 24 小时账：明说没给，不写没在占用、不画 0。 */
+function missingRecentCells(): { cpu: Cell; memory: Cell } {
+  const why = '近 24 小时用量没给（定时任务跑完进程就没了，此刻读不到；要等 root 采集器给）';
+  const word = '近 24 小时没给';
+  return { cpu: { kind: 'unread', why, word }, memory: { kind: 'unread', why, word } };
+}
+
 function usageCells(app: HostApp, totalCores: number | undefined): { cpu: Cell; memory: Cell } {
   const u = app.usage;
+  if (app.scheduled && u.state === 'idle') return missingRecentCells();
   if (u.state === 'unread')
     return { cpu: { kind: 'unread', why: u.why }, memory: { kind: 'unread', why: u.why } };
   if (u.state === 'idle') {
@@ -332,7 +345,12 @@ export function sessionChildren(
   return rows.sort((a, b) => (a.key === '_other' ? 1 : b.key === '_other' ? -1 : b.memoryMb - a.memoryMb));
 }
 
-export type AppRowsResult = { kind: 'ok'; rows: AppRow[] } | { kind: 'unread'; why: string };
+/** 没登记的行下面的提示：登记表在哪。 */
+export const UNREGISTERED_HINT = '在 packages/api/src/vps-apps.ts 登记';
+
+export type AppRowsResult =
+  | { kind: 'ok'; rows: AppRow[] /** 扫没登记的服务没扫成的原因：可能还有没列出来的。 */; scanWhy?: string }
+  | { kind: 'unread'; why: string };
 
 /** 每个上线项目一行，按后端登记表的先后（本仓的在前，别家的在后）。 */
 export function appRows(
@@ -361,6 +379,8 @@ export function appRows(
       place: app.place,
       units: app.units,
       external: app.external === true,
+      unregistered: app.unregistered === true,
+      scheduled: app.scheduled === true,
       ...(timerCells(app, resources.footprint) ?? usageCells(app, totalCores)),
       disk: appDisk(app, resources.footprint, mine, opts),
       diskParts: mine,
@@ -369,6 +389,11 @@ export function appRows(
   });
   return {
     kind: 'ok',
-    rows: [...rows.filter((r) => !r.external), ...rows.filter((r) => r.external)],
+    rows: [
+      ...rows.filter((r) => !r.external && !r.unregistered),
+      ...rows.filter((r) => r.external && !r.unregistered),
+      ...rows.filter((r) => r.unregistered),
+    ],
+    ...(apps.unregisteredScanWhy ? { scanWhy: apps.unregisteredScanWhy } : {}),
   };
 }

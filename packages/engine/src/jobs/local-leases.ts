@@ -6,7 +6,9 @@
 //
 //   单已经关了 → 有合并的 PR 挂着记做完（本机做完忘了报），没有记 stopped（还是本机的账）；
 //   还活着（本机会话心跳里有会话在 local/<单号>- 分支上、不到租约时长前还动过；或这张单有开着的 PR）→ 租约顺延；
-//   都没有 → 摘「本机做」、在单上留一句话、行改成 stopped + engine（拉单按「stopped 且没有任何一代」接手，和接手老行同一条路）。
+//   都没有 → 先按拉单的准入关卡试判一遍法国接不接得了（#3461）：接不了的（验收要 diff 外证据、交代不全、改标准、失败过多……）不摘「本机做」、
+//   不退回，通知本机、在单上留一句话（退回去两边都没人做）；接得了的 → 摘「本机做」、在单上留一句话、行改成 stopped + engine。
+//   退回之后拉单接回：没有任何一代的按接手，已有各代都结束的按「重新派」起下一代（jobs/dispatch-standing.ts）。
 // 先动 GitHub 再改行：改行写不成，下一轮整件事重来（摘标签不在就当摘了，留言按键只留一次）；反过来先改行，标签摘不掉，单就卡在「本机做」上没人接。
 // 读不到、写不成记进 unchecked（这一轮记没查成），不当成「没有到期的」。
 // 验收责任（#3037）：退回之前看这张单还有没有开着的验收责任。代码已合（或只剩协调验收责任，没有代码要写）就不退回法国重做、
@@ -90,10 +92,23 @@ export interface LocalLeaseDeps {
   openDuties?(taskId: string): Promise<Pick<AcceptanceDuty, 'prNumber' | 'head' | 'items'>[]>;
 }
 
+/** 法国接不接得了这张单（拉单的准入关卡试判一遍，jobs/intake.ts 的 franceVerdict）。ok:false 带挡住的那一关和原话。 */
+export type FranceVerdict = { ok: true } | { ok: false; reason: string; why: string };
+
+/** 报给本机的通知（同一个 key 只报一次）。 */
+export interface LeaseNotice {
+  issueNumber: number;
+  key: string;
+  title: string;
+  body: string;
+}
+
 export interface LeaseSweepResult {
   extended: number;
   returned: number;
   closed: number;
+  /** 到期了，可法国接不了（准入关卡挡着）：不摘「本机做」、不退回，报给本机（#3461）。 */
+  keptLocal: number;
   /** 代码已合（或只有协调验收责任）、验收责任还开着：不退回法国重做，记做完、单子留着等人验（#3037）。 */
   awaitingAcceptance: number;
   unchecked: string[];
@@ -114,6 +129,21 @@ export function leaseAcceptanceComment(
     ]),
     '',
     `验完记下最终验收完成以后才关 #${issueNumber}。`,
+  ].join('\n');
+}
+
+/** 租约到期、可法国接不了时留在单上的话：不摘「本机做」、不退回，写明挡在哪一关。 */
+export function leaseKeptComment(
+  issueNumber: number,
+  leaseUntil: Date,
+  blocked: { reason: string; why: string },
+): string {
+  return [
+    `本机领这张单的租约在 ${leaseUntil.toISOString()} 到期：${LOCAL_LEASE_MS / 3_600_000} 小时里本机没有会话在 \`local/${issueNumber}-\` 分支上动过、没有开着的 PR 挂着它、也没有续租。`,
+    '',
+    `按理该摘掉「${LOCAL_LABEL}」退回法国队列，可法国接不了：${blocked.why}（拉单这一关：${blocked.reason}）。退回去只会两边都没人做，所以没摘「${LOCAL_LABEL}」、也没退回，单子留给本机。`,
+    '',
+    `要本机接着做：\`pnpm work claim ${issueNumber}\` 重新领；要引擎做：先把挡着的地方改好，再摘掉「${LOCAL_LABEL}」。`,
   ].join('\n');
 }
 
@@ -148,12 +178,26 @@ export async function sweepLocalLeases(
     /** 开着的 PR 挂着哪些单（单号 → PR 号）。读不到照抛。 */
     prClaims: () => Promise<Map<number, number>>;
     comment: (input: { issueNumber: number; key: string; body: string }) => Promise<{ created: boolean }>;
+    /**
+     * 退回之前先判法国接不接得了（#3461）：接不了的不摘标签、不退回。读不到照抛：这条租约记没查成、不退回。
+     * 不给（老装配、测试）就不判，照旧退回。
+     */
+    franceVerdict?: (issueNumber: number) => Promise<FranceVerdict>;
+    /** 把「法国接不了、留给本机」报给本机（驾驶舱通知）。写不进照抛：这条租约记没查成，下一轮重来。不给就只留言。 */
+    notify?: (input: LeaseNotice) => Promise<void>;
     now: Date;
     log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
   },
 ): Promise<LeaseSweepResult> {
   const slug = `${repo.owner}/${repo.name}`;
-  const out: LeaseSweepResult = { extended: 0, returned: 0, closed: 0, awaitingAcceptance: 0, unchecked: [] };
+  const out: LeaseSweepResult = {
+    extended: 0,
+    returned: 0,
+    closed: 0,
+    keptLocal: 0,
+    awaitingAcceptance: 0,
+    unchecked: [],
+  };
   if (deps.unexpired) {
     try {
       for (const lease of await deps.unexpired(repo, ctx.now)) {
@@ -218,6 +262,30 @@ export async function sweepLocalLeases(
           if ((await deps.settle({ taskId: lease.taskId, how: 'done', why, now: ctx.now })) > 0) {
             out.awaitingAcceptance += 1;
           }
+          continue;
+        }
+      }
+      // 法国接不了的单（验收要 diff 外证据、交代不全、改标准……）退回去两边都没人做：不摘「本机做」、不退回、行不动，先通知再留言（都只报一次）
+      if (ctx.franceVerdict) {
+        const verdict = await ctx.franceVerdict(lease.issueNumber);
+        if (!verdict.ok) {
+          const key = `local-lease-kept:${lease.leaseUntil.toISOString()}`;
+          const body = leaseKeptComment(lease.issueNumber, lease.leaseUntil, verdict);
+          await ctx.notify?.({
+            issueNumber: lease.issueNumber,
+            key,
+            title: `${ref} 本机租约到期，法国接不了，仍留在本机做`,
+            body,
+          });
+          await ctx.comment({ issueNumber: lease.issueNumber, key, body });
+          out.keptLocal += 1;
+          ctx.log(
+            'warn',
+            `拉单：${ref} 本机租约到期，可法国接不了（${verdict.reason}：${verdict.why}），没摘「${LOCAL_LABEL}」、没退回`,
+            {
+              leaseUntil: lease.leaseUntil.toISOString(),
+            },
+          );
           continue;
         }
       }
