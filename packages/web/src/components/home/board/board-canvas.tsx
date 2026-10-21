@@ -46,7 +46,6 @@ import { useNavigate, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { formatDuration } from '../../../lib/format';
 import { useLocalState, useMediaQuery, useNow } from '../../../lib/hooks';
-import { useRootScale } from '../../../lib/root-scale';
 import { type Tone, toneLabel } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
 import { FlowModeToggle } from '../../flow-mode-toggle';
@@ -262,8 +261,6 @@ function Canvas({ running, flow, health, slots, resources }: BoardCanvasProps) {
   const [view] = useState(createBoardView);
   const level = useZoomLevel();
 
-  // 卡里的字和内边距是 rem，桌面根字号放大 125%（#1937）：节点尺寸、排版间距乘同一个倍数，整张图等比放大
-  const scale = useRootScale();
   // 可用区的宽高比（取整到 ASPECT_STEP）：一段的单子排几列按它挑（model.ts 的 chooseColumns）。高度扣掉顶上的工具条和
   // 左下「此刻」那一条（收进视野时也是让开它们）。量不到（测试环境宽高为 0）就不给，一列
   const [aspect, setAspect] = useState<number | undefined>(undefined);
@@ -283,9 +280,8 @@ function Canvas({ running, flow, health, slots, resources }: BoardCanvasProps) {
     return () => ro.disconnect();
   }, []);
   const graph = useMemo(
-    () =>
-      buildGraph({ running, flow, health, filter: { stuck, needsYou }, scale, resources, remote, aspect }),
-    [running, flow, health, stuck, needsYou, scale, resources, remote, aspect],
+    () => buildGraph({ running, flow, health, filter: { stuck, needsYou }, resources, remote, aspect }),
+    [running, flow, health, stuck, needsYou, resources, remote, aspect],
   );
   const graphRef = useRef(graph);
   graphRef.current = graph;

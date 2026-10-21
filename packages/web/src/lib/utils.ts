@@ -6,21 +6,15 @@ import { extendTailwindMerge } from 'tailwind-merge';
  * 不告诉它这些自定义档位，它会把 text-meta 当成文字颜色，和 text-ink-fail 这类颜色放进同一个 cn() 时把字号吞掉
  * （额度页用满时的大数字、带颜色的指标卡都因此丢过字号）。app.css 加减档位，这里跟着改（utils.test.ts 对着 app.css 钉住）。
  */
-export const FONT_SIZE_TOKENS = [
-  'meta',
-  'body',
-  'heading',
-  'subtitle',
-  'title',
-  'display',
-  'canvas',
-] as const;
+export const FONT_SIZE_TOKENS = ['meta', 'body', 'heading', 'title', 'display', 'mono', 'canvas'] as const;
 
 /** 聚焦圈宽（app.css 的 --ring-width-*）。不登记的话 cn() 不把它当宽度，后写的 ring-2 盖不住。 */
 export const RING_WIDTH_TOKENS = ['focus'] as const;
 
 /** 阴影档位（app.css 的 --shadow-*）。不登记的话 cn() 把 shadow-card 当成阴影颜色，和 shadow-xs 不互相顶替。 */
 export const SHADOW_TOKENS = [
+  'pop',
+  'pop-side',
   'xs',
   'card',
   'overlay',

@@ -2,7 +2,7 @@
 // 2026-10-04 的断链：创始人问「丢失我的回复，查到原因和解决了没有」。查下来分两种丢法——
 // ① 在途丢（主因）：我前台等一次长工具调用时，他的消息只在两次工具调用之间的间隙被送进来，会话一断那条就跟着断；
 // ② 到了没落盘：消息到了、那一轮用了，但只活在对话里，被总结/换机器之后接手的新会话看不到。
-// 「引导必须落盘」那条（directive-inbox.rules.test.ts）管的是 ② 里 AI 主动记下来的那部分，
+// 「AI 做法类引导记进 docs/directives/」那条（`pnpm progress directive --kind ai`，packages/conventions/test/progress-kind.test.ts）管的是 ② 里 AI 主动记下来的那部分，
 // 管不了 ①——AI 根本没见到的那条，谁也没法记。
 // 这个钩子（agents/hooks/prompt-log.mjs）堵的就是 ①：消息提交那一刻由钩子自己写进持久文件，不经过模型。
 //

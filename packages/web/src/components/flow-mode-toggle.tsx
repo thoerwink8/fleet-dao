@@ -11,17 +11,10 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useSettings, useUpdateSetting } from '../api/client';
 import { useSelectedNodeId } from '../lib/node';
+import { ConfirmDialog } from './layout/confirm-dialog';
 import { FilterTabs } from './layout/filter-tabs';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from './ui/alert-dialog';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 
 const CHOICES = [
   { id: 'three', label: '三步法' },
@@ -83,35 +76,36 @@ export function FlowModeToggle() {
   const askLabel = ask ? choiceLabel(ask) : '';
 
   return (
-    <div
-      data-flow-mode-switch
-      title="只改之后新派的单，正在跑的、已经分过组的不变"
-      className="pointer-events-auto flex flex-wrap items-center gap-2 rounded-lg border bg-popover p-1 shadow-overlay"
-    >
-      <span data-flow-mode-current className="px-2 text-meta text-muted-foreground">
-        {text}
-      </span>
-      <fieldset disabled={blocked} className="m-0 min-w-0 border-0 p-0">
-        <FilterTabs mode="toggle" aria-label="全程或三步法" items={CHOICES} value={choice} onChange={pick} />
-      </fieldset>
-      <AlertDialog
+    // 平的一行：当前一句灰字加分段控件，不浮起、不带框（样稿 .seg）；手机上放不下就换行
+    <div data-flow-mode-switch title="只改之后新派的单，正在跑的、已经分过组的不变">
+      <Stack direction="horizontal" gap="md" align="center" wrap>
+        <span data-flow-mode-current>
+          <Text size="meta" tone="muted">
+            {text}
+          </Text>
+        </span>
+        <fieldset disabled={blocked}>
+          <FilterTabs
+            mode="toggle"
+            variant="segmented"
+            aria-label="全程或三步法"
+            items={CHOICES}
+            value={choice}
+            onChange={pick}
+          />
+        </fieldset>
+      </Stack>
+      <ConfirmDialog
         open={ask !== null}
         onOpenChange={(open) => {
           if (open || update.isPending) return;
           setAsk(null);
         }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>改成「{askLabel}」？</AlertDialogTitle>
-            <AlertDialogDescription>{ask ? DETAIL[ask] : ''}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction onConfirm={confirm}>确认改成{askLabel}</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        title={`改成「${askLabel}」？`}
+        description={ask ? DETAIL[ask] : ''}
+        confirmText={`确认改成${askLabel}`}
+        onConfirm={confirm}
+      />
     </div>
   );
 }

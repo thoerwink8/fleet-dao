@@ -17,27 +17,30 @@ test.describe('主页三块', () => {
   }) => {
     const notes = (await api.get('/api/notifications?status=open&limit=200')) as Notifications;
     const home = (await api.get('/api/home')) as Home;
-    const asks = notes.items.filter(
-      (n) =>
-        (n.level === 'decision' && !n.answer) ||
-        (n.level === 'alert' && n.dedupeKey?.startsWith('watchdog:')),
-    );
+    const asks = notes.items.filter((n) => n.level === 'decision' && !n.answer);
+    const alarms = notes.items.filter((n) => n.level === 'alert' && n.dedupeKey?.startsWith('watchdog:'));
     await page.goto('/');
-    await expect(page.getByRole('heading', { level: 1, name: '主页' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: '工作台' })).toBeVisible();
     const blocks = page.locator('[data-home-block]');
-    await expect(blocks).toHaveCount(3);
+    await expect(blocks).toHaveCount(4);
+    // 左列要你拍的、在跑的任务，右列卡住报警、最近上线
     expect(await blocks.evaluateAll((els) => els.map((e) => e.getAttribute('data-home-block')))).toEqual([
       'ask',
       'run',
+      'alarm',
       'shipped',
     ]);
 
     const ask = page.locator('[data-home-block="ask"]');
     if (asks.length === 0) await expect(ask).toContainText('没有要你拍的');
     else await expect(ask.locator('[data-ask-row]')).toHaveCount(asks.length);
-    // 别的卡住报警（不是看门狗报的）不进主页
+    const alarm = page.locator('[data-home-block="alarm"]');
+    if (alarms.length === 0) await expect(alarm).toContainText('没有卡住报警');
+    else await expect(alarm.locator('[data-ask-row]')).toHaveCount(alarms.length);
+    // 别的卡住报警（不是看门狗报的）不进工作台
     for (const n of notes.items.filter((x) => x.level === 'alert' && !x.dedupeKey?.startsWith('watchdog:'))) {
       await expect(ask).not.toContainText(n.title);
+      await expect(alarm).not.toContainText(n.title);
     }
 
     const run = page.locator('[data-home-block="run"]');
@@ -50,15 +53,21 @@ test.describe('主页三块', () => {
     await shot(page, '02b-主页三块');
   });
 
-  test('导航降级：侧栏只常驻主页，画布和别的页在「更多」里', async ({ page }, info) => {
-    test.skip((page.viewportSize()?.width ?? 1920) < 768, '手机走底部导航的「更多」抽屉');
-    void info;
+  test('左菜单：八项常驻（工作台、通知、任务、提需求、法国、路由、额度、设置），没有「更多」和「画布」；画布在法国名下', async ({
+    page,
+  }) => {
+    test.skip((page.viewportSize()?.width ?? 1920) < 768, '手机走底部导航的「更多」菜单');
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: '主导航' });
-    await expect(nav.getByRole('link', { name: '主页' })).toBeVisible();
+    for (const label of ['工作台', '通知', '任务', '提需求', '法国', '路由', '额度', '设置']) {
+      await expect(nav.getByRole('link', { name: label })).toBeVisible();
+    }
+    await expect(nav.getByRole('link', { name: '工作台' })).toHaveAttribute('aria-current', 'page');
     await expect(nav.getByRole('link', { name: '画布' })).toHaveCount(0);
-    await nav.getByRole('button', { name: /更多/ }).click();
-    await nav.getByRole('link', { name: '画布' }).click();
+    await expect(nav.getByRole('button', { name: /更多/ })).toHaveCount(0);
+    // 画布不进菜单，地址还在：打开时菜单亮它挂靠的「法国」
+    await page.goto('/board');
     await expect(page).toHaveURL(/\/board$/);
+    await expect(nav.getByRole('link', { name: '法国' })).toHaveAttribute('aria-current', 'page');
   });
 });

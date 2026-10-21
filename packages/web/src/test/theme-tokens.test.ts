@@ -65,8 +65,16 @@ function* sourceFiles(dir: string): Generator<string> {
   }
 }
 
+const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+
+/** 「--名字: 值;」读成像素（rem × 16）；不是 rem 就是 NaN。 */
+function remPx(name: string): number {
+  const v = css.match(new RegExp(`--${name}:\\s*([\\d.]+)rem;`))?.[1];
+  return v === undefined ? Number.NaN : Number.parseFloat(v) * 16;
+}
+
 describe('自定义尺寸 token 放对命名空间', () => {
-  const tokens = themeSizeTokens(readFileSync(join(srcDir, 'app.css'), 'utf8'));
+  const tokens = themeSizeTokens(css);
 
   test('app.css 里读得到自定义尺寸 token（读不到就红，不当成「没有问题」）', () => {
     expect(tokens.get('topbar')).toBeDefined();
@@ -92,123 +100,87 @@ describe('自定义尺寸 token 放对命名空间', () => {
   });
 });
 
-describe('组件令牌和密度（规范 2.7）', () => {
-  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+describe('组件令牌只有一套（Arco，#3509）', () => {
   const tokens = themeSizeTokens(css);
-  const VARS = ['control-h', 'row-h', 'section-p', 'section-gap', 'stack-gap'] as const;
 
-  /** 取一个选择器块里「--变量: 值」的字典。 */
-  function block(selector: string): Record<string, string | undefined> {
-    const at = css.indexOf(selector);
-    expect(at, `app.css 里没有 ${selector}`).toBeGreaterThan(-1);
-    const body = css.slice(css.indexOf('{', at) + 1, css.indexOf('}', at));
-    return Object.fromEntries([...body.matchAll(/--([a-z-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2]]));
-  }
-
-  test('五个令牌类认得：落在 --spacing-* 下', () => {
-    for (const name of ['control', 'row', 'section', 'section-gap', 'stack']) {
+  test('六个令牌类落在 --spacing-* 下', () => {
+    for (const name of ['control', 'row', 'row-tall', 'section', 'section-gap', 'stack']) {
       expect(tokens.get(name), name).toEqual(new Set(['spacing']));
     }
   });
-  test('标准 32/40/16/24/12，紧凑 28/32/12/16/8（16px 根字号下，写成 rem 跟根字号放大，#1937），紧凑只在桌面（48rem）起生效', () => {
-    const std = block(':root,\n[data-density="comfortable"]');
-    const compact = block('[data-density="compact"]');
-    const px = (v: string | undefined) => (v?.endsWith('rem') ? Number.parseFloat(v) * 16 : Number.NaN);
-    expect(VARS.map((v) => px(std[v]))).toEqual([32, 40, 16, 24, 12]);
-    expect(VARS.map((v) => px(compact[v]))).toEqual([28, 32, 12, 16, 8]);
-    expect(css).toMatch(/@media \(width >= 48rem\) \{\s*\[data-density="compact"\]/);
+  test('控件高 32、行高 40、两行的行 48、卡片内边距 20、区块间距 16、区块内间距 12，都写 rem', () => {
+    expect(
+      ['control', 'row', 'row-tall', 'section', 'section-gap', 'stack'].map((n) => remPx(`spacing-${n}`)),
+    ).toEqual([32, 40, 48, 20, 16, 12]);
   });
-  test('紧凑不改字号', () => {
-    expect(Object.keys(block('[data-density="compact"]')).filter((k) => k.startsWith('text'))).toEqual([]);
+  test('密度切换删了：没有 data-density，也没有紧凑那一组', () => {
+    expect(css).not.toMatch(/data-density|compact/);
   });
 });
 
-describe('字号两组值：手机在 :root，桌面（48rem 起）参照苹果 macOS HIG（#1882）', () => {
-  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
-  const FS = ['body', 'heading', 'title', 'display'] as const;
-  const MEDIA = /@media \(width >= 48rem\) \{\s*:root \{\s*--fs-/;
-  const mediaAt = css.search(MEDIA);
-
-  /** 取一段 CSS 里「--fs-名: 值」的字典。 */
-  function fsVars(body: string): Record<string, string> {
-    return Object.fromEntries([...body.matchAll(/--fs-([a-z-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2]]));
+describe('字号五档加等宽 13（Arco，#3509）', () => {
+  /** 一档字号读成「字号/行高（字重）」，像素。 */
+  function step(n: string): string {
+    const w = css.match(new RegExp(`--text-${n}--font-weight:\\s*(\\d+);`))?.[1];
+    return `${remPx(`text-${n}`)}/${remPx(`text-${n}--line-height`)}${w ? ` ${w}` : ''}`;
   }
-  const rootAt = css.search(/:root \{\s*--fs-/);
-  const mobile = fsVars(css.slice(rootAt, mediaAt));
-  const desktop = fsVars(css.slice(mediaAt, css.indexOf('\n}\n', mediaAt)));
-  const pairs = (v: Record<string, string>) => FS.map((n) => `${v[n]} / ${v[`${n}-lh`]}`);
-
-  test('手机（<48rem）：正文 14/20、小标题 16/24、页标题 20/28、大数字 28/32', () => {
-    expect(pairs(mobile)).toEqual([
-      '0.875rem / 1.25rem',
-      '1rem / 1.5rem',
-      '1.25rem / 1.75rem',
-      '1.75rem / 2rem',
+  test('meta 12/20、body 14/22、heading 16/24 500、title 20/28 600、display 24/32 600、mono 13/20、canvas 11/14', () => {
+    expect(['meta', 'body', 'heading', 'title', 'display', 'mono', 'canvas'].map(step)).toEqual([
+      '12/20',
+      '14/22',
+      '16/24 500',
+      '20/28 600',
+      '24/32 600',
+      '13/20',
+      '11/14',
     ]);
   });
-  test('桌面（≥48rem）：正文 13/16、小标题 15/20、页标题 22/28、大数字 26/32', () => {
-    expect(mediaAt, 'app.css 里没有 48rem 的 --fs-* 覆盖块').toBeGreaterThan(-1);
-    expect(pairs(desktop)).toEqual([
-      '0.8125rem / 1rem',
-      '0.9375rem / 1.25rem',
-      '1.375rem / 1.75rem',
-      '1.625rem / 2rem',
-    ]);
-  });
-  test('@theme 的四档读 --fs-*，meta 12/16 和画布 11/14 两组一样、直接写值', () => {
-    for (const n of FS) {
-      expect(css, n).toContain(`--text-${n}: var(--fs-${n});`);
-      expect(css, n).toContain(`--text-${n}--line-height: var(--fs-${n}-lh);`);
-    }
-    expect(css).toContain('--text-meta: 0.75rem;');
-    expect(css).toContain('--text-meta--line-height: 1rem;');
-    expect(css).toContain('--text-canvas: 0.6875rem;');
-    expect(desktop.meta).toBeUndefined();
+  test('旧的 subtitle 并到 title，不再定义；手机桌面同一套，没有 --fs-* 覆盖', () => {
+    expect(css).not.toMatch(/--text-subtitle\s*:/);
+    expect(css).not.toMatch(/--fs-[a-z]/);
   });
 });
 
-describe('根字号：桌面放大到 125%，手机不变（#1937）', () => {
-  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
-
-  test('html 的字号按 --root-scale 放大；:root 是 1，48rem 起 1.25', () => {
-    expect(css).toMatch(/html \{\s*font-size: calc\(100% \* var\(--root-scale\)\);/);
-    expect(css).toMatch(/:root \{\s*--root-scale: 1;\s*\}/);
-    expect(css).toMatch(/@media \(width >= 48rem\) \{\s*:root \{\s*--root-scale: 1\.25;/);
+describe('根字号不放大：照 Arco 原样，1rem = 16px（#3509）', () => {
+  test('没有 --root-scale，html 不改字号', () => {
+    expect(css).not.toMatch(/--root-scale/);
+    expect(css).not.toMatch(/html\s*\{[^}]*font-size/);
   });
-  test('壳和密度的尺寸写 rem，不写 px（写 px 就不跟根字号放大）', () => {
-    for (const name of [
-      'spacing-topbar',
-      'spacing-sidebar',
-      'spacing-sidebar-collapsed',
-      'spacing-drawer',
-      'container-cockpit',
-    ]) {
+  test('顶栏 60、左菜单 220，壳的尺寸写 rem', () => {
+    expect(remPx('spacing-topbar')).toBe(60);
+    expect(remPx('spacing-sidebar')).toBe(220);
+    for (const name of ['spacing-sidebar-collapsed', 'spacing-drawer', 'container-cockpit']) {
       expect(css, name).toMatch(new RegExp(`--${name}:\\s*[\\d.]+rem;`));
     }
-    for (const name of ['control-h', 'row-h', 'row-tall-h', 'section-p', 'section-gap', 'stack-gap']) {
-      expect(css, name).not.toMatch(new RegExp(`--${name}:\\s*[\\d.]+px;`));
-    }
   });
-  test('【故意造出的失败】写成 px 的顶栏高会被认出来', () => {
+  test('圆角 2 / 4 / 8', () => {
+    expect(['sm', 'md', 'lg'].map((n) => remPx(`radius-${n}`))).toEqual([2, 4, 8]);
+  });
+  test('【故意造出的失败】写成 px 的顶栏高读不成 rem', () => {
     expect('--spacing-topbar: 52px;').not.toMatch(/--spacing-topbar:\s*[\d.]+rem;/);
   });
 });
 
 describe('收口：@theme 关掉 Tailwind 默认的字号、圆角、阴影（#1855）', () => {
-  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
-
   test('三行 initial 都在', () => {
     for (const line of ['--text-*: initial;', '--radius-*: initial;', '--shadow-*: initial;']) {
       expect(css, line).toContain(line);
     }
   });
   test('#182 的旧字号名和 shadow-card-edge 不再定义，新档位还在', () => {
-    for (const old of ['micro', 'caption', 'sub', 'label', 'strong', 'stat-num', 'stat']) {
+    for (const old of ['micro', 'caption', 'sub', 'label', 'strong', 'stat-num', 'stat', 'subtitle']) {
       expect(css, `--text-${old}`).not.toMatch(new RegExp(`--text-${old}\\s*:`));
     }
     expect(css).not.toMatch(/--shadow-card-edge\s*:/);
-    for (const name of ['meta', 'body', 'heading', 'title', 'display', 'canvas']) {
+    for (const name of ['meta', 'body', 'heading', 'title', 'display', 'mono', 'canvas']) {
       expect(css, `--text-${name}`).toMatch(new RegExp(`--text-${name}\\s*:`));
     }
+  });
+  test('阴影：卡片无阴影，浮层和对话框用 --pop，抽屉用 --pop-side', () => {
+    expect(css).toContain('--shadow-card: 0 0 transparent;');
+    expect(css).toContain('--shadow-pop: var(--pop);');
+    expect(css).toContain('--shadow-pop-side: var(--pop-side);');
+    expect(css).toContain('--shadow-overlay: var(--pop);');
+    expect(css).toContain('--shadow-modal: var(--pop);');
   });
 });

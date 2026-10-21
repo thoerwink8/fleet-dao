@@ -800,7 +800,7 @@ function ChannelDetail({
       {/* 结论块三行（照路由页用途标题块，#1914）：名字、一句结论加状态、灰字细节；每行都不折 */}
       <header data-channel-hero className="mb-6 flex min-w-0 flex-col pt-2">
         <div className="mb-3 flex min-w-0 items-center justify-between gap-3 whitespace-nowrap">
-          <h2 className="min-w-0 truncate text-subtitle" title={card.channel.name}>
+          <h2 className="min-w-0 truncate text-title" title={card.channel.name}>
             {card.channel.name}
           </h2>
           <Button

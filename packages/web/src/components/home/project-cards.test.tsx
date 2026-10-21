@@ -54,22 +54,22 @@ function order(): string[] {
   return [...document.querySelectorAll('[data-project]')].map((el) => el.getAttribute('data-project') ?? '');
 }
 
-test('四个仓各一张：本周上线、在跑、卡住、里程碑都在；读不到的上线写没记', () => {
+/** 一个仓那一行（表里一行一个仓）。 */
+const rowOf = (repo: string) => document.querySelector(`[data-project="${repo}"]`)?.closest('tr');
+
+test('四个仓各一行：表头是本周上线、在跑、卡住、里程碑；读不到的上线写没记', () => {
   render(<ProjectCards projects={FOUR} />);
   expect(order()).toHaveLength(4);
-  const orbit = document.querySelector('[data-project="acme/orbit"]');
-  expect(orbit?.textContent).toContain('本周上线');
+  const head = document.querySelector('thead')?.textContent;
+  for (const col of ['本周上线', '在跑', '卡住', '里程碑']) expect(head).toContain(col);
+  const orbit = rowOf('acme/orbit');
   expect(orbit?.textContent).toContain('没记');
-  expect(orbit?.textContent).toContain('在跑');
   expect(orbit?.textContent).toContain('4 张');
-  expect(orbit?.textContent).toContain('卡住');
   expect(orbit?.textContent).toContain('3 张');
-  expect(orbit?.textContent).toContain('里程碑');
   expect(orbit?.textContent).toContain('登录和订单 4/9');
-  const flux = document.querySelector('[data-project="acme/fluxwatch"]');
-  expect(flux?.textContent).toContain('没有');
-  expect(document.querySelector('[data-project="acme/website"]')?.textContent).toContain('1 版');
-  expect(document.querySelector('[data-project="acme/orbit-canary"]')?.textContent).toContain('0 版');
+  expect(rowOf('acme/fluxwatch')?.textContent).toContain('没有');
+  expect(rowOf('acme/website')?.textContent).toContain('1 版');
+  expect(rowOf('acme/orbit-canary')?.textContent).toContain('0 版');
 });
 
 test('有问题的排前面：卡住的最先，只有要拍的其次', () => {
@@ -94,11 +94,8 @@ test('假数据里的四个仓各渲染一张，有问题的在前', async () =>
   expect(shown.indexOf('acme/fluxwatch')).toBeLessThan(shown.indexOf('acme/orbit-canary'));
   expect(shown[0]).toBe('acme/orbit');
   for (const repo of shown) {
-    const card = document.querySelector(`[data-project="${repo}"]`);
-    expect(card?.textContent).toContain('本周上线');
-    expect(card?.textContent).toContain('在跑');
-    expect(card?.textContent).toContain('卡住');
-    expect(card?.textContent).toContain('里程碑');
+    // 每行五格：仓、本周上线、在跑、卡住、里程碑
+    expect(rowOf(repo)?.querySelectorAll('td')).toHaveLength(5);
   }
 });
 

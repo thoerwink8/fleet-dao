@@ -591,7 +591,7 @@ function FranceHero({
   return (
     <header data-france-hero className="flex min-w-0 flex-col pt-1">
       <div className="mb-3 flex min-w-0 items-baseline gap-2 whitespace-nowrap">
-        <p className="truncate text-subtitle" data-machine-name>
+        <p className="truncate text-title" data-machine-name>
           {env.name.name}
         </p>
         <span className="shrink-0 text-meta text-muted-foreground">本台</span>

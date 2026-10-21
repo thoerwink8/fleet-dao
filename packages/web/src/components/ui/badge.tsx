@@ -2,19 +2,24 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { Slot } from 'radix-ui';
 import type * as React from 'react';
 import { cn } from '../../lib/utils';
+import { focusRing } from './styles';
 
+/**
+ * 小标签（#3509，照 Arco，样稿 canvas/fd3.css `.tag`）：24 高、左右 8、2 圆角、12px 500。
+ * 颜色只给异常：带底色的只有灰（default、secondary）、橙（warning）、红（destructive）三种。
+ */
 const badgeVariants = cva(
-  'inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-full border border-transparent px-2 py-0.5 text-meta font-medium whitespace-nowrap transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-focus focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&>svg]:pointer-events-none [&>svg]:size-3',
+  `inline-flex h-6 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-sm border border-transparent px-2 text-meta font-medium whitespace-nowrap transition-colors duration-100 ${focusRing} [&>svg]:pointer-events-none [&>svg]:size-3`,
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground [a&]:hover:bg-primary/90',
-        secondary: 'bg-secondary text-secondary-foreground [a&]:hover:bg-secondary/90',
-        destructive:
-          'bg-destructive text-destructive-foreground focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 [a&]:hover:bg-destructive/90',
-        outline: 'border-border text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground',
-        ghost: '[a&]:hover:bg-accent [a&]:hover:text-accent-foreground',
-        link: 'text-primary underline-offset-4 [a&]:hover:underline',
+        default: 'bg-fill-2 text-ink-2 [a&]:hover:bg-fill-3',
+        secondary: 'bg-fill-2 text-ink-2 [a&]:hover:bg-fill-3',
+        warning: 'bg-warn-1 text-warn-ink',
+        destructive: 'bg-fail-1 text-fail-ink',
+        outline: 'border-line text-ink-2 [a&]:hover:bg-fill-2',
+        ghost: 'text-ink-2 [a&]:hover:bg-fill-2',
+        link: 'text-brand-ink underline-offset-4 [a&]:hover:underline',
       },
     },
     defaultVariants: {

@@ -93,7 +93,8 @@ test.describe('法国页', () => {
     await page.goto('/france');
     const card = page.getByTestId('engine-master');
     await expect(card.getByTestId('engine-master-state')).toHaveText('关着');
-    await expect(page.getByRole('link', { name: /总开关 关着/ })).toBeVisible();
+    // 顶栏的引擎状态（#3509 起是一个点加一句字的按钮，点开是小卡）
+    await expect(page.getByRole('button', { name: /引擎总开关关着/ })).toBeVisible();
     await shot(page, '07b-环境-引擎总开关-关着');
 
     // 点开启先弹确认；点「先不」什么都不改
@@ -106,7 +107,7 @@ test.describe('法国页', () => {
     await card.getByRole('button', { name: '开启引擎总开关' }).click();
     await page.getByRole('alertdialog').getByRole('button', { name: '开启', exact: true }).click();
     await expect(card.getByTestId('engine-master-state')).toHaveText('开着');
-    await expect(page.getByRole('link', { name: /总开关 开着/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /引擎总开关开着/ })).toBeVisible();
     await expect(card.getByTestId('engine-master-who')).toContainText('打开');
     await shot(page, '07b-环境-引擎总开关-开着');
 
@@ -117,7 +118,7 @@ test.describe('法国页', () => {
 
     // 换一页（设置页）顶栏的胶囊还在、还是开着；刷新后还开着；再点关闭回到关着
     await page.goto('/settings');
-    await expect(page.getByRole('link', { name: /总开关 开着/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /引擎总开关开着/ })).toBeVisible();
     await expect(page.getByTestId('engine-master-relation')).toContainText('总开关关＝全停');
     await page.goto('/france');
     await expect(card.getByTestId('engine-master-state')).toHaveText('开着');

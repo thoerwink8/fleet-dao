@@ -9,6 +9,12 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runChildOk } from './child.ts';
+import {
+  FIXTURE_HOOK_MS,
+  type FixtureDb,
+  openPatrolSqlFixture,
+  type PatrolSqlFixture,
+} from './patrol-sql-fixture.ts';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 
@@ -541,43 +547,29 @@ describe('巡查脚本：只读、不抄引擎的判法、读不到 ssh 名字�
 });
 
 const dbRequire = createRequire(fileURLToPath(new URL('../../packages/db/package.json', import.meta.url)));
-const { PGlite } = (await import(pathToFileURL(dbRequire.resolve('@electric-sql/pglite')).href)) as {
-  PGlite: new () => {
-    exec(sql: string): Promise<unknown>;
-    query(sql: string, params: unknown[], opts: { rowMode: 'array' }): Promise<{ rows: unknown[][] }>;
-    close(): Promise<void>;
-  };
-};
+const loadPglite = async () =>
+  (
+    (await import(pathToFileURL(dbRequire.resolve('@electric-sql/pglite')).href)) as {
+      PGlite: new () => FixtureDb;
+    }
+  ).PGlite;
 
 /**
  * #3513：定时任务「最近一次已结束」的真实结局。这一组不手喂 job| 行：用 REMOTE_SCRIPT 里实际的 `q jobs` 那条 SQL，
  * 在隔离的 PGlite 里按生产的表结构（schedule_outcome 枚举、两张表的约束）真执行，再把结果按 psql -At -F'|' 的样子
  * 拼成远端输出喂回 judge，走完 REMOTE_SCRIPT → parseRaw → invariants → delta → render 一整条链。
+ * 夹具的装载、起库、建表各段限时、失败回收、建完读回，见 patrol-sql-fixture.ts（#3524）；这里的 hook 窗跟着它的期限走，不用默认 10 秒。
  */
 describe('巡查脚本：定时任务最近结局，partial 要报、恢复要有真实 ok（#3513）', () => {
-  let db: InstanceType<typeof PGlite>;
-  // #3520 lint：agents_test 一次起几十个隔离进程，PGlite 冷启动超过 vitest 默认 10 秒钩子时限
-  // （Hook timed out）。等的是内存库起来，不是巡查时限；和测试库 TEST_DB_TIMEOUT_MS 一样给 60 秒。
-  // 关掉同样可能慢。beforeAll 没跑完时 db 还没有，收尾不要再抛一次。
+  let fixture: PatrolSqlFixture<FixtureDb> | undefined;
+  let db: FixtureDb;
   beforeAll(async () => {
-    db = new PGlite();
-    await db.exec(`
-      create type schedule_outcome as enum ('ok', 'partial', 'unscanned', 'failed');
-      create table scheduled_jobs (id text primary key, removed_at timestamptz);
-      create table schedule_runs (
-        id bigint generated always as identity primary key,
-        job text not null references scheduled_jobs(id),
-        started_at timestamptz not null default now(),
-        ended_at timestamptz,
-        outcome schedule_outcome,
-        scanned int, found int, why text,
-        check ((ended_at is null) = (outcome is null)),
-        check (outcome is null or outcome = 'ok' or why is not null)
-      );`);
-  }, 60_000);
+    fixture = await openPatrolSqlFixture({ load: loadPglite });
+    db = fixture.db;
+  }, FIXTURE_HOOK_MS);
   afterAll(async () => {
-    await db?.close();
-  }, 60_000);
+    await fixture?.close();
+  }, FIXTURE_HOOK_MS);
   beforeEach(async () => {
     await db.exec('truncate schedule_runs restart identity; truncate scheduled_jobs cascade;');
   });

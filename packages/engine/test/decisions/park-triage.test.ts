@@ -2,6 +2,7 @@
 // 留给人只认三种理由类别；白名单外的裁决不放行；额度超预算按空转判，不按钱；老历史的停法从提醒正文认。
 import { describe, expect, it } from 'vitest';
 import {
+  type AcceptanceFounderFact,
   allowedActions,
   COMMANDER_ACTIONS,
   type CommanderAction,
@@ -14,6 +15,7 @@ import {
   RUNTIME_RULES,
   type TriageKind,
   triageKindOf,
+  trustedFounderFact,
 } from '../../src/decisions/park-triage.ts';
 import { judgeSpin, type SpinRound } from '../../src/decisions/spin.ts';
 import { PARK_CODE_NO_ROUTE, PARK_CODE_ROUTE_SWITCH } from '../../src/task-contract.ts';
@@ -389,5 +391,33 @@ describe('验收责任裁决白名单', () => {
         evidence: '只有未合并的 PR 记录',
       }),
     ).toEqual({ ok: false, why: 'PR 没有合并回执，不能结清验收责任' });
+  });
+
+  it('创始人证据只认引擎可信来源的精确事实：身份差一项、种类不认、说明空或超长、同责任多条，都不算（#3497）', () => {
+    const duty = source({ id: 7, generation: 2, prNumber: 99, head: 'a'.repeat(40) });
+    const fact = (over: Partial<AcceptanceFounderFact> = {}): AcceptanceFounderFact => ({
+      dutyId: 7,
+      generation: 2,
+      prNumber: 99,
+      head: 'a'.repeat(40),
+      kind: 'founder-decision',
+      what: '线下合同签章确认',
+      ...over,
+    });
+    expect(trustedFounderFact(duty, [fact()])).toEqual(fact());
+    expect(trustedFounderFact(duty, [fact({ dutyId: 8 }), fact()])).toEqual(fact());
+    // 没有事实（受限模型自述不是事实）
+    expect(trustedFounderFact(duty, [])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ dutyId: 8 })])).toBeUndefined();
+    // 身份精确：代次、PR、head 差一项都不认
+    expect(trustedFounderFact(duty, [fact({ generation: 1 })])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ prNumber: 100 })])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ head: 'b'.repeat(40) })])).toBeUndefined();
+    // 种类认不出、说明为空、说明超长
+    expect(trustedFounderFact(duty, [fact({ kind: 'model-said' as never })])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ what: '  ' })])).toBeUndefined();
+    expect(trustedFounderFact(duty, [fact({ what: 'x'.repeat(301) })])).toBeUndefined();
+    // 同一责任有不止一条：不猜
+    expect(trustedFounderFact(duty, [fact(), fact({ what: '另一条' })])).toBeUndefined();
   });
 });

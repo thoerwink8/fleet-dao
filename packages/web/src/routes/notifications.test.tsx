@@ -189,10 +189,7 @@ describe('通知数同一口径（#1745）', () => {
     );
     const bell = await screen.findByRole('button', { name: '提醒，9 条待处理' });
     expect(bell.textContent).toBe('9');
-    // 侧栏「更多」收着时角标挂在它上面（决定 0093），点开后挂在「通知中心」上
-    const more = screen.getByRole('button', { name: /更多/ });
-    expect(more.textContent).toContain('9');
-    fireEvent.click(more);
+    // 「通知」常驻左菜单（#3509 外壳），角标直接挂在它上面
     const side = screen
       .getAllByRole('link')
       .find((a) => a.getAttribute('href')?.startsWith('/notifications'));

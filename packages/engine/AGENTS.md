@@ -92,6 +92,21 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - schedule_runs 的 why 列在一轮没收尾期间只放诊断见证：每小时对账的最后一个子步骤（`在途阶段见证：`，写不进只记 warn，不改步骤结果）；引擎正常停机、宽限到了某任务一轮还没回，再追加 `停机宽限到期时这一轮仍在跑 at=…`（`timers.ts` 的 `recordUnfinished`，只写本进程起定时器之后开始的未结束行）。它们只证明「最后记到的位置」，不证明卡在哪、为什么中断，也不是结束时刻；这一行不结束，ended_at、scanned、found 仍未知，由下次启动补记成 failed（ended_at=started_at 是补记，不是真实结束时间）。SIGKILL/OOM/断电没有机会写，仍只有最后一笔阶段见证。
 
+## 指挥官重做的受管接续（#3496）
+
+- `jobs/park-triage.ts` 的重做是多步（叫停旧代 → 等终态 → 起新代），每跨一步前先写接续账 `commander.redo`（`stop-requested` / `start-requested`，带叫停前读到的全部旧代 workflowId + runId），账写不进就不动手；等不到终态、启动没确认各记 `stop-unconfirmed` / `start-unconfirmed`，终态是 `started` / `exists` / `given-up`，另有「没核实」的 `unverified`。不另建表、不另起巡检：同一个 10 分钟定时任务每轮先读这份账，对没到终态的按原裁决调 `real/park-triage.ts` 的 `resumeRedo`，不新认领、不占每日名额、没配模型也接续。
+- 叫停前先把全部旧代的 runId 核全（缺/空/代数不连续就在任何副作用前拒绝），对全部还在跑的旧代一次发完叫停请求，叫停、查询、读状态都钉住已核 runId。叫停请求记账后进程崩溃、或部分信号没送到时，接续在同一授权意图内补发：只对账上已核 run、身份重核仍对得上、姿态仍是 `parked` 的旧代，先记一条 `stop-requested` 再发，最多 `PARK_TRIAGE_REDO_STOP_TRIES` 轮（含首次），发完只重读一次、不等待；旧代在干活、已在收尾、读不到姿态的不发。每次接续/动手前从现有任务/仓记录（`taskContext` + `intakeTaskRow`）重核：task id/ref 对得上且 `executor=engine` 是「还是同一个引擎任务」，对不上/转本机是已核实事实 → `given-up`；状态是停着/已放弃才允许叫停、起新代（`canAct`），否则（例如新代已把任务行改成 running）只许只读确认新代是否存在；读不到只是等。
+- 起新代之前（首次和接续都一样）现读全部代次：先核全部旧代（runId 一致、不少、都真实终止），旧代没核完哪怕新代已存在也不报完成；核完新代已存在才算 `exists`，不再起。补发叫停先核全部仍活旧代的姿态，任何一代仍在干活或读不到就整批拒绝；姿态查询结束后再次核任务归属，转本机或状态变化不动手。所有耗时的远端读和写账之后、真正发叫停/Start 的前一刻，各再从任务/仓记录重读一次归属和状态（不复用前面读到的结果，也不用前面的仓/标题去 Start）；读不到只等，转本机/对不上记 `given-up`，状态不是停着/已放弃不动手。这只拒绝能观察到的转移，不承诺跨库与 Temporal 的原子性；若在叫停账已写、信号未发时被拒，回执写「任务没动」。已在收尾的旧代只等终态，不对它重发。叫停后读状态失败从不当成已终止。
+- 约束：接续不新认领，每日认领计数、单张单防空转、代数上限都不变；一个意图只对应固定的新代编号，Start 用 FAIL + REJECT_DUPLICATE，最多创建一个新代，`PARK_TRIAGE_REDO_START_TRIES` 是对同一编号的有界重发，不是额度。24 小时窗口或次数用完只停止发起新的 Start；`given-up` 只用于已核实的事实（身份变了、归属不对、代数到顶、旧代已终止且新代确认不存在但不许再起），读不到/旧代未终止记 `unverified`：责任继续保留，每轮继续读证并在 problems 里报「未核实」，绝不把未知当结清。
+- 账本身读法严格：trail 须非空、代数连续、runId 不重复，同键后来的记录不得和起头记录的身份/代次/编号不一致；对不上就阻断该意图，每轮报 problems（「已阻断」），连键都定位不到的坏记录同样每轮报。
+- 回执分三种：叫停已发送、终态未确认；旧代已终态、新代待启动/启动未确认；新代已确认启动（或已存在、本次没再起）。什么都没发出去才写「任务没动」。测试：`test/real/park-triage.test.ts`（假 Temporal + `ParkTriageWiring.clock` 假时钟）、`test/park-triage.test.ts`（假存储）。
+
+## 验收责任巡检的责任分类（#3497）
+
+- `jobs/park-triage.ts` 的 `triageAcceptanceRepo` 把每条 open 责任分成三种结果：已结清/替代（只在核过白名单并真执行成功后）、**创始人证据**、**没核完**。模型的 `leave` 只是「证据仍缺」的自述（读不到证据时它也会写），不是转人的依据，`humanOnly`/`reason` 的自由文本和模型自填的任何字段都不算授权。只有 `deps.acceptanceFounderFacts`（引擎自己的可信来源：只读、限长、精确绑定 duty/代次/PR/head 的事实，`decisions/park-triage.ts` 的 `trustedFounderFact` 逐项核对，同责任多条或不合格都不认）给出这条责任的创始人证据，才发 decision「要你拍」（`reason: human-only`），说明用事实里的 `what` 而不是模型自述，并写一条 `commander.act`（action=leave，带认领键）作为「已转人」的凭据。**当前真装配没有这种可信来源**（旧历史里没有这种证明，不补造），所以生产上 leave 一律不转人，真实的创始人证据来源是 #3497 的欠项。
+- 没核完＝缺唯一裁决、裁决格式/身份/代次不符、缺合并回执、证据为空、supersede 目标/coverage 不满足、结清/替代口子没装配或抛错、leave 没有可信创始人事实（来源没装配、读不到、没有精确对应）；以及主线头读不到、会话没起成、回答认不出（这三种还没拿到裁决，是读取失败）。它们都不发「要你拍」，发 alert 级提醒（正文分「已按裁决收口 / 仍未收口 / 机读或执行没核完」，部分成功只报已核那部分，不关单），责任保持 open，经 `deps.acceptanceRetry` 抵销这次认领（写不进再试一次，仍不行明报），下一轮同一 head 再处理。所有原因合用一份预算：`AuditBook.acceptanceWindowRetries` 只读 `commander.retry`（`after.cause` 为 `session` / `unverified`，`after.why` 存限长原因），24 小时窗口内 `PARK_TRIAGE_SESSION_TRIES` 次；用满后不再认领、不起会话、不执行，但每轮调度仍在 problems 里报「验收责任仍未核实」和最近一次原因，窗口滚过后预算重新开始（每天有界，不是永久停摆也不是无限重试）。已认领却没被重试抵销的候选，只有「当前每条 open 责任都有精确对应（duty/代次/PR/head 四项相等）的转人记录」才算整个候选在等创始人；凭据缺字段、身份不符、只覆盖一部分、认领后才新增的责任，都逐条在 problems 里报「已认领但既没有重试记录也没有转人记录」（例如重试记账写失败），不再起会话、不被别的责任的转人遮住、不当成已处理；所在单已关闭则不报。没动每日 60 次上限和单张防空转的口径。
+- 只留给创始人的那一条与没核完的并存时，decision 卡只列创始人那条；已核结清的照实写。supersede 仍由 `checkAcceptanceVerdict` 要求同仓同单同 PR 的已结清目标和逐项 coverage，旧头没有合并回执不能 settle。引擎没有给会话新增任何读取能力或凭据：提示词只给责任身份、合并回执和 leave 不转人的约定；读不到证据只能明报机读缺口并重试，不靠编造证据过关。
+
 ## 版本更新日志
 
 - `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。

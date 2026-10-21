@@ -9,24 +9,35 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
   ALLOWLIST,
+  type Baseline,
   check,
+  compareToBaseline,
   countHits,
   formatHit,
   type Hit,
   lex,
+  loadBaseline,
+  parseBaseline,
+  RATCHET_RULES,
   RULE_IDS,
   type RuleId,
+  ratchetCounts,
   scanSource,
+  serializeBaseline,
   utilityOf,
 } from '../../scripts/lint-design.ts';
 
 const PAGE = 'src/routes/sample.tsx';
 
+/** 只看严格规则 R0–R12 的命中（页面夹具常顺带踩到 R13–R20，那些在下面单独测）。 */
+function strictScan(source: string, file = PAGE): Hit[] {
+  return scanSource(source, file).filter((h) => !RATCHET_RULES.includes(h.rule));
+}
 function rulesOf(source: string, file = PAGE): RuleId[] {
-  return scanSource(source, file).map((h) => h.rule);
+  return strictScan(source, file).map((h) => h.rule);
 }
 function classesOf(source: string, file = PAGE): string[] {
-  return scanSource(source, file).map((h) => h.cls);
+  return strictScan(source, file).map((h) => h.cls);
 }
 
 describe('每条规则：造红的报、合规的放', () => {
@@ -139,7 +150,7 @@ describe('每条规则：造红的报、合规的放', () => {
       '  <input type="search" />',
       '</label>',
     ].join('\n');
-    expect(scanSource(src, PAGE).map((h) => [h.rule, h.line])).toEqual([
+    expect(strictScan(src, PAGE).map((h) => [h.rule, h.line])).toEqual([
       ['R9', 2],
       ['R9', 5],
     ]);
@@ -170,7 +181,7 @@ describe('每条规则：造红的报、合规的放', () => {
     expect(rulesOf(`<Tag>关着</Tag>`)).toEqual(['R11']);
     expect(rulesOf(`<span className="text-meta">\n  在跑\n</span>`)).toEqual(['R11']);
     expect(rulesOf(`<b>开着</b><i>已关</i>`)).toEqual(['R11', 'R11']);
-    const [hit] = scanSource(`\n<Tag>关着</Tag>`, PAGE);
+    const [hit] = strictScan(`\n<Tag>关着</Tag>`, PAGE);
     expect(hit?.line).toBe(2);
     expect(formatHit(hit as Hit)).toContain('StatusBadge');
   });
@@ -189,8 +200,8 @@ describe('每条规则：造红的报、合规的放', () => {
   return <Button onClick={() => save.mutate({ on: true })}>保存</Button>;
 }`;
     expect(rulesOf(direct)).toEqual(['R12']);
-    expect(scanSource(direct, PAGE)[0]?.line).toBe(3);
-    expect(formatHit(scanSource(direct, PAGE)[0] as Hit)).toContain('loading-ok');
+    expect(strictScan(direct, PAGE)[0]?.line).toBe(3);
+    expect(formatHit(strictScan(direct, PAGE)[0] as Hit)).toContain('loading-ok');
 
     // 确认框老写法：preventDefault 后调本文件里的 confirm()，confirm 里 mutate
     const viaName = `export function B() {
@@ -283,9 +294,245 @@ describe('每条规则：造红的报、合规的放', () => {
   });
 
   test('R12 解析不了的文件报出来，不当没事放过', () => {
-    const [hit] = scanSource(`const x = save.mutate(1); <Button onClick={`, PAGE);
+    const [hit] = strictScan(`const x = save.mutate(1); <Button onClick={`, PAGE);
     expect(hit?.rule).toBe('R12');
     expect(hit?.cls).toBe('解析不了');
+  });
+});
+
+// R13–R20（#3509）：业务层 = routes + components，组件层 = components/layout、ui、shell。
+const LAYOUT = 'src/components/layout/section.tsx';
+const SHELL = 'src/components/shell/sidebar.tsx';
+const BIZ = 'src/components/task-card.tsx';
+/** 只留 R13–R20 的命中（造红夹具常顺带踩到 R0–R12，不在这里断言）。 */
+function ratchetOf(source: string, file = PAGE): RuleId[] {
+  return scanSource(source, file)
+    .map((h) => h.rule)
+    .filter((r) => RATCHET_RULES.includes(r));
+}
+
+describe('R13–R20 业务层规则：造红的报、合规的放', () => {
+  test('R13 业务层写样式类：颜色、字号、字重、边框、底色、圆角、阴影、边距、gap、过渡都报，并提示用哪个组件', () => {
+    const src = `<div className="text-muted-foreground text-meta font-medium border bg-fill-2 rounded-md shadow-pop p-4 gap-2 mt-3 transition-colors hover:bg-fill-3" />`;
+    expect(ratchetOf(src)).toEqual(Array(12).fill('R13'));
+    expect(ratchetOf(src, BIZ)).toEqual(Array(12).fill('R13'));
+    const [first] = scanSource(`<p className="text-muted-foreground" />`, PAGE).filter(
+      (h) => h.rule === 'R13',
+    );
+    expect(first?.fix).toContain('<Text tone');
+    expect(first?.cls).toBe('text-muted-foreground');
+  });
+  test('R13 放行：位置类、显隐、num；组件层（layout、ui、shell）随便写', () => {
+    expect(
+      ratchetOf(
+        `<div className="min-w-0 flex-1 shrink-0 col-span-2 row-span-1 sr-only hidden md:block num text-left text-center truncate flex items-center w-55 h-10" />`,
+      ),
+    ).toEqual([]);
+    for (const f of [LAYOUT, 'src/components/ui/button.tsx', SHELL]) {
+      expect(ratchetOf(`<div className="text-ink-3 border rounded-md bg-card p-4 gap-2" />`, f)).toEqual([]);
+    }
+  });
+  test('R13 单个英文单词不当类名（border 单独一个词的普通文字）', () => {
+    expect(ratchetOf(`const label = 'border';`)).toEqual([]);
+    expect(ratchetOf(`const label = 'rounded border';`)).toEqual(['R13', 'R13']);
+  });
+
+  test('R14 业务层 import components/ui、radix-ui、motion 报（相对路径按文件位置解析）', () => {
+    expect(ratchetOf(`import { Button } from '../components/ui/button';`)).toEqual(['R14']);
+    expect(ratchetOf(`import { Button } from './ui/button';`, BIZ)).toEqual(['R14']);
+    expect(ratchetOf(`import { Dialog } from 'radix-ui';`)).toEqual(['R14']);
+    expect(ratchetOf(`import { Dialog } from '@radix-ui/react-dialog';`)).toEqual(['R14']);
+    expect(ratchetOf(`import { motion } from 'motion/react';`, BIZ)).toEqual(['R14']);
+    expect(
+      scanSource(`\nimport { Button } from '../components/ui/button';`, PAGE).find((h) => h.rule === 'R14')
+        ?.line,
+    ).toBe(2);
+  });
+  test('R14 放行：从 layout 引；组件层自己引 ui、motion；包名只是长得像', () => {
+    expect(ratchetOf(`import { Button } from '../components/layout/button';`)).toEqual([]);
+    expect(ratchetOf(`import { Button } from './ui/button';`, LAYOUT)).toEqual([]);
+    expect(ratchetOf(`import { Button } from '../ui/button';`, SHELL)).toEqual([]);
+    expect(ratchetOf(`import { motion } from 'motion/react';`, LAYOUT)).toEqual([]);
+    expect(ratchetOf(`import x from 'motionless';`)).toEqual([]);
+  });
+
+  test('R15 业务层 style={{…}} 报；组件层放行', () => {
+    expect(ratchetOf(`<div style={{ width: pct }} />`)).toEqual(['R15']);
+    expect(ratchetOf(`<div style={{ width: pct }} />`, LAYOUT)).toEqual([]);
+    expect(ratchetOf(`<div style={styles} />`)).toEqual([]);
+  });
+
+  test('R16 时长缓动不在档位：duration-500、ease-linear、motion 里写死的数都报，连组件层一起查', () => {
+    expect(ratchetOf(`"duration-500 ease-linear md:duration-700 ease-in"`, LAYOUT)).toEqual([
+      'R16',
+      'R16',
+      'R16',
+      'R16',
+    ]);
+    // 业务层写这些类，R13 也报
+    expect(ratchetOf(`"duration-500 ease-linear"`).sort()).toEqual(['R13', 'R13', 'R16', 'R16']);
+    expect(ratchetOf(`"duration-500"`, 'src/components/ui/sheet.tsx')).toEqual(['R16']);
+    expect(ratchetOf(`"duration-150"`, LAYOUT)).toEqual(['R16']);
+    expect(
+      ratchetOf(
+        `import { motion } from 'motion/react';\nconst t = { duration: 0.5, ease: 'linear' };`,
+        LAYOUT,
+      ),
+    ).toEqual(['R16', 'R16']);
+    expect(ratchetOf(`<motion.div transition={{ duration: 0.4 }} />`, LAYOUT)).toEqual(['R16']);
+  });
+  test('R16 放行：档位里的、arco 缓动；和动效无关的 duration 字段', () => {
+    expect(
+      ratchetOf(`"duration-100 duration-200 duration-300 ease-arco ease-out ease-in-out"`, LAYOUT),
+    ).toEqual([]);
+    expect(
+      ratchetOf(
+        `import { motion } from 'motion/react';\nconst t = { duration: 0.2, ease: [0.34, 0.69, 0.1, 1] };`,
+        LAYOUT,
+      ),
+    ).toEqual([]);
+    expect(ratchetOf(`const row = { duration: 3600 };`)).toEqual([]);
+  });
+
+  test('R17 业务层原生 button、table、h1–h4、dl、progress、hr 报；组件层放行；th、h5、自定义组件不算', () => {
+    const src = `<><button /><table /><h1 /><h2>x</h2><h3 /><h4 /><dl /><progress /><hr /></>`;
+    expect(ratchetOf(src)).toEqual(Array(9).fill('R17'));
+    expect(ratchetOf(src, LAYOUT)).toEqual([]);
+    expect(ratchetOf(`<><Button /><Table /><th /><h5 /><header /><hgroup /></>`)).toEqual([]);
+    expect(ratchetOf(`const s = '<button>';`)).toEqual([]);
+  });
+
+  test('R18 Section/Card 套 Section/Card 报；展开区里再套带底色或描边的框报', () => {
+    expect(ratchetOf(`const A = () => <Section><Card>x</Card></Section>;`)).toEqual(['R18']);
+    expect(ratchetOf(`const A = () => <Card><div><Section>x</Section></div></Card>;`)).toEqual(['R18']);
+    expect(
+      ratchetOf(
+        `const A = () => <Collapse><div className="rounded-md border bg-fill-1">x</div></Collapse>;`,
+      ).filter((r) => r === 'R18'),
+    ).toEqual(['R18']);
+    expect(
+      ratchetOf(
+        `const A = () => <Table expandedRowRender={() => <div className="bg-fill-2">x</div>} />;`,
+      ).filter((r) => r === 'R18'),
+    ).toEqual(['R18']);
+  });
+  test('R18 放行：并排的两个容器；展开区里没有框；组件层', () => {
+    expect(ratchetOf(`const A = () => <><Section>a</Section><Card>b</Card></>;`)).toEqual([]);
+    expect(ratchetOf(`const A = () => <Collapse><Descriptions /></Collapse>;`)).toEqual([]);
+    expect(ratchetOf(`const A = () => <Section><Card>x</Card></Section>;`, LAYOUT)).toEqual([]);
+  });
+
+  test("R19 对 query 的 data 写 ?? 0、|| 0、?? []、|| '正常' 报", () => {
+    const src = `export function A() {
+  const { data } = useTasks();
+  const q = useQuota();
+  const { data: rows } = useRows();
+  const a = data?.count ?? 0;
+  const b = data?.items || 0;
+  const c = rows ?? [];
+  const d = q.data?.state || '正常';
+  const e = q.data.list ?? [];
+  return null;
+}`;
+    expect(ratchetOf(src)).toEqual(['R19', 'R19', 'R19', 'R19', 'R19']);
+    expect(scanSource(src, PAGE).find((h) => h.rule === 'R19')?.line).toBe(5);
+  });
+  test('R19 放行：不是 query 的数据、非默认值、组件层', () => {
+    const src = `export function A() {
+  const { data } = useTasks();
+  const local = props.count ?? 0;
+  const label = data?.name ?? '未命名';
+  const n = data?.count ?? null;
+  const [list] = useState([]);
+  const x = list ?? [];
+  return null;
+}`;
+    expect(ratchetOf(src)).toEqual([]);
+    expect(ratchetOf(`function A() { const { data } = useTasks(); return data ?? 0; }`, LAYOUT)).toEqual([]);
+  });
+
+  test('R20 StatusBadge 写 tone=、label= 报；状态中文映射表报', () => {
+    expect(
+      ratchetOf(`const A = () => <StatusBadge tone="ok" label="在跑" />;`).filter((r) => r === 'R20'),
+    ).toEqual(['R20', 'R20']);
+    expect(ratchetOf(`const M = { running: '在干活', failed: '出错了', other: 'x' };`)).toEqual(['R20']);
+    expect(ratchetOf(`const M: Record<string, string> = { 'ok': '正常', 'error': '异常' };`)).toEqual([
+      'R20',
+    ]);
+  });
+  test('R20 主按钮：.map( 里的报；同一文件第二个报', () => {
+    expect(ratchetOf(`const A = () => rows.map((r) => <Button variant="primary">{r}</Button>);`)).toEqual([
+      'R20',
+    ]);
+    expect(
+      ratchetOf(
+        `const A = () => <><Button variant="primary">a</Button><Button variant="primary">b</Button></>;`,
+      ),
+    ).toEqual(['R20']);
+  });
+  test('R20 放行：status= 取字典、一个主按钮、次按钮在 .map( 里、只有一个状态键的对象、组件层', () => {
+    expect(ratchetOf(`const A = () => <StatusBadge status="task:running" />;`)).toEqual([]);
+    expect(
+      ratchetOf(
+        `const A = () => <><Button variant="primary">a</Button>{rows.map((r) => <Button variant="default">{r}</Button>)}</>;`,
+      ),
+    ).toEqual([]);
+    expect(ratchetOf(`const M = { running: '在干活', title: '标题' };`)).toEqual([]);
+    expect(ratchetOf(`const A = () => <StatusBadge tone="ok" label="在跑" />;`, LAYOUT)).toEqual([]);
+  });
+});
+
+describe('棘轮：基线', () => {
+  const hitsOf = (src: string, file: string) =>
+    scanSource(src, file).filter((h) => RATCHET_RULES.includes(h.rule));
+  const old = hitsOf(`<p className="text-ink-3 p-4" />`, 'src/routes/old.tsx'); // R13 ×2
+
+  test('现数不超基线：通过；比基线少：也通过（数只许减）', () => {
+    expect(compareToBaseline(old, { 'src/routes/old.tsx': { R13: 2 } })).toEqual([]);
+    expect(compareToBaseline(old, { 'src/routes/old.tsx': { R13: 5 } })).toEqual([]);
+  });
+  test('超过基线就红：报文件、规则、基线数、现数，并列出每一处（故意造红）', () => {
+    const errors = compareToBaseline(old, { 'src/routes/old.tsx': { R13: 1 } });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('src/routes/old.tsx R13 基线 1，现在 2：只许减');
+    expect(errors[0]).toContain('src/routes/old.tsx:1');
+  });
+  test('新文件（不在基线里）一律 0：有一处就红（故意造红）', () => {
+    const errors = compareToBaseline(hitsOf(`<p className="p-4" />`, 'src/routes/brand-new.tsx'), {
+      'src/routes/old.tsx': { R13: 2 },
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('src/routes/brand-new.tsx R13 新文件不许有');
+  });
+  test('基线里写了 R13 不能拿去放行 R14：按规则分开记', () => {
+    const hits = hitsOf(`import { Button } from '../components/ui/button';`, 'src/routes/old.tsx');
+    expect(compareToBaseline(hits, { 'src/routes/old.tsx': { R13: 9 } })).toHaveLength(1);
+  });
+  test('R0–R12 不进基线：它们一直严格，基线再大也报', () => {
+    const strict = strictScan(`<p className="text-sm" />`, 'src/routes/old.tsx');
+    expect(strict.map((h) => h.rule)).toEqual(['R2']);
+    expect(ratchetCounts(strict)).toEqual({});
+    expect(check({ 'src/routes/old.tsx': { R13: 99 } }, strict).length).toBe(1);
+  });
+  test('基线序列化后再读回一样；文件按名字排序', () => {
+    const base: Baseline = { 'src/routes/b.tsx': { R13: 2, R17: 1 }, 'src/routes/a.tsx': { R15: 3 } };
+    const text = serializeBaseline(base);
+    expect(text.indexOf('a.tsx')).toBeLessThan(text.indexOf('b.tsx'));
+    expect(parseBaseline(text)).toEqual(base);
+  });
+  test('基线格式坏了要明确报错，不当成 0（故意造红）', () => {
+    const bad = (t: string) => () => parseBaseline(t, 'baseline.json');
+    expect(bad('not json')).toThrow(/baseline\.json 格式不对：不是合法 JSON/);
+    expect(bad('[]')).toThrow(/最外层要是对象/);
+    expect(bad('{"files":{}}')).toThrow(/version 要是 1/);
+    expect(bad('{"version":1}')).toThrow(/files 要是对象/);
+    expect(bad('{"version":1,"files":{"a.tsx":5}}')).toThrow(/a\.tsx 的值要是对象/);
+    expect(bad('{"version":1,"files":{"a.tsx":{"R13":"3"}}}')).toThrow(/R13 要是正整数/);
+    expect(bad('{"version":1,"files":{"a.tsx":{"R13":0}}}')).toThrow(/R13 要是正整数/);
+    expect(bad('{"version":1,"files":{"a.tsx":{"R2":1}}}')).toThrow(/基线不管的规则「R2」/);
+    expect(() =>
+      loadBaseline(join(dirname(fileURLToPath(import.meta.url)), 'no-such-baseline.json')),
+    ).toThrow(/读不到基线文件/);
   });
 });
 
@@ -301,7 +548,7 @@ describe('词法和报错', () => {
   });
   test('JSX 正文里的撇号不当字符串开头', () => {
     const src = [`<p>it's fine</p>`, `<div className="text-xs" />`].join('\n');
-    expect(scanSource(src, PAGE).map((h) => [h.cls, h.line])).toEqual([['text-xs', 2]]);
+    expect(strictScan(src, PAGE).map((h) => [h.cls, h.line])).toEqual([['text-xs', 2]]);
   });
   test('正则字面量里的引号不打乱字符串', () => {
     const src = `const re = /['"]/g; const c = "rounded-xl";`;
@@ -315,7 +562,7 @@ describe('词法和报错', () => {
     expect(utilityOf('-mt-9')).toBe('mt-9');
   });
   test('报错写清文件、行、类名、换成什么、规范第几节', () => {
-    const [hit] = scanSource('\n<div className="text-xs" />', PAGE);
+    const [hit] = strictScan('\n<div className="text-xs" />', PAGE);
     expect(hit).toBeDefined();
     const msg = formatHit(hit as Hit);
     expect(msg).toContain('src/routes/sample.tsx:2');
@@ -334,7 +581,7 @@ describe('词法和报错', () => {
 
 describe('计数', () => {
   test('按文件、按规则', () => {
-    const hits = scanSource('"text-xs text-sm rounded-xl"', PAGE);
+    const hits = strictScan('"text-xs text-sm rounded-xl"', PAGE);
     expect(countHits(hits)).toEqual({ [PAGE]: { R2: 2, R5: 1 } });
   });
 });
@@ -348,7 +595,7 @@ describe('令牌名不撞车', () => {
 });
 
 describe('整个 packages/web/src', () => {
-  test('严格模式：一条违规都没有', () => {
+  test('R0–R12 严格一条都没有；R13–R20 不超基线（lint-design.baseline.json）', () => {
     expect(check()).toEqual([]);
   });
 });

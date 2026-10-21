@@ -183,7 +183,7 @@ describe('首页在跑卡片', () => {
         ]}
       />,
     );
-    const line = async (title: string) => (await screen.findByText(title)).closest('li');
+    const line = async (title: string) => (await screen.findByText(title)).closest('[data-run-row]');
     expect((await line('#1 全程单'))?.querySelector('[data-flow-mode="full"]')?.textContent).toBe('全程');
     expect((await line('#2 三段单'))?.querySelector('[data-flow-mode="three"]')?.textContent).toBe('三段');
     expect((await line('#4 退回单'))?.querySelector('[data-flow-fallback]')?.textContent).toBe('退回三步');

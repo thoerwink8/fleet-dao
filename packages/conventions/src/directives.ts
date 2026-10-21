@@ -1,4 +1,4 @@
-// 创始人引导记在仓里：docs/directives/<YYYY-MM>/<编号>.md，一条引导一个文件，随 PR 走（决定 0093）。
+// 创始人引导记在仓里：docs/directives/<YYYY-MM>/<编号>.md，一条引导一个文件，随 PR 走（决定 0097 #2169；只收 AI 做法类，先判类见决定 0111）。
 // 为什么不再记在置顶单 #1055 的评论里：评论分页读（约 11-01 撞 2000 条上限）、开会话钩子每次问 GitHub 常超时、改评论没锁、
 // 单被误关过 22 小时没人发现、办完要另记一笔（16 条挂着没人收）。放进仓：开会话钩子读本地 origin/main（不联网、不限条数），
 // 法国引擎和别家 CLI 照读文件，git 历史就是审计；「办完」那一笔和活在同一个 PR 里合进主线，合了就算办完，核得出来。
@@ -315,7 +315,7 @@ export type LineageInfo =
   | { status: 'none' | 'unchecked'; why: string };
 
 const HAND_FILL =
-  '手填：pnpm progress directive "<创始人原话>" --at "<他说话的时间，如 2026-10-14 16:30>" [--owner <Mirasim 会话目录名或「无主」>]';
+  '手填：pnpm progress directive --kind ai "<创始人原话>" --at "<他说话的时间，如 2026-10-14 16:30>" [--owner <Mirasim 会话目录名或「无主」>]';
 
 /**
  * 定下要记的原话、时间、主人。原话不给就取 prompt-log 里本会话他最近一句（连时间）；原话给了、--at 没给，只有和 prompt-log

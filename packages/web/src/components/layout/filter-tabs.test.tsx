@@ -35,20 +35,31 @@ describe('FilterTabs', () => {
     expect(screen.getByRole('tab', { name: '完成' }).textContent).toBe('完成');
   });
 
-  test('次级样式没有灰底轨道，选中的用 selected 令牌（不再是白底卡片）', () => {
+  test('主筛选是 Arco 下划线页签：选中品牌色字加品牌色底线，没有灰底轨道；次级的选中用 fill-2 底（#3509）', () => {
     const { rerender } = render(
       <FilterTabs aria-label="按状态" items={items} value="all" onChange={() => {}} />,
     );
-    expect(screen.getByRole('tablist').getAttribute('data-variant')).toBe('primary');
-    expect(screen.getByRole('tablist').className).toContain('bg-muted');
-    expect(screen.getByRole('tab', { name: /全部/ }).className).toContain('bg-selected');
-    expect(screen.getByRole('tab', { name: /全部/ }).className).not.toContain('bg-card');
+    const list = screen.getByRole('tablist');
+    expect(list.getAttribute('data-variant')).toBe('primary');
+    expect(list.className).not.toContain('bg-fill-2');
+    const on = screen.getByRole('tab', { name: /全部/ });
+    expect(on.className).toContain('border-brand');
+    expect(on.className).toContain('text-brand-ink');
+    expect(on.className).not.toContain('bg-card');
+    const off = screen.getByRole('tab', { name: '完成' });
+    expect(off.className).toContain('border-transparent');
+    expect(off.className).toContain('text-ink-2');
+    // 计数：选中的 brand-1 底，没选的灰底
+    expect(on.querySelector('[data-tab-count]')?.className).toContain('bg-brand-1');
+    expect(screen.getByRole('tab', { name: /在跑/ }).querySelector('[data-tab-count]')?.className).toContain(
+      'bg-fill-2',
+    );
     rerender(
       <FilterTabs aria-label="按状态" variant="secondary" items={items} value="all" onChange={() => {}} />,
     );
     expect(screen.getByRole('tablist').getAttribute('data-variant')).toBe('secondary');
-    expect(screen.getByRole('tablist').className).not.toContain('bg-muted');
-    expect(screen.getByRole('tab', { name: /全部/ }).className).toContain('bg-selected');
+    expect(screen.getByRole('tab', { name: /全部/ }).className).toContain('bg-fill-2');
+    expect(screen.getByRole('tab', { name: /全部/ }).className).not.toContain('border-b-2');
   });
 
   test('页签：方向键、Home、End 换页签（循环），只有选中的在 Tab 序里；idPrefix 给页签 id', () => {
@@ -89,5 +100,25 @@ describe('FilterTabs', () => {
     expect(screen.getByRole('group').getAttribute('aria-label')).toBe('按级别');
     expect(screen.getByRole('button', { name: /在跑/ }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('button', { name: /全部/ }).getAttribute('aria-pressed')).toBe('false');
+  });
+
+  test('segmented：平的分段控件（样稿 .seg）——灰底槽、选中白底品牌色字，不浮起、不带阴影和描边', () => {
+    render(
+      <FilterTabs
+        mode="toggle"
+        variant="segmented"
+        aria-label="三步法或全程"
+        items={items}
+        value="run"
+        onChange={() => {}}
+      />,
+    );
+    const group = screen.getByRole('group');
+    expect(group.className).toContain('bg-fill-2');
+    expect(group.className).not.toMatch(/shadow|border/);
+    const on = screen.getByRole('button', { name: /在跑/ });
+    expect(on.className).toContain('bg-card');
+    expect(on.className).toContain('text-brand-ink');
+    expect(screen.getByRole('button', { name: /全部/ }).className).not.toContain('bg-card');
   });
 });
