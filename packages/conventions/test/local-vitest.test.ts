@@ -111,6 +111,9 @@ it('快照读取当前 tracked 脏改、新文件和删除，不用 HEAD 或暂�
   expect(sourceDigest(snapshotSource(root))).not.toBe(before);
 });
 
+// 先枚举本仓测试全集，再把全部跟踪文件读进快照，然后才因没配 runner 失败。
+// 单跑约 10 秒；整段 test:changed 磁盘忙时，同类全仓扫描会从不到 1 秒涨到约 9 秒。
+// 同步读完才返回，时限必须盖住做完。
 it('Windows 命中 Linux 测试且没有配置时明确报错，不能返回成功', () => {
   // 用本仓实际测试全集核路由；此分支在启动任何测试前失败。
   const root = new URL('../../../', import.meta.url);
@@ -122,7 +125,7 @@ it('Windows 命中 Linux 测试且没有配置时明确报错，不能返回成�
   );
   expect(result.error?.message).toContain('FLEET_TEST_LINUX_RUNNER');
   expect(result.status).toBeNull();
-});
+}, 180_000);
 
 it('tracked 父目录被换成链接时拒绝快照，不读取链接另一端的源码', { timeout: 0 }, () => {
   const root = mkdtempSync(join(tmpdir(), 'fleet-snapshot-link-'));

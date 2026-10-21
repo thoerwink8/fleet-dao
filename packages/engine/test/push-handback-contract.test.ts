@@ -602,6 +602,10 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
         expect(reads).toBe(2);
         expect(calls.segment[1]?.brief).toEqual(h1);
         await waitUntil(() => segmentsDone === 2, 'second segment activity returned');
+        // 段活动返回后工作流还会调度自测。放弃若落在自测已调度、尚未开始的窗口，跳时测试服务端
+        // 完成工作流任务时报 ACTIVITY_UNKNOWN，这一拍不再完成，用例坐到 60 秒。真服务端不会卡住。
+        // 先等到再次停在权限停点（没有在途的可取消活动），再放弃收尾。
+        await parked(handle);
         await abandon(handle);
       },
       // 本例核统计失败后的控制消费，不驱逐工作流；固定原历史/真换 worker 另外覆盖重放。
