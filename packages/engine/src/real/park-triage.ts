@@ -487,15 +487,39 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         const parked: GenerationView[] = [];
         for (const g of gate.alive) {
           const runId = runIdOf(g);
-          if (runId === null) continue;
+          if (runId === null)
+            return { ok: false, stage: 'waiting', why: `旧代 ${g.workflowId} 的 run 身份未核实，不补发叫停` };
           try {
             const status = await withDeadline((c) => pinned(c, g.workflowId, runId).query(taskStatusQuery));
             if (status.phase === 'parked') parked.push(g);
-          } catch {
-            // 读不到姿态：不发信号
+            else if (status.phase !== 'abandoned')
+              return {
+                ok: false,
+                stage: 'waiting',
+                why: `旧代 ${g.workflowId} 现在处于 ${status.phase}，整批不补发叫停`,
+              };
+          } catch (err) {
+            return {
+              ok: false,
+              stage: 'waiting',
+              why: `旧代 ${g.workflowId} 的姿态没查成，整批不补发叫停：${errMessage(err)}`,
+            };
           }
         }
         if (parked.length > 0) {
+          const beforeSignal = await verifyOwnership(row);
+          if (!beforeSignal.ok)
+            return {
+              ok: false,
+              stage: beforeSignal.kind === 'mismatch' ? 'final' : 'waiting',
+              why: beforeSignal.why,
+            };
+          if (!beforeSignal.canAct)
+            return {
+              ok: false,
+              stage: 'waiting',
+              why: `任务状态已变成 ${beforeSignal.state}，这一轮不补发叫停`,
+            };
           try {
             await journal({ phase: 'stop-requested', trail });
           } catch (err) {

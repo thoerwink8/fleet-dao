@@ -830,4 +830,51 @@ describe('real/park-triage', () => {
     expect(fake.w.signals).toEqual([WF1, WF1B]);
     expect(fake.w.starts).toEqual(['task:acme/app#7:r3']);
   });
+
+  it.each(['running', 'unreadable'])(
+    '补发前任何旧代姿态为 %s：整批拒绝，不对其它旧代补发叫停',
+    async (posture) => {
+      const { fake, state, d } = await seedRedoRig();
+      fake.w.runs.set(WF2, { runId: 'run-2', status: 'RUNNING', phase: 'parked' });
+      await triageParkedTasks(d);
+      state.stalled = false;
+      const handle = fake.client.workflow.getHandle;
+      fake.client.workflow.getHandle = (id) => {
+        const old = handle(id);
+        return {
+          ...old,
+          query: async () => {
+            if (id === WF1) {
+              if (posture === 'unreadable') throw new Error('posture unavailable');
+              return { ...(await old.query()), phase: 'running' };
+            }
+            return old.query();
+          },
+        };
+      };
+      await triageParkedTasks(d);
+      expect(fake.w.signals).toEqual([WF1, WF2]);
+      expect(fake.w.starts).toEqual([]);
+    },
+  );
+
+  it('接续查询旧代姿态期间任务转本机：补发信号前重读归属并拒绝', async () => {
+    const { fake, state, d } = await seedRedoRig();
+    await triageParkedTasks(d);
+    state.stalled = false;
+    const handle = fake.client.workflow.getHandle;
+    fake.client.workflow.getHandle = (id) => {
+      const old = handle(id);
+      return {
+        ...old,
+        query: async () => {
+          await t.db.update(tasks).set({ executor: 'local' });
+          return old.query();
+        },
+      };
+    };
+    await triageParkedTasks(d);
+    expect(fake.w.signals).toEqual([WF1]);
+    expect(fake.w.starts).toEqual([]);
+  });
 });
