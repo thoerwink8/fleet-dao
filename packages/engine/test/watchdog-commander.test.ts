@@ -17,6 +17,7 @@ const task = (over: Partial<CommanderStalledTask> = {}): CommanderStalledTask =>
   parkSeq: 2,
   stalledAt: new Date(NOW.getTime() - (COMMANDER_AFTER_MINUTES + 1) * 60_000),
   commanderSeen: false,
+  retry: null,
   ...over,
 });
 
@@ -76,6 +77,46 @@ describe('看门狗盯法国指挥官', () => {
     expect(seen.open.get(`${COMMANDER_ALERT_PREFIX}task-1`)).toMatchObject({
       resolvedBy: 'engine:watchdog',
     });
+  });
+
+  const bodyOf = (r: ReturnType<typeof rig>) => r.open.get(`${COMMANDER_ALERT_PREFIX}task-1`)?.body ?? '';
+  const openCard = (r: ReturnType<typeof rig>, key: string) =>
+    r.open.set(key, { title: '卡', body: '正文', resolvedAt: null, resolvedBy: null });
+
+  it('正文写出没人看的原因：到了认领上限', async () => {
+    const r = rig([task()]);
+    openCard(r, 'commander:daily-cap');
+    await watchCommander(r.deps, NOW);
+    expect(bodyOf(r)).toContain('上限');
+    expect(bodyOf(r)).toContain('commander:daily-cap');
+  });
+
+  it('正文写出没人看的原因：会话没起成（选不到路由），带第几次和原文', async () => {
+    const r = rig([task({ retry: { attempt: 2, why: '选不到路由（用途 commander）：拼车并发满了' } })]);
+    await watchCommander(r.deps, NOW);
+    expect(bodyOf(r)).toContain('没起成');
+    expect(bodyOf(r)).toContain('第 2 次');
+    expect(bodyOf(r)).toContain('选不到路由');
+  });
+
+  it('正文写出没人看的原因：用途没配模型', async () => {
+    const r = rig([task()]);
+    openCard(r, 'commander:no-model');
+    await watchCommander(r.deps, NOW);
+    expect(bodyOf(r)).toContain('没配模型');
+  });
+
+  it('查不出原因：照实写「没查出原因」，不编', async () => {
+    const r = rig([task()]);
+    await watchCommander(r.deps, NOW);
+    expect(bodyOf(r)).toContain('没查出原因');
+  });
+
+  it('已撤的上限卡不算原因', async () => {
+    const r = rig([task()]);
+    r.open.set('commander:daily-cap', { title: '卡', body: '正文', resolvedAt: NOW, resolvedBy: 'x' });
+    await watchCommander(r.deps, NOW);
+    expect(bodyOf(r)).not.toContain('commander:daily-cap');
   });
 
   it('未满 30 分钟不报', async () => {

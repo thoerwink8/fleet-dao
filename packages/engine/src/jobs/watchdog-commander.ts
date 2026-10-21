@@ -32,12 +32,31 @@ function raiseOnce(
   return alerts.raise({ ...input, link: COMMANDER_LINK, level: 'alert' });
 }
 
-function watchBody(task: CommanderStalledTask): { title: string; body: string } {
+/** park-triage 报的两张全局卡（jobs/park-triage.ts）：开着就是指挥官整体没在看的原因。 */
+export const COMMANDER_CAP_KEY = 'commander:daily-cap';
+export const COMMANDER_NO_MODEL_KEY = 'commander:no-model';
+
+/**
+ * 这张单没人看的原因，按能查到的先后写：全局上限卡开着 → 用途没配模型卡开着 → 这一次停下有「会话没起成」的记录
+ * （选不到路由、主线头没读到、会话报错……原文照写）→ 都不是就写「没查出原因」，不编。
+ */
+function whyUnseen(task: CommanderStalledTask, open: ReadonlySet<string>): string {
+  if (open.has(COMMANDER_CAP_KEY))
+    return `原因：指挥官 24 小时内的认领到了熔断上限（见提醒 ${COMMANDER_CAP_KEY}，里面有等着的单和下一个名额什么时候空出来），名额空出来之前不再看新的停下。`;
+  if (open.has(COMMANDER_NO_MODEL_KEY))
+    return `原因：路由用途「指挥官」没配模型（见提醒 ${COMMANDER_NO_MODEL_KEY}），指挥官会话起不来。`;
+  if (task.retry)
+    return `原因：指挥官会话没起成${task.retry.attempt === null ? '' : `（第 ${task.retry.attempt} 次）`}：${task.retry.why}；这一次停下不算处理过，下一轮再看，同一次停下最多试 3 次，第 3 次还没起成按默认动作执行。`;
+  return '原因：没查出原因（没有上限、没配模型、没有「会话没起成」的记录）；查 park-triage 定时任务这几轮的结果和日志，看指挥官开关（设置 engine.commander）是不是关着。';
+}
+
+function watchBody(task: CommanderStalledTask, open: ReadonlySet<string>): { title: string; body: string } {
   const ref = refOf(task);
   return {
     title: `停下的任务没人看：${ref}`,
     body: [
       `任务 ${ref} 已停下（停下于 ${task.stalledAt.toISOString()}），超过 30 分钟，法国指挥官还没看过。`,
+      whyUnseen(task, open),
       '看驾驶舱任务页和指挥官会话；指挥官认领这一次停下后，这张提醒自动撤。',
     ].join('\n'),
   };
@@ -58,16 +77,27 @@ export async function watchCommander(deps: CommanderWatchDeps, now: Date): Promi
     return out;
   }
 
+  const due = tasks.filter(
+    (task) =>
+      !task.commanderSeen && now.getTime() - task.stalledAt.getTime() >= COMMANDER_AFTER_MINUTES * 60_000,
+  );
+  // 全局原因（上限、没配模型）只读一次；读不到记进 problems，正文照常发（原因落到下一条能查到的）
+  const globalOpen = new Set<string>();
+  if (due.length > 0) {
+    for (const key of [COMMANDER_CAP_KEY, COMMANDER_NO_MODEL_KEY]) {
+      try {
+        const card = await deps.alerts.byKey(key);
+        if (card && card.resolvedAt === null) globalOpen.add(key);
+      } catch (err) {
+        out.problems.push(`读提醒 ${key} 没成，没人看的原因可能写得不全：${errMessage(err)}`);
+      }
+    }
+  }
   const wanted = new Map(
-    tasks
-      .filter(
-        (task) =>
-          !task.commanderSeen && now.getTime() - task.stalledAt.getTime() >= COMMANDER_AFTER_MINUTES * 60_000,
-      )
-      .map((task) => {
-        const text = watchBody(task);
-        return [keyOf(task), { ...text, task }] as const;
-      }),
+    due.map((task) => {
+      const text = watchBody(task, globalOpen);
+      return [keyOf(task), { ...text, task }] as const;
+    }),
   );
   out.found = wanted.size;
 
