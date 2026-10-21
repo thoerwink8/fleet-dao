@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { WorkflowHandle } from '@temporalio/client';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { createFakeWorld } from '../src/fakes.ts';
+import { createFakeWorld, type FakeWorld } from '../src/fakes.ts';
 import { PortError } from '../src/ports.ts';
 import type { PushHandbackPreflight, PushHandbackRequest } from '../src/push-handback.ts';
 import { requestPushHandback } from '../src/push-handback-client.ts';
@@ -67,7 +67,14 @@ function request(s: TaskStatus, id = 'request1'): PushHandbackRequest {
   if (!token) throw new Error('park token missing');
   return { version: 1, requestId: id, token, by: 'isolated-test', feedback: '修正写入工作流文件的交付' };
 }
-async function parked(h: WorkflowHandle) {
+// 先等假库写进停下再查。cache0 的工人每次查询都整段重放，从起头就每 50 毫秒查一次，负载下查询和真进度抢工人，
+// 20 秒走不到停下（replay/worker-replacement-3413/slow-parked-query.*；本机 accepted and ready 同样停在 implement）。
+// 已停过的再查，假库里已有停下，照旧直接轮询查询。
+async function parked(h: WorkflowHandle, w: FakeWorld) {
+  await w.until(
+    () => w.states.some((s) => s.phase === 'parked'),
+    'permission push park written to fake store',
+  );
   return pollQuery(
     () => h.query<TaskStatus>('taskStatus'),
     (s) => s.phase === 'parked' && s.waiting?.kind === 'human',
@@ -103,7 +110,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const s = await parked(h),
+        const s = await parked(h, w),
           r = request(s);
         const first = await requestPushHandback(h, r);
         expect(first.outcome).toBe('unknown');
@@ -114,7 +121,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
         expect(reads).toBe(1);
         expect(calls.segment).toHaveLength(1);
         expect(w.count('pushBranch')).toBe(1);
-        expect((await parked(h)).closedIssueClose?.token).toEqual(s.closedIssueClose?.token);
+        expect((await parked(h, w)).closedIssueClose?.token).toEqual(s.closedIssueClose?.token);
         await abandon(h);
       },
       { tasks },
@@ -149,7 +156,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const r = request(await parked(h));
+        const r = request(await parked(h, w));
         const result = requestPushHandback(h, r).then((x) => {
           settled = true;
           return x;
@@ -204,14 +211,14 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
             taskQueue,
             args: [task()],
           });
-          const result = requestPushHandback(h, request(await parked(h)));
+          const result = requestPushHandback(h, request(await parked(h, w)));
           await waitUntil(() => entered, 'trusted IO');
           if (control === 'continue') await h.signal(taskContinueSignal, { by: 'test' });
           else await h.signal(taskAbandonSignal, { by: 'test', reason: 'during IO' });
           read.resolve(success);
           expect((await result).outcome).toBe('stale');
           if (control === 'continue') {
-            await parked(h);
+            await parked(h, w);
             expect(calls.segment).toHaveLength(1);
             await abandon(h);
           } else expect(((await h.result()) as { outcome: string }).outcome).toBe('abandoned');
@@ -235,10 +242,10 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const s = await parked(h);
+        const s = await parked(h, w);
         expect((await requestPushHandback(h, request(s))).outcome).toBe('budget-held');
         expect(calls.segment).toHaveLength(1);
-        expect((await parked(h)).round).toBe(s.round);
+        expect((await parked(h, w)).round).toBe(s.round);
         expect(w.count('pushBranch')).toBe(1);
         await abandon(h);
       },
@@ -268,7 +275,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const result = requestPushHandback(h, request(await parked(h)));
+        const result = requestPushHandback(h, request(await parked(h, w)));
         await entered.promise;
         await h.signal(taskContinueSignal, { by: 'test' });
         round.resolve();
@@ -299,12 +306,12 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const s = await parked(h);
+        const s = await parked(h, w);
         expect(s.round).toBe(3);
         expect((await requestPushHandback(h, request(s))).outcome).toBe('budget-held');
         expect(reads).toBe(0);
         expect(calls.segment).toHaveLength(3);
-        expect((await parked(h)).round).toBe(3);
+        expect((await parked(h, w)).round).toBe(3);
         await abandon(h);
       },
       { tasks },
@@ -349,7 +356,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           'permission push park written to fake store',
         );
         diagnostics.mark('wait:first-worker:parked-query');
-        r = request(await parked(h));
+        r = request(await parked(h, w));
         diagnostics.mark('wait:first-worker:handback-update');
         expect((await requestPushHandback(h, r)).outcome).toBe('unknown');
         diagnostics.mark('wait:first-worker:worker-stop');
@@ -400,7 +407,7 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
           taskQueue,
           args: [task()],
         });
-        const r = request(await parked(h));
+        const r = request(await parked(h, w));
         r.token = { ...r.token, generation: 2 };
         expect(await requestPushHandback(h, r)).toMatchObject({ outcome: 'stale', code: 'unsupported_hold' });
         expect(reads).toBe(0);

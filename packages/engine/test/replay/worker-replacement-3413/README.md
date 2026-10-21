@@ -30,6 +30,6 @@
 
 ## 原用例怎么改的
 
-`push-handback.test.ts` 第一个工人先用假世界的 `until` 等「停下」写进假库（`saveTaskState` 的 phase `parked`，不发查询），再照旧 `parked()` 查一次拿凭据。60 秒、20 秒等待、cache0、换工人、业务断言都没变，没加重试或 sleep。这样第一段不再在走向停下的路上查询：上面两种卡法的触发都在这段。查询撞上本地活动结果这个生产问题本身没修（归 #3258），由 `la-query-split.test.ts` 确定钉住，不再靠这条用例偶发撞上。
+`push-handback.test.ts` 第一个工人先用假世界的 `until` 等「停下」写进假库（`saveTaskState` 的 phase `parked`，不发查询），再照旧 `parked()` 查一次拿凭据。60 秒、20 秒等待、cache0、换工人、业务断言都没变，没加重试或 sleep。这样第一段不再在走向停下的路上查询：上面两种卡法的触发都在这段。同文件的 `parked()` 也先等假库写进停下再轮询查询：本机四文件并行时 `accepted and ready do not succeed before main loop consumes; duplicate returns same receipt`（同为 cache0）在查停点等满 20 秒，最后状态 phase 仍是 implement，属第二种卡法，没有取证帧，不是这份 TMPRL1100。已停过的再查，假库里已有停下，照旧直接轮询。查询撞上本地活动结果这个生产问题本身没修（归 #3258），由 `la-query-split.test.ts` 确定钉住，不再靠这条用例偶发撞上。
 
 CI run 39392992046 没留历史；PR #3488 那次（`test (5/8)`，同一处查停点 20 秒超时、phase 停在 brief）日志里若有取证帧，这里也还没解出来。两次都不能断言是这个机制，只是症状一致。
