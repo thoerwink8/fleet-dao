@@ -305,6 +305,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let master: EngineMasterGate | undefined;
   let recordSkippedRun: ((jobId: string, why: string) => Promise<void>) | undefined;
   let closeInterruptedScheduleRuns: Parameters<typeof startEngineTimers>[2] | undefined;
+  let recordUnfinishedScheduleRuns: Parameters<typeof realTimerHost>[3];
   let close: () => Promise<void> = async () => {};
   let statusFile: string | undefined;
   let control: DrainControl | undefined;
@@ -323,6 +324,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     master = real.master;
     recordSkippedRun = real.recordSkippedRun;
     closeInterruptedScheduleRuns = real.closeInterruptedScheduleRuns;
+    recordUnfinishedScheduleRuns = real.recordUnfinishedScheduleRuns;
     close = real.close;
     statusFile = join(real.stateDir, 'drain.json');
     control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
@@ -399,6 +401,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
           async (id) => (lastRuns ? ((await lastRuns).get(id) ?? null) : null),
           master,
           recordSkippedRun,
+          recordUnfinishedScheduleRuns,
         ),
         closeInterruptedScheduleRuns,
       );

@@ -49,12 +49,18 @@ export interface TimerHost {
   master?: Pick<EngineMasterGate, 'refresh' | 'state'>;
   /** 总开关关着、这一轮被跳过：记一条 partial 进 schedule_runs（看门狗不当成「停了」）。记不上抛，由调用方（runRound）记日志。 */
   recordSkipped?(jobId: string, why: string): Promise<void>;
+  /**
+   * 停机宽限到了、这些任务的一轮还没回：在它们本进程里开始的未结束 schedule_runs 上留一笔「退出时仍在跑」的见证
+   * （不结束这一行，结果仍未知，下次启动补记）。记不上抛，由 stop 记日志，不挡停机。
+   */
+  recordUnfinished?(jobIds: readonly string[], since: Date, at: Date): Promise<void>;
 }
 
 export const realTimerHost = (
   lastStartedAt: TimerHost['lastStartedAt'],
   master: NonNullable<TimerHost['master']>,
   recordSkipped: NonNullable<TimerHost['recordSkipped']>,
+  recordUnfinished?: NonNullable<TimerHost['recordUnfinished']>,
 ): TimerHost => ({
   now: () => Date.now(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -63,6 +69,7 @@ export const realTimerHost = (
   log: (level, text) => console[level](text),
   master,
   recordSkipped,
+  ...(recordUnfinished ? { recordUnfinished } : {}),
 });
 
 export interface EngineTimers {
@@ -122,6 +129,7 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
   const inFlight = new Map<string, Promise<void>>();
   const handles = new Map<string, unknown>();
   let stopped = false;
+  const startedAt = new Date(host.now());
 
   const runRound = (job: TimerJob, why: string): void => {
     if (stopped) return;
@@ -225,7 +233,18 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
         }),
       ]);
       host.clearTimeout(graceTimer);
-      return [...inFlight.keys()];
+      const unfinished = [...inFlight.keys()];
+      if (unfinished.length > 0 && host.recordUnfinished) {
+        try {
+          await host.recordUnfinished(unfinished, startedAt, new Date(host.now()));
+        } catch (error) {
+          host.log(
+            'error',
+            `停机宽限到了还没回的定时任务（${unfinished.join('、')}）没把「退出时仍在跑」记进 schedule_runs：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      return unfinished;
     },
   };
 }
