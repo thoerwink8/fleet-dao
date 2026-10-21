@@ -2167,7 +2167,7 @@ export async function runParkTriageJob(deps: ParkTriageDeps): Promise<ScheduleRe
   let got: ParkTriageResult | undefined;
   try {
     got = await triageParkedTasks(deps);
-    const line = `停着的引擎任务 ${got.listed} 张，指挥官候选（含验收责任）${got.candidates} 张，认领 ${got.claimed} 张，执行 ${got.acted.length} 张，留给人 ${got.left.length} 张，会话没起成下一轮再看 ${got.retrying.length} 张`;
+    const line = `停着的引擎任务 ${got.listed} 张，指挥官候选（含验收责任）${got.candidates} 张，认领 ${got.claimed} 张，执行 ${got.acted.length} 张，留给人 ${got.left.length} 张，读取或核验未成、保留后续处理 ${got.retrying.length} 张`;
     if (got.noModel) result = { outcome: 'partial', why: `${got.skipped ?? '没配模型'}；${line}` };
     else if (got.capped || got.problems.length > 0)
       result = {
