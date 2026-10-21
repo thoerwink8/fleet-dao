@@ -8,13 +8,10 @@ const [action, ...rest] = process.argv.slice(2);
 const log = process.env.FLEET_FAKE_SCOPE_LOG;
 if (log) appendFileSync(log, `${JSON.stringify({ action, args: rest, env: process.env })}\n`);
 
-if (action === 'capabilities') {
-  if (process.env.FLEET_FAKE_SCOPE_CAPABILITIES !== undefined) {
-    process.stdout.write(process.env.FLEET_FAKE_SCOPE_CAPABILITIES);
-    process.exit(0);
-  }
-  process.stdout.write(
-    JSON.stringify({
+function holdPayload(): string {
+  if (action === 'cleanup-status') return process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT ?? '';
+  if (action === 'capabilities') {
+    return JSON.stringify({
       version: 1,
       state: 'ok',
       features: [
@@ -25,81 +22,137 @@ if (action === 'capabilities') {
         'locked-adopt',
         'temporary-files',
       ],
-    }),
-  );
-} else if (action === 'cleanup-status' && process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES) {
-  // 分页：按调用顺序逐个吐 JSON 数组里的回执，用过几页记在 FLEET_FAKE_SCOPE_CLEANUP_COUNTER 文件；吐完了按读失败退出
-  const counter = process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER as string;
-  const used = existsSync(counter) ? Number(readFileSync(counter, 'utf8')) : 0;
-  writeFileSync(counter, String(used + 1));
-  const pages = JSON.parse(process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES) as unknown[];
-  if (used >= pages.length) process.exit(1);
-  process.stdout.write(JSON.stringify(pages[used]));
-} else if (action === 'cleanup-status') {
-  process.stdout.write(process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT ?? '');
-  process.exit(Number(process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT ?? '0'));
-} else if (action === 'run') {
-  const at = rest.indexOf('--');
-  const cwdAt = rest.indexOf('--cwd');
-  const command = rest.slice(at + 1);
-  // 和真帮手一样：环境只剩 FLEET_* 这几类；PATH 取 FLEET_SESSION_PATH（没给用同一个默认），会话用户自己写得动的
-  // ~/.local/bin 接在最后
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (
-      v !== undefined &&
-      /^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$/.test(k)
-    )
-      env[k] = v;
+    });
   }
-  env.HOME = '/home/fake-session-user';
-  env.PATH = `${process.env.FLEET_SESSION_PATH ?? '/usr/local/bin:/usr/bin:/bin'}:${env.HOME}/.local/bin`;
-  const child = spawn(command[0] as string, command.slice(1), {
-    cwd: cwdAt >= 0 ? rest[cwdAt + 1] : '/',
-    env,
-    stdio: 'inherit',
-  });
-  child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
-  process.on('SIGTERM', () => child.kill('SIGTERM'));
-} else if (action === 'adopt') {
-  // 退出码由测试摆布：验 adoptWorktree 把各个退出码翻成哪种 AdoptWorktreeResult
-  if (process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR)
-    process.stderr.write(process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR);
-  process.stdout.write(
-    JSON.stringify({
-      version: 1,
-      state: 'adopted',
-      identity: { lex: rest[0], real: rest[0], dev: '0', ino: '0', uid: '0' },
-    }),
-  );
-  process.exit(Number(process.env.FLEET_FAKE_SCOPE_ADOPT_EXIT ?? '0'));
-} else if (action === 'list') {
-  process.stdout.write(process.env.FLEET_FAKE_SCOPE_LIST_STDOUT ?? '');
-  process.exit(Number(process.env.FLEET_FAKE_SCOPE_LIST_EXIT ?? '0'));
-} else if (action === 'remove') {
-  // 标准输出和退出码由测试摆布：验 removeWorktreeDir 怎么认 removed / gone / 认不出
-  process.stdout.write(
-    process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT ??
+  return '';
+}
+
+function keepAlive(): void {
+  setInterval(() => {}, 1 << 30);
+}
+
+function main(): void {
+  if (action === 'capabilities') {
+    if (process.env.FLEET_FAKE_SCOPE_CAPABILITIES !== undefined) {
+      process.stdout.write(process.env.FLEET_FAKE_SCOPE_CAPABILITIES);
+      process.exit(0);
+    }
+    process.stdout.write(
       JSON.stringify({
         version: 1,
-        state: 'removed',
-        identity: { lex: rest[0], real: rest[0], dev: rest[2], ino: rest[4], uid: rest[6] },
-        transaction: 'a'.repeat(64),
+        state: 'ok',
+        features: [
+          'tree-usage',
+          'identity-remove',
+          'cleanup-status',
+          'cleanup-rollback',
+          'locked-adopt',
+          'temporary-files',
+        ],
       }),
-  );
-  if (process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR)
-    process.stderr.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR);
-  process.exit(Number(process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT ?? '0'));
-} else if (action === 'org-use') {
-  // 标准输出、标准错误、退出码由测试摆布：验 switchSessionOrg 怎么认 switched / already / failed / 认不出；
-  // FLEET_FAKE_SCOPE_ORG_HANG_MS 给了就先睡这么久（验超时）
-  const hang = Number(process.env.FLEET_FAKE_SCOPE_ORG_HANG_MS ?? '0');
-  setTimeout(() => {
-    process.stdout.write(process.env.FLEET_FAKE_SCOPE_ORG_STDOUT ?? `switched ${rest[0]}\n`);
-    if (process.env.FLEET_FAKE_SCOPE_ORG_STDERR)
-      process.stderr.write(process.env.FLEET_FAKE_SCOPE_ORG_STDERR);
-    process.exit(Number(process.env.FLEET_FAKE_SCOPE_ORG_EXIT ?? '0'));
-  }, hang);
-} else {
+    );
+  } else if (action === 'cleanup-status' && process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES) {
+    // 分页：按调用顺序逐个吐 JSON 数组里的回执，用过几页记在 FLEET_FAKE_SCOPE_CLEANUP_COUNTER 文件；吐完了按读失败退出
+    const counter = process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER as string;
+    const used = existsSync(counter) ? Number(readFileSync(counter, 'utf8')) : 0;
+    writeFileSync(counter, String(used + 1));
+    const pages = JSON.parse(process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES) as unknown[];
+    if (used >= pages.length) process.exit(1);
+    process.stdout.write(JSON.stringify(pages[used]));
+  } else if (action === 'cleanup-status') {
+    process.stdout.write(process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT ?? '');
+    process.exit(Number(process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT ?? '0'));
+  } else if (action === 'run') {
+    const at = rest.indexOf('--');
+    const cwdAt = rest.indexOf('--cwd');
+    const command = rest.slice(at + 1);
+    // 和真帮手一样：环境只剩 FLEET_* 这几类；PATH 取 FLEET_SESSION_PATH（没给用同一个默认），会话用户自己写得动的
+    // ~/.local/bin 接在最后
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (
+        v !== undefined &&
+        /^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$/.test(k)
+      )
+        env[k] = v;
+    }
+    env.HOME = '/home/fake-session-user';
+    env.PATH = `${process.env.FLEET_SESSION_PATH ?? '/usr/local/bin:/usr/bin:/bin'}:${env.HOME}/.local/bin`;
+    const child = spawn(command[0] as string, command.slice(1), {
+      cwd: cwdAt >= 0 ? rest[cwdAt + 1] : '/',
+      env,
+      stdio: 'inherit',
+    });
+    child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+    process.on('SIGTERM', () => child.kill('SIGTERM'));
+  } else if (action === 'adopt') {
+    // 退出码由测试摆布：验 adoptWorktree 把各个退出码翻成哪种 AdoptWorktreeResult
+    if (process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR)
+      process.stderr.write(process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR);
+    process.stdout.write(
+      JSON.stringify({
+        version: 1,
+        state: 'adopted',
+        identity: { lex: rest[0], real: rest[0], dev: '0', ino: '0', uid: '0' },
+      }),
+    );
+    process.exit(Number(process.env.FLEET_FAKE_SCOPE_ADOPT_EXIT ?? '0'));
+  } else if (action === 'list') {
+    process.stdout.write(process.env.FLEET_FAKE_SCOPE_LIST_STDOUT ?? '');
+    process.exit(Number(process.env.FLEET_FAKE_SCOPE_LIST_EXIT ?? '0'));
+  } else if (action === 'remove') {
+    // 标准输出和退出码由测试摆布：验 removeWorktreeDir 怎么认 removed / gone / 认不出
+    process.stdout.write(
+      process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT ??
+        JSON.stringify({
+          version: 1,
+          state: 'removed',
+          identity: { lex: rest[0], real: rest[0], dev: rest[2], ino: rest[4], uid: rest[6] },
+          transaction: 'a'.repeat(64),
+        }),
+    );
+    if (process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR)
+      process.stderr.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR);
+    process.exit(Number(process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT ?? '0'));
+  } else if (action === 'org-use') {
+    // 标准输出、标准错误、退出码由测试摆布：验 switchSessionOrg 怎么认 switched / already / failed / 认不出；
+    // FLEET_FAKE_SCOPE_ORG_HANG_MS 给了就先睡这么久（验超时）
+    const hang = Number(process.env.FLEET_FAKE_SCOPE_ORG_HANG_MS ?? '0');
+    setTimeout(() => {
+      process.stdout.write(process.env.FLEET_FAKE_SCOPE_ORG_STDOUT ?? `switched ${rest[0]}\n`);
+      if (process.env.FLEET_FAKE_SCOPE_ORG_STDERR)
+        process.stderr.write(process.env.FLEET_FAKE_SCOPE_ORG_STDERR);
+      process.exit(Number(process.env.FLEET_FAKE_SCOPE_ORG_EXIT ?? '0'));
+    }, hang);
+  } else {
+    process.exit(0);
+  }
+}
+
+// FLEET_FAKE_SCOPE_HOLD：startup 先不写不退；protocol 只吐半截；exit 写完并关掉标准输出但不退；
+// cleanup 自己先退，留下还握着标准输出的子进程。HOLD_MS 只给 startup，睡完再走原来的动作。
+const hold = process.env.FLEET_FAKE_SCOPE_HOLD;
+const holdMs = Number(process.env.FLEET_FAKE_SCOPE_HOLD_MS ?? '0');
+if (hold === 'startup' && holdMs > 0) {
+  setTimeout(main, holdMs);
+} else if (hold === 'startup') {
+  keepAlive();
+} else if (hold === 'protocol') {
+  process.stdout.write('{');
+  keepAlive();
+} else if (hold === 'exit') {
+  process.stdout.write(holdPayload());
+  process.stdout.end();
+  keepAlive();
+} else if (hold === 'cleanup') {
+  process.stdout.write(holdPayload());
+  const kid = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], {
+    stdio: ['ignore', 'inherit', 'ignore'],
+  });
+  const pidfile = process.env.FLEET_FAKE_SCOPE_HOLD_PIDFILE;
+  if (pidfile && kid.pid !== undefined) writeFileSync(pidfile, String(kid.pid));
+  kid.unref();
   process.exit(0);
+} else {
+  main();
 }

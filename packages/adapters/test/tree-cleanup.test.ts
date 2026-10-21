@@ -2,8 +2,15 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
-import { CLEANUP_PAGE_LIMITS, cleanupStatus, readCleanupNamespace } from '../src/tree-cleanup.ts';
+import { afterEach, describe, expect, it, onTestFailed } from 'vitest';
+import {
+  CLEANUP_PAGE_LIMITS,
+  cleanupStatus,
+  type HelperWaitStage,
+  helperWaitStage,
+  readCleanupNamespace,
+  TreeHelperError,
+} from '../src/tree-cleanup.ts';
 
 const root = '/var/lib/fleet-work';
 const options = {
@@ -17,6 +24,25 @@ const namespace = {
   ino: '2',
   uid: '0',
 };
+function shown(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+  return String(error);
+}
+
+async function failedHelper(): Promise<never> {
+  try {
+    await readCleanupNamespace(root, options);
+  } catch (error) {
+    const message = shown(error);
+    expect(message).not.toContain('fake-scope-helper');
+    expect(message).not.toContain('FLEET_FAKE_SCOPE');
+    expect(message).not.toContain(process.execPath);
+    throw error;
+  }
+  throw new Error('失败被当成完成');
+}
+
 function reply(over: Record<string, unknown> = {}) {
   process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT = JSON.stringify({
     version: 1,
@@ -27,13 +53,40 @@ function reply(over: Record<string, unknown> = {}) {
     ...over,
   });
 }
+function reapHoldChild(): void {
+  const file = process.env.FLEET_FAKE_SCOPE_HOLD_PIDFILE;
+  if (!file) return;
+  try {
+    const pid = Number(readFileSync(file, 'utf8'));
+    if (Number.isInteger(pid) && pid > 1) process.kill(pid, 'SIGKILL');
+  } catch {
+    // 没写出来，或子进程已经退了。
+  }
+}
+
 afterEach(() => {
+  reapHoldChild();
   delete process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT;
   delete process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT;
+  delete process.env.FLEET_FAKE_SCOPE_HOLD;
+  delete process.env.FLEET_FAKE_SCOPE_HOLD_MS;
+  delete process.env.FLEET_FAKE_SCOPE_HOLD_PIDFILE;
 });
 
 describe('cleanup-status 原帮手端口的命名空间事实', () => {
+  // 首红：head fc1c891ef0d595c170e35cab1920bf814fb179aa，
+  // Actions run 39492760116 attempt 1，job test (3/8)，vitest 默认 5000ms。
+  // 那次日志没有启动/协议读取/退出/异步收尾。本用例再通过，也不能把当时卡在哪一段写成已经知道。
   it('正常空/已结记录不进pending；未结记录原样保留', async () => {
+    onTestFailed(({ task }) => {
+      const stage = TreeHelperError.pending?.stage;
+      if (!stage) return;
+      const timedOut = (task.result?.errors ?? []).some((error) => /timed out|5000/.test(shown(error)));
+      if (!timedOut) return;
+      throw new Error(
+        `帮手等待阶段=${stage}。原首红 head fc1c891ef0d595c170e35cab1920bf814fb179aa、run 39492760116、attempt 1、test (3/8) 的 5000ms 没有这一段，当时卡在哪一段仍未知`,
+      );
+    });
     reply();
     expect(await readCleanupNamespace(root, options)).toEqual([]);
     const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
@@ -59,10 +112,97 @@ describe('cleanup-status 原帮手端口的命名空间事实', () => {
   it('帮手因文件/链接/权限/坏记录失败，不当成空；原cleanupStatus截断仍拒绝', async () => {
     reply();
     process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT = '1';
-    await expect(readCleanupNamespace(root, options)).rejects.toThrow();
+    await expect(failedHelper()).rejects.toThrow('退出码 1');
     delete process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT;
     reply({ truncated: true });
     await expect(cleanupStatus(options)).rejects.toThrow('不完整');
+  });
+});
+
+describe('帮手等待阶段', () => {
+  const holdOf: Record<HelperWaitStage, string> = {
+    启动: 'startup',
+    协议读取: 'protocol',
+    退出: 'exit',
+    异步收尾: 'cleanup',
+  };
+
+  it('四段只看有没有起来、读没读完、退没退、输出关没关', () => {
+    const none = { spawned: false, stdoutBytes: 0, stdoutEnded: false, exited: false, closed: false };
+    expect(helperWaitStage(none)).toBe('启动');
+    expect(helperWaitStage({ ...none, spawned: true })).toBe('启动');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutBytes: 1 })).toBe('协议读取');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutBytes: 1, stdoutEnded: true })).toBe('退出');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutBytes: 1, stdoutEnded: true, exited: true })).toBe(
+      '异步收尾',
+    );
+    expect(helperWaitStage({ ...none, spawned: true, exited: true })).toBe('异步收尾');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutBytes: 1, exited: true })).toBe('异步收尾');
+  });
+
+  async function expectHold(stage: HelperWaitStage): Promise<void> {
+    process.env.FLEET_FAKE_SCOPE_HOLD = holdOf[stage];
+    let dir = '';
+    if (stage === '异步收尾') {
+      dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-hold-'));
+      process.env.FLEET_FAKE_SCOPE_HOLD_PIDFILE = join(dir, 'pid');
+    }
+    const stop = new AbortController();
+    const pending = readCleanupNamespace(root, { ...options, signal: stop.signal }).then(
+      () => {
+        throw new Error(`等待阶段=${stage} 被当成完成`);
+      },
+      (error: unknown) => error,
+    );
+    try {
+      const deadline = Date.now() + 4_000;
+      let reached = false;
+      while (Date.now() < deadline) {
+        const now = TreeHelperError.pending;
+        const started = stage !== '启动' || (now?.spawned === true && now.stdoutBytes === 0);
+        if (now?.stage === stage && started) {
+          reached = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      if (!reached) {
+        throw new Error(`4 秒内没有进入等待阶段=${stage}，停在 ${TreeHelperError.pending?.stage ?? '无'}`);
+      }
+      stop.abort();
+      const error = await pending;
+      expect(shown(error)).toContain(`等待阶段=${stage}`);
+      expect(shown(error)).not.toContain('fake-scope-helper');
+      expect(shown(error)).not.toContain(process.execPath);
+    } finally {
+      stop.abort();
+      reapHoldChild();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      await pending.catch(() => undefined);
+    }
+  }
+
+  it.each(['启动', '协议读取', '退出', '异步收尾'] as const)(
+    '真帮手停在%s就拒绝，不交回空列表',
+    async (stage) => {
+      await expectHold(stage);
+    },
+  );
+
+  it('短延迟后仍交回未结记录，不变成空', async () => {
+    const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
+    reply({ rows });
+    process.env.FLEET_FAKE_SCOPE_HOLD = 'startup';
+    process.env.FLEET_FAKE_SCOPE_HOLD_MS = '30';
+    expect(await readCleanupNamespace(root, options)).toEqual(rows);
+    expect(await cleanupStatus(options)).toEqual(rows);
+  });
+
+  it('没有输出或不完整回执不当成空', async () => {
+    process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT = '';
+    await expect(readCleanupNamespace(root, options)).rejects.toThrow('回执读失败');
+    process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT = '{';
+    await expect(readCleanupNamespace(root, options)).rejects.toThrow('回执读失败');
   });
 });
 

@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { type ChildProcess, execFile } from 'node:child_process';
 
 export interface TreeIdentity {
   lex: string;
@@ -19,14 +19,115 @@ type Reply = Record<string, unknown>;
 /** Only the fixed root helper can attest this private namespace; never inspect it as a session. */
 export const CLEANUP_TRANSACTION_DIR = '.cleanup-transactions';
 
+/** 一次帮手调用还在等的那一段。已经收齐并关闭之后不再占用。 */
+export type HelperWaitStage = '启动' | '协议读取' | '退出' | '异步收尾';
+
 export class TreeHelperError extends Error {
   readonly exitCode: number | null;
+  /**
+   * 还没落地的那一次调用。回调或取消之后清空。
+   * 测试超时钩子只读阶段名，不另开巡检出口。
+   */
+  static pending: {
+    stage: HelperWaitStage;
+    spawned: boolean;
+    stdoutBytes: number;
+    stdoutEnded: boolean;
+    exited: boolean;
+    closed: boolean;
+  } | null = null;
   constructor(message: string, exitCode: number | null) {
     super(message);
     this.exitCode = exitCode;
   }
 }
 
+interface HelperWaitSeen {
+  spawned: boolean;
+  stdoutBytes: number;
+  stdoutEnded: boolean;
+  exited: boolean;
+  closed: boolean;
+  stage: HelperWaitStage;
+  exitCode: number | null;
+}
+
+/** 父进程眼里还在等哪一段。进程已退出但标准输出没关，算异步收尾，不能当成读完。 */
+export function helperWaitStage(seen: {
+  spawned: boolean;
+  stdoutBytes: number;
+  stdoutEnded: boolean;
+  exited: boolean;
+  closed: boolean;
+}): HelperWaitStage {
+  if (seen.exited && !seen.closed) return '异步收尾';
+  if (!seen.spawned || (seen.stdoutBytes === 0 && !seen.stdoutEnded)) return '启动';
+  if (!seen.stdoutEnded) return '协议读取';
+  if (!seen.exited) return '退出';
+  return '异步收尾';
+}
+
+function clip(text: unknown, max: number): string {
+  return (typeof text === 'string' ? text : '').slice(0, max);
+}
+
+function waitCause(error: NodeJS.ErrnoException & { killed?: boolean }, exitCode: number | null): string {
+  if (error.killed || error.code === 'ETIMEDOUT') return '超时';
+  if (error.name === 'AbortError' || error.code === 'ABORT_ERR') return '已取消';
+  if (typeof error.code === 'number') return `退出码 ${error.code}`;
+  if (exitCode !== null) return `退出码 ${exitCode}`;
+  if (typeof error.code === 'string' && /^[A-Z0-9_]+$/.test(error.code)) return error.code;
+  return '失败';
+}
+
+function waitFailure(
+  wait: HelperWaitSeen,
+  cause: string,
+  stderr: unknown,
+  stdout: unknown,
+  exitCode: number | null,
+): TreeHelperError {
+  const tail = wait.stdoutEnded ? '标准输出已结束' : '标准输出未结束';
+  return new TreeHelperError(
+    `受管删树未完成：等待阶段=${wait.stage} ${tail} ${cause} ${clip(stderr, 1000)} ${clip(stdout, 2000)}`,
+    exitCode,
+  );
+}
+
+function remember(wait: HelperWaitSeen): void {
+  // 只改这一次调用自己的对象。落地后 pending 已清空，退出/关闭事件不能再把它挂回去。
+  wait.stage = helperWaitStage(wait);
+}
+
+function watchHelper(child: ChildProcess, wait: HelperWaitSeen): void {
+  const sync = () => remember(wait);
+  child.on('spawn', () => {
+    wait.spawned = true;
+    sync();
+  });
+  child.stdout?.on('data', (chunk: string | Buffer) => {
+    wait.stdoutBytes += chunk.length;
+    sync();
+  });
+  child.stdout?.on('end', () => {
+    wait.stdoutEnded = true;
+    sync();
+  });
+  child.on('exit', (code) => {
+    wait.exited = true;
+    wait.exitCode = typeof code === 'number' ? code : null;
+    sync();
+  });
+  child.on('close', () => {
+    wait.closed = true;
+    sync();
+  });
+}
+
+/**
+ * 启动、读协议、等退出、等标准输出关闭是四段不同的等待。回执要等进程退出且输出关闭才解析；
+ * 取消、超时、起不来停在哪一段就写在原错误里。不把命令行或环境写进错误。
+ */
 async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> {
   options.signal?.throwIfAborted();
   const [bin, ...rest] = [
@@ -34,36 +135,62 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
     options.helper ?? '/usr/local/sbin/fleet-agent-scope',
     ...args,
   ];
+  const wait: HelperWaitSeen = {
+    spawned: false,
+    stdoutBytes: 0,
+    stdoutEnded: false,
+    exited: false,
+    closed: false,
+    stage: '启动',
+    exitCode: null,
+  };
   return new Promise((resolve, reject) => {
-    execFile(
+    let settled = false;
+    const stop = options.signal;
+    const finish = (go: () => void) => {
+      if (settled) return;
+      settled = true;
+      stop?.removeEventListener('abort', onAbort);
+      if (TreeHelperError.pending === wait) TreeHelperError.pending = null;
+      go();
+    };
+    const onAbort = () => {
+      finish(() => reject(waitFailure(wait, '已取消', '', '', wait.exitCode)));
+    };
+    TreeHelperError.pending = wait;
+    remember(wait);
+    stop?.addEventListener('abort', onAbort, { once: true });
+    const child = execFile(
       bin as string,
       rest,
       {
         encoding: 'utf8',
         timeout: 115_000,
         maxBuffer: 128 * 1024,
-        ...(options.signal ? { signal: options.signal } : {}),
+        ...(stop ? { signal: stop } : {}),
       },
       (error, stdout, stderr) => {
-        if (error)
-          return reject(
-            new TreeHelperError(
-              `受管删树未完成：${stderr.slice(0, 1000)} ${stdout.slice(0, 2000)} ${error.message}`,
-              typeof error.code === 'number' ? error.code : null,
-            ),
-          );
-        try {
-          const value: unknown = JSON.parse(stdout);
-          if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('非对象回执');
-          const row = value as Reply;
-          if (row.version !== 1 || typeof row.state !== 'string' || row.state === 'unknown')
-            throw new Error('删树协议版本/状态不完整');
-          resolve(row);
-        } catch (error) {
-          reject(new Error(`受管删树回执读失败：${String(error)}`));
-        }
+        finish(() => {
+          if (error) {
+            const errno = error as NodeJS.ErrnoException & { killed?: boolean };
+            const exitCode = typeof errno.code === 'number' ? errno.code : wait.exitCode;
+            if (exitCode !== null) wait.exitCode = exitCode;
+            return reject(waitFailure(wait, waitCause(errno, exitCode), stderr, stdout, exitCode));
+          }
+          try {
+            const value: unknown = JSON.parse(stdout);
+            if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('非对象回执');
+            const row = value as Reply;
+            if (row.version !== 1 || typeof row.state !== 'string' || row.state === 'unknown')
+              throw new Error('删树协议版本/状态不完整');
+            resolve(row);
+          } catch (parseError) {
+            reject(new Error(`受管删树回执读失败：${String(parseError)}`));
+          }
+        });
       },
     );
+    if (child) watchHelper(child, wait);
   });
 }
 
