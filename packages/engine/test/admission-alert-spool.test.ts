@@ -359,7 +359,10 @@ describe('专用SQLite持久pending', () => {
         }),
       ]);
       expect(sink.status().active).toBe(1);
-      expect((await sink.record(observation(), options())).kind).toBe('spooled');
+      const t0 = performance.now();
+      const during = await sink.record(observation(), options());
+      const spent = Math.round(performance.now() - t0);
+      expect(during.kind, `${JSON.stringify(during)} ${spent}ms`).toBe('spooled');
       expect(await transfer).toEqual({ kind: 'unknown', code: 'deadline' });
     } finally {
       for (const s of sockets) s.destroy();
