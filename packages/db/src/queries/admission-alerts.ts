@@ -50,28 +50,43 @@ export type AdmissionAlertObservation = z.infer<typeof AdmissionAlertObservation
 export const ADMISSION_ALERT_PREFIX = 'admission-unknown:v1:';
 export const ADMISSION_ALERT_TITLE = '旧运行准入状态未知，责任待核实';
 
-export function admissionAlertIdentityJson(input: AdmissionAlertIdentity): string {
-  const i = AdmissionAlertIdentitySchema.parse(input);
-  return JSON.stringify({
+// 下面两个只吃已校验的值；对外入口都先 parse。
+const identityJson = (i: AdmissionAlertIdentity) =>
+  JSON.stringify({
     version: i.version,
     category: i.category,
     namespace: i.namespace,
     workflowId: i.workflowId,
     runId: i.runId,
   });
+// 与 JSON.stringify({ identity: JSON.parse(identityJson(..)), firstCode }) 逐字节相同，省掉往返解析。
+const observationJson = (o: AdmissionAlertObservation, identity = identityJson(o.identity)) =>
+  `{"identity":${identity},"firstCode":${JSON.stringify(o.firstCode)}}`;
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+
+export function admissionAlertIdentityJson(input: AdmissionAlertIdentity): string {
+  return identityJson(AdmissionAlertIdentitySchema.parse(input));
 }
 export function admissionAlertKey(input: AdmissionAlertIdentity): string {
-  return createHash('sha256').update(admissionAlertIdentityJson(input)).digest('hex');
+  return sha256(admissionAlertIdentityJson(input));
 }
 export function admissionAlertJson(input: AdmissionAlertObservation): string {
-  const o = AdmissionAlertObservationSchema.parse(input);
-  return JSON.stringify({
-    identity: JSON.parse(admissionAlertIdentityJson(o.identity)),
-    firstCode: o.firstCode,
-  });
+  return observationJson(AdmissionAlertObservationSchema.parse(input));
 }
 export function admissionAlertRecordHash(input: AdmissionAlertObservation): string {
-  return createHash('sha256').update(admissionAlertJson(input)).digest('hex');
+  return sha256(admissionAlertJson(input));
+}
+/** 只校验一次，给出校验后的值和与上面 Json/Key/RecordHash 逐字节相同的三项；逐行核对 spool 时用（#3414）。 */
+export function admissionAlertCanonical(input: AdmissionAlertObservation): {
+  observation: AdmissionAlertObservation;
+  json: string;
+  key: string;
+  recordHash: string;
+} {
+  const o = AdmissionAlertObservationSchema.parse(input);
+  const identity = identityJson(o.identity),
+    json = observationJson(o, identity);
+  return { observation: o, json, key: sha256(identity), recordHash: sha256(json) };
 }
 
 /** 调用方在独立有界宿主事务内执行，COMMIT 和连接关闭后才能删除本地 pending。 */

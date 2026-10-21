@@ -1,11 +1,14 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   ADMISSION_ALERT_PREFIX,
   type AdmissionAlertObservation,
+  admissionAlertCanonical,
+  admissionAlertIdentityJson,
   admissionAlertJson,
   admissionAlertKey,
+  admissionAlertRecordHash,
   insertAdmissionUnknownAlertOnce,
 } from '../src/queries/admission-alerts.ts';
 import { pendingFeishuPushes } from '../src/queries/feishu-push.ts';
@@ -83,5 +86,33 @@ describe('准入未知通知专用insert-once', () => {
     expect(await t.db.select().from(notificationDeliveries)).toEqual([]);
     expect(await pendingFeishuPushes(t.db, new Date(), 100)).toEqual([]);
     expect((await t.db.select().from(notifications))[0]?.taskId).toBeNull();
+  });
+  it('一次校验的规范三项与原 Json/Key/RecordHash 及原往返写法逐字节相同', () => {
+    const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+    for (const text of ['test', '\u0001'.repeat(300), '"\\ \ud800x\udfff😀</script>', 'é'.repeat(500)]) {
+      const o = observation();
+      o.identity.namespace = text;
+      o.identity.workflowId = `${text}#1`;
+      const original = JSON.stringify({
+        identity: JSON.parse(admissionAlertIdentityJson(o.identity)),
+        firstCode: o.firstCode,
+      });
+      expect(admissionAlertJson(o)).toBe(original);
+      expect(admissionAlertCanonical(o)).toEqual({
+        observation: o,
+        json: original,
+        key: sha(admissionAlertIdentityJson(o.identity)),
+        recordHash: sha(original),
+      });
+      expect(admissionAlertCanonical(o)).toEqual({
+        observation: o,
+        json: admissionAlertJson(o),
+        key: admissionAlertKey(o.identity),
+        recordHash: admissionAlertRecordHash(o),
+      });
+    }
+    expect(() =>
+      admissionAlertCanonical({ ...observation(), extra: 1 } as AdmissionAlertObservation),
+    ).toThrow();
   });
 });

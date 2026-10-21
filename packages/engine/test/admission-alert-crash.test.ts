@@ -2,12 +2,12 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { availableParallelism, homedir, loadavg } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import type { AdmissionAlertObservation } from '@fleet-dao/db';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFailed } from 'vitest';
 import { createAdmissionAlertSink } from '../src/real/admission-alert-process.ts';
 import { ALERT_SPOOL_LIMITS, recordAdmissionAlert } from '../src/real/admission-alert-spool.ts';
 
@@ -59,6 +59,13 @@ const count = () => {
     return d.prepare('SELECT count(*) n FROM pending').get()?.n;
   } finally {
     d.close();
+  }
+};
+const readUsage = () => {
+  try {
+    return process.resourceUsage();
+  } catch {
+    return undefined;
   }
 };
 async function bounded<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
@@ -210,14 +217,54 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(records.filter((r) => r.kind === 'unknown' && r.code === 'capacity')).toHaveLength(1);
     expect(count()).toBe(256);
   }, 120000);
-  // 每条都走 recordAdmissionAlert：开库、quick_check、重读已有行。256 条近上限记录在整段
-  // test:changed 里超过 15 秒（本机约 20–28 秒）。函数是同步的，到点杀不掉，时限必须盖住做完。
+  // #3414：CI 在原 15 秒处超时（run 39390033280）。整段同步、不起子进程，卡的不是收尾而是两处：
+  // 一是盘，每条约 6 次 fsync（SQLite DELETE journal + EXTRA 五次，开库同步父目录一次；strace 实数
+  // 256 条 1544 次），随盘速；二是 CPU，每次开库逐行核对全部旧行，随行数平方增长，原先打开时、事务内
+  // 各核一遍，每行多遍 schema 校验。后者已减到事务内一遍、每行一次校验一次规范化，前者是耐久设计不动。
+  // 函数同步，超时也要等做完才报；失败时打印各段耗时和本进程资源读数（只有合成样本的计数），成功不打印，
+  // 没采到的写 unknown。
   it('256个近DTO上界记录的COMMIT边界：主库和journal峰值在固定字节界内', () => {
     const original = DatabaseSync.prototype.exec;
     let mainPeak = 0,
       journalPeak = 0,
       blocksPeak = 0,
       observed = 0;
+    const started = performance.now(),
+      usage = readUsage();
+    const spent = { record: 0, commit: 0, otherSql: 0, sample: 0, slowestRecord: 0 };
+    let phase = 'setup',
+      done = 0,
+      ended: number | undefined;
+    onTestFailed(() => {
+      const now = readUsage();
+      const delta = (k: keyof NodeJS.ResourceUsage, scale = 1) =>
+        usage && now ? Math.round((now[k] - usage[k]) / scale) : 'unknown';
+      const ms = Object.fromEntries(Object.entries(spent).map(([k, v]) => [k, Math.round(v)]));
+      console.error(
+        'SPOOL_COMMIT_TIMING=' +
+          JSON.stringify({
+            phase,
+            recordsDone: done,
+            of: 256,
+            // 同步体跑完才轮到超时判定：phase=done 且 bodyMs 超限就是做完了才超时，不是卡在收尾。
+            bodyMs: Math.round((ended ?? performance.now()) - started),
+            ms,
+            // recordAdmissionAlert 里 exec 之外：prepare 的查询（quick_check、逐行读）、逐行解码、路径/journal
+            // 核对、目录 fsync，以及等 CPU 的时间。
+            outsideExecMs: Math.round(spent.record - spent.commit - spent.otherSql - spent.sample),
+            observed,
+            mainPeak: observed ? mainPeak : 'unknown',
+            journalPeak: observed ? journalPeak : 'unknown',
+            cpuUserMs: delta('userCPUTime', 1000),
+            cpuSystemMs: delta('systemCPUTime', 1000),
+            fsWrite: delta('fsWrite'),
+            voluntarySwitches: delta('voluntaryContextSwitches'),
+            involuntarySwitches: delta('involuntaryContextSwitches'),
+            loadavg1: process.platform === 'linux' ? loadavg()[0] : 'unknown',
+            parallelism: availableParallelism(),
+          }),
+      );
+    });
     const sample = () => {
       if (!existsSync(path)) return;
       for (const name of readdirSync(path))
@@ -231,22 +278,38 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       blocksPeak = Math.max(blocksPeak, ((main?.blocks ?? 0) + (rollback?.blocks ?? 0)) * 512);
       observed++;
     };
+    const timed = (k: 'commit' | 'otherSql' | 'sample', run: () => unknown) => {
+      const at = performance.now();
+      try {
+        return run();
+      } finally {
+        spent[k] += performance.now() - at;
+      }
+    };
     DatabaseSync.prototype.exec = function (sql: string) {
-      if (sql === 'COMMIT') sample();
-      const result = original.call(this, sql);
-      if (sql === 'COMMIT') sample();
-      return result;
+      if (sql === 'COMMIT') timed('sample', sample);
+      const result = timed(sql === 'COMMIT' ? 'commit' : 'otherSql', () => original.call(this, sql));
+      if (sql === 'COMMIT') timed('sample', sample);
+      return result as undefined;
     };
     try {
       for (let n = 0; n < 256; n++) {
+        phase = `record ${n + 1}/256`;
         const o = observation();
         o.identity.namespace = '\u0001'.repeat(300);
         o.identity.workflowId = '\u0002'.repeat(300);
-        expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+        const at = performance.now();
+        const kind = recordAdmissionAlert(path, o).kind;
+        const took = performance.now() - at;
+        spent.record += took;
+        spent.slowestRecord = Math.max(spent.slowestRecord, took);
+        expect(kind).toBe('spooled');
+        done++;
       }
     } finally {
       DatabaseSync.prototype.exec = original;
     }
+    phase = 'checks';
     expect(count()).toBe(256);
     expect(observed).toBeGreaterThanOrEqual(512);
     expect(mainPeak).toBeGreaterThan(1024 * 1024);
@@ -261,7 +324,9 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       'SPOOL_PEAK_EVIDENCE=' +
         JSON.stringify({ uid: process.getuid?.(), version, mainPeak, journalPeak, blocksPeak, observed }),
     );
-  }, 120_000);
+    phase = 'done';
+    ended = performance.now();
+  }, 15_000);
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
     (mode) => {

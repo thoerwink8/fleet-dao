@@ -20,12 +20,14 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   type AdmissionAlertObservation,
+  AdmissionAlertObservationSchema,
   admissionAlertJson,
   admissionAlertKey,
   admissionAlertRecordHash,
 } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createAdmissionAlertSink } from '../src/real/admission-alert-process.ts';
+import { AlertObservationSchema } from '../src/real/admission-alert-protocol.ts';
 import {
   ALERT_SPOOL_LIMITS,
   recordAdmissionAlert,
@@ -91,6 +93,56 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
     d.close();
     // 257 次同步落盘（每次 fsync），慢盘上默认 5 秒不够。
   }, 30000);
+  // #3414：打开时和事务内各逐行解码一遍，256 行近上限时 CPU 翻倍，CI 原 15 秒超时。逐行核对只留事务内一遍。
+  it('每次记录只在写事务内逐行核对一遍已有行，打开时不重复解码', () => {
+    for (let n = 0; n < 3; n++) expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    const exec = DatabaseSync.prototype.exec,
+      prepare = DatabaseSync.prototype.prepare;
+    const events: string[] = [];
+    DatabaseSync.prototype.exec = function (sql: string) {
+      if (sql === 'BEGIN IMMEDIATE') events.push('begin');
+      return exec.call(this, sql);
+    };
+    DatabaseSync.prototype.prepare = function (sql: string) {
+      if (sql === 'SELECT key,payload,record_hash FROM pending') events.push('rows');
+      return prepare.call(this, sql);
+    };
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    } finally {
+      DatabaseSync.prototype.exec = exec;
+      DatabaseSync.prototype.prepare = prepare;
+    }
+    expect(events).toEqual(['begin', 'rows']);
+  });
+  // #3414：原先每行每次调用过六遍 schema（两遍解码各三遍），256 行时这份平方级 CPU 和 fsync 一起撑过 15 秒。
+  // refine 出来的 AlertObservationSchema 是另一个实例，两个都数。
+  it('逐行核对每多一行旧记录只多一次 schema 校验', () => {
+    const schemas = [AdmissionAlertObservationSchema, AlertObservationSchema];
+    const parses = schemas.map((s) => s.parse);
+    let count = 0;
+    const counted = () => {
+      count = 0;
+      schemas.forEach((s, i) => {
+        s.parse = ((value: unknown, params?: unknown) => {
+          count++;
+          return parses[i]?.call(s, value, params as never);
+        }) as typeof s.parse;
+      });
+      try {
+        expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+      } finally {
+        schemas.forEach((s, i) => {
+          s.parse = parses[i] as typeof s.parse;
+        });
+      }
+      return count;
+    };
+    for (let n = 0; n < 3; n++) expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    const three = counted(),
+      four = counted();
+    expect(four - three).toBe(1);
+  });
   it('实际写锁第二连接fail-fast busy，原事务回滚后重开成功', () => {
     const o = observation();
     recordAdmissionAlert(path, o);

@@ -16,6 +16,7 @@ import { isAbsolute, join, parse, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   type AdmissionAlertObservation,
+  admissionAlertCanonical,
   admissionAlertIdentityJson,
   admissionAlertJson,
   admissionAlertKey,
@@ -271,13 +272,15 @@ class Spool {
         d.exec('COMMIT');
         this.path.sync();
       }
-      this.validate();
+      // 打开时只核结构；逐行解码只在随后的事务内做一次。两处都全量解码会让每次调用付两倍 O(行数)，
+      // 256 行近上限时这部分占同步耗时的一半（#3414）。事务外的解码挡不住锁前的变化，不是安全界。
+      this.validate(false);
     } catch (e) {
       this.close();
       throw e;
     }
   }
-  private validate(): void {
+  private validate(decodeRows = true): void {
     const d = this.db as DatabaseSync;
     this.path.check();
     if (
@@ -297,6 +300,7 @@ class Spool {
     )
       fail('corrupt');
     if (d.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') fail('corrupt');
+    if (!decodeRows) return;
     const rows = d.prepare('SELECT key,payload,record_hash FROM pending').all();
     if (rows.length > ALERT_SPOOL_LIMITS.rows) fail('capacity');
     let bytes = 0;
@@ -308,19 +312,21 @@ class Spool {
   }
   private decode(row: Record<string, unknown>): AdmissionAlertObservation {
     if (typeof row.payload !== 'string' || Buffer.byteLength(row.payload) > 4096) fail('corrupt');
-    let o: AdmissionAlertObservation;
+    // 每行只过一次 schema（#3414）。payload 须逐字节等于规范 JSON，规范 JSON 就是 JSON.stringify(校验后的值)，
+    // 上面又限了 4096 字节，所以 AlertObservationSchema 那道 DTO 字节界在这里已经成立，不再另 parse 一遍。
+    let canonical: ReturnType<typeof admissionAlertCanonical>;
     try {
-      o = AlertObservationSchema.parse(JSON.parse(row.payload as string));
+      canonical = admissionAlertCanonical(JSON.parse(row.payload as string));
     } catch {
       return fail('corrupt');
     }
     if (
-      row.payload !== admissionAlertJson(o) ||
-      row.key !== admissionAlertKey(o.identity) ||
-      row.record_hash !== admissionAlertRecordHash(o)
+      row.payload !== canonical.json ||
+      row.key !== canonical.key ||
+      row.record_hash !== canonical.recordHash
     )
       fail('corrupt');
-    return o;
+    return canonical.observation;
   }
   record(input: AdmissionAlertObservation): AlertOutcome {
     const o = AlertObservationSchema.parse(input);
