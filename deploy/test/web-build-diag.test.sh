@@ -112,11 +112,11 @@ else
   }
   trace_log() {
     cat <<'EOF'
-[prerender-trace] #1 GET localhost:4173/ 发出，进程已跑 3300ms
+[prerender-trace] #1 GET / 发出，进程已跑 3300ms
 [prerender-trace] #1 连上 ::1（IPv6）+12ms
 [prerender-trace] #1 响应头 200 +1500ms
 [prerender-trace] #1 响应收完 +1501ms
-[prerender-trace] 进程结束：墙钟 5000ms，自己用掉 CPU 4000ms，被抢占切走 10 次，事件循环最长停 1100ms，最大内存 300MB，系统 load 1.00/1.00/1.00，16 核
+[prerender-trace] 进程结束（只是读数，单看比例不能当根因）：墙钟 5000ms，自己用掉 CPU 4000ms，非自愿上下文切换 10 次，事件循环最长停 1100ms，最大内存 300MB，系统 load 1.00/1.00/1.00，16 核
 EOF
   }
   fail_log() {
@@ -158,6 +158,9 @@ EOF
   has "构建后资源" "$out" "构建后资源："
   has "没有探针行时明说探针没出声" "$out" "探针没出声"
   has "预渲染超时：说明固定 10 秒、不重试、同进程" "$out" "固定 10 秒不回就报错、不重试"
+  has "CPU 与墙钟的比例只当读数：要结合 PSI、事件循环、上下文切换" "$out" "不能单凭它断定 CPU 饥饿、被抢占或别的根因"
+  has "写明要结合 PSI" "$out" "PSI（/proc/pressure）"
+  lacks "不再把比例直接解释成被抢占" "$out" "（被抢占）"
   has "构建日志末尾原样贴出" "$out" "构建日志末尾 60 行"
   has "带着探针：NODE_OPTIONS 预载这一版目录里的文件" "$SEEN_EXTRA" "NODE_OPTIONS=--import=$stage/deploy/lib/prerender-trace.mjs"
   check "构建命令跑完就清掉额外环境变量" "${#BUILD_EXTRA_ENV[@]}" 0
