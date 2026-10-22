@@ -1141,6 +1141,28 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history
 
 归档执行重新取得可信活动来源，网络读取全部在 PG 锁外；随后 Store 事务锁通知、任务、目标 PR 和 runs 表（挡住并发新增，含 task_id 为空的历史兼容 run），重新核对来源与全部 DB 身份、通知 body/raisedAt 代次、受管检出失败格式、原 verify run 起止/终态、无在途 run、merged PR/head。只撤旧通知、追加含确定来源摘要的 `notification.checkout_history_archive` 审计，审计失败会回滚撤卡。输出明确“历史归档、检出恢复未证实”，不修改任务、run、PR、正常冷验收账或验收责任。重复同一完整请求幂等，不同快照或来源冲突；实际生产处置前仍须由指挥官独立核验。
 
+### 已结束却误记 abandoned 的真实已合任务：受管纠正（`task correct-merged`，#3476）
+
+单子在 PR 合并后、旧引擎来得及收尾前被关，工作流按 issue-closed 路径以 abandoned 收场（Temporal 已 COMPLETED），任务行停在 stopped/abandoned。给工作流发信号没用，不手改库、不 `continue`/`redo`/`abandon`、不造普通合并记账，只用私有入口 `fleet-api task correct-merged`（逻辑在 `packages/api/src/task-correct-merged.ts`，经 `bin/fleet-api` 提供 `FLEET_OPS_OPERATOR`，不许手填操作者，也不许拿开发树直连生产代替部署）。入口只改持久任务结局：不改旧 run、不动 Temporal 历史、不关或重开 issue、不起工人、不碰验收责任。
+
+两步，都在法国经既有 SSH 连接跑：
+
+```sh
+# 1. 只读预检：现读 GitHub PR、Temporal 原 run、库里任务账，不写任何东西
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task correct-merged <owner/仓名> <单号> --pr <PR号> --head <完整sha> --merge <完整合并提交sha> --run <原Temporal runId> --note "<为什么>"
+# 2. 预检通过后：命令末尾加预检打印的 --execute --task <任务编号> --seen <摘要>
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task correct-merged … --execute --task <任务编号> --seen <摘要> --note "<为什么>"
+```
+
+- 入口按这张表的参数认：只收 `--pr`、`--head`、`--merge`、`--run`、`--note`，执行再加 `--execute --task --seen`；没有 `--workflow`、`--apply` 这两个开关（带了按「认不出参数」拒），工作流编号由入口按任务自己推。输出是一行中文文本，不是 JSON，也没有 `mode`、`status` 字段；`--seen` 是预检打印的 16 位摘要，不能自己编。
+- 预检成功文本以「预检通过（只读，没改任何数据）」开头，带任务编号、原 run、PR、head、合并提交和「拟把任务从 stopped/abandoned 改成 done」，末尾给出执行命令。
+- 执行把身份和事实全部重读一遍，`--seen` 对不上（任务账、run 集合或 GitHub/Temporal 证据变了）就拒绝，要重新预检；通过后 Store 在一个事务里 CAS 改任务行并写操作记录 `task.correct-merged`（target 按任务编号，actor `ops:task`，reason 带 wrapper 提供的操作者，before/after 含 repo、issue、workflow、run、PR、head、合并提交、证据）。记录写不进，任务不动。成功文本以「已纠正：」开头。
+- 同一请求重复预检或执行都回「已纠正过（同一请求，幂等，没有再写）」，不新增审计；这是既存回执，不能当作本轮新增的纠正。换 PR、head、合并提交、run 或证据的请求一律拒绝。拒绝或 CAS 变化就停下、记原因、重新取证，不绕过。
+- 执行前提：`/srv/fleet-dao-releases/current` 解析到的那一版含这个入口（`git -C /srv/fleet-dao merge-base --is-ancestor c61d64c9 <current 的提交号>`，或看该版 `packages/api/src/task-correct-merged.ts` 在不在）。旧版本、读不全都停，不手工部署绕过。
+- 执行后单独鲜读验证，不只信返回：任务 done/merged；只有一条匹配该任务的成功 `task.correct-merged` 记录且 actor 来自 wrapper；`runs` 的数量、身份、结局、结束时刻不变；Temporal 原 run 与最新代仍是同一个 COMPLETED；GitHub 与镜像的 PR、head、合并提交不变；验收责任仍是原基线；旧 issue 仍 CLOSED。验证不过不称完成，不回写旧历史。
+
+2026-10-19 起 #3114（`thoerwink8/fleet-dao`，任务 `d629758a-570d-405d-be00-417b7ee6c0c7`，原 run `01a14fd8-fb57-741a-8c14-42e3fdba87d6`，PR 3137，head `5b52006a9cdcef60c030c5dbeec645f81a2ad86a`，squash `bfe1b1ae69c7ae6404b068eb3ed7bde3082b3e40`）是这条入口要纠正的真实任务。操作回执和验证证据只留本机（`_tmp/`），不进仓。
+
 ### 命令行工具升级（#1971）
 
 法国上的 Claude Code、Codex 是 2026-09 用 root 的 `npm i -g` 装进 `/usr/lib/node_modules` 的（二进制在 `/usr/bin`）。Claude Code 官方的自动更新在这种「目录不归运行用户写」的装法下不生效。Cursor、reclaude 有各自的更新路径，不在这里升。Grok 装在会话用户家里（`~/.grok/bin/grok`），会话里关了自动更新，这里在空闲或发版窗口里替它跑 `grok update`。
