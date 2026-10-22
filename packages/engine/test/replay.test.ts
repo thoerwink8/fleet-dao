@@ -398,8 +398,8 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     });
   }
 
-  it('task-rounds-continued-old 老历史（#3603 之前录的）：累计 6 轮停下、不带原因点了「继续」、又做 3 轮停下；没有 task-total-rounds 标记，现在的代码照老步序重放得过', async () => {
-    // 录法：在 origin/main 5eaf379fd（#3603 之前）的代码上，用 record.ts 同一套假端口和 scripted()，每轮都没提交（不走 CI 红，
+  it('task-rounds-continued-old 老历史（总轮数上限之前录的）：累计 6 轮停下、不带原因点了「继续」、又做 3 轮停下；没有 task-total-rounds 标记，现在的代码照老步序重放得过', async () => {
+    // 录法：在 origin/main 5eaf379fd（#3603 第 1 片已合、总轮数上限还没有）的代码上，用 record.ts 同一套假端口和 scripted()，每轮都没提交（不走 CI 红，
     // 「旧夹具没有 CI 红带评审这一步」那条只许老夹具有），停在 6 轮后发一次 { by: 'recorder' } 的继续，停在 9 轮后取历史。
     // record.ts 跑的是现在的代码，录不出这份老历史，所以没把它写成那里的场景。
     const { workflowId, history } = load('task-rounds-continued-old.json');
