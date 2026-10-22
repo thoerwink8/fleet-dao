@@ -349,15 +349,15 @@ describe('发布源解析：认不出就写原因', () => {
         '/home/u/.local/share/cursor-agent/versions/2026.09.23-86fc751/cursor-agent\n2026.09.23-86fc751\n',
       ),
     ).toBe('2026.09.23-86fc751');
-    expect(parseInstalledOutput('reclaude', 'reclaude 1.4.0\n')).toBe('1.4.0');
     expect(parseInstalledOutput('mirasim-server', '0.0.355\n')).toBe('0.0.355');
   });
 
-  it('reclaude 只认自己的「reclaude <版本>」行：Claude Code 的版本、裸数字、没有版本都不当成它的', () => {
-    expect(parseInstalledOutput('reclaude', 'Syncing config...\nreclaude 1.5.0\n')).toBe('1.5.0');
+  it('reclaude 没有经证实的自身版本输出：Claude Code 的版本、裸数字、未证实的「reclaude x.y.z」、没有版本都不当成它的', () => {
+    expect(parseInstalledOutput('reclaude', 'reclaude 1.4.0\n')).toBeNull();
+    expect(parseInstalledOutput('reclaude', 'Syncing config...\nreclaude 1.5.0\n')).toBeNull();
     expect(
       parseInstalledOutput('reclaude', 'Syncing config...\nreclaude 1.5.0\n2.1.308 (Claude Code)\n'),
-    ).toBe('1.5.0');
+    ).toBeNull();
     expect(parseInstalledOutput('reclaude', '2.1.308 (Claude Code)\n')).toBeNull();
     expect(parseInstalledOutput('reclaude', 'Syncing config...\n2.1.308 (Claude Code)\n')).toBeNull();
     expect(parseInstalledOutput('reclaude', '1.5.0\n')).toBeNull();
