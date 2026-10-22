@@ -11,10 +11,15 @@ import {
   FALLBACK_FILE_MS,
   guessMs,
   HEAVY_FILES,
+  HEAVY_RECORD,
+  HEAVY_TESTS,
+  type HeavyEntry,
+  heavyBox,
   isHeavy,
   isTestFile,
   listTestFiles,
   MAX_BOXES,
+  NEVER_HEAVY,
   needsPg,
   packTests,
   parseTimings,
@@ -396,10 +401,7 @@ describe('在真仓上装箱（全跑那一轮）', () => {
       temporal: temporalOf(FILES),
     });
     if (typeof r === 'string') throw new Error(r);
-    // 重负载多进程文件独占的台（HEAVY_FILES）只有它自己，不进「分得匀不匀」的比较
-    const seconds = r.boxes
-      .filter((b) => !b.label.endsWith('· heavy'))
-      .map((b) => Math.round(b.estMs / 1000));
+    const seconds = r.boxes.map((b) => Math.round(b.estMs / 1000));
     // 8 台的合计 = 全部文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按所在包的均值估（guessMs），
     // 和装箱同一个估法。不拿整张表的合计比：表一过期（加了测试文件、删了旧的）两边就差几秒，这条就红（#700 写的
     // 那种比法，主线上新加了测试文件之后改到 conventions 的 PR 全跑时都红在这）。最重的台和最轻的差不过 2 倍（LPT 的效果）。
@@ -433,93 +435,93 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     expect(withTemporal[0]?.files).toContain('packages/engine/test/arm-deadline-real.test.ts');
     expect(input.read('packages/engine/test/github-reconcile.test.ts')).toBeDefined();
   });
-
-  it('重负载多进程文件（#3469）：每个独占一台、台里没有别的文件，台数仍是 8', () => {
-    const r = packTests({
-      files: FILES,
-      universe: FILES,
-      timings: REAL_TIMINGS,
-      temporal: temporalOf(FILES),
-    });
-    if (typeof r === 'string') throw new Error(r);
-    expect(r.boxes).toHaveLength(MAX_BOXES);
-    const heavyBoxes = r.boxes.filter((b) => b.files.some(isHeavy));
-    expect(heavyBoxes).toHaveLength(HEAVY_FILES.size);
-    for (const b of heavyBoxes) {
-      expect(b.files.length).toBe(1);
-      expect(b.pg).toBe(false);
-      expect(b.label).toContain('· heavy');
-    }
-    expect(r.boxes.filter((b) => b.label.includes('· heavy'))).toEqual(heavyBoxes);
-  });
 });
 
-describe('重负载多进程文件单独排台（#3469）', () => {
-  const heavy = 'packages/engine/test/admission-alert-crash.test.ts';
-  const timings = (files: string[]): Timings => ({
-    source: 'test',
-    files: Object.fromEntries(files.map((f) => [f, f === heavy ? 46_000 : 3_000])),
-  });
+describe('重型 / 不确定测试名单（#3597）', () => {
+  const read = (rel: string) => REPO.read(rel);
 
-  it('清单里的文件都真在仓里（挪了名、删了，清单跟着改）、是测试文件', () => {
+  it('名单里的文件都真在仓里、是测试文件、不要库、不要 Temporal；每条有理由和至少一个单号', () => {
     expect(HEAVY_FILES.size).toBeGreaterThan(0);
-    for (const f of HEAVY_FILES) {
+    for (const [f, e] of Object.entries(HEAVY_TESTS)) {
       expect(isTestFile(f), f).toBe(true);
       expect(FILES, f).toContain(f);
       expect(needsPg(f), `${f} 不能同时要真 Postgres`).toBe(false);
+      expect(e.why.length, `${f} 要写进名单的理由`).toBeGreaterThan(5);
+      expect(e.records.length, `${f} 要有真实超时记录（#单号 或 run 运行号）`).toBeGreaterThan(0);
+      for (const r of e.records) expect(HEAVY_RECORD.test(r), `${f} 的记录「${r}」`).toBe(true);
     }
-    expect(isHeavy(heavy)).toBe(true);
-    expect(isHeavy('packages/engine/test/admission-alert-spool.test.ts')).toBe(false);
+    expect(isHeavy('packages/engine/test/admission-alert-crash.test.ts')).toBe(true);
+    // 被邻居拖超时的受害者不进名单（#3469 排台后没再出现）
+    expect(isHeavy('packages/adapters/test/tree-cleanup.test.ts')).toBe(false);
   });
 
-  it('【故意造出的失败】总量够好几台时，重负载文件也独占一台、别的文件不和它同台', () => {
-    const plain = Array.from({ length: 200 }, (_, i) => `packages/web/src/t${i}.test.ts`);
-    const files = [heavy, ...plain];
-    const r = packTests({ files, universe: files, timings: timings(files), temporal: new Set() });
-    if (typeof r === 'string') throw new Error(r);
-    const box = r.boxes.find((b) => b.files.includes(heavy));
-    expect(box?.files).toEqual([heavy]);
-    expect(box?.label).toMatch(/^\d+\/8 · heavy$/);
-    expect(r.boxes).toHaveLength(8);
-    expect(r.boxes.flatMap((b) => b.files).sort()).toEqual([...files].sort());
+  it('replay.test.ts、task-workflow.test.ts 永远不许进名单', () => {
+    expect(NEVER_HEAVY).toEqual([
+      'packages/engine/test/replay.test.ts',
+      'packages/engine/test/task-workflow.test.ts',
+    ]);
+    for (const f of NEVER_HEAVY) {
+      expect(FILES, `${f} 本该在仓里`).toContain(f);
+      expect(isHeavy(f), f).toBe(false);
+      expect(Object.keys(HEAVY_TESTS), f).not.toContain(f);
+    }
   });
 
-  it('总量只够一台时，重负载文件仍单独一台（不和别的并在一个 vitest 进程里）', () => {
-    const files = [heavy, 'packages/web/src/a.test.ts'];
-    const r = packTests({ files, universe: files, timings: timings(files), temporal: new Set() });
-    if (typeof r === 'string') throw new Error(r);
-    expect(r.boxes.map((b) => b.files)).toEqual([[heavy], ['packages/web/src/a.test.ts']]);
+  it('名单里的文件不会被 vitest 的子串过滤拉上别的文件，别的文件也拉不上它们', () => {
+    for (const f of HEAVY_FILES) expect(siblingsOf(f, FILES as string[]), f).toEqual([]);
   });
 
-  it('只有重负载文件时也装得出台', () => {
+  it('heavyBox：真仓算得出一份，文件就是名单，不要库不要 Temporal', () => {
+    const box = heavyBox(FILES as string[], read);
+    if (typeof box === 'string') throw new Error(box);
+    expect(box.files).toEqual([...HEAVY_FILES].sort());
+    expect(box.pg).toBe(false);
+    // 名单里有调 createRealEnv 的测试：heavy job 装了 Temporal 命令行（ci.yml 的 heavy 里那几步）
+    expect(box.temporal).toBe(true);
+    expect(box.label).toBe('heavy');
+  });
+
+  it('【故意造出的失败】名单里的文件不在仓里、读不到、被子串拉上别的文件、要真库、没有记录或记录写法不对：heavyBox 报出来，不静默少跑', () => {
+    const f = [...HEAVY_FILES][0] as string;
+    const all = FILES as string[];
+    expect(
+      heavyBox(
+        all.filter((x) => x !== f),
+        read,
+      ),
+    ).toContain('不在仓里');
+    expect(heavyBox(all, (rel) => (rel === f ? undefined : read(rel)))).toContain('读不到');
+    expect(heavyBox([...all, `${f}x`], read)).toContain('子串过滤');
+    const entry = HEAVY_TESTS[f] as HeavyEntry;
+    const saved = entry.records;
+    try {
+      (entry as { records: readonly string[] }).records = [];
+      expect(heavyBox(all, read)).toContain('没有真实超时记录');
+      (entry as { records: readonly string[] }).records = ['看着重'];
+      expect(heavyBox(all, read)).toContain('写法不对');
+    } finally {
+      (entry as { records: readonly string[] }).records = saved;
+    }
+  });
+
+  it('不用 Temporal 的名单也算得出：temporal 开关只看文件内容', () => {
+    // 名单里的文件全换成不调 createRealEnv 的，才是 false
+    const none = (rel: string) => (HEAVY_FILES.has(rel) ? 'it("x", () => {})' : read(rel));
+    const b2 = heavyBox(FILES as string[], none);
+    if (typeof b2 === 'string') throw new Error(b2);
+    expect(b2.temporal).toBe(false);
+  });
+
+  it('必过的 test 台里没有名单里的文件（assignTests 排除）；真仓全部装出来的台和名单不相交', () => {
+    const rest = (FILES as string[]).filter((x) => !isHeavy(x));
     const r = packTests({
-      files: [heavy],
-      universe: [heavy],
-      timings: timings([heavy]),
-      temporal: new Set(),
+      files: rest,
+      universe: FILES as string[],
+      timings: REAL_TIMINGS,
+      temporal: temporalOf(rest),
     });
     if (typeof r === 'string') throw new Error(r);
-    expect(r.boxes.map((b) => b.label)).toEqual(['1/1 · heavy']);
-  });
-
-  it('【故意造出的失败】重负载文件被名字或 Temporal 绑进别的文件那一组：分不了台，报出来', () => {
-    const files = [heavy, 'packages/engine/test/x/packages/engine/test/admission-alert-crash.test.ts'];
-    const bySubstring = packTests({
-      files,
-      universe: files,
-      timings: timings(files),
-      temporal: new Set(),
-    });
-    expect(typeof bySubstring).toBe('string');
-    expect(bySubstring as string).toContain('分不了台');
-    const other = 'packages/engine/test/other-real.test.ts';
-    const byTemporal = packTests({
-      files: [heavy, other],
-      universe: [heavy, other],
-      timings: timings([heavy, other]),
-      temporal: new Set([heavy, other]),
-    });
-    expect(typeof byTemporal).toBe('string');
-    expect(byTemporal as string).toContain('分不了台');
+    expect(r.boxes.flatMap((b) => b.files).filter(isHeavy)).toEqual([]);
+    expect(r.boxes).toHaveLength(MAX_BOXES);
   });
 });
