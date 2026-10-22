@@ -83,7 +83,7 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
   it('第257条明确capacity；满额同key仍回原行且所有旧行保留', () => {
     const first = observation();
     expect(recordAdmissionAlert(path, first).kind).toBe('spooled');
-    // 产品路径每条都重开库、全表校验、fsync 提交（实测 255 条约 5 秒，验收机上超 120 秒）：
+    // 产品路径每条都重开库、全表校验、fsync 提交（本机实测 256 次：重开约 2.4 秒、COMMIT 约 4.1 秒、关库约 0.06 秒，合计约 8 秒；验收机 fsync 慢，超 120 秒）：
     // 第 2~254 条用夹具在一个事务里按产品同样的 key/payload/hash 直接插入，容量判定仍由最后几条产品路径覆盖。
     const keys = [admissionAlertKey(first.identity)];
     const filler = database();
