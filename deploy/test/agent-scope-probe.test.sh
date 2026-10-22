@@ -94,6 +94,7 @@ out=$(run_scope probe --user pilot -- mirasim-server 2>&1) && rc=0 || rc=$?
 if [[ $rc -eq 0 && "$out" == "0.0.355" ]]; then pass "Mirasim 读目录名 0.0.355"; else flunk "mirasim 得到 $rc [$out]"; fi
 
 echo "reclaude：只认自己的版本行，Claude Code 版本、无版本、非零退出、设备解绑都不当成功"
+# shellcheck disable=SC2016 # $* 和 $HOME 要由假 reclaude 自己展开
 write_reclaude() { printf '#!/bin/sh\nprintf "%%s\\n" "$*" >"$HOME/reclaude-args"\n%s\n' "$1" >"$HOME_DIR/.local/bin/reclaude"; }
 write_reclaude 'printf "Syncing config...\nreclaude 1.5.0\n2.1.308 (Claude Code)\n"'
 out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
