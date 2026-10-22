@@ -25,7 +25,7 @@
 | `background-recovery.mjs` | 只读本会话原生重启任务通知，提示接手未完成代理/命令 | 读本 transcript；兼容 tick 状态仅保留 backgroundRestartKey，不读 seen 原文账；main-thread 调用 | 原生通知保留真实任务编号，本仓补明确接手方式 | 保留；与 Mirasim 血缘无关，同次重启去重，失败明报且写状态失败仍输出恢复提示 |
 | `session-id.mjs` | 原生会话号纯校验 | 无文件或进程副作用；background-recovery 与 work-watch 调用 | 宿主协议仍需边界校验 | 保留；仅允许1到128个字母数字下划线连字符 |
 | `capacity.mjs` | 派工前核本机资源容量，供 pretool / queue 使用 | 从系统接口只读资源；无独立持久账；调用方读结果 | 原生 Agent 并发不等于本机资源配额 | 保留。读不到明确失败，不能回空值冒充可派 |
-| `founder-inbox.mjs` | 只读 Mirasim 血缘、实际 turns 和同家 prompt-log 历史 | 读 record、turns、prompt-log；session-start、progress 与引导认主读取；不写投递账 | turns 收尾才落，缺行不代表未投递；prompt-log 只证明入口收取 | 保留 lineageOf、sentByFounder、ownerPresence 和 readFounderHistory；读取失败明确报告，不比较发收差集 |
+| `founder-inbox.mjs` | 只读 Mirasim 血缘、实际 turns 和同家 prompt-log 历史 | 读 record、turns、prompt-log；session-start、progress 与引导认主读取；不写投递账 | turns 收尾才落，缺行不代表未投递；prompt-log 只证明入口收取 | 保留 lineageOf、sentByFounder 和 readFounderHistory；读取失败明确报告，不比较发收差集 |
 | `fresh-main.mjs` | 派工等入口确认远端 main 新旧 | 经 git-run fetch；写 fetch 成功缓存，调用方读；不切开发树 | 原生 git fetch 是基础操作，不替代本仓新旧约束 | 保留。失败不可放宽为“已经最新” |
 | `git-run.mjs` | 共用 git 运行与环境 / 网络回退 | 读调用参数与本机环境；返回真实退出结果给 fresh-main / 同步调用方 | git 原生命令仍需可靠调用、错误传播 | 保留。直连 / 备用路径不等于修改业务工作区 |
 | `hook-timing.mjs` | 记录 hook 耗时，供性能核验 | 写 Fleet 日志目录的 `hook-timing.jsonl`，约 2MB 轮转 `.1`；摘要读取该日志 | 宿主事件能力不提供本仓分段耗时证据 | 保留。观测失败不阻业务；耗时日志不证明消息已投递 |

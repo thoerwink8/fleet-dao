@@ -1,12 +1,9 @@
 // 开会话钩子对没办完引导的两件事：挂了超过 24 小时、本会话接不了的写成指挥官自己接着办（决定 0097，不进「要你拍的」）；
-// 办没办完看挂的单，没有认领（#2727，认领和自动认领都删了）。主人在不在由 founder-inbox.mjs 的 ownerPresence 按本机 Mirasim 记录判。
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+// 办没办完看挂的单，没有认领（#2727，认领和自动认领都删了）。
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-type Presence = { state: 'gone' | 'here' | 'unknown'; why: string };
 const HOOKS = fileURLToPath(new URL('../hooks/', import.meta.url));
 const hook = (await import(pathToFileURL(join(HOOKS, 'session-start.mjs')).href)) as {
   progressLines(
@@ -14,14 +11,6 @@ const hook = (await import(pathToFileURL(join(HOOKS, 'session-start.mjs')).href)
     lineage: unknown,
     o?: { now?: number },
   ): string[];
-};
-const inbox = (await import(pathToFileURL(join(HOOKS, 'founder-inbox.mjs')).href)) as {
-  ownerPresence(o: {
-    home: string;
-    owner: string;
-    now?: number;
-    env?: Record<string, string | undefined>;
-  }): Presence;
 };
 
 const NOW = Date.parse('2026-10-14T12:00:00Z');
@@ -73,55 +62,6 @@ describe('挂久了的引导交给指挥官自己办', () => {
     expect(unowned).toContain('无主的创始人引导 1 条');
     expect(unowned).toContain('新的无主');
     expect(unowned).not.toContain('长长');
-  });
-});
-
-describe('ownerPresence：主人会话在不在', () => {
-  const made: string[] = [];
-  afterEach(() => {
-    for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
-  });
-  const home = () => {
-    const h = mkdtempSync(join(tmpdir(), 'presence-'));
-    made.push(h);
-    return h;
-  };
-  const session = (h: string, dir: string, rec: Record<string, unknown>, turnsHAgo?: number) => {
-    const d = join(h, '.mirasim', 'sessions', 'claude', dir);
-    mkdirSync(d, { recursive: true });
-    writeFileSync(join(d, 'record.json'), JSON.stringify(rec));
-    if (turnsHAgo !== undefined) {
-      writeFileSync(join(d, 'turns.jsonl'), '{}\n');
-      const t = new Date(NOW - turnsHAgo * 3_600_000);
-      utimesSync(join(d, 'turns.jsonl'), t, t);
-    }
-  };
-  const env = {};
-
-  it('没在跑、闲置超过 12 小时：不在；最近动过、在跑：在', () => {
-    const h = home();
-    session(h, 'old', { runPid: null, updatedAt: iso(20) }, 20);
-    session(h, 'fresh', { runPid: null, updatedAt: iso(20) }, 1);
-    session(h, 'busy', { runPid: 123, updatedAt: iso(50) });
-    expect(inbox.ownerPresence({ home: h, owner: 'old', now: NOW, env }).state).toBe('gone');
-    expect(inbox.ownerPresence({ home: h, owner: 'fresh', now: NOW, env }).state).toBe('here');
-    expect(inbox.ownerPresence({ home: h, owner: 'busy', now: NOW, env }).state).toBe('here');
-  });
-
-  it('交接给了别的会话、自己没在跑：不在', () => {
-    const h = home();
-    session(h, 'src', { runPid: null, updatedAt: iso(1) });
-    session(h, 'next', { runPid: 9, handoverFrom: 'src', updatedAt: iso(0) });
-    expect(inbox.ownerPresence({ home: h, owner: 'src', now: NOW, env })).toMatchObject({ state: 'gone' });
-  });
-
-  it('【故意造出失败】判不了的（本机没有这个会话、记录认不出、无主）一律 unknown', () => {
-    const h = home();
-    session(h, 'x', { runPid: null, updatedAt: iso(30) });
-    writeFileSync(join(h, '.mirasim', 'sessions', 'claude', 'x', 'record.json'), '{坏');
-    expect(inbox.ownerPresence({ home: h, owner: 'x', now: NOW, env }).state).toBe('unknown');
-    expect(inbox.ownerPresence({ home: h, owner: 'nobody', now: NOW, env }).state).toBe('unknown');
-    expect(inbox.ownerPresence({ home: h, owner: '无主', now: NOW, env }).state).toBe('unknown');
   });
 });
 
