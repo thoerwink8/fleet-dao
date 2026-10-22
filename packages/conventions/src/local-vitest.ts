@@ -6,6 +6,7 @@ import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { verifyRun } from './ci-box.ts';
 import { fsRepo } from './repo.ts';
+import { runCheckedChild } from './step-process.ts';
 import { prepareTemporalCli, selectedNeedsTemporal } from './temporal-test-cli.ts';
 import { createTestReport } from './test-report.ts';
 import { listTestFiles } from './test-split.ts';
@@ -152,14 +153,16 @@ export function runLocalVitest(
   let result: Result = { status: null };
   const direct = (argv: string[]) => {
     const commandArgs = [join(root, 'node_modules/vitest/vitest.mjs'), ...argv];
-    const spawn = () =>
-      spawnSync(process.execPath, commandArgs, {
+    const spawn = (): Result => {
+      const run = runCheckedChild(process.execPath, commandArgs, {
         cwd: root,
         env,
         stdio: 'inherit',
       });
-    const r = evidence ? evidence.command('native', process.execPath, commandArgs, spawn) : spawn();
-    return { status: r.status, signal: r.signal, error: r.error };
+      // spawn 的 signal 缺省是 undefined；这里和原来的同步执行一样，没有信号就记 null。
+      return { status: run.status, signal: run.signal ?? null, error: run.error };
+    };
+    return evidence ? evidence.command('native', process.execPath, commandArgs, spawn) : spawn();
   };
   try {
     if (platform === 'win32') evidence = createTestReport(root, args, phase);
