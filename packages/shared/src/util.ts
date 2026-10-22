@@ -3,7 +3,7 @@
 // 改这里之前必须知道：
 // - 这个文件**不许有任何 import**，不碰 node: 内置、process、Date.now()、Math.random()——Temporal 工作流沙箱里也要能 bundle、
 //   能重放（shared/test/util.test.ts 钉住）；
-// - 零安装区（conventions、hygiene、agents-sync、mirasim-reclaude、adapters/src/mirasim/bridge.ts）不许 import 它，
+// - 零安装区（conventions、hygiene、agents-sync、adapters/src/mirasim/bridge.ts）不许 import 它，
 //   那些地方在没有 node_modules 的环境里跑（conventions/test/package-boundaries.test.ts 钉住）；
 // - 每个函数都是「全仓逐字相同的写法」收来的，语义和原来一字不差；写法不同的（数组也放行的 asRecord、叫停时 resolve 的 sleep、
 //   不判 instanceof 的 `(err as Error).message`）故意没收。

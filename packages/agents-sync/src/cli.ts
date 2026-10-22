@@ -68,7 +68,7 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 agents/shared-rule
                      写出来的东西也归他）
   --repo <目录>      fleet-dao 仓的位置（默认：本脚本所在的仓）
   --old-repo <目录>  旧仓在这台机器上的位置（--retire-old 要）
-  --no-maintenance   仍同步全部目标，但本次不运行 Mirasim 迁移、本机会话 refresh、reclaude 后台健康维护；
+  --no-maintenance   仍同步全部目标，但本次不运行本机会话 refresh；
                      只给 --check、--apply 用，不是只同步钩子。不带此参数时维护行为保持不变。
   --no-skills        这个家不装 skill，以前本脚本装的撤掉（清单里没记的不碰）：给引擎一次性会话的用户（法国的会话用户）。
                      那里的会话照单子干活，家目录里的通用 skill（commander、discuss 这些）和单子无关，
@@ -301,10 +301,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
   const platformName = deps.platform === 'win32' ? 'Windows' : 'Linux';
   const title = { '--check': '查', '--apply': '写', '--retire-old': '撤旧仓' }[args.mode];
   deps.stdout(`agents-sync ${args.mode}（${title}；${who}家目录 ${home}；${platformName}）\n`);
-  if (args.noMaintenance)
-    deps.stdout(
-      '无附带维护：仍同步全部目标；本次不运行 Mirasim 迁移、本机会话 refresh、reclaude 后台健康维护。\n',
-    );
+  if (args.noMaintenance) deps.stdout('无附带维护：仍同步全部目标；本次不运行本机会话 refresh。\n');
 
   const backups = new Backups(home, deps.platform, deps.now());
   const all: Line[] = [];
