@@ -36,7 +36,7 @@ const actions = () => document.querySelector('[data-page-actions]') as HTMLEleme
 
 async function ready() {
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBe('false'),
+    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBeNull(),
   );
   // 系统状态读到了（健康条不再挤在页头，放进「系统状态」那一块）
   await waitFor(() => expect(screen.getByText('引擎进程')).toBeTruthy());

@@ -3,43 +3,33 @@
 
 import type { NotWired } from '@fleet-dao/shared';
 import { DraftingCompass } from 'lucide-react';
-import { cn } from '../lib/utils';
 import { EmptyState } from './layout/empty-state';
+import { Inset } from './layout/inset';
 import { RepoLink } from './repo-link';
 
-export function NotBuilt({
-  notWired,
-  compact,
-  className,
-}: {
-  notWired: NotWired;
-  compact?: boolean;
-  className?: string;
-}) {
+export function NotBuilt({ notWired, compact }: { notWired: NotWired; compact?: boolean }) {
   const label = `#${notWired.issue}`;
   return (
-    <div
-      role="note"
-      data-not-built={notWired.issue}
-      className={cn('rounded-lg border border-dashed text-muted-foreground', className)}
-    >
-      <EmptyState
-        size={compact ? 'inline' : 'section'}
-        icon={DraftingCompass}
-        title={`${notWired.what} · 待实现`}
-        hint={
-          <>
-            这块还没做，排在 {notWired.phase} ·{' '}
-            {notWired.issueRepo ? (
-              <RepoLink repo={notWired.issueRepo} kind="issues" n={notWired.issue} className="num underline">
-                {label}
-              </RepoLink>
-            ) : (
-              <span className="num">{label}</span>
-            )}
-          </>
-        }
-      />
+    <div role="note" data-not-built={notWired.issue}>
+      <Inset look="dashed">
+        <EmptyState
+          size={compact ? 'inline' : 'section'}
+          icon={DraftingCompass}
+          title={`${notWired.what} · 待实现`}
+          hint={
+            <>
+              这块还没做，排在 {notWired.phase} ·{' '}
+              {notWired.issueRepo ? (
+                <RepoLink repo={notWired.issueRepo} kind="issues" n={notWired.issue}>
+                  {label}
+                </RepoLink>
+              ) : (
+                <span className="num">{label}</span>
+              )}
+            </>
+          }
+        />
+      </Inset>
     </div>
   );
 }

@@ -107,7 +107,7 @@ describe('三段的单：按段、按模型，每一笔', () => {
 });
 
 describe('页头：面包屑代替「回任务列表」按钮（#1903）', () => {
-  test('从任务列表点进来：面包屑第一级是「任务列表」链接（带回筛选），页头没有「回任务列表」按钮', async () => {
+  test('从任务列表点进来：面包屑第一级是「任务」链接（带回筛选），页头没有「回任务列表」按钮', async () => {
     open(`/tasks/t-c9?from=${encodeURIComponent('/tasks?state=done')}`);
     await screen.findByRole('heading', { level: 1, name: /README/ });
     const crumbs = document.querySelector('[data-breadcrumb]') as HTMLElement;
@@ -121,11 +121,13 @@ describe('页头：面包屑代替「回任务列表」按钮（#1903）', () =>
     expect(within(actions).queryByRole('link')).toBeNull();
   });
 
-  test('别处进来：第一级是「主页」', async () => {
+  test('别处进来：第一级也是「任务」，回不带筛选的 /tasks（不再是「主页」）', async () => {
     open('/tasks/t-c9');
     await screen.findByRole('heading', { level: 1, name: /README/ });
     const crumbs = document.querySelector('[data-breadcrumb]') as HTMLElement;
-    expect(within(crumbs).getByRole('link', { name: '回主页' }).getAttribute('href')).toBe('/');
+    const back = within(crumbs).getByRole('link', { name: '回任务列表' });
+    expect(back.textContent).toBe('任务');
+    expect(back.getAttribute('href')).toBe('/tasks');
   });
 });
 

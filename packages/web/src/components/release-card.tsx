@@ -182,28 +182,28 @@ type Recover = NonNullable<ReleaseCard['action']['recover']>;
 
 const RECOVER_COPY: Record<
   ReleaseRecoverKind,
-  { label: string; title: string; confirm: string; done: string; fail: string }
+  { label: string; title: string; confirm: string; submitted: string; notSubmitted: string }
 > = {
   retry: {
     label: '重试',
     title: '重试：从卡住的这一步接着走？',
     confirm: '确认重试',
-    done: '已提交重试请求',
-    fail: '没能提交重试请求',
+    submitted: '已提交重试请求',
+    notSubmitted: '没能提交重试请求',
   },
   restore: {
     label: '恢复引擎开关',
     title: '恢复引擎开关？',
     confirm: '确认恢复',
-    done: '已提交恢复引擎开关请求',
-    fail: '没能提交恢复引擎开关请求',
+    submitted: '已提交恢复引擎开关请求',
+    notSubmitted: '没能提交恢复引擎开关请求',
   },
   abort: {
     label: '撤掉暂停',
     title: '撤掉暂停？',
     confirm: '确认撤掉',
-    done: '已提交撤掉暂停请求',
-    fail: '没能提交撤掉暂停请求',
+    submitted: '已提交撤掉暂停请求',
+    notSubmitted: '没能提交撤掉暂停请求',
   },
 };
 
@@ -234,9 +234,9 @@ function ReleaseRecoverButtons({ recover }: { recover: Recover }) {
     const c = RECOVER_COPY[asking];
     try {
       await mut.mutateAsync(asking);
-      toast.success(c.done, { description: '法国接活后，版本卡显示进度；操作记录里有这一条。' });
+      toast.success(c.submitted, { description: '法国接活后，版本卡显示进度；操作记录里有这一条。' });
     } catch (e) {
-      toast.error(c.fail, { description: errorText(e) });
+      toast.error(c.notSubmitted, { description: errorText(e) });
       throw e;
     }
   };

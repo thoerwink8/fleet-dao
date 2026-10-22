@@ -30,4 +30,9 @@ describe('Title', () => {
     render(<Title truncate>很长的名字</Title>);
     expect(screen.getByRole('heading').className).toContain('truncate');
   });
+
+  test('level 4 是 h4，样子同 3', () => {
+    render(<Title level={4}>四级</Title>);
+    expect(screen.getByRole('heading', { level: 4, name: '四级' }).className).toContain('font-medium');
+  });
 });

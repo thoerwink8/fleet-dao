@@ -146,9 +146,9 @@ describe('根字号不放大：照 Arco 原样，1rem = 16px（#3509）', () => 
     expect(css).not.toMatch(/--root-scale/);
     expect(css).not.toMatch(/html\s*\{[^}]*font-size/);
   });
-  test('顶栏 60、左菜单 220，壳的尺寸写 rem', () => {
+  test('顶栏 60 写 rem；左菜单固定 220px，不随根字号变', () => {
     expect(remPx('spacing-topbar')).toBe(60);
-    expect(remPx('spacing-sidebar')).toBe(220);
+    expect(css).toMatch(/--spacing-sidebar:\s*220px;/);
     for (const name of ['spacing-sidebar-collapsed', 'spacing-drawer', 'container-cockpit']) {
       expect(css, name).toMatch(new RegExp(`--${name}:\\s*[\\d.]+rem;`));
     }
