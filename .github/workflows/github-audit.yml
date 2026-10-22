@@ -33,6 +33,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Guard inventory (advisory)
+        continue-on-error: true
+        run: node packages/conventions/src/bin/guard-inventory.ts --weekly-progress
+        env:
+          GH_TOKEN: ${{ github.token }}
       - run: node packages/conventions/src/bin/github-audit.ts --comment
         env:
           GITHUB_TOKEN: ${{ github.token }}
