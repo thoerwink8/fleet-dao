@@ -15,7 +15,10 @@
 //   报警不写「不会自己好」。续期由引擎在读数过期前跑一次 grok models（refreshGrokLogin），不在看门狗上加宽限
 //   ——宽限只少报「没按期跑成」，读数仍旧，选路继续把这个池按「额度没读成」排后面。
 // - 「这台机器当前挂的不是这个组织」（not_current）不算失败：Claude 额度只能读当前挂着的那个组织，读取器不切号，
-//   另一个池本来就读不到。照旧留着旧读数、不报警，但这一轮记 partial 写明哪几个池没读，不记成全读到了。
+//   另一个池本来就读不到。照旧留着旧读数、不报警，但这个池记 unknown，整轮写明哪几个池没读，不记成全读到了。
+// - 整轮结局由各池结局汇总（#3592）：每个池各记 ok / unknown（回包认不出、账单没报用量、没挂着这个组织、丢过窗口）/
+//   failed（没读成）。全部 ok → ok；一个池也没读到数 → failed（抛）；其余 partial，明细列出各结局下是哪几个池。
+//   退役/停用的池（有效配置的 notRead）不读，也不计入整轮结局。
 // - 配置读不到、认不出：这一轮整个没跑成，当场报（key 单独一个），不拿上一次的配置顶。
 // - 有效配置 notRead 里的池不读（没有这种数据或已退役）。每轮撤掉它们的 quota-read 提醒，不留着报错；退役池的旧读数不动。
 // - 读到的窗口里被读取器丢过的（notes 里写着「没收」）不算读全：只写收到的窗口，不标别的窗口过期、不算一次读成。
@@ -115,6 +118,20 @@ export class QuotaReadFailedError extends Error {
 export const isCompleteRead = (r: Extract<PoolQuotaResult, { ok: true }>): boolean =>
   !r.notes.some((n) => n.includes('没收'));
 
+/**
+ * 一个池这一轮的结局（#3592）：ok 读全；unknown 收到了东西但认不出/不采信/没读全（带原因，不写 0）；failed 没读成。
+ * gotData：这一轮有读数写进了库（读到了窗口，哪怕有被丢的）。
+ */
+export interface PoolOutcome {
+  poolId: string;
+  outcome: 'ok' | 'unknown' | 'failed';
+  why?: string;
+  gotData: boolean;
+}
+
+/** 算 unknown 而不是 failed 的读取错：回包认不出、账单没报用量、当前没挂着这个组织。 */
+const UNKNOWN_CODES = new Set(['bad_response', 'usage_unreported', 'not_current']);
+
 type Round = { result: ScheduleResult };
 
 /** 名册自己消化错误。额度已经按原样记完之前、或配置还没读，都不让这一步把整轮打成失败。 */
@@ -169,11 +186,14 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
 
   const before = await deps.lastReadOk(config.pools.map((p) => p.poolId));
   const report = await deps.read(config);
-  const notCurrent: string[] = [];
+  const retired = new Set((config.notRead ?? []).map((skip) => skip.poolId));
+  const outcomes: PoolOutcome[] = [];
   const problems: string[] = [];
   let toAlert = 0;
 
   for (const r of report.results) {
+    // 退役/停用的池不读；读取层万一还交回了它的结果，也不写库、不报警、不计入整轮结局。
+    if (retired.has(r.poolId)) continue;
     if (r.ok) {
       await deps.save(
         {
@@ -190,12 +210,19 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
         now,
       );
       await deps.resolve(poolAlertKey(r.poolId));
-      if (!isCompleteRead(r))
-        problems.push(`${r.poolId} 有窗口被丢掉（${r.notes.filter((n) => n.includes('没收')).join('；')}）`);
+      if (isCompleteRead(r)) {
+        outcomes.push({ poolId: r.poolId, outcome: 'ok', gotData: true });
+      } else {
+        const why = `${r.poolId} 有窗口被丢掉（${r.notes.filter((n) => n.includes('没收')).join('；')}）`;
+        problems.push(why);
+        outcomes.push({ poolId: r.poolId, outcome: 'unknown', why, gotData: true });
+      }
       continue;
     }
     if (r.error.code === 'not_current') {
-      notCurrent.push(r.poolId);
+      const why = `${r.poolId} 当前没挂着这个组织，读不到（读取器不切号），旧读数留着`;
+      problems.push(why);
+      outcomes.push({ poolId: r.poolId, outcome: 'unknown', why, gotData: false });
       continue;
     }
     const last = before.get(r.poolId) ?? null;
@@ -205,7 +232,15 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
     const selfHealing = r.error.code === 'auth_refreshable';
     const unreported = r.error.code === 'usage_unreported';
     const since = last ? `上次读成是 ${last.toISOString()}。` : '库里从没读成过这个池。';
-    problems.push(`${r.poolId} 没读成（${r.error.code}）：${r.error.message}`);
+    const why = `${r.poolId} 没读成（${r.error.code}）：${r.error.message}`;
+    problems.push(why);
+    // 回包认不出、账单没报用量：读到了东西但没法采信，记 unknown，不写 0；其余是真没读成。
+    outcomes.push({
+      poolId: r.poolId,
+      outcome: UNKNOWN_CODES.has(r.error.code) ? 'unknown' : 'failed',
+      why,
+      gotData: false,
+    });
     if (immediate || repeated) {
       toAlert += 1;
       await deps.raise({
@@ -226,14 +261,33 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
     }
   }
 
-  if (notCurrent.length > 0) {
-    problems.push(`${notCurrent.join('、')} 当前没挂着这个组织，读不到（读取器不切号），旧读数留着`);
+  // 每个必读的池都要有一条结局：读取层没交回结果的池记 failed，不当成没事。
+  const seen = new Set(outcomes.map((o) => o.poolId));
+  for (const p of config.pools) {
+    if (seen.has(p.poolId)) continue;
+    const why = `${p.poolId} 读取层没交回这个池的结果`;
+    problems.push(why);
+    outcomes.push({ poolId: p.poolId, outcome: 'failed', why, gotData: false });
   }
   const scanned = config.pools.length;
-  if (problems.length > 0) {
-    return { result: { outcome: 'partial', why: problems.join('；'), scanned, found: toAlert } };
-  }
-  return { result: { outcome: 'ok', scanned, found: 0 } };
+  return { result: summarizePools(outcomes, problems, scanned, toAlert) };
+}
+
+/** 整轮结局由各池结局汇总：全部 ok → ok；一个池也没读到 → failed；其余 partial。明细按结局列出是哪几个池。 */
+export function summarizePools(
+  outcomes: readonly PoolOutcome[],
+  problems: readonly string[],
+  scanned: number,
+  found: number,
+): ScheduleResult {
+  if (outcomes.every((o) => o.outcome === 'ok')) return { outcome: 'ok', scanned, found: 0 };
+  const list = (kind: PoolOutcome['outcome']) => {
+    const ids = outcomes.filter((o) => o.outcome === kind).map((o) => o.poolId);
+    return `${kind} [${ids.join('、')}]`;
+  };
+  const why = `池结局 ${list('ok')} ${list('unknown')} ${list('failed')}：${problems.join('；')}`;
+  const outcome = outcomes.some((o) => o.gotData) ? 'partial' : 'failed';
+  return { outcome, why, scanned, found };
 }
 
 /**

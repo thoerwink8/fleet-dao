@@ -16,6 +16,7 @@ import {
   QuotaReadFailedError,
   type QuotaReadJobDeps,
   runQuotaReadJob,
+  summarizePools,
 } from '../src/jobs/quota-read.ts';
 import { usageRecordsFrom } from '../src/real/quota-read.ts';
 
@@ -54,6 +55,12 @@ const failed = (poolId: string, code: string, text = '读不到', reader = 'clau
     notes: [],
     error: { code, message: text },
   }) as PoolQuotaResult;
+
+/** 一个池也没读到时这一轮记 failed 并抛；只关心提醒和写库的用例用它吞掉这一声。 */
+const runLoose = (deps: QuotaReadJobDeps) =>
+  runQuotaReadJob(deps).catch((err: unknown) => {
+    if (!(err instanceof QuotaReadFailedError)) throw err;
+  });
 
 interface World {
   deps: QuotaReadJobDeps;
@@ -119,27 +126,27 @@ describe('定时读额度', () => {
   });
 
   it('退役池从有效配置移出：不读、不写旧额度，其他必读池失败仍是 partial', async () => {
-    const w = world([failed('p1', 'unreachable')], {
+    const results = [ok('p0'), failed('p1', 'unreachable')];
+    const w = world(results, {
       loadConfig: async () =>
         ({
-          pools: [{ poolId: 'p1', channelId: 'disabled-channel', reader: 'reclaude-carpool' }],
+          pools: [
+            { poolId: 'p0', channelId: 'c0', reader: 'reclaude-carpool' },
+            { poolId: 'p1', channelId: 'disabled-channel', reader: 'reclaude-carpool' },
+          ],
           notRead: [{ poolId: 'mirasim-relay', why: 'Mirasim 已退役' }],
         }) as unknown as QuotaConfig,
     });
     const readPoolIds: string[][] = [];
     w.deps.read = async (config) => {
       readPoolIds.push(config.pools.map((p) => p.poolId));
-      return {
-        startedAt: NOW.toISOString(),
-        finishedAt: NOW.toISOString(),
-        results: [failed('p1', 'unreachable')],
-      };
+      return { startedAt: NOW.toISOString(), finishedAt: NOW.toISOString(), results };
     };
 
     const run = await runQuotaReadJob(w.deps);
 
-    expect(readPoolIds).toEqual([['p1']]);
-    expect(w.saved).toEqual([]);
+    expect(readPoolIds).toEqual([['p0', 'p1']]);
+    expect(w.saved.map((s) => s.poolId)).toEqual(['p0']);
     expect(w.resolved).toContain(poolAlertKey('mirasim-relay'));
     expect(run.outcome).toBe('partial');
     expect(run.why).toContain('p1 没读成（unreachable）');
@@ -163,21 +170,21 @@ describe('定时读额度', () => {
   });
 
   it('没有退役标记时，渠道即使下架也不能替必读池免读；缺凭据仍是明确 partial', async () => {
-    const w = world([failed('mirasim-relay', 'no_credentials', '没有令牌')], {
+    const results = [ok('p0'), failed('mirasim-relay', 'no_credentials', '没有令牌')];
+    const w = world(results, {
       loadConfig: async () =>
         ({
-          pools: [{ poolId: 'mirasim-relay', channelId: 'mirasim-disabled', reader: 'mirasim-relay' }],
+          pools: [
+            { poolId: 'p0', channelId: 'c0', reader: 'reclaude-carpool' },
+            { poolId: 'mirasim-relay', channelId: 'mirasim-disabled', reader: 'mirasim-relay' },
+          ],
         }) as unknown as QuotaConfig,
     });
     let read = 0;
     w.deps.read = async (config) => {
       read += 1;
-      expect(config.pools.map((p) => p.poolId)).toEqual(['mirasim-relay']);
-      return {
-        startedAt: NOW.toISOString(),
-        finishedAt: NOW.toISOString(),
-        results: [failed('mirasim-relay', 'no_credentials', '没有令牌')],
-      };
+      expect(config.pools.map((p) => p.poolId)).toEqual(['p0', 'mirasim-relay']);
+      return { startedAt: NOW.toISOString(), finishedAt: NOW.toISOString(), results };
     };
 
     const run = await runQuotaReadJob(w.deps);
@@ -212,11 +219,11 @@ describe('定时读额度', () => {
   it('mirasim 单轮 timeout：不写库、不报警，读数还在 30 分钟内，选路不把整池当没读成', async () => {
     expect(15 * 60_000).toBeLessThan(QUOTA_STALE_AFTER_MS);
     expect(QUOTA_REPEAT_FAIL_MS).toBeLessThan(QUOTA_STALE_AFTER_MS);
-    const w = world([failed('mirasim-relay', 'timeout', '整体 30 秒用完', 'mirasim-relay')], {
+    const w = world([ok('p1'), failed('mirasim-relay', 'timeout', '整体 30 秒用完', 'mirasim-relay')], {
       lastOk: { 'mirasim-relay': minutesAgo(15) },
     });
     const run = await runQuotaReadJob(w.deps);
-    expect(w.saved).toEqual([]);
+    expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
     expect(w.raised).toEqual([]);
     expect(run.outcome).toBe('partial');
     expect(run.why).toContain('mirasim-relay 没读成（timeout）');
@@ -224,11 +231,11 @@ describe('定时读额度', () => {
 
   it('mirasim 连着两轮 timeout：才报警，写明上次读成，这时才按额度没读成排后面', async () => {
     const last = new Date(NOW.getTime() - QUOTA_REPEAT_FAIL_MS - 60_000);
-    const w = world([failed('mirasim-relay', 'timeout', '整体 30 秒用完', 'mirasim-relay')], {
+    const w = world([ok('p1'), failed('mirasim-relay', 'timeout', '整体 30 秒用完', 'mirasim-relay')], {
       lastOk: { 'mirasim-relay': last },
     });
     const run = await runQuotaReadJob(w.deps);
-    expect(w.saved).toEqual([]);
+    expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
     expect(w.raised).toHaveLength(1);
     expect(w.raised[0]?.key).toBe(poolAlertKey('mirasim-relay'));
     expect(w.raised[0]?.body).toContain('连着两轮没读成');
@@ -238,7 +245,7 @@ describe('定时读额度', () => {
   });
 
   it('连着两轮没读成（最近读成早于两轮之前）：报警，写明上次读成时刻', async () => {
-    const w = world([failed('p2', 'upstream', '502')], {
+    const w = world([ok('p1'), failed('p2', 'upstream', '502')], {
       lastOk: { p2: new Date(NOW.getTime() - QUOTA_REPEAT_FAIL_MS - 60_000) },
     });
     const run = await runQuotaReadJob(w.deps);
@@ -250,14 +257,14 @@ describe('定时读额度', () => {
 
   it('从没读成过的池读失败：报警（不拿「没有记录」当没事）', async () => {
     const w = world([failed('p3', 'timeout')]);
-    await runQuotaReadJob(w.deps);
+    await runLoose(w.deps);
     expect(w.raised[0]?.body).toContain('从没读成过');
   });
 
   it('凭据、登录、配置这类要人动手的：第一次就当场报', async () => {
     for (const code of ['no_credentials', 'auth', 'config']) {
       const w = world([failed('p4', code)], { lastOk: { p4: minutesAgo(15) } });
-      await runQuotaReadJob(w.deps);
+      await runLoose(w.deps);
       expect(w.raised, code).toHaveLength(1);
       expect(w.raised[0]?.body).toContain('要人动手');
       expect(w.raised[0]?.body).toContain('不会自己好');
@@ -268,13 +275,13 @@ describe('定时读额度', () => {
     expect(GROK_TOKEN_SELF_HEAL_MINUTES * 60_000).toBe(QUOTA_STALE_AFTER_MS);
     const msg = '等 grok 下次运行会自己续；超过 30 分钟还没读成再找人';
     const recent = world([failed('grok', 'auth_refreshable', msg)], { lastOk: { grok: minutesAgo(15) } });
-    await runQuotaReadJob(recent.deps);
+    await runLoose(recent.deps);
     expect(recent.raised).toEqual([]);
 
     const w = world([failed('grok', 'auth_refreshable', msg)], {
       lastOk: { grok: new Date(NOW.getTime() - QUOTA_REPEAT_FAIL_MS - 60_000) },
     });
-    await runQuotaReadJob(w.deps);
+    await runLoose(w.deps);
     expect(w.raised).toHaveLength(1);
     expect(w.raised[0]?.body).not.toContain('不会自己好');
     expect(w.raised[0]?.body).toContain('会在 grok 下次运行后自己好');
@@ -295,7 +302,7 @@ describe('定时读额度', () => {
         lastOk: { grok: minutesAgo(15) },
       },
     );
-    await runQuotaReadJob(w.deps);
+    await runLoose(w.deps);
     expect(w.raised).toHaveLength(1);
     expect(w.raised[0]?.body).toContain('要人动手');
     expect(w.raised[0]?.body).toContain('不会自己好');
@@ -309,14 +316,14 @@ describe('定时读额度', () => {
       '账单已读，但上游未报告当前用量；用量未知',
       'grok-billing',
     );
-    const recent = world([result], { lastOk: { grok: minutesAgo(15) } });
+    const recent = world([ok('p1'), result], { lastOk: { grok: minutesAgo(15) } });
     await expect(runQuotaReadJob(recent.deps)).resolves.toMatchObject({ outcome: 'partial' });
-    expect(recent.saved).toEqual([]);
+    expect(recent.saved.map((s) => s.poolId)).toEqual(['p1']);
     expect(recent.raised).toEqual([]);
     expect(recent.resolved).not.toContain(poolAlertKey('grok'));
 
     const stale = world([result], { lastOk: { grok: minutesAgo(31) } });
-    await runQuotaReadJob(stale.deps);
+    await runLoose(stale.deps);
     expect(stale.raised).toHaveLength(1);
     expect(stale.raised[0]?.body).toContain('下一轮定时读取自然重试');
     expect(stale.raised[0]?.body).not.toContain('不会自己好');
@@ -364,6 +371,80 @@ describe('定时读额度', () => {
     await expect(runQuotaReadJob(w.deps)).rejects.toThrow(/连不上/);
     expect(w.saved).toEqual([]);
     expect(w.finished[0]).toMatchObject({ outcome: 'failed' });
+  });
+
+  describe('整轮结局由各池结局汇总（#3592）', () => {
+    it('全部 ok → ok', async () => {
+      const w = world([ok('p1'), ok('p2')]);
+      const run = await runQuotaReadJob(w.deps);
+      expect(run).toMatchObject({ outcome: 'ok', scanned: 2, found: 0 });
+      expect(w.finished[0]).toEqual({ outcome: 'ok', scanned: 2, found: 0 });
+    });
+
+    it('部分 ok、部分 unknown / failed → partial，明细按结局列出是哪几个池', async () => {
+      const w = world([
+        ok('p1'),
+        failed('p2', 'bad_response', '一个窗口都认不出'),
+        failed('p3', 'unreachable'),
+        failed('p4', 'not_current'),
+      ]);
+      const run = await runQuotaReadJob(w.deps);
+      expect(run.outcome).toBe('partial');
+      expect(run.why).toContain('ok [p1]');
+      expect(run.why).toContain('unknown [p2、p4]');
+      expect(run.why).toContain('failed [p3]');
+      expect(run.why).toContain('p2 没读成（bad_response）：一个窗口都认不出');
+      expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
+    });
+
+    it('全部读不到（failed）→ failed 并抛，什么都不写，明细列出各池', async () => {
+      const w = world([failed('p1', 'unreachable'), failed('p2', 'upstream', '502')]);
+      await expect(runQuotaReadJob(w.deps)).rejects.toBeInstanceOf(QuotaReadFailedError);
+      expect(w.saved).toEqual([]);
+      expect(w.finished[0]).toMatchObject({ outcome: 'failed', scanned: 2 });
+      const why = (w.finished[0] as { why: string }).why;
+      expect(why).toContain('failed [p1、p2]');
+      expect(why).toContain('ok []');
+    });
+
+    it('全部 unknown（回包认不出）也算全部读不到：failed，不写 0', async () => {
+      const w = world([failed('p1', 'bad_response', '字段改名'), failed('p2', 'usage_unreported')]);
+      await expect(runQuotaReadJob(w.deps)).rejects.toBeInstanceOf(QuotaReadFailedError);
+      expect(w.saved).toEqual([]);
+      expect((w.finished[0] as { why: string }).why).toContain('unknown [p1、p2]');
+    });
+
+    it('读取层漏交某个必读池的结果：该池记 failed，不当成没事', async () => {
+      const w = world([ok('p1')], {
+        loadConfig: async () => ({ pools: [{ poolId: 'p1' }, { poolId: 'p2' }] }) as unknown as QuotaConfig,
+      });
+      const run = await runQuotaReadJob(w.deps);
+      expect(run.outcome).toBe('partial');
+      expect(run.why).toContain('failed [p2]');
+    });
+
+    it('退役池的结果即使被交回：不写库、不报警、不计入整轮结局', async () => {
+      const w = world([ok('p1'), failed('mirasim-relay', 'unreachable', '连不上', 'mirasim-relay')], {
+        loadConfig: async () =>
+          ({
+            pools: [{ poolId: 'p1' }],
+            notRead: [{ poolId: 'mirasim-relay', why: 'Mirasim 已退役' }],
+          }) as unknown as QuotaConfig,
+      });
+      const run = await runQuotaReadJob(w.deps);
+      expect(run).toMatchObject({ outcome: 'ok', scanned: 1 });
+      expect(w.raised).toEqual([]);
+      expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
+    });
+
+    it('summarizePools：partial 的 found 带当场报警数；ok 的 found 为 0', () => {
+      const outcomes = [
+        { poolId: 'a', outcome: 'ok', gotData: true },
+        { poolId: 'b', outcome: 'failed', gotData: false },
+      ] as const;
+      expect(summarizePools(outcomes, ['b 没读成'], 2, 1)).toMatchObject({ outcome: 'partial', found: 1 });
+      expect(summarizePools([outcomes[0]], [], 1, 0)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
+    });
   });
 
   it('配置里一个池都没有：记 unscanned，不记成 ok', async () => {

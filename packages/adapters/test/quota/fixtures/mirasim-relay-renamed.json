@@ -1,0 +1,14 @@
+{
+  "type": "relay",
+  "relay": {
+    "available": true,
+    "usage": {
+      "ok": true,
+      "capturedAt": "2026-09-24T18:59:47.384Z",
+      "windows": [
+        { "name": "5h", "pct": 97, "resetsAt": "2026-09-24T19:06:54.000Z" },
+        { "name": "7d", "pct": 99, "resetsAt": "2026-09-27T19:00:00.000Z" }
+      ]
+    }
+  }
+}
