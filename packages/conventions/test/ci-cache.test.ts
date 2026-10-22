@@ -970,17 +970,13 @@ describe('ci.yml 的 test job', () => {
     }
   });
 
-  it('postgres 容器在 job 一开始就后台起、装依赖之后才等 pg_isready（不和装依赖串着等）', () => {
-    const start = steps.findIndex((s) => /docker run -d --name fleet-test-pg/.test(s.run ?? ''));
+  it('pg 台在装依赖后通过公共启动器核对本 job 的 PostgreSQL 16 cluster，再算缓存和跑测试', () => {
+    const start = steps.findIndex((s) => /ci-postgres\.ts test/.test(s.run ?? ''));
     const install = steps.findIndex((s) => /pnpm install --frozen-lockfile/.test(s.run ?? ''));
-    const wait = steps.findIndex((s) => /pg_isready/.test(s.run ?? ''));
-    expect(start, '起容器那一步').toBeGreaterThanOrEqual(0);
-    expect(start).toBeLessThan(install);
-    expect(wait).toBeGreaterThan(install);
+    const cache = steps.findIndex((s) => s.id === 'cache-key');
+    expect(start, '起独立 cluster 那一步').toBeGreaterThan(install);
+    expect(start).toBeLessThan(cache);
     expect((steps[start] as Step).if).toBe('matrix.pg');
-    expect((steps[wait] as Step).if).toBe('matrix.pg');
-    // 起容器那一步自己不等（拉镜像放后台），也不跑 pg_isready
-    expect(steps[start]?.run).not.toContain('pg_isready');
   });
 
   it('清单文件名和缓存目录名两边一致（bin 写的、yml 存的是同一个目录）', () => {
