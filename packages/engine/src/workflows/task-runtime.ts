@@ -8,6 +8,7 @@
 // - 停下等人 park() 回来＝人点了「继续」；放弃会在 park() 里抛 Abandoned，走不到下一行。
 
 import type { TaskState } from '@fleet-dao/shared';
+import { totalRoundsTitle } from '@fleet-dao/shared/continue-exhausted';
 import { clipCauseSummary, type RunCause } from '@fleet-dao/shared/run-cause';
 import {
   CancellationScope,
@@ -46,9 +47,11 @@ import {
   MAX_IMPLEMENT_ROUNDS,
   MAX_MAIN_SYNCS,
   MAX_ROUND_RESETS,
+  MAX_TOTAL_ROUNDS,
   MAX_VERIFY_ROUNDS,
   type MainSyncBudgetExhausted,
   type MergedTaskReceipt,
+  PARK_CODE_TOTAL_ROUNDS,
   PARKED_RETRY_ACTOR,
   PAUSED_BY_HUMAN,
   type ParkCause,
@@ -323,6 +326,19 @@ export class TaskRuntime {
   mergeRecheckWoke: { head: string; title: string } | null = null;
   /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */
   private roundResets = 0;
+  /** 这一代累计动手了几轮（#3603）：跨「继续」累计，继续不清零。纯状态，重放算得出。 */
+  totalRounds = 0;
+  /** 总轮数到顶后带原因的「继续」多给了几轮（#3603）：上限＝MAX_TOTAL_ROUNDS + 这个数。 */
+  totalRoundGrants = 0;
+  /** 最近一次被认下的「继续」带的原因（ContinueCommand.note，去掉首尾空白）；没带是 null。总轮数到顶的停下只认带原因的。 */
+  private lastContinueNote: string | null = null;
+
+  /** 取走最近一次「继续」带的原因（取了就清）：总轮数到顶的停下前先取一次清掉旧的，醒来再取这一次的。 */
+  takeContinueNote(): string | null {
+    const note = this.lastContinueNote;
+    this.lastContinueNote = null;
+    return note;
+  }
   attemptSeq = 0;
 
   /** 记下一次冷验收转给人的验收条（同一 PR 同一个头只记一份，后来的条目并进去）。 */
@@ -372,6 +388,9 @@ export class TaskRuntime {
         if (command.widenBudget === true && park.kind === 'quota') this.budgetWiden += 1;
       }
       this.continued += 1;
+      // 记下这次「继续」的原因（#3603）：只改内存状态，不发命令，老历史重放不受影响
+      const note = typeof command?.note === 'string' ? command.note.trim() : '';
+      this.lastContinueNote = note === '' ? null : note;
       this.closeHold = null;
       // 还没停下（没到检查点）就收到「继续」：撤掉这次暂停请求；已经停着的由 holdPaused 看 continued 放行
       if (!this.holding) this.pauseReq = null;
@@ -1120,7 +1139,11 @@ export class TaskRuntime {
       );
       return 'auto';
     }
-    await this.park(title, reset ? detail : legacyDetail, level, 'rounds');
+    // 累计动手到了总轮数上限（#3603）：交还本机、等带原因的「继续」，不走下面的普通停下；带原因的继续照样算进 MAX_ROUND_RESETS
+    const capped = reset && (await this.holdAtTotalRounds(title, detail, level));
+    if (!capped) {
+      await this.park(title, reset ? detail : legacyDetail, level, 'rounds');
+    }
     // 点「继续」清掉没提交攒下的避让，和轮数清零同一处（#1408）。老历史没有这个标记，不碰。
     if (patched('avoid-empty-commit-route')) this.clearCommitAvoid();
     if (!reset) return 'legacy';
@@ -1134,6 +1157,60 @@ export class TaskRuntime {
     this.resetRounds();
     await this.reloadBrief();
     return 'reset';
+  }
+
+  /**
+   * 总轮数上限（#3603，patched('task-total-rounds')）：这一代累计动手（totalRounds）没到 MAX_TOTAL_ROUNDS + 已放行的轮数，回 false，
+   * 调用方照原来停下。到了：先交还本机（handBackLocal：留言、贴「本机做」；没成照旧停下，正文写明没贴上），再停下等人；
+   * 不带原因的「继续」不放行（记一行、原样再停），带了原因才回 true，并把上限再放 MAX_IMPLEMENT_ROUNDS 轮。累计不清：下一次到顶照样要原因。
+   * 调用方拿到 true 照「继续」后的做法清零。标记只在到顶那一刻问：老历史在这一刻没有标记，重放为假，照原来停下。
+   * 停法记 other（码 total_rounds）：指挥官不对它重做（重做另起一代就把累计清了），只留给人。
+   */
+  async holdAtTotalRounds(title: string, detail: string, level: 'stuck' | 'decision'): Promise<boolean> {
+    const limit = MAX_TOTAL_ROUNDS + this.totalRoundGrants;
+    if (this.totalRounds < limit || !patched('task-total-rounds')) return false;
+    const capTitle = `${title}；${totalRoundsTitle(limit)}`;
+    const { owner, name } = this.input.repo;
+    const issue = this.input.issueNumber;
+    const how = `要本机接着做：\`pnpm work claim ${issue}\` 领走，这一代点「放弃」；要引擎再试：\`fleet-api task continue ${owner}/${name} ${issue} --note "<为什么还值得接着做>"\`，不带原因的「继续」引擎不放行。`;
+    let handed = '已贴「本机做」交还本机。';
+    try {
+      await this.cancellable(() =>
+        this.acts.handBackLocal({
+          schemaVersion: 1,
+          taskId: this.input.taskId,
+          repo: this.input.repo,
+          issueNumber: issue,
+          key: `total-rounds:${workflowInfo().workflowId}:${limit}`,
+          body: [
+            `引擎这一代在这张单上动手累计 ${limit} 轮还没合（跨「继续」累计、不清零，#3603），已贴「本机做」交还本机，任务工作流停着等人。`,
+            '',
+            detail.slice(0, 2000),
+            '',
+            how,
+          ].join('\n'),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
+      handed = `「本机做」没贴上（${String(error).slice(0, 300)}），要人手动贴。`;
+      log.warn('总轮数到顶：交还本机没做成，照旧停下', { error: String(error) });
+    }
+    for (;;) {
+      this.takeContinueNote();
+      await this.park(capTitle, `${handed}${detail} ${how}`, level, 'other', undefined, {
+        code: PARK_CODE_TOTAL_ROUNDS,
+      });
+      const why = this.takeContinueNote();
+      if (why !== null) {
+        this.totalRoundGrants += MAX_IMPLEMENT_ROUNDS;
+        await this.note(
+          `带原因的「继续」放行（${why.slice(0, 300)}）：再给 ${MAX_IMPLEMENT_ROUNDS} 轮，累计 ${this.totalRounds} 轮不清零`,
+        );
+        return true;
+      }
+      await this.note(`「继续」没带原因，不放行：${capTitle}`);
+    }
   }
 
   /** 两轮计数清零；单子可能改了：重读之后开新会话，不续带着旧交代的那个。 */

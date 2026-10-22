@@ -49,6 +49,8 @@ import type {
   DeliveryRead,
   EngineStartedAt,
   GuardedPaths,
+  HandBackLocalInput,
+  HandBackLocalResult,
   MergedTaskReceipt,
   MergeNowInput,
   MergeNowResult,
@@ -351,6 +353,8 @@ export interface EngineTasks {
   noteBare401?: (input: NoteBare401Input, ctx: PortContext) => Promise<NoteBare401Result>;
   /** 定这张单走三段还是全程（#2826，flow-mode.ts）：读标签、开关、仓档案，写一次分组记录。读不到抛。 */
   decideFlowMode?: (input: DecideFlowModeInput, ctx: PortContext) => Promise<DecideFlowModeResult>;
+  /** 总轮数到顶交还本机（#3603）：先留言（幂等键）再贴「本机做」。哪步没成都抛。 */
+  handBackLocal?: (input: HandBackLocalInput, ctx: PortContext) => Promise<HandBackLocalResult>;
 }
 
 /** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
@@ -376,6 +380,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   taskSpend: true,
   noteBare401: true,
   decideFlowMode: true,
+  handBackLocal: true,
 };
 export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
 

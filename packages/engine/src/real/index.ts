@@ -91,6 +91,7 @@ import { gitNetworkEnv } from './git-env.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
 import { groomJob } from './groom.ts';
+import { createHandBackLocal } from './hand-back-local.ts';
 import {
   cursorBareCommand,
   cursorLaunchCommand,
@@ -1227,6 +1228,8 @@ export function realPortsFromEnv(
     ...taskActivities,
     resolveConflictMechanically: real.resolveConflictMechanically,
     readPushHandbackPreflight: createPushHandbackPreflight(pushHandbackDeps),
+    // 总轮数到顶交还本机（#3603）：留言再贴「本机做」
+    handBackLocal: createHandBackLocal(gh),
     async readCiPolicy(input) {
       if (input?.schemaVersion !== 1 || !input.repo?.owner || !input.repo?.name) {
         throw new PortError('INVALID_INPUT', '读 CI 模式：要有仓的 owner 和 name', { retryable: false });
