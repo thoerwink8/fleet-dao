@@ -1,6 +1,6 @@
 // Mirasim 血缘和实际历史记录的只读接口。turns 在收尾落盘，缺行不代表未投递。
 // 读不到、血缘冲突或格式认不出都明确报告；不比较投递差集、不重注入原文。
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dayOf, logDir } from './prompt-log.mjs';
 import { isMachineOpening, isMachineSession } from './unattended.mjs';
@@ -217,66 +217,6 @@ export function sentByFounder({ home, now = Date.now(), env = process.env, only 
   }
   entries.sort((a, b) => a.at - b.at);
   return { absent: false, entries, problems, since };
-}
-
-/** 主人会话闲置多久算「已不在」（自动认领它的引导） */
-export const OWNER_IDLE_MS = 12 * 60 * 60_000;
-
-/**
- * 记引导的那个 Mirasim 会话（主人）还在不在，只认本机 Mirasim 的记录（~/.mirasim/sessions/claude/<目录>/record.json）：
- * - gone：确定不在了——它把活交接给了别的会话（别的会话的 record.json 里 handoverFrom 是它）且自己没在跑；或没在跑（runPid 空）、
- *   最后一次动静（record.json 的 updatedAt、turns.jsonl 的修改时刻取晚的）离现在超过 OWNER_IDLE_MS。
- * - here：在跑，或最近 OWNER_IDLE_MS 里还动过。
- * - unknown：判不了——这台没装 Mirasim、没有这个目录（可能是别的机器记的）、record.json 读不了认不出、无主。判不了的不认领。
- * @param {{ home: string, owner: string, now?: number, env?: Record<string, string | undefined> }} opts
- * @returns {{ state: 'gone' | 'here' | 'unknown', why: string }}
- */
-export function ownerPresence({ home, owner, now = Date.now(), env = process.env }) {
-  if (typeof owner !== 'string' || !SESSION_ID.test(owner))
-    return { state: 'unknown', why: '无主或主人名认不出' };
-  const base = join(mirasimDir(env, home), 'sessions', 'claude');
-  if (!existsSync(base)) return { state: 'unknown', why: '这台没装 Mirasim' };
-  const dir = join(base, owner);
-  if (!existsSync(dir))
-    return { state: 'unknown', why: `本机没有 Mirasim 会话 ${owner}（可能是别的机器记的）` };
-  let rec;
-  try {
-    rec = JSON.parse(readFileSync(join(dir, 'record.json'), 'utf8'));
-  } catch (err) {
-    return { state: 'unknown', why: `${owner} 的 record.json 读不了或认不出（${errCode(err)}）` };
-  }
-  if (!rec || typeof rec !== 'object') return { state: 'unknown', why: `${owner} 的 record.json 认不出` };
-  const running = rec.runPid !== null && rec.runPid !== undefined;
-  if (running) return { state: 'here', why: `${owner} 正在跑` };
-  let handedTo = null;
-  try {
-    for (const d of readdirSync(base)) {
-      if (d === owner) continue;
-      const text = readOrNull(join(base, d, 'record.json'));
-      if (text === null || !text.includes(owner)) continue;
-      try {
-        if (JSON.parse(text)?.handoverFrom === owner) handedTo = d;
-      } catch {
-        // 别的会话的记录认不出：不拿它当证据
-      }
-    }
-  } catch {
-    // 列不了：交接这条证据用不上，下面按闲置判
-  }
-  if (handedTo !== null) return { state: 'gone', why: `${owner} 已交接给 ${handedTo}，自己没在跑` };
-  const updated = Date.parse(String(rec.updatedAt ?? ''));
-  if (!Number.isFinite(updated))
-    return { state: 'unknown', why: `${owner} 的 record.json 没有能认的 updatedAt` };
-  let last = updated;
-  try {
-    last = Math.max(last, statSync(join(dir, 'turns.jsonl')).mtimeMs);
-  } catch {
-    // 没有 turns.jsonl：只按 updatedAt
-  }
-  const idleH = (now - last) / 3_600_000;
-  if (now - last > OWNER_IDLE_MS)
-    return { state: 'gone', why: `${owner} 没在跑、已闲置 ${idleH.toFixed(0)} 小时` };
-  return { state: 'here', why: `${owner} ${idleH.toFixed(1)} 小时前还动过` };
 }
 
 // —— 同血缘的实际历史，只读、不推断投递状态 ——
