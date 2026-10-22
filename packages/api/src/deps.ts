@@ -14,6 +14,7 @@ import type { PreflightReaders } from './france-preflight.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { HostResourceSampler } from './host-resources.ts';
 import type { LocalClaimsPort } from './local-claims.ts';
+import type { LocalHoldPort } from './local-hold.ts';
 import type { ManualTracksPort } from './manual-tracks.ts';
 import type { ModelRosterPort } from './model-roster.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
@@ -159,6 +160,11 @@ export interface Deps {
    * 没给（开发环境、机器人凭据没读到）的答案照样存下，回包里 handoff 写没接上，不当成记上了。
    */
   decisionCommenter?: DecisionCommenter | undefined;
+  /**
+   * 诊断型 / diff 外验收条的单被「继续」「重做」时交回本机（#3602）：往单上留言并贴「本机做」，走引擎机器人的 GitHub。
+   * 没给（开发环境、机器人凭据没读到）就只拒绝，原因里写明没贴标签。
+   */
+  localHold?: LocalHoldPort | undefined;
   /**
    * 「要你拍」选完要本机做的事（decision-actions.ts）：重查 GitHub App、重查飞书推送。
    * 没给（开发、内存版）这两样回「没接上」，卡留着；暂停、放开、移出仓、留着只靠库，删工作树交给引擎，都不看这项。

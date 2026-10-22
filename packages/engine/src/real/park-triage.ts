@@ -8,6 +8,9 @@
 // - 操作记录经 recordEngineAudit 写，actor 是 engine:commander、target 是 commander；「认领」和「执行」各一条（jobs/park-triage.ts 看认领判是否处理过）。
 // - 提醒（诊断文字）经 upsertAlert 推：执行了的、贴「本机做」交本机指挥官的是 daily；留给人（要掏新钱、删了找不回、只有人能做）
 //   是 decision（带选项和原因）；没成、会话没起成的是 alert。改标准的停下经 addIssueLabel 贴「本机做」（#3423）。
+
+import { LOCAL_LABEL, offDiffHoldOf } from '@fleet-dao/conventions';
+import { criteriaOf } from '@fleet-dao/core';
 import {
   COMMANDER_AUDIT_TARGET,
   commanderAuditRows,
@@ -872,6 +875,20 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     },
     async addLabel(repo, issueNumber, label) {
       await w.gh.addIssueLabel({ repo: { owner: repo.owner, name: repo.name }, issueNumber, label });
+    },
+    // 重做之前过诊断判据（#3602）：验收条先取单子正文（rawRequest）里最后一个「怎么算做完」，读不出来再退到任务行存的验收条
+    offDiffHold: {
+      async check(row) {
+        const ctx = await taskContext(w.db, row.taskId);
+        if (ctx === null) throw new Error(`库里没有任务 ${row.taskId}，判不了验收条`);
+        const criteria = criteriaOf(ctx.rawRequest);
+        return offDiffHoldOf('ok' in criteria ? criteria.ok : ctx.acceptance, 'commander.redo');
+      },
+      async handBack(repo, issueNumber, hold) {
+        const ref = { owner: repo.owner, name: repo.name };
+        await w.gh.commentIssue({ repo: ref, issueNumber, key: hold.key, body: hold.comment });
+        await w.gh.addIssueLabel({ repo: ref, issueNumber, label: LOCAL_LABEL });
+      },
     },
     async audit({ item, action, reason, ok, error, source }) {
       await recordEngineAudit(w.db, {
