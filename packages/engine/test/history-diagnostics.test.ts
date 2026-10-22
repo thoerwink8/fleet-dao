@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +6,8 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import type { Worker, WorkflowBundle } from '@temporalio/worker';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ANNOTATION_LIMIT,
+  ANNOTATION_PREFIX,
   DiagnosticOutput,
   decodeFrames,
   encodeFrames,
@@ -96,6 +98,7 @@ async function fixture(
   const root = await mkdtemp(join(tmpdir(), 'fleet-synthetic-history-'));
   roots.push(root);
   const lines: string[] = [],
+    annotations: string[] = [],
     order: string[] = [];
   const raw = randomBytes(1024);
   class History {
@@ -130,10 +133,13 @@ async function fixture(
   const scope = new SyntheticHistoryDiagnostics({
     test: 'synthetic',
     testSha256: identity.testSha256,
-    output: new DiagnosticOutput((line) => {
-      lines.push(line);
-      emit?.(line);
-    }),
+    output: new DiagnosticOutput(
+      (line) => {
+        lines.push(line);
+        emit?.(line);
+      },
+      (line) => annotations.push(line),
+    ),
     failed: () => failed,
     artifactRoot: root,
     ...(scheduleWatchdog ? { scheduleWatchdog } : {}),
@@ -159,8 +165,97 @@ async function fixture(
   scope.worker(env, worker, run, { code: 'actual synthetic bundle' } as WorkflowBundle);
   scope.track(run);
   if (started) await scope.start(env, 'taskWorkflow', { workflowId: 'workflow', taskQueue: 'q', args: [] });
-  return { scope, env, worker, run, stop, lines, exactHandle, withDeadline, root, raw, order };
+  return { scope, env, worker, run, stop, lines, annotations, exactHandle, withDeadline, root, raw, order };
 }
+
+const annotationOf = (line: string) => {
+  expect(line.startsWith(ANNOTATION_PREFIX)).toBe(true);
+  const data = line.slice(ANNOTATION_PREFIX.length);
+  expect(data).not.toMatch(/[\r\n]/);
+  return JSON.parse(data.replace(/%0A/g, '\n').replace(/%0D/g, '\r').replace(/%25/g, '%'));
+};
+
+describe('#3413 public Actions annotation for a CI capture', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+  it('binds each captured read to workflow, run, stage, ciSha and byte SHA-256 without frames or business text', async () => {
+    vi.stubEnv('GITHUB_SHA', 'c'.repeat(40));
+    const f = await fixture(true);
+    f.scope.mark('wait:first-worker:parked-query');
+    f.stop();
+    await f.scope.finish();
+    const published = f.annotations.map(annotationOf);
+    expect(published.map((a) => a.kind)).toEqual(['history', 'describe']);
+    expect(published[0]).toMatchObject({
+      outcome: 'captured',
+      test: 'synthetic',
+      workflowId: 'workflow',
+      runId: 'exact-run',
+      stage: 'wait:first-worker:parked-query',
+      reason: 'test-failed',
+      ciSha: 'c'.repeat(40),
+      testSha256: identity.testSha256,
+      bytes: f.raw.length,
+      sha256: createHash('sha256').update(f.raw).digest('hex'),
+    });
+    // 注解的 hash 和日志帧里的同一份字节对得上。
+    const frames = f.lines.filter((line) => parse(line).type !== 'status');
+    const end = frames.findIndex((line) => parse(line).type === 'end');
+    expect(decodeFrames(frames.slice(0, end + 1)).identity.ciSha).toBe('c'.repeat(40));
+    expect(parse(frames[0] ?? '').sha256).toBe(published[0].sha256);
+    const joined = f.annotations.join('\n');
+    expect(joined).not.toContain(PREFIX);
+    expect(joined).not.toContain('must not appear');
+    expect(joined).not.toContain(f.raw.toString('base64').slice(0, 32));
+  });
+  it('a passing test publishes nothing', async () => {
+    const f = await fixture();
+    f.stop();
+    await f.scope.finish();
+    expect(f.annotations).toEqual([]);
+  });
+  it('failed reads publish unknown with the code, never a captured hash', async () => {
+    const f = await fixture(true);
+    f.exactHandle.fetchHistory.mockRejectedValue(new Error('RPC rejected'));
+    f.scope.mark('修正写入工作流文件的交付');
+    f.stop();
+    await f.scope.finish();
+    const [history] = f.annotations.map(annotationOf);
+    expect(history).toMatchObject({
+      outcome: 'unknown',
+      kind: 'history',
+      runId: 'exact-run',
+      code: 'rpc-failed',
+    });
+    expect(history.sha256).toBeUndefined();
+    expect(history.stage).toBe('unlabeled');
+    expect(f.annotations.join('\n')).not.toContain('修正');
+  });
+  it('defaults on only for the real file sink inside Actions, escapes % and caps the count', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const value = {
+      outcome: 'unknown',
+      test: '100% x',
+      reason: 'watchdog',
+      stage: 'a',
+      ciSha: 'unknown',
+    } as const;
+    vi.stubEnv('GITHUB_ACTIONS', '');
+    expect(new DiagnosticOutput().annotation(value)).toBe(false);
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    expect(new DiagnosticOutput(() => undefined).annotation(value)).toBe(false);
+    expect(errors).not.toHaveBeenCalled();
+    const output = new DiagnosticOutput();
+    expect(output.annotation(value)).toBe(true);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(String(errors.mock.calls[0]?.[0])).toContain('"test":"100%25 x"');
+    for (let i = 1; i < ANNOTATION_LIMIT; i++) expect(output.annotation(value)).toBe(true);
+    expect(output.annotation(value)).toBe(false);
+    expect(errors).toHaveBeenCalledTimes(ANNOTATION_LIMIT);
+  });
+});
 
 describe('local watchdog and owned worker cleanup', () => {
   it('defers a controlled watchdog until slow preparation and the exact-run host barrier are ready', async () => {

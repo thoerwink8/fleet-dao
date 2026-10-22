@@ -32,4 +32,29 @@
 
 `push-handback.test.ts` 第一个工人先用假世界的 `until` 等「停下」写进假库（`saveTaskState` 的 phase `parked`，不发查询），再照旧 `parked()` 查一次拿凭据。60 秒、20 秒等待、cache0、换工人、业务断言都没变，没加重试或 sleep。这样第一段不再在走向停下的路上查询：上面两种卡法的触发都在这段。同文件的 `parked()` 也先等假库写进停下再轮询查询：本机四文件并行时 `accepted and ready do not succeed before main loop consumes; duplicate returns same receipt`（同为 cache0）在查停点等满 20 秒，最后状态 phase 仍是 implement，属第二种卡法，没有取证帧，不是这份 TMPRL1100。已停过的再查，假库里已有停下，照旧直接轮询。查询撞上本地活动结果这个生产问题本身没修（归 #3258），由 `la-query-split.test.ts` 确定钉住，不再靠这条用例偶发撞上。
 
-CI run 39392992046 没留历史；PR #3488 那次（`test (5/8)`，同一处查停点 20 秒超时、phase 停在 brief）日志里若有取证帧，这里也还没解出来。两次都不能断言是这个机制，只是症状一致。
+## 公开 check 注解（没有 workflow/run，不替换上面的字节）
+
+Actions 日志在这台机器上是 HTTP 403，注解里也没有 `FLEET_SYNTHETIC_HISTORY` 帧。`ci-check-runs.json` 是从公开 check-run / annotations API 原样摘的 run、job 名、head、注解路径行号和标题（用例名只在标题里），也记了各注解正文的 SHA-256。`worker-replacement-ci-annotation.test.ts` 只核这份元数据、下面三份注解原文和对应源码行。源码快照 `push-handback.d45207791e21.txt` 与本仓 `415dc14b^` 的该文件逐字节相同（该文件上次改动是 #3354）。
+
+| 注解 | 证明了什么 |
+| --- | --- |
+| run 39392992046 / job 118528847472 / head `d45207791e21`，`ci-job-118528847472.annotation.txt` | 只有 `Test timed out in 60000ms`，栈停在 `push-handback.test.ts:289:3`。源码快照 `push-handback.d45207791e21.txt` 的这一行是 `it(...)` 本身，不是内部 await。注解里没有 `pollQuery`、phase、workflow、run。当时 `pollQuery` 的 20 秒要等 `read()` 返回才检查，所以这则注解定不了是查停点、Update 还是 `result()` 没返回。不能写成上面那份 TMPRL1100 |
+| run 39588087499 / job 119181973185 / head `6c4d389277f9`（PR #3488，`test (5/8)`），`ci-job-119181973185.annotation.txt` | `等了 20000 毫秒还没等到：permission push park`。栈是 `support.ts:181`（抛出带最后状态的错误）和 `push-handback.test.ts:343:21`。源码快照 `push-handback.6c4d389277f9.txt` 与 `a6c7739001a4` 字节相同（SHA-256 `c754d861…`，也是 `slow-parked-query` 的 testSha256）：342 行 mark `wait:first-worker:parked-query`，343 行 `await parked(h)`。最后状态 `phase` 为 `brief`、`doing` 为读单子和需求文档、`round` 为 1，凭据是 null。查询有回包。注解没有 workflow/run，帧仍未解出。这不是 60 秒原超时，也不是 run `6385a827…`（TMPRL1100）或 `d8500003…`（implement / selfCheck） |
+| 同一次原 run 的 job 118528847602（`test (8/8 · temporal)`），`ci-job-118528847602.annotation.txt` | 另一条 `60000ms`，栈在 `push-handback-contract.test.ts:233:3`。该头这一行是 `wrong H0 and exhausted original budget…` 的 `it`。注解里没有 park-kind，也没有本用例的文件名。不能拿来解释 worker replacement |
+
+原 60 秒那次的内部 await 和 workflow/run 仍然没有，事后也补不回来：
+
+- 那个头的测试源码（快照与 `raw.githubusercontent.com/thoerwink8/fleet-dao/d45207791e21faa6c7c166f5023b49fe18f21264/packages/engine/test/push-handback.test.ts` 逐字节相同）没有接取证，workflowId 用 `randomUUID()` 现起，测试服务端在内存里，用例结束就关。
+- 那次 run 只有 e2e 的 artifact，`test (6/8)` 没有。步骤日志匿名读是 403/404，本机没有 GitHub 凭据。
+- 60 秒的 vitest 超时只指 `it` 行，所有内部 await（启工人、查停点、Update、`result()`）都没留下各自的报错，靠注解分不出来。
+
+所以接下来只能靠下一次 CI 复现时的取证。现在这条用例接着 `SyntheticHistoryDiagnostics`，在 Actions 里（`GITHUB_ACTIONS=true`，用默认输出的 `DiagnosticOutput()`）每次 watchdog/失败取证另打一条 `::warning title=FLEET_SYNTHETIC_HISTORY_V1::` 公开注解，内容是 test、workflowId、runId、固定阶段标签、reason、`ciSha`（`GITHUB_SHA`）、testSha256、bundleSha256，以及所取字节的长度和 SHA-256。读不成就写 unknown 和错误码，不带 hash。帧仍只进日志，注解不带 protobuf、describe 正文或业务文字；每文件最多 8 条；通过的用例不出注解。`history-diagnostics.test.ts` 钉住这些。下次 CI 再红，注解上的 runId 和 sha256 就能跟日志帧、runner 上的 `_tmp/synthetic-history` 对上，不用读日志也知道停在哪一步、是哪个 run。
+
+PR #3412 的公开评论也写了同一件事（这台机器上没有那份 root 本机保存的原日志，下面只是转述，不是我核过的字节）：
+
+- [2026-10-20 08:30:23Z](https://github.com/thoerwink8/fleet-dao/pull/3412#issuecomment-6286829597)：job 118528847472 的 worker replacement 用例同为 60000ms 超时，「没取得其真实 history，不能套用上面的 run 或根因」。上面说的有真实 history 的 run `c89489a5-…` 是 job 118528847602（合同台，park-kind）的。
+- [08:33:47Z](https://github.com/thoerwink8/fleet-dao/pull/3412#issuecomment-6286888369)：写到 root 保存了原 CI 日志（240337 字节，SHA-256 `ac463c08…`）并核了父提交，没说是哪台 job，也没说里面有本用例的帧。
+
+所以任何人拿到的原件里本用例都没有 workflow/run，这份 README 不拿合成夹具、本机 watchdog 的 `6385a827…`、`d8500003…`，或 job 118528847602 的 `c89489a5…` 来顶。若 root 那份日志里有本用例的 `FLEET_SYNTHETIC_HISTORY` 帧，补法是把帧原样存进本目录并加测试核 SHA-256，不改上面已有的字节。
+
+查询撞上未交本地活动结果的生产修复仍归 #3258。

@@ -1,0 +1,53 @@
+[
+  {
+    "job": 118528847472,
+    "run": 39392992046,
+    "name": "test (6/8)",
+    "headSha": "d45207791e21faa6c7c166f5023b49fe18f21264",
+    "conclusion": "failure",
+    "completedAt": "2026-10-20T08:25:31Z",
+    "annotation": {
+      "path": "packages/engine/test/push-handback.test.ts",
+      "startLine": 289,
+      "endLine": 289,
+      "level": "failure",
+      "title": "packages/engine/test/push-handback.test.ts > permission push handback original park protocol > same run reconstructs business receipts after worker replacement, then accepts one new request",
+      "messageFile": "ci-job-118528847472.annotation.txt",
+      "messageSha256": "9c5810a0553bd31d7cf66cfb67961b1c1275463fac8fbd6242614368b95246a0"
+    }
+  },
+  {
+    "job": 118528847602,
+    "run": 39392992046,
+    "name": "test (8/8 · temporal)",
+    "headSha": "d45207791e21faa6c7c166f5023b49fe18f21264",
+    "conclusion": "failure",
+    "completedAt": "2026-10-20T08:26:40Z",
+    "annotation": {
+      "path": "packages/engine/test/push-handback-contract.test.ts",
+      "startLine": 233,
+      "endLine": 233,
+      "level": "failure",
+      "title": "packages/engine/test/push-handback-contract.test.ts > permission contract snapshot consumption > wrong H0 and exhausted original budget cannot wake or grant a new observation",
+      "messageFile": "ci-job-118528847602.annotation.txt",
+      "messageSha256": "e6ea5a86f5fbf67964927e4f593f2fca145ba4528269defb2f8945eda5a28f8a"
+    }
+  },
+  {
+    "job": 119181973185,
+    "run": 39588087499,
+    "name": "test (5/8)",
+    "headSha": "6c4d389277f98a807e3ebc219aa58d06c0046db3",
+    "conclusion": "failure",
+    "completedAt": "2026-10-21T10:57:55Z",
+    "annotation": {
+      "path": "packages/engine/test/support.ts",
+      "startLine": 181,
+      "endLine": 181,
+      "level": "failure",
+      "title": "packages/engine/test/push-handback.test.ts > permission push handback original park protocol > same run reconstructs business receipts after worker replacement, then accepts one new request",
+      "messageFile": "ci-job-119181973185.annotation.txt",
+      "messageSha256": "a9ba5ebf40165402c41f23fa02c4a0f90be80d2f20cd8a594c840d176d9d307c"
+    }
+  }
+]

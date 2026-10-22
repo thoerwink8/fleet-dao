@@ -1,5 +1,6 @@
 // 合成假端口失败取证：push-handback-contract 全文件，以及 push-handback 的 worker replacement 一条。
 // 保留原 protobuf 字节，失败不伪装成空历史。等待阶段只留固定标签，写进该 run 的帧，不另记可串台的时间线。
+// 在 Actions 里每次取证另打一条公开注解（workflow/run/阶段/字节 SHA-256），日志读不到也能核绑定。
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -117,13 +118,62 @@ export function decodeFrames(lines: readonly string[]): {
   return { identity: first.identity, kind: first.kind, bytes };
 }
 
+export const ANNOTATION_PREFIX = '::warning title=FLEET_SYNTHETIC_HISTORY_V1::';
+export const ANNOTATION_LIMIT = 8;
+const LABEL = /^[A-Za-z0-9:._-]{1,128}$/;
+// #3413：Actions 日志匿名读不到（403），注解公开可读。原 run 39392992046 没有取证，绑定不回来；
+// 下次 CI 里取证时，同一份 workflow/run/阶段/字节 SHA-256 另打一条公开注解，帧仍只在日志里。
+export type Annotation = {
+  outcome: 'captured' | 'unknown';
+  test: string;
+  reason: string;
+  stage: string;
+  ciSha: string;
+  kind?: 'history' | 'describe';
+  workflowId?: string;
+  runId?: string;
+  testSha256?: string;
+  bundleSha256?: string;
+  bytes?: number;
+  sha256?: string;
+  code?: string;
+};
+
 /** 文件共享的输出账：状态保留独立额度，超限明确 unknown，不输出半组帧。 */
 export class DiagnosticOutput {
   private dataBytes = 0;
   private statusBytes = 0;
+  private annotations = 0;
   private readonly emit: (line: string) => void;
-  constructor(emit: (line: string) => void = (line) => console.error(line)) {
-    this.emit = emit;
+  private readonly annotate: ((line: string) => void) | undefined;
+  constructor(emit?: (line: string) => void, annotate?: (line: string) => void) {
+    this.emit = emit ?? ((line) => console.error(line));
+    // 只有两样都用默认（真用例）且在 Actions 里才打注解；自带输出的夹具不出，除非显式给 annotate。
+    this.annotate =
+      annotate ??
+      (emit === undefined && process.env.GITHUB_ACTIONS === 'true'
+        ? (line) => console.error(line)
+        : undefined);
+  }
+  /** 补充公开注解：每文件最多 ANNOTATION_LIMIT 条，只带编号/hash/固定标签；打不出返回 false，不改取证结果。 */
+  annotation(value: Annotation): boolean {
+    if (!this.annotate || this.annotations >= ANNOTATION_LIMIT) return false;
+    const safe = {
+      ...value,
+      test: value.test.slice(0, 512),
+      stage: LABEL.test(value.stage) ? value.stage : 'unlabeled',
+      reason: LABEL.test(value.reason) ? value.reason : 'unlabeled',
+      ...(value.code === undefined ? {} : { code: LABEL.test(value.code) ? value.code : 'unlabeled' }),
+    };
+    // 工作流命令的正文只转义 %、CR、LF；JSON.stringify 不出裸换行。
+    const data = JSON.stringify(safe).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+    try {
+      this.annotate(`${ANNOTATION_PREFIX}${data}`);
+    } catch {
+      return false;
+    }
+    this.annotations++;
+    return true;
   }
   frames(lines: string[]): void {
     const bytes = lines.reduce((n, line) => n + Buffer.byteLength(line) + 1, 0);
@@ -237,25 +287,30 @@ export class SyntheticHistoryDiagnostics {
   }
   private async read(reason: string): Promise<void> {
     // 固定标签才写进帧。不符合的标记改成 unlabeled，避免把业务正文或凭据带进日志。
-    const stage = /^[A-Za-z0-9:._-]{1,128}$/.test(this.stage) ? this.stage : 'unlabeled';
-    if (!this.runs.length)
-      this.options.output.status({
+    const stage = LABEL.test(this.stage) ? this.stage : 'unlabeled';
+    const ciSha = /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA ?? '')
+      ? String(process.env.GITHUB_SHA)
+      : 'unknown';
+    const test = this.options.test.slice(0, 512);
+    if (!this.runs.length) {
+      this.options.output.status({ outcome: 'unknown', reason, stage, code: 'no-started-run', test });
+      this.options.output.annotation({
         outcome: 'unknown',
+        test,
         reason,
         stage,
+        ciSha,
         code: 'no-started-run',
-        test: this.options.test.slice(0, 512),
       });
+    }
     for (const run of this.runs) {
       const identity: Identity = {
-        test: this.options.test.slice(0, 512),
+        test,
         workflowId: run.workflowId,
         runId: run.runId,
         bundleSha256: this.bundleSha256,
         testSha256: this.options.testSha256,
-        ciSha: /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA ?? '')
-          ? String(process.env.GITHUB_SHA)
-          : 'unknown',
+        ciSha,
         stage,
       };
       const deadline = Date.now() + 3000;
@@ -306,14 +361,28 @@ export class SyntheticHistoryDiagnostics {
           );
           this.options.output.frames(frames);
           this.options.output.status({ outcome: 'captured', kind, runId: run.runId, stage, reason });
+          this.options.output.annotation({
+            outcome: 'captured',
+            kind,
+            ...identity,
+            reason,
+            stage,
+            bytes: value.value.length,
+            sha256: hash(value.value),
+          });
         } catch (error) {
-          this.options.output.status({
+          const code = error instanceof Error ? error.message.slice(0, 80) : 'capture-failed';
+          this.options.output.status({ outcome: 'unknown', kind, runId: run.runId, stage, reason, code });
+          this.options.output.annotation({
             outcome: 'unknown',
             kind,
+            test,
+            workflowId: run.workflowId,
             runId: run.runId,
-            stage,
+            ciSha,
             reason,
-            code: error instanceof Error ? error.message.slice(0, 80) : 'capture-failed',
+            stage,
+            code,
           });
         }
       }
