@@ -361,6 +361,38 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
   });
 
+  // #3603：CI 红返工点名上一段的路由、不受连续续会话上限。两份老历史都真走过 CI 红返工（三段的 task-reworked 没有续会话那一套，
+  // 全程的 task-full-reworked 带 rework-resume、真问过 planSegmentResume），历史里都没有这两个新标记：patched() 为假，
+  // 第 2 轮选路照老入参（不带 preferRouteId），重放得过。
+  const CI_REWORK_MARKERS = ['ci-rework-prefer-route', 'ci-rework-keep-resume'].map((id) =>
+    Buffer.from(JSON.stringify({ id, deprecated: false })).toString('base64'),
+  );
+  const pickInputs = (history: Fixture['history']): Record<string, unknown>[] =>
+    history.events
+      .map(
+        (e) =>
+          e.activityTaskScheduledEventAttributes as
+            | { activityType: { name: string }; input?: { payloads?: { data?: string }[] } }
+            | undefined,
+      )
+      .filter((a) => a?.activityType.name === 'pickRoute')
+      .map((a) => JSON.parse(Buffer.from(a?.input?.payloads?.[0]?.data ?? '', 'base64').toString('utf8')));
+  for (const name of ['task-reworked', 'task-full-reworked']) {
+    it(`${name} 老历史真走过 CI 红返工、没有 #3603 的标记：返工那一轮选路不点名，现在的代码重放得过`, async () => {
+      const { workflowId, history } = load(`${name}.json`);
+      const text = JSON.stringify(history);
+      for (const marker of CI_REWORK_MARKERS) expect(text).not.toContain(marker);
+      const acts = scheduledActivities(history);
+      // CI 红了（第一次 waitCi 不是最后一次）、回去又起了一段会话
+      expect(acts.filter((n) => n === 'waitCi').length).toBeGreaterThanOrEqual(2);
+      expect(acts.indexOf('runSegment', acts.indexOf('waitCi'))).toBeGreaterThan(acts.indexOf('waitCi'));
+      const picks = pickInputs(history);
+      expect(picks.length).toBeGreaterThanOrEqual(2);
+      for (const pick of picks) expect(pick).not.toHaveProperty('preferRouteId');
+      await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
+    });
+  }
+
   it('对照：历史里调度的活动和代码调的对不上，重放当场报 DeterminismViolationError（这道检查真能红）', async () => {
     const { workflowId, history } = load('task-merged.json');
     const scheduled = history.events.find((e) => e.activityTaskScheduledEventAttributes);

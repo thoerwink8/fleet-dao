@@ -12,6 +12,8 @@
 //   只有「审计结果/报告/通过」才是外证据，#3374 就是被这个词误挡的）；
 //   「保留现场」「现场凭据」「现场交还」「现场顺序」「现场状态/记录/数据/快照/工作树」「破坏现场」（代码保存、交还状态的行为，#3343、#3247 被它误挡；「现场验收/证据/核验」仍拦）；「只记日志」「写日志」（代码行为）；「飞书网关收到消息后…」（描述代码）。
 //   钉在 test/off-diff-acceptance.test.ts，拿真单子里的写法校过（本仓近 300 张单）。
+import { createHash } from 'node:crypto';
+import { LOCAL_LABEL } from './labels.ts';
 
 /** 一条命中的验收条：原文和认出的词。 */
 export interface OffDiffItem {
@@ -125,3 +127,49 @@ export function describeOffDiff(hits: readonly OffDiffItem[]): string {
 export const OFF_DIFF_REWRITE =
   '冷验收只看 diff、测试输出和单子，看不到截图、线上、现场、审计结果、日志、读库、读回、评论、恢复连接、健康检查读回、飞书收到没有、原场景当时卡在哪：改成 diff 或测试输出里看得见的写法' +
   '（哪个测试文件里哪条用例断言了什么、哪个文件里改成了什么、命令跑出什么）；要人去现场看的，单子留给本机做。';
+
+/** 已经在跑的单被续上（人工继续、task.redo、commander.redo）的三个入口。 */
+export type OffDiffHoldAction = 'continue' | 'task.redo' | 'commander.redo';
+
+const HOLD_ACTION_WORDS: Record<OffDiffHoldAction, string> = {
+  continue: '人工继续',
+  'task.redo': 'task.redo 重做',
+  'commander.redo': '指挥官重做',
+};
+
+/** 续单前的判决：命中了就不再续，改交回本机。 */
+export interface OffDiffHold {
+  hits: OffDiffItem[];
+  /** 一句话原因（拒绝信息、操作记录、日志）。 */
+  why: string;
+  /** 留在单上的话。 */
+  comment: string;
+  /** 留言的幂等键：同样的命中条目同一个键。 */
+  key: string;
+}
+
+/**
+ * 已经在跑的单被续上之前先过一遍判据（#3602）：#3595 只在拉单时挡诊断型 / diff 外验收条，在跑的单被人工「继续」、task.redo、
+ * commander.redo 照样续上空转（10-20～10-22 诊断单第一轮 0/25 做成）。命中就不续，调用方改贴「本机做」并留这句 comment。
+ * 入参是一条一条的验收条（api 用 criteriaOf(rawRequest).ok，引擎同）；没命中回 null，普通单不受影响。
+ */
+export function offDiffHoldOf(items: readonly string[], action: OffDiffHoldAction): OffDiffHold | null {
+  const hits = offDiffItems(items);
+  if (hits.length === 0) return null;
+  const words = hits.flatMap((h) => h.words);
+  const digest = createHash('sha256').update(describeOffDiff(hits)).digest('hex').slice(0, 12);
+  return {
+    hits,
+    why: `「怎么算做完」要 diff 外证据（${words.join('、')}），${HOLD_ACTION_WORDS[action]}只会再空转一轮：不续，已交回本机做`,
+    comment: [
+      `${HOLD_ACTION_WORDS[action]}被拦下了：这张单的「怎么算做完」里有条目要 diff 外的证据，引擎做不出来，冷验收也验不过，续上只会再空转一轮（命中的是哪一条见下方）：`,
+      '',
+      describeOffDiff(hits),
+      '',
+      OFF_DIFF_REWRITE,
+      '',
+      `已贴「${LOCAL_LABEL}」交回本机做；改成 diff 里看得见的写法后，摘掉「${LOCAL_LABEL}」才会重新被引擎拉。`,
+    ].join('\n'),
+    key: `off-diff-hold:${action}:${digest}`,
+  };
+}

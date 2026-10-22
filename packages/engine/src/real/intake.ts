@@ -228,7 +228,8 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
         }));
       },
-      // 法国接不了、单子留给本机（本机租约到期不退回，或本机退回来的单被准入挡住）：报给本机，同一个 key 只报一次（人处理掉了不重开）
+      // 法国接不了、单子留给本机（本机租约到期不退回，或本机退回来的单被准入挡住）：报给本机，同一个 key 只报一次（人处理掉了不重开）。
+      // 必须用 insertAlertOnce，别改成 upsertAlert：后者会把人已经处理掉的提醒又打开（packages/db/test/alerts.test.ts 钉着 insertAlertOnce 不动已有行）。
       async notifyLocal({ repo, issueNumber, key, title, body }) {
         await insertAlertOnce(w.db, {
           dedupeKey: `local-kept:${repo.owner}/${repo.name}#${issueNumber}:${key}`,

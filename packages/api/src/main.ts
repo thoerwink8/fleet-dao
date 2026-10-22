@@ -224,6 +224,7 @@ async function assemble(): Promise<{
     acceptanceDuties: (identity) => readAcceptanceDutyRows(db, identity),
     ...(github.installationRepos ? { installationRepos: github.installationRepos } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
+    ...(github.localHold ? { localHold: github.localHold } : {}),
     decisionCapabilities: {
       recheckGitHubApp: (repo) => runGitHubAppRecheck(github.selfCheck, repo),
       recheckFeishuPush: async () => {
