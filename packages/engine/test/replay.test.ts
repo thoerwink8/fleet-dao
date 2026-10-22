@@ -27,6 +27,7 @@ const REQUIRED = [
   'task-full-reworked',
   'task-verify-reattach',
   'task-contract-first-accept',
+  'task-acceptance-duty-merged',
 ];
 
 const HOW =
@@ -184,7 +185,9 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     expect(at).toBeGreaterThanOrEqual(0);
     // 首次接纳（之前没有合同）才会写进度行；被默认参数吞成「没变」就直接往下选路，重放当场对不上
     expect(scheduled[at + 1]?.activityType.name).toBe('saveTaskState');
-    for (const old of files.filter((f) => f !== 'task-contract-first-accept.json')) {
+    // #3402 之后录的夹具（新代码每次都过合同修订边界，自然带这个标记）不在「老夹具」之列
+    const AFTER_3402 = ['task-contract-first-accept.json', 'task-acceptance-duty-merged.json'];
+    for (const old of files.filter((f) => !AFTER_3402.includes(f))) {
       expect(readFileSync(`${DIR}${old}`, 'utf8')).not.toContain(marker);
     }
   });
@@ -312,6 +315,49 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     expect(acts).toContain('closeIssue');
     expect(acts).not.toContain('acceptanceDuties');
     // 反过来验过：把 finish 里的 patched('acceptance-duty') 去掉，这一步重放当场报 TMPRL1100（'closeIssue' 对不上 'acceptanceDuties'）
+    await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
+  });
+
+  it('task-acceptance-duty-merged 老历史（#3591 停写之前录的）：合并前、收尾两次 acceptanceDuties 都带着要写的转人验收条，没关单；现在的代码只读不写，重放照老步序得过', async () => {
+    const { workflowId, history } = load('task-acceptance-duty-merged.json');
+    const scheduled = history.events
+      .map((e) => e.activityTaskScheduledEventAttributes)
+      .filter((a): a is NonNullable<typeof a> => a !== undefined) as {
+      activityType: { name: string };
+      input?: { payloads?: { data?: string }[] };
+    }[];
+    const duties = scheduled.filter((a) => a.activityType.name === 'acceptanceDuties');
+    expect(duties).toHaveLength(2);
+    for (const a of duties) {
+      const arg = JSON.parse(Buffer.from(a.input?.payloads?.[0]?.data ?? '', 'base64').toString('utf8')) as {
+        record: { items: string[] }[];
+      };
+      // 老代码真交过去记库（停写前的步序），不是一份只读的历史
+      expect(arg.record.flatMap((r) => r.items)).toContain('现场 add/check 五条');
+    }
+    const acts = scheduledActivities(history);
+    expect(acts).not.toContain('closeIssue');
+    expect(acts.indexOf('acceptanceDuties')).toBeLessThan(acts.indexOf('armAutoMerge'));
+    // 现在的代码：同样调两次 acceptanceDuties（record 改空、结果并上工作流记着的条），步序一样，不关单
+    await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
+  });
+
+  it('同一份老历史把 acceptanceDuties 的读回改成空（库里没有行）：留不留单只凭工作流自己记着的转人验收条，照样不关单，重放得过（#3591）', async () => {
+    const { workflowId, history } = load('task-acceptance-duty-merged.json');
+    const ids = history.events
+      .filter((e) => e.activityTaskScheduledEventAttributes?.activityType.name === 'acceptanceDuties')
+      .map((e) => e.eventId);
+    expect(ids).toHaveLength(2);
+    for (const e of history.events) {
+      const done = e.activityTaskCompletedEventAttributes;
+      if (done && ids.includes(done.scheduledEventId)) {
+        done.result = {
+          payloads: [{ metadata: { encoding: 'anNvbi9wbGFpbg==' }, data: payloadOf({ open: [] }) }],
+        };
+      }
+    }
+    // 反过来验过：openDuties 只回 read.open（不并工作流记着的）时，合并前读到空就不改 PR 说明（Refs），重放当场报
+    // TMPRL1100（'updatePrBody' 对不上 'readTaskBrief'）——留单、写 Refs 真是靠工作流自己记着的条
     await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
   });
 
