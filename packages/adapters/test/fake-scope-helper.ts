@@ -38,6 +38,26 @@ if (action === 'capabilities') {
 } else if (action === 'cleanup-status') {
   process.stdout.write(process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT ?? '');
   process.exit(Number(process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT ?? '0'));
+} else if (action === 'tree-usage') {
+  // 标准输出、标准错误、退出码、先睡多久由测试摆布；默认按请求身份答 idle、扫过 3 个进程
+  setTimeout(
+    () => {
+      process.stdout.write(
+        process.env.FLEET_FAKE_SCOPE_USAGE_STDOUT ??
+          JSON.stringify({
+            version: 1,
+            state: 'idle',
+            identity: { lex: rest[0], real: rest[0], dev: rest[2], ino: rest[4], uid: rest[6] },
+            scanned: 3,
+            failed: 0,
+          }),
+      );
+      if (process.env.FLEET_FAKE_SCOPE_USAGE_STDERR)
+        process.stderr.write(process.env.FLEET_FAKE_SCOPE_USAGE_STDERR);
+      process.exit(Number(process.env.FLEET_FAKE_SCOPE_USAGE_EXIT ?? '0'));
+    },
+    Number(process.env.FLEET_FAKE_SCOPE_USAGE_HANG_MS ?? '0'),
+  );
 } else if (action === 'run') {
   const at = rest.indexOf('--');
   const cwdAt = rest.indexOf('--cwd');

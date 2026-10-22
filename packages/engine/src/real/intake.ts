@@ -27,6 +27,7 @@ import {
   intakeWorkloadSince,
   listIntakeRepos,
   mergedPrForIssue,
+  openAlertsByPrefix,
   readIntakeBreaker,
   recentEndedTasks,
   recordIntakeStart,
@@ -149,6 +150,38 @@ export async function reportIntakeProfile(
   });
 }
 
+/**
+ * 撤掉「留给本机」的提醒（local-kept:<仓>#<单号>:<key>）：单号不在 keep（开着且贴着「本机做」的单）里，
+ * 说明单关了或「本机做」摘了，提醒的条件不成立。处理人记引擎，操作记录写为什么。
+ */
+export async function settleLocalKept(
+  db: Db,
+  repo: { owner: string; name: string },
+  keep: ReadonlySet<number>,
+): Promise<void> {
+  const prefix = `local-kept:${repo.owner}/${repo.name}#`;
+  for (const alert of await openAlertsByPrefix(db, prefix)) {
+    const issueNumber = Number(/^\d+/.exec(alert.dedupeKey.slice(prefix.length))?.[0]);
+    if (!Number.isInteger(issueNumber) || keep.has(issueNumber)) continue;
+    await resolveAlertWithReason(db, {
+      dedupeKey: alert.dedupeKey,
+      by: BREAKER_ACTOR,
+      why: `#${issueNumber} 已关闭或「${LOCAL_LABEL}」已摘掉，不再留给本机`,
+    });
+  }
+}
+
+/** 还开着的「本机退回的单、引擎接不了」提醒（local-kept:<仓>#<单号>:intake-returned-blocked:…）对应的单号。 */
+export async function keptReturnedIssues(db: Db, repo: { owner: string; name: string }): Promise<number[]> {
+  const prefix = `local-kept:${repo.owner}/${repo.name}#`;
+  const out = new Set<number>();
+  for (const alert of await openAlertsByPrefix(db, prefix)) {
+    const m = /^(\d+):intake-returned-blocked:/.exec(alert.dedupeKey.slice(prefix.length));
+    if (m) out.add(Number(m[1]));
+  }
+  return [...out];
+}
+
 export interface IntakeWiring {
   db: Db;
   gh: IntakeGitHub;
@@ -203,6 +236,15 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           taskId: null,
           title,
           body,
+        });
+      },
+      settleLocalKept: ({ repo, keep }) => settleLocalKept(w.db, repo, keep),
+      keptReturned: (repo) => keptReturnedIssues(w.db, repo),
+      async unmarkLocal({ repo, issueNumber }) {
+        await w.gh.removeIssueLabel({
+          repo: { owner: repo.owner, name: repo.name },
+          issueNumber,
+          label: LOCAL_LABEL,
         });
       },
       toolchainReady: w.toolchainReady ?? missingToolchain,

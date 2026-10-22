@@ -539,6 +539,18 @@ export interface IntakeDeps {
     title: string;
     body: string;
   }): Promise<void>;
+  /**
+   * 撤掉「留给本机」的提醒（notifyLocal 报的那些）：这个仓里开着、贴着「本机做」的单号在 keep 里，其余单号（单关了、或标签摘了）的提醒撤掉。
+   * 写不进照抛：这一轮记没查成，下一轮重来。不给（测试）就不撤。
+   */
+  settleLocalKept?(input: { repo: IntakeRepo; keep: ReadonlySet<number> }): Promise<void>;
+  /**
+   * 这个仓里还开着的「本机退回的单、引擎接不了」提醒（key 是 intake-returned-blocked:…）对应的单号。读不到照抛：这一轮记没查成。
+   * 和 unmarkLocal 一起给才生效：挡着的地方改好了，就自己摘掉「本机做」、撤提醒，不等人来摘。不给（测试）就不看。
+   */
+  keptReturned?(repo: IntakeRepo): Promise<number[]>;
+  /** 摘「本机做」（没贴着不算错）。写不成照抛。 */
+  unmarkLocal?(input: { repo: IntakeRepo; issueNumber: number }): Promise<void>;
   /** 在单子上留言（同一个键只留一条）；以前留过回 created: false。 */
   comment(input: {
     repo: IntakeRepo;
@@ -747,6 +759,52 @@ async function franceVerdict(
   if (!blocked) throw new Error('试判没挡住也没放行，没给出原因');
   if (blocked.reason === 'waiting_prerequisite') return { ok: true };
   return { ok: false, reason: blocked.reason, why: blocked.why };
+}
+
+/**
+ * 本机退回来、引擎接不了而贴回「本机做」的单（holdReturned），挡着的地方后来改好了：「引擎接不了」这个条件就不成立，
+ * 照准入关卡再试判一遍，过了、而且这张单此刻还是没人接的退回行（没被本机重新领走）→ 摘「本机做」，下一轮照常拉；返回摘掉的单号。
+ * 还挡着、或已经有人接了的不动。摘标签写不成、试判读不到记没查成，那张单照旧留着。
+ */
+async function releaseReturned(
+  deps: IntakeDeps,
+  repo: IntakeRepo,
+  listed: { issues: readonly IntakeIssue[] },
+  ctx: Parameters<typeof admitIssue>[3],
+  whitelist: GithubWhitelist,
+  prClaims: () => Promise<Map<number, number>>,
+  t: Tally,
+): Promise<Set<number>> {
+  const released = new Set<number>();
+  if (!deps.keptReturned || !deps.unmarkLocal) return released;
+  const slug = `${repo.owner}/${repo.name}`;
+  let kept: number[];
+  try {
+    kept = await deps.keptReturned(repo);
+  } catch (err) {
+    t.unchecked.push(`${slug}：读不到留给本机的提醒：${errMessage(err)}`);
+    return released;
+  }
+  for (const number of kept) {
+    const issue = listed.issues.find((i) => i.number === number);
+    if (!issue?.labels.includes(LOCAL_LABEL)) continue;
+    try {
+      const standing = await readDispatchStanding(deps, repo, number);
+      if (standing.kind !== 'redispatch' && !(standing.kind === 'adopt' && standing.returnedAt)) continue;
+      const verdict = await franceVerdict(deps, repo, issue, ctx, whitelist, prClaims);
+      if (!verdict.ok) continue;
+      await deps.unmarkLocal({ repo, issueNumber: number });
+      released.add(number);
+      deps.log(
+        'info',
+        `拉单：${slug}#${number} 挡着的地方改好了，已摘掉「${LOCAL_LABEL}」，下一轮照常拉`,
+        {},
+      );
+    } catch (err) {
+      t.unchecked.push(`${slug}#${number}：${errMessage(err)}`);
+    }
+  }
+  return released;
 }
 
 /** 过了准入、等排序和空位的一张单。 */
@@ -1252,15 +1310,47 @@ async function prepareRepo(
     t.unchecked.push(...swept.unchecked);
   }
 
+  // 挡着的地方改好了的退回单：先摘「本机做」，下面的提醒跟着撤
+  const released = await releaseReturned(deps, repo, listed, ctx, whitelist, prClaims, t);
+  // 这一轮贴上（或试着贴上）「本机做」的单：贴的那步写不成、或报给本机之后留言写不成，也算留着，别让下面撤提醒把刚报给本机的话撤了
+  const labelled = new Set(
+    listed.issues
+      .filter((i) => i.labels.includes(LOCAL_LABEL) && !released.has(i.number))
+      .map((i) => i.number),
+  );
+  const notifyKept = deps.notifyLocal;
+  const tracked: IntakeDeps = {
+    ...deps,
+    markLocal: (input) => {
+      labelled.add(input.issueNumber);
+      return deps.markLocal(input);
+    },
+    ...(notifyKept
+      ? {
+          notifyLocal: (input) => {
+            labelled.add(input.issueNumber);
+            return notifyKept(input);
+          },
+        }
+      : {}),
+  };
   const admitted: Candidate[] = [];
   for (const issue of listed.issues) {
     t.scanned += 1;
     try {
-      const c = await admitIssue(deps, repo, issue, ctx, whitelist, prClaims, t);
+      const c = await admitIssue(tracked, repo, issue, ctx, whitelist, prClaims, t);
       if (c) admitted.push(c);
     } catch (err) {
       // 这张单没处理成（读历史、留言、贴标签出错）：记下，别的单照做
       t.unchecked.push(`${slug}#${issue.number}：${errMessage(err)}`);
+    }
+  }
+  // 「留给本机」的提醒跟着单子走：单关了、或「本机做」摘掉了（要引擎做的那一步），这条提醒的条件就不成立了，撤掉
+  if (deps.settleLocalKept) {
+    try {
+      await deps.settleLocalKept({ repo, keep: labelled });
+    } catch (err) {
+      t.unchecked.push(`${slug}：留给本机的提醒没撤成：${errMessage(err)}`);
     }
   }
   return { repo, admitted, skippedBefore };
