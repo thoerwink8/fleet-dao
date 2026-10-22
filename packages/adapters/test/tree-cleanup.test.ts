@@ -296,6 +296,21 @@ describe('tree-usage 读不出 idle/busy 时带有界的原因类别（#3557）'
       { reason: 'helper-unknown' },
     ],
     [
+      '能力回执自己答 unknown 是协议无效，不是帮手明确 unknown',
+      { FLEET_FAKE_SCOPE_CAPABILITIES: JSON.stringify({ version: 1, state: 'unknown', note: secret }) },
+      { reason: 'protocol' },
+    ],
+    [
+      '帮手答 unknown 但换了树：身份优先',
+      { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ state: 'unknown', identity: { ...place, ino: '9' } }) },
+      { reason: 'identity' },
+    ],
+    [
+      '帮手答 unknown 但没带身份：身份优先',
+      { FLEET_FAKE_SCOPE_USAGE_STDOUT: JSON.stringify({ version: 1, state: 'unknown', note: secret }) },
+      { reason: 'identity' },
+    ],
+    [
       '回执换了树',
       { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ identity: { ...place, ino: '9' } }) },
       { reason: 'identity' },

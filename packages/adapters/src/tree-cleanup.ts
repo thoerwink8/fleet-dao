@@ -56,6 +56,9 @@ export interface TreeUsageReading {
 /** 帮手调用失败的类别只记在本模块；错误原文照旧，不随类别外传。 */
 const FAULT = new WeakMap<object, { reason: TreeUsageReason; exitCode?: number }>();
 
+/** tree-usage 里版本合法的 unknown 回执原件；call 照旧拒绝它，类别由读取方核完身份再定。 */
+const UNKNOWN_REPLY = new WeakMap<object, Reply>();
+
 function fault<E extends object>(error: E, reason: TreeUsageReason, exitCode?: number | null): E {
   FAULT.set(error, {
     reason,
@@ -107,22 +110,20 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
             ),
           );
         }
-        let explicit = false;
+        let unknownReply: Reply | undefined;
         try {
           const value: unknown = JSON.parse(stdout);
           if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('非对象回执');
           const row = value as Reply;
-          explicit = row.version === 1 && row.state === 'unknown';
+          // 只有 tree-usage 的 unknown 可能是帮手的明确答复；它是否可信要等身份核过，这里先留着原回执。
+          if (row.version === 1 && row.state === 'unknown' && args[0] === 'tree-usage') unknownReply = row;
           if (row.version !== 1 || typeof row.state !== 'string' || row.state === 'unknown')
             throw new Error('删树协议版本/状态不完整');
           resolve(row);
         } catch (error) {
-          reject(
-            fault(
-              new Error(`受管删树回执读失败：${String(error)}`),
-              explicit ? 'helper-unknown' : 'protocol',
-            ),
-          );
+          const failure = fault(new Error(`受管删树回执读失败：${String(error)}`), 'protocol');
+          if (unknownReply) UNKNOWN_REPLY.set(failure, unknownReply);
+          reject(failure);
         }
       },
     );
@@ -229,6 +230,17 @@ export async function readTreeUsageDetail(
     assertIdentity(reply, identity);
   } catch (error) {
     const known = error && typeof error === 'object' ? FAULT.get(error) : undefined;
+    const said = error && typeof error === 'object' ? UNKNOWN_REPLY.get(error) : undefined;
+    if (said) {
+      // 帮手答 unknown：先核回执身份，缺失或换树记身份不符；身份对得上才算帮手明确 unknown。
+      try {
+        assertIdentity(said, identity);
+      } catch (mismatch) {
+        const why = mismatch && typeof mismatch === 'object' ? FAULT.get(mismatch) : undefined;
+        return { state: 'unknown', ...(why ?? { reason: 'identity' }) };
+      }
+      return { state: 'unknown', reason: 'helper-unknown' };
+    }
     return { state: 'unknown', ...(known ?? { reason: 'unknown' }) };
   }
   if (!Number.isSafeInteger(reply.scanned) || (reply.scanned as number) <= 0 || reply.failed !== 0)
