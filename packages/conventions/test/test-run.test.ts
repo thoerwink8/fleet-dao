@@ -7,15 +7,19 @@ import {
   BUSY_SIBLING_CORES,
   CPU_SAMPLE_MS,
   cpuShareOf,
+  HEAP_MARGIN_MIB,
   localWorkers,
   measureBusy,
   memoryLimitOf,
+  nodeHeapCapMib,
+  RESERVE_ALREADY_RESIDENT_MIB,
   RESERVE_MIB,
   realTestRunEnv,
   TestRunConfigError,
   type TestRunEnv,
   testWorkers,
   WORKER_MIB,
+  withHeapCap,
   workersThatFit,
 } from '../src/test-run.ts';
 
@@ -444,5 +448,93 @@ describe('测试开几个进程：按本进程所在 cgroup 的内存上限算',
       expect(env.list(join(dir, 'no-such-dir'))).toBeUndefined();
       expect(env.list(dir)).toEqual([]);
     });
+  });
+});
+
+describe('本 scope 匿名占用：引擎会话和本机少开，专用 CI 不扣', () => {
+  /** memory.stat 把 anon_thp 放在 anon 前面：只认整行 `anon <字节>`，不能把 anon_thp 当成已用。 */
+  function withAnon(mib: number) {
+    return session(5888, 6144, {
+      [`/sys/fs/cgroup${SCOPE}/memory.stat`]: `anon_thp ${MIB}\nanon ${mib * MIB}\nfile ${MIB}\n`,
+    });
+  }
+
+  it('cgroup 行走仍只看上限，不把匿名占用写进 MemoryLimit', () => {
+    expect(memoryLimitOf(linux(withAnon(2200)).env)).toEqual({
+      kind: 'limited',
+      mib: 5888,
+      source: `/sys/fs/cgroup${SCOPE}/memory.high`,
+    });
+  });
+
+  it('引擎会话（含写码 CLI 注入的 CI）匿名已用 2200：少开到 3 个，说明里写本 scope', () => {
+    // 5888 − (2200 − 360) = 4048；(4048 − 1300) / 900 = 3。旧实现不读 anon，5888 仍开 5 个。
+    const { env } = linux(withAnon(2200), { env: { CI: 'true', FLEET_RUN_ID: 'r1' } });
+    const w = testWorkers(env);
+    expect(w.maxWorkers).toBe(3);
+    expect(w.note).toContain('本 scope 匿名已用 2200 MiB');
+    expect(w.note).toContain('测试开 3 个进程');
+  });
+
+  it('匿名正好落在预留里的 360，或 memory.stat 读不到：仍按 5888 开 5 个', () => {
+    for (const files of [withAnon(RESERVE_ALREADY_RESIDENT_MIB), session(5888, 6144)]) {
+      const w = testWorkers(linux(files, { env: { CI: 'true', FLEET_RUN_ID: 'r1' } }).env);
+      expect(w.maxWorkers).toBe(5);
+      expect(w.note ?? '').not.toContain('本 scope 匿名');
+    }
+  });
+
+  it('专用 CI（没有 FLEET_RUN_ID）不按作业已用的匿名改进程数', () => {
+    expect(testWorkers(linux(withAnon(2200)).env).maxWorkers).toBe(5);
+  });
+
+  it('匿名高到一个都不够：仍开 1 个，说明里写会很慢', () => {
+    const w = testWorkers(linux(withAnon(5600), { env: { FLEET_RUN_ID: 'r1' } }).env);
+    expect(w.maxWorkers).toBe(1);
+    expect(w.note).toContain('连一个都不够');
+    expect(w.note).toContain('本 scope 匿名已用 5600 MiB');
+  });
+
+  it('本机人手跑同样扣超出预留的匿名占用，不超过降一档', () => {
+    const tight = testWorkers(linux(withAnon(3600), { env: {}, busy: () => 0 }).env);
+    expect(tight.maxWorkers).toBe(1);
+    expect(tight.note).toContain('本 scope 匿名已用 3600 MiB');
+    const calm = testWorkers(linux(withAnon(RESERVE_ALREADY_RESIDENT_MIB), { env: {}, busy: () => 0 }).env);
+    expect(calm.maxWorkers).toBe(localWorkers(6, 0));
+    expect(calm.note ?? '').not.toContain('本 scope 匿名');
+  });
+});
+
+describe('tsc 这一步的 node 堆上限', () => {
+  it('硬上限减匿名再留 256；不够 1 就封到 32', () => {
+    const files = session(5888, 6144, {
+      [`/sys/fs/cgroup${SCOPE}/memory.stat`]: `anon ${4096 * MIB}\n`,
+    });
+    expect(nodeHeapCapMib(linux(files).env)).toBe(6144 - 4096 - HEAP_MARGIN_MIB);
+    const full = session(5888, 6144, {
+      [`/sys/fs/cgroup${SCOPE}/memory.stat`]: `anon ${6144 * MIB}\n`,
+    });
+    expect(nodeHeapCapMib(linux(full).env)).toBe(32);
+  });
+
+  it('没有 memory.stat、硬上限是 max、认不出、不是 Linux：不封，不拿猜的数', () => {
+    expect(nodeHeapCapMib(linux(session(5888, 6144)).env)).toBeUndefined();
+    expect(nodeHeapCapMib(linux(session(5888, 'max')).env)).toBeUndefined();
+    const bad = session(5888, 6144, { [`/sys/fs/cgroup${SCOPE}/memory.max`]: '2G\n' });
+    expect(nodeHeapCapMib(linux(bad).env)).toBeUndefined();
+    expect(nodeHeapCapMib(linux(session(5888, 6144), { platform: 'win32' }).env)).toBeUndefined();
+  });
+
+  it('已经写了 --max-old-space-size 的不动，也不改调用方的环境对象', () => {
+    const kept = { NODE_OPTIONS: '--max-old-space-size=512' };
+    expect(withHeapCap(kept, 1792).NODE_OPTIONS).toBe('--max-old-space-size=512');
+    expect(kept.NODE_OPTIONS).toBe('--max-old-space-size=512');
+    expect(withHeapCap({ NODE_OPTIONS: '--enable-source-maps' }, 1792).NODE_OPTIONS).toBe(
+      '--enable-source-maps --max-old-space-size=1792',
+    );
+    expect(withHeapCap({ NODE_OPTIONS: '  ' }, 1792).NODE_OPTIONS).toBe('--max-old-space-size=1792');
+    const bare = { CI: 'true' };
+    expect(withHeapCap(bare, undefined).NODE_OPTIONS).toBeUndefined();
+    expect(bare).toEqual({ CI: 'true' });
   });
 });

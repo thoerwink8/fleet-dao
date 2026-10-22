@@ -14,7 +14,9 @@ import {
 import { mergeFixture, NOW } from './acceptance-merge-fixture.ts';
 
 const url = realTestPgUrl();
-it.runIf(Boolean(process.env.CI) && !url)('CI必须提供真实PG双连接', () => {
+// 引擎会话里注入的 CI 不是装了 Postgres 的分片（同 real-pg.test.ts）。
+const dedicatedPgCi = Boolean(process.env.CI) && !process.env.FLEET_RUN_ID?.trim();
+it.runIf(dedicatedPgCi && !url)('CI必须提供真实PG双连接', () => {
   throw new Error('FLEET_TEST_PG_URL required');
 });
 describe.runIf(Boolean(url))('候选索引真实PG竞争', () => {
