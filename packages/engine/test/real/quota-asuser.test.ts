@@ -4,7 +4,7 @@ import { type MirasimFrame, type MirasimWire, SESSION_USERS } from '@fleet-dao/a
 import type { QuotaConfig } from '@fleet-dao/adapters/quota';
 import type { Db, PoolQuotaSnapshot } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
-import { runQuotaReadJob } from '../../src/jobs/quota-read.ts';
+import { QuotaReadFailedError, runQuotaReadJob } from '../../src/jobs/quota-read.ts';
 import type { UserCommand, UserCommandResult } from '../../src/real/exec.ts';
 import { catAsUser, DEFAULT_MIRASIM_HOME, quotaAsUser } from '../../src/real/index.ts';
 import { quotaReadJob } from '../../src/real/quota-read.ts';
@@ -407,8 +407,10 @@ describe('额度读取：claude-solo 经会话用户通道起 reclaude，不由�
     expect(r).toMatchObject({ ok: false, error: { code: 'unreachable' } });
     expect(r && !r.ok && r.error.message).toContain(`reclaude org list 起不来：spawn ${RECLAUDE} EACCES`);
     expect(r && !r.ok && 'windows' in r).toBe(false);
-    const run = await w.runJob(async () => claudeConfig());
-    expect(run.outcome).toBe('partial');
+    // 唯一的池没读到：这一轮记 failed 并抛（#3592），原因里带着读取错。
+    const err = await w.runJob(async () => claudeConfig()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(QuotaReadFailedError);
+    expect((err as Error).message).toContain('failed [claude-solo]');
     expect(w.saved).toEqual([]);
     expect(w.raised.map((a) => a.key)).toEqual(['quota-read:claude-solo']);
     expect(w.raised[0]?.body).toContain('EACCES');
