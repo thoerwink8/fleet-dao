@@ -1124,6 +1124,45 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     expect((await alertByKey(t.db, unreadable))?.resolvedAt).toBeNull();
   });
 
+  it('本机留着的单（local-kept:）：单关了、「本机做」被摘掉就撤；还贴着留着；开着却不在列表里不撤、记没查成', async () => {
+    probeDir();
+    const suffix = ':intake-returned-blocked:2026-10-20T07:13:03.139Z';
+    const closedKey = `local-kept:acme/widgets#401${suffix}`;
+    const releasedKey = `local-kept:acme/widgets#402${suffix}`;
+    const heldKey = `local-kept:acme/widgets#403${suffix}`;
+    const missingKey = `local-kept:acme/widgets#404${suffix}`;
+    for (const key of [closedKey, releasedKey, heldKey, missingKey]) await alert(key);
+    const at = new Date().toISOString();
+    const issue = (number: number, labels: string[]) => ({
+      number,
+      title: `#${number}`,
+      body: '',
+      author: null,
+      authorId: null,
+      authorType: null,
+      authorIsBot: false,
+      createdAt: at,
+      updatedAt: at,
+      labels,
+      milestone: null,
+    });
+    const gh = ghWith({
+      readIssueState: async ({ issueNumber }) =>
+        ({ state: issueNumber === 401 ? 'closed' : 'open' }) as never,
+      readGroomFacts: async () => ({
+        milestones: [],
+        issues: [issue(402, ['缺陷']), issue(403, ['本机做'])],
+      }),
+    });
+    const run = await runHourlyReconcileJob(deps({ gh }));
+    expect(await alertByKey(t.db, closedKey)).toMatchObject({ resolvedBy: 'engine:hourly-reconcile' });
+    expect((await alertByKey(t.db, closedKey))?.body).toMatch(/^已撤：#401 已经关了/);
+    expect((await alertByKey(t.db, releasedKey))?.body).toMatch(/^已撤：#402 的「本机做」已经摘掉/);
+    expect((await alertByKey(t.db, heldKey))?.resolvedAt).toBeNull();
+    expect((await alertByKey(t.db, missingKey))?.resolvedAt).toBeNull();
+    expect(run.why ?? '').toContain('#404');
+  });
+
   it('先挂起提醒、后任务做完：工作流还显示挂着也撤；仍叫停或仍挂着不撤', async () => {
     probeDir();
     const { repo, task } = await work('running');
