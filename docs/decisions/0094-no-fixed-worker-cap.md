@@ -25,7 +25,7 @@
 
 ## 落到代码（#2731，2026-10-16）
 
-第 2 条不再只是文字：派写码工人前由调工具前钩子判（`agents/hooks/capacity.mjs` 读数，`pretool.mjs` 的 `capacityVerdict` 拦，读不到也拦、明说没查成）；收轮前收尾钩子拿同一份读数和 `pnpm work queue` 对账（`agents/hooks/queue-stop.mjs`）。判法只看内存和负载，代码里没有个数上限（`agents/test/rules/pretool.rules.test.ts` 钉着）。
+第 2 条不再只是文字：派写码工人前由调工具前钩子判（`agents/hooks/capacity.mjs` 读数，`pretool.mjs` 的 `capacityVerdict` 拦，读不到也拦、明说没查成）；收轮前收尾钩子拿同一份读数和 `pnpm work queue` 对账（`agents/hooks/queue-stop.mjs`），只在无人值守开着时对账；人在场时由人看队列（单 #3588）。原来人在不在场都对账，10-19～10-22 实测 86 次里 85 次「没查成」、每次约 7 秒（两条 gh 加读容量），白付耗时，所以收窄。判法只看内存和负载，代码里没有个数上限（`agents/test/rules/pretool.rules.test.ts` 钉着）。
 
 ## 同一个 PR 改的
 
