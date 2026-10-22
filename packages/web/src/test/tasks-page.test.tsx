@@ -205,13 +205,13 @@ describe('任务列表页', () => {
     expect(tab('失败').getAttribute('aria-selected')).toBe('true');
   });
 
-  test('详情页不是从列表进的：返回照旧回主页；from 不是站内列表地址也不信', async () => {
+  test('详情页不是从列表进的：返回「任务」回不带筛选的 /tasks；from 不是站内列表地址也不信', async () => {
     open('/tasks/t-c9');
-    const home = await screen.findByRole('link', { name: /回主页/ });
-    expect(home.getAttribute('href')).toBe('/');
+    const home = await screen.findByRole('link', { name: /回任务列表/ });
+    expect(home.getAttribute('href')).toBe('/tasks');
     cleanup();
     open(`/tasks/t-c9?from=${encodeURIComponent('https://evil.example/tasks')}`);
-    expect((await screen.findByRole('link', { name: /回主页/ })).getAttribute('href')).toBe('/');
+    expect((await screen.findByRole('link', { name: /回任务列表/ })).getAttribute('href')).toBe('/tasks');
   });
 
   test('读不到：写「没读成」、原因和重试，不拿空列表冒充没有；重试读成了就出列表', async () => {

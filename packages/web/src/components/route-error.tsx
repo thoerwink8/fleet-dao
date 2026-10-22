@@ -1,6 +1,10 @@
 // 顶层出错页和读失败横幅共用的人话：主文案说发生了什么、能做什么，原始报错收在「详情」里。
 import { errMessage } from '@fleet-dao/shared/util';
-import { isRouteErrorResponse, Link, useRouteError } from 'react-router';
+import { isRouteErrorResponse, useRouteError } from 'react-router';
+import { Screen } from './layout/screen';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
+import { TextLink } from './layout/text-link';
 import { LogoMark } from './logo';
 
 export function errorRaw(error: unknown): string {
@@ -12,17 +16,23 @@ export function errorRaw(error: unknown): string {
 
 export function ErrorDetail({ summary, raw }: { summary: string; raw: string }) {
   return (
-    <>
-      <p data-error-summary>{summary}</p>
+    <Stack gap="sm">
+      <Text as="p" data-error-summary="true">
+        {summary}
+      </Text>
       {raw ? (
-        <details className="mt-2 text-left">
-          <summary className="cursor-pointer text-meta text-muted-foreground">详情</summary>
-          <p data-error-raw className="mt-1 break-words text-meta text-muted-foreground">
+        <details className="text-left">
+          <summary className="cursor-pointer">
+            <Text size="meta" tone="secondary">
+              详情
+            </Text>
+          </summary>
+          <Text as="p" size="meta" tone="secondary" breakWords data-error-raw="true">
             {raw}
-          </p>
+          </Text>
         </details>
       ) : null}
-    </>
+    </Stack>
   );
 }
 
@@ -51,16 +61,13 @@ export function RouteErrorPage({ error }: { error: unknown }) {
     : '页面画到一半出错了。回到看板，或刷新再试一次。';
   const raw = route ? route.raw : errMessage(error);
   return (
-    <main className="grid h-dvh place-items-center bg-background p-6">
-      <div className="max-w-md text-center">
-        <LogoMark className="mx-auto size-10" />
-        <h1 className="mt-4 text-heading font-semibold">这一页没能显示</h1>
-        <ErrorDetail summary={summary} raw={raw} />
-        <Link to="/" className="mt-4 inline-block text-body underline underline-offset-4">
-          回到看板
-        </Link>
-      </div>
-    </main>
+    <Screen
+      mark={<LogoMark className="size-10" />}
+      title="这一页没能显示"
+      actions={<TextLink href="/">回到看板</TextLink>}
+    >
+      <ErrorDetail summary={summary} raw={raw} />
+    </Screen>
   );
 }
 

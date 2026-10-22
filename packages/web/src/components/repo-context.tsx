@@ -13,13 +13,16 @@ interface RepoApi {
   setRepoId(id: string): void;
 }
 
+const NO_REPOS: Repo[] = [];
+
 const Ctx = createContext<RepoApi | null>(null);
 
 /** 顶栏上显示的仓。记在浏览器本地，下次打开还是它。 */
 export function RepoProvider({ children }: { children: ReactNode }) {
   const { data, isPending, error } = useRepos();
   const [stored, setRepoId] = useLocalState<string | null>(`${brand.storagePrefix}repo`, null);
-  const repos = data?.repos ?? [];
+  // 没读到数据（还在读，或读失败）时 repos 是空列表，不代表没有仓：loading、error 照传，调用方先判这两个再看 repos
+  const repos = data === undefined ? NO_REPOS : data.repos;
   const repo = repos.find((r) => r.id === stored) ?? repos[0];
 
   const value = useMemo(

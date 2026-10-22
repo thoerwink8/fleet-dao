@@ -7,7 +7,9 @@ import { useMemo } from 'react';
 import { useNotifications } from '../api/client';
 import { formatAgo } from '../lib/format';
 import { type PoolProblem, poolProblemsOf, problemLine } from '../lib/pool-problems';
-import { cn } from '../lib/utils';
+import { Glyph } from './layout/glyph';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 
 export function usePoolProblems(): {
   problems: ReadonlyMap<string, PoolProblem>;
@@ -24,33 +26,33 @@ export function usePoolProblems(): {
 export function PoolProblemLine({
   problem,
   now,
-  className,
   oneLine = false,
 }: {
   problem: PoolProblem;
   now?: number;
-  className?: string;
   oneLine?: boolean;
 }) {
   return (
-    <p
+    <div
       data-pool-problem={problem.kind}
       data-pool={problem.poolId}
       data-one-line={oneLine || undefined}
       title={problemLine(problem)}
-      className={cn(
-        'flex min-w-0 gap-1.5 text-meta text-ink-stall',
-        oneLine ? 'items-center whitespace-nowrap' : 'items-start',
-        className,
-      )}
     >
-      <TriangleAlert className={cn('size-3 shrink-0', !oneLine && 'mt-0.5')} aria-hidden />
-      <span className={cn('min-w-0', oneLine ? 'truncate' : 'break-words')}>
-        <span className="font-medium">{problem.kind === 'unreadable' ? '额度读不到' : '额度读数过期'}</span>：
-        {problem.reason}。<span className="font-medium">要人做：</span>
-        {problem.action}
-        {now === undefined ? null : <span className="num">（{formatAgo(problem.since, now)}报的）</span>}
-      </span>
-    </p>
+      <Stack direction="horizontal" gap="sm" align={oneLine ? 'center' : 'start'}>
+        <Glyph icon={TriangleAlert} size="meta" tone="warning" />
+        <Text size="meta" tone="warning" truncate={oneLine} breakWords={!oneLine}>
+          <Text size="meta" tone="warning" strong>
+            {problem.kind === 'unreadable' ? '额度读不到' : '额度读数过期'}
+          </Text>
+          ：{problem.reason}。
+          <Text size="meta" tone="warning" strong>
+            要人做：
+          </Text>
+          {problem.action}
+          {now === undefined ? null : <span className="num">（{formatAgo(problem.since, now)}报的）</span>}
+        </Text>
+      </Stack>
+    </div>
   );
 }

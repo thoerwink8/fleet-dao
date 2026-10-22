@@ -25,6 +25,7 @@ export function Text({
   truncate,
   block,
   pre,
+  breakWords,
   lines,
   as: Tag = 'span',
   title,
@@ -50,7 +51,10 @@ export function Text({
   block?: boolean;
   /** 保留原文的换行，长词也折行（通知正文这类多行原文）。 */
   pre?: boolean;
-  as?: 'span' | 'p' | 'div';
+  /** 长词（路径、哈希、原始报错）放不下时折行，不撑破外框；不保留原文的换行。 */
+  breakWords?: boolean;
+  /** strong 是行内的（更新日志里的加粗），p、div 独占一行。 */
+  as?: 'span' | 'p' | 'div' | 'strong';
   /** 悬停给全文（truncate 时用）。 */
   title?: string;
   children?: ReactNode;
@@ -65,7 +69,8 @@ export function Text({
         TONE[tone],
         strong && 'font-medium',
         truncate ? 'block min-w-0 truncate' : block && 'block',
-        Tag !== 'span' && !truncate && 'block',
+        (Tag === 'p' || Tag === 'div') && !truncate && 'block',
+        breakWords && 'break-words',
         pre && 'block whitespace-pre-wrap break-words',
         lines === 2 && 'line-clamp-2 block',
         lines === 3 && 'line-clamp-3 block',

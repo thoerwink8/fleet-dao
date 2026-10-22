@@ -20,16 +20,19 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { Link } from 'react-router';
 import { brand } from '#brand';
 import { formatAgo, formatClock, formatDuration } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import type { Tone } from '../../lib/status';
-import { cn } from '../../lib/utils';
 import { FlowModeTag } from '../flow-mode-tag';
+import { BlockLink } from '../layout/block-link';
+import { Glyph } from '../layout/glyph';
+import { MetaLine } from '../layout/meta-line';
 import { Section } from '../layout/section';
+import { Stack } from '../layout/stack';
 import { StatusBadge } from '../layout/status-badge';
-import { inkClass } from '../layout/tone';
+import { Tag } from '../layout/tag';
+import { Text, type TextTone } from '../layout/text';
 import { useRemoteView } from '../node-notice';
 import type { HomeRunning } from './types';
 
@@ -156,7 +159,14 @@ export function statusTextOf(item: HomeRunning): string {
       : SEGMENT_LABEL[item.segment];
 }
 
-export function RunningCard({ item, className }: { item: HomeRunning; className?: string }) {
+/** 状态色对到字色：颜色只给异常，失败红、停滞橙，别的灰。 */
+function inkTone(tone: Tone): TextTone {
+  if (tone === 'fail') return 'danger';
+  if (tone === 'stall') return 'warning';
+  return 'secondary';
+}
+
+export function RunningCard({ item }: { item: HomeRunning }) {
   const now = useNow();
   const { tone } = toneOf(item);
   const founder = needsFounder(item);
@@ -165,83 +175,89 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
   // 出问题和等你拍的卡，左边一道状态色竖线
   const rail = tone === 'fail' ? 'fail' : founder ? 'human' : undefined;
   return (
-    <div data-running-card={item.segment} data-needs-founder={founder} className={cn('h-full', className)}>
-      <Section flush {...(rail ? { tone: rail } : {})} className="h-full [&>div]:h-full">
-        <CardLink
-          item={item}
-          className="pointer-events-auto nopan nodrag flex h-full flex-col justify-between gap-1 px-3 py-2 text-left transition-colors hover:bg-accent"
-        >
-          <div className="flex items-center gap-2">
-            <span className="num text-meta font-semibold text-muted-foreground">#{item.issueNumber}</span>
-            <span className="min-w-0 flex-1 truncate text-body font-medium">{item.title}</span>
-            <FlowModeTag mode={item.flowMode} fallback={item.flowFallback} />
-            <StatusBadge tone={tone} label={statusText} />
-            {founder ? <StatusBadge tone="human" label="等你" variant="dot" /> : null}
-          </div>
-
-          <div className="flex items-center gap-x-2 text-meta text-muted-foreground">
-            <Bot className="size-3 shrink-0" aria-hidden />
-            <span
-              className={cn(
-                'max-w-1/2 shrink-0 truncate',
-                item.worker || isLocalTask(item) ? 'text-foreground' : undefined,
-              )}
-            >
-              {workerTextOf(item)}
+    <div data-running-card={item.segment} data-needs-founder={founder}>
+      <Section flush {...(rail ? { tone: rail } : {})}>
+        <CardLink item={item}>
+          <Stack direction="horizontal" gap="sm" align="center">
+            <span className="num shrink-0">
+              <Text size="meta" tone="muted" strong>
+                #{item.issueNumber}
+              </Text>
             </span>
-            {isLocalTask(item) ? (
-              <>
-                <span aria-hidden>·</span>
-                <span className="num shrink-0 whitespace-nowrap" data-lease>
+            <span className="min-w-0 flex-1">
+              <Text truncate strong>
+                {item.title}
+              </Text>
+            </span>
+            <FlowModeTag mode={item.flowMode} fallback={item.flowFallback} />
+            <Tag tone={tone}>{statusText}</Tag>
+            {founder ? <StatusBadge status="tone:human" variant="dot" /> : null}
+          </Stack>
+
+          <MetaLine
+            items={[
+              <Stack key="worker" direction="horizontal" gap="sm" align="center">
+                <Glyph icon={Bot} size="meta" tone="muted" />
+                <Text size="meta" tone={item.worker || isLocalTask(item) ? 'secondary' : 'muted'} truncate>
+                  {workerTextOf(item)}
+                </Text>
+              </Stack>,
+              isLocalTask(item) ? (
+                <span key="lease" className="num whitespace-nowrap" data-lease>
                   {leaseTextOf(item, now)}
                 </span>
-              </>
-            ) : null}
-            {item.stageSince ? (
-              <>
-                <span aria-hidden>·</span>
-                <span className="num shrink-0 whitespace-nowrap">本段 {since(item.stageSince)}</span>
-              </>
-            ) : null}
-            {item.taskSince ? (
-              <>
-                <span aria-hidden>·</span>
-                <span className="num min-w-0 truncate">共 {since(item.taskSince)}</span>
-              </>
-            ) : null}
-          </div>
+              ) : null,
+              item.stageSince ? (
+                <span key="stage" className="num whitespace-nowrap">
+                  本段 {since(item.stageSince)}
+                </span>
+              ) : null,
+              item.taskSince ? (
+                <span key="task" className="num">
+                  共 {since(item.taskSince)}
+                </span>
+              ) : null,
+            ]}
+          />
 
           {item.waitingReason !== 'nothing' ? (
-            <div className="flex items-center gap-x-2 text-meta">
-              <span className={cn('shrink-0 font-medium', inkClass[tone])}>{waitLineOf(item)}</span>
+            <Stack direction="horizontal" gap="sm" align="center">
+              <span className="shrink-0">
+                <Text size="meta" strong tone={inkTone(tone)}>
+                  {waitLineOf(item)}
+                </Text>
+              </span>
               {item.waitingSince ? (
-                <span className="num shrink-0 whitespace-nowrap text-muted-foreground">
-                  已 {since(item.waitingSince)}
+                <span className="num shrink-0 whitespace-nowrap">
+                  <Text size="meta" tone="muted">
+                    已 {since(item.waitingSince)}
+                  </Text>
                 </span>
               ) : null}
-            </div>
+            </Stack>
           ) : null}
 
           {parkedForHuman(item) && item.parked ? (
-            <div className="truncate text-meta text-ink-human" title={item.parked} data-parked-why>
+            <Text size="meta" tone="secondary" truncate title={item.parked} data-parked-why="true">
               为什么停：{item.parked}
-            </div>
+            </Text>
           ) : founder && item.pendingDecision ? (
-            <div className="truncate text-meta text-ink-human" title={item.pendingDecision}>
+            <Text size="meta" tone="secondary" truncate title={item.pendingDecision}>
               要你拍：{item.pendingDecision}
-            </div>
+            </Text>
           ) : item.lastEvent ? (
-            <div
-              className={cn(
-                'truncate text-meta',
-                item.lastEvent.tone === 'trouble' ? 'text-ink-fail' : 'text-muted-foreground',
-              )}
+            <Text
+              size="meta"
+              tone={item.lastEvent.tone === 'trouble' ? 'danger' : 'muted'}
+              truncate
               title={item.lastEvent.text}
             >
               最近：{item.lastEvent.text} · <span className="num">{formatAgo(item.lastEvent.at, now)}</span>
-            </div>
+            </Text>
           ) : (
-            <div className="truncate text-meta text-muted-foreground">最近：还没有三段流水记录</div>
+            <Text size="meta" tone="muted" truncate>
+              最近：还没有三段流水记录
+            </Text>
           )}
         </CardLink>
       </Section>
@@ -255,12 +271,10 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
  */
 export function CardLink({
   item,
-  className,
   children,
   label,
 }: {
   item: HomeRunning;
-  className: string;
   children: ReactNode;
   /** 链接只有图标、没有字时给读屏和悬停提示的话；不给就用单子标题。 */
   label?: string;
@@ -269,9 +283,9 @@ export function CardLink({
   const title = label ?? item.title;
   if (!remote) {
     return (
-      <Link to={item.link} title={title} aria-label={label} className={className}>
+      <BlockLink to={item.link} title={title} label={label}>
         {children}
-      </Link>
+      </BlockLink>
     );
   }
   const cut = item.repo.indexOf('/');
@@ -280,13 +294,9 @@ export function CardLink({
     'issues',
     item.issueNumber,
   );
-  return href ? (
-    <a href={href} target="_blank" rel="noreferrer" title={title} aria-label={label} className={className}>
+  return (
+    <BlockLink href={href} title={title} label={label}>
       {children}
-    </a>
-  ) : (
-    <div title={title} className={className}>
-      {children}
-    </div>
+    </BlockLink>
   );
 }

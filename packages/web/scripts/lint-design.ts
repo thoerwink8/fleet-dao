@@ -1,15 +1,14 @@
 // 驾驶舱设计规范检查（#1847，规范 docs/design/驾驶舱界面.md 第八节）。并入了原来的 lint-arbitrary（#182、#1446）。
 // 扫 packages/web/src 下非测试的 .ts/.tsx：取出所有字符串字面量和模板串的静态段（className、cn()、cva、映射表都在里面），
 // 按空白切成类名，去掉变体前缀（md:、hover:、data-[…]:）后逐条按 R0–R10 判；.css 只判 R0。
-// R0–R12 严格模式：整个 src 一条违规都不许有，没有旧账清单、没有例外名单（例外只在本文件的 allowed() 里，写明理由）。
-// R13–R20（#3509 驾驶舱改版的分层规则）是棘轮：scripts/lint-design.baseline.json 按文件按规则记基线，数只许减，新文件一律 0；
-// 全部迁完后删基线，回到严格。
+// R0–R20 全部严格模式：整个 src 一条违规都不许有，没有旧账清单、没有基线、没有例外名单
+// （例外只在本文件的 allowed() 里，写明理由）。R13–R20 是 #3509 驾驶舱改版的分层规则（页面只拼组件），迁移期曾是棘轮，
+// 迁完（#3533）已改回严格。
 // 用法（在 packages/web 下）：
-//   node scripts/lint-design.ts                 检查，有一条违规或超基线就退出 1
-//   node scripts/lint-design.ts --report        每条规则的总数（R13–R20 带基线总数）和违规最多的前 20 个文件（PR 正文贴前后两次）
-//   node scripts/lint-design.ts --write-baseline  按现状重写基线（只在迁完一片、数减少后用）
+//   node scripts/lint-design.ts                 检查，有一条违规就退出 1
+//   node scripts/lint-design.ts --report        每条规则的总数和违规最多的前 20 个文件
 //   node scripts/lint-design.ts --list          列出每一处
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from '@babel/parser';
@@ -66,10 +65,10 @@ export const RULES: Record<RuleId, { name: string; section: string }> = {
   R20: { name: '状态不走字典、主按钮乱放', section: '5' },
 };
 export const RULE_IDS = Object.keys(RULES) as RuleId[];
-/** 棘轮规则（#3509）：按文件按规则记基线，数只许减，新文件一律 0。R0–R12 仍是严格模式。 */
-export const RATCHET_RULES: readonly RuleId[] = ['R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19', 'R20'];
-export function isRatchet(rule: RuleId): boolean {
-  return RATCHET_RULES.includes(rule);
+/** 分层规则（#3509「页面只拼组件」）：R13–R20，和 R0–R12 一样是严格模式，一条都不许有。 */
+export const LAYER_RULES: readonly RuleId[] = ['R13', 'R14', 'R15', 'R16', 'R17', 'R18', 'R19', 'R20'];
+export function isLayerRule(rule: RuleId): boolean {
+  return LAYER_RULES.includes(rule);
 }
 
 export interface Hit {
@@ -738,6 +737,57 @@ function boxy(tokens: string[]): boolean {
   return bg || border;
 }
 
+/** R20「同一块区域一个主按钮」里的「块」：这些容器各算一块。 */
+const PRIMARY_AREAS = new Set([
+  'Form',
+  'Section',
+  'Card',
+  'Dialog',
+  'ConfirmDialog',
+  'Drawer',
+  'SidePanel',
+  'Popout',
+  'Page',
+  'AuthCard',
+  'Band',
+  'Inset',
+  'Pane',
+]);
+
+/** 这个按钮属于哪一块：往上找最近的容器元素；先碰到函数边界就以那个函数为一块（模块顶层用 null 占位）。 */
+function areaOf(anc: AstNode[]): AstNode {
+  for (let i = anc.length - 1; i >= 0; i--) {
+    const a = anc[i] as AstNode;
+    if (a.type === 'JSXElement' && PRIMARY_AREAS.has(jsxName(a) ?? '')) return a;
+    if (
+      a.type === 'FunctionDeclaration' ||
+      a.type === 'FunctionExpression' ||
+      a.type === 'ArrowFunctionExpression'
+    )
+      return a;
+  }
+  return anc[0] as AstNode;
+}
+
+/**
+ * variant 的值会不会是 primary：写死的 "primary" 是 static；按条件选的（cond ? 'primary' : …、cond && 'primary'、a ?? 'primary'）是 conditional。
+ */
+function primaryKind(v: AstNode): 'static' | 'conditional' | undefined {
+  if (v.type === 'StringLiteral') return v.value === 'primary' ? 'static' : undefined;
+  if (v.type === 'ParenthesizedExpression' || v.type === 'TSAsExpression' || v.type === 'TSNonNullExpression')
+    return isNode(v.expression) ? primaryKind(v.expression) : undefined;
+  const branches: unknown[] =
+    v.type === 'ConditionalExpression'
+      ? [v.consequent, v.alternate]
+      : v.type === 'LogicalExpression'
+        ? [v.left, v.right]
+        : [];
+  for (const b of branches) {
+    if (isNode(b) && primaryKind(b)) return 'conditional';
+  }
+  return undefined;
+}
+
 const STATUS_KEYS = new Set([
   'running',
   'idle',
@@ -850,7 +900,7 @@ export function scanBusinessAst(src: string, file: string): Hit[] {
     }
   }
 
-  let primaryOutsideMap = 0;
+  const primaryByArea = new Map<AstNode, number>();
   walkWithAncestors(ast, (n, anc) => {
     // R18 容器套容器
     if (n.type === 'JSXElement') {
@@ -900,7 +950,8 @@ export function scanBusinessAst(src: string, file: string): Hit[] {
       // R20 主按钮
       if (name === 'Button') {
         const v = attrExpr(jsxAttr(n, 'variant')) as AstNode | null;
-        if (v && v.type === 'StringLiteral' && v.value === 'primary') {
+        const kind = v ? primaryKind(v) : undefined;
+        if (kind) {
           const inMap = anc.some(
             (a) =>
               (a.type === 'ArrowFunctionExpression' || a.type === 'FunctionExpression') &&
@@ -914,23 +965,27 @@ export function scanBusinessAst(src: string, file: string): Hit[] {
                   (p.arguments as unknown[]).includes(a),
               ),
           );
+          const shown = kind === 'static' ? 'variant="primary"' : 'variant={条件 ? "primary" : …}';
           if (inMap) {
             hits.push({
               file,
               line: at(n),
               rule: 'R20',
-              cls: '<Button variant="primary"> 在 .map( 里',
+              cls: `<Button ${shown}> 在 .map( 里`,
               fix: '列表行不许有主按钮 → 用 type="text" 的按钮，或收进「更多」',
             });
           } else {
-            primaryOutsideMap++;
-            if (primaryOutsideMap >= 2) {
+            // 「同一块区域」＝最近的容器（Form、Section、Card、对话框、抽屉、Page、AuthCard…），碰到函数边界就以那个函数为一块
+            const area = areaOf(anc);
+            const seen = (primaryByArea.get(area) ?? 0) + 1;
+            primaryByArea.set(area, seen);
+            if (seen >= 2) {
               hits.push({
                 file,
                 line: at(n),
                 rule: 'R20',
-                cls: '同一文件第二个主按钮',
-                fix: '一个页面一个主按钮，其余用次按钮（判法按文件数，条件分支里的两个也算）',
+                cls: `同一块区域第二个主按钮（${shown}）`,
+                fix: '同一块区域（一个 Form、Section、Card、对话框、页头）只有一个主按钮，其余用次按钮；按条件选主按钮的写法也算一个',
               });
             }
           }
@@ -1325,104 +1380,20 @@ export function countHits(hits: readonly Hit[]): Counts {
   return out;
 }
 
-// ---------- 棘轮基线（R13–R20，#3509） ----------
-// scripts/lint-design.baseline.json：{ "version": 1, "files": { "src/routes/x.tsx": { "R13": 31 } } }。
-// 数只许减：现数 > 基线就红；不在基线里的文件基线是 0（新文件一律 0）。基线只记 R13–R20，R0–R12 不进。
+// ---------- 检查 ----------
+// R0–R20 全部严格：一条违规都不许有，没有基线、没有放行清单（迁移期的棘轮已在 #3533 收尾时删掉）。
 
-export const BASELINE_PATH = join(pkgDir, 'scripts', 'lint-design.baseline.json');
-export const BASELINE_VERSION = 1;
-export type Baseline = Record<string, Partial<Record<RuleId, number>>>;
-
-/** 解析基线文本；格式不对一律抛错（不当成 0、不当成空）。 */
-export function parseBaseline(text: string, from = 'lint-design.baseline.json'): Baseline {
-  const bad = (why: string): never => {
-    throw new Error(`${from} 格式不对：${why}。重写用 node scripts/lint-design.ts --write-baseline`);
-  };
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (e) {
-    return bad(`不是合法 JSON（${e instanceof Error ? e.message : String(e)}）`);
-  }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return bad('最外层要是对象');
-  const obj = raw as Record<string, unknown>;
-  if (obj.version !== BASELINE_VERSION)
-    return bad(`version 要是 ${BASELINE_VERSION}，读到 ${String(obj.version)}`);
-  const files = obj.files;
-  if (typeof files !== 'object' || files === null || Array.isArray(files)) return bad('files 要是对象');
-  const out: Baseline = {};
-  for (const [file, row] of Object.entries(files as Record<string, unknown>)) {
-    if (typeof row !== 'object' || row === null || Array.isArray(row)) return bad(`${file} 的值要是对象`);
-    const entry: Partial<Record<RuleId, number>> = {};
-    for (const [rule, n] of Object.entries(row as Record<string, unknown>)) {
-      if (!RATCHET_RULES.includes(rule as RuleId))
-        return bad(`${file} 里有基线不管的规则「${rule}」（只记 R13–R20）`);
-      if (typeof n !== 'number' || !Number.isInteger(n) || n <= 0)
-        return bad(`${file} 的 ${rule} 要是正整数，读到 ${String(n)}`);
-      entry[rule as RuleId] = n;
-    }
-    out[file] = entry;
-  }
-  return out;
+/** 检查：返回出错信息（空数组＝通过）。 */
+export function check(hits: readonly Hit[] = scan()): string[] {
+  return hits.map(formatHit);
 }
 
-export function loadBaseline(path = BASELINE_PATH): Baseline {
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    throw new Error(`读不到基线文件 ${path}。生成用 node scripts/lint-design.ts --write-baseline`);
-  }
-  return parseBaseline(text, path);
-}
-
-/** 把现有命中按文件按规则数出来，只留棘轮规则。 */
-export function ratchetCounts(hits: readonly Hit[]): Baseline {
-  return countHits(hits.filter((h) => isRatchet(h.rule)));
-}
-
-export function serializeBaseline(base: Baseline): string {
-  const files: Baseline = {};
-  for (const file of Object.keys(base).sort()) files[file] = base[file] as Baseline[string];
-  return `${JSON.stringify({ version: BASELINE_VERSION, files }, null, 2)}\n`;
-}
-
-/** 现数对基线：超出的报错（多出的那几处带上位置）；返回出错信息，空数组＝通过。 */
-export function compareToBaseline(hits: readonly Hit[], base: Baseline): string[] {
-  const errors: string[] = [];
-  const now = ratchetCounts(hits);
-  for (const file of Object.keys(now).sort()) {
-    const row = now[file] as Baseline[string];
-    const isNew = !(file in base);
-    for (const rule of RATCHET_RULES) {
-      const cur = row[rule] ?? 0;
-      const allowedN = base[file]?.[rule] ?? 0;
-      if (cur <= allowedN) continue;
-      const mine = hits.filter((h) => h.file === file && h.rule === rule);
-      const head = isNew
-        ? `${file} ${rule} 新文件不许有（基线 0，现在 ${cur}）`
-        : `${file} ${rule} 基线 ${allowedN}，现在 ${cur}：只许减`;
-      errors.push([head, ...mine.map((h) => `  ${formatHit(h)}`)].join('\n'));
-    }
-  }
-  return errors;
-}
-
-/** 检查：R0–R12 严格（一条都不许有）+ R13–R20 不超基线。返回出错信息（空数组＝通过）。基线读不了会抛错。 */
-export function check(base: Baseline = loadBaseline(), hits: readonly Hit[] = scan()): string[] {
-  return [...hits.filter((h) => !isRatchet(h.rule)).map(formatHit), ...compareToBaseline(hits, base)];
-}
-
-export function report(hits: readonly Hit[], base?: Baseline): string {
+export function report(hits: readonly Hit[]): string {
   const lines: string[] = [];
   const counts = countHits(hits);
   lines.push(`共 ${hits.length} 处，${Object.keys(counts).length} 个文件。`);
-  const baseTotal = (rule: RuleId) => Object.values(base ?? {}).reduce((a, row) => a + (row[rule] ?? 0), 0);
   for (const rule of RULE_IDS) {
-    const n = hits.filter((h) => h.rule === rule).length;
-    if (isRatchet(rule)) {
-      lines.push(`${rule} ${RULES[rule].name}：基线 ${base ? baseTotal(rule) : '（未读）'}，现 ${n}`);
-    } else lines.push(`${rule} ${RULES[rule].name}：${n}`);
+    lines.push(`${rule} ${RULES[rule].name}：${hits.filter((h) => h.rule === rule).length}`);
   }
   lines.push('违规最多的前 20 个文件：');
   const top = Object.entries(counts)
@@ -1435,41 +1406,21 @@ export function report(hits: readonly Hit[], base?: Baseline): string {
 
 function main() {
   const argv = process.argv.slice(2);
-  if (argv.includes('--write-baseline')) {
-    const hits = scan();
-    writeFileSync(BASELINE_PATH, serializeBaseline(ratchetCounts(hits)));
-    console.log(
-      `已重写 ${relative(pkgDir, BASELINE_PATH)}（R13–R20 共 ${hits.filter((h) => isRatchet(h.rule)).length} 处）。`,
-    );
-    return;
-  }
   if (argv.includes('--report')) {
-    let base: Baseline | undefined;
-    try {
-      base = loadBaseline();
-    } catch (e) {
-      console.error(e instanceof Error ? e.message : String(e));
-    }
-    console.log(report(scan(), base));
+    console.log(report(scan()));
     return;
   }
   if (argv.includes('--list')) {
     for (const h of scan()) console.log(formatHit(h));
     return;
   }
-  let errors: string[];
-  try {
-    errors = check();
-  } catch (e) {
-    console.error(e instanceof Error ? e.message : String(e));
-    process.exit(1);
-  }
+  const errors = check();
   for (const e of errors) console.error(e);
   if (errors.length > 0) {
     console.error(`\n设计规范检查没过（${errors.length} 条）。规范：${DOC}。`);
     process.exit(1);
   }
-  console.log('设计规范检查通过（R0–R12 严格没有违规；R13–R20 没超基线）。');
+  console.log('设计规范检查通过（R0–R20 严格没有违规）。');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

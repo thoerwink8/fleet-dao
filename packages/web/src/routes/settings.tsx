@@ -24,7 +24,6 @@ import type { Me, Repo, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { useMasterView } from '../components/engine-master';
 import { EngineMasterRelation } from '../components/engine-master-relation';
-import { FlowModeSetting } from '../components/flow-mode-setting';
 import { Anchor } from '../components/layout/anchor';
 import { Button } from '../components/layout/button';
 import { Descriptions } from '../components/layout/descriptions';
@@ -733,7 +732,6 @@ export default function Settings() {
                 />
                 <SoloPaused s={find('engine.soloPaused')} />
                 <CommanderSwitch s={find('engine.commander')} />
-                <FlowModeSetting s={find('engine.flowMode')} />
               </Stack>
             ) : settings.error ? (
               <LoadError error={settings.error} />

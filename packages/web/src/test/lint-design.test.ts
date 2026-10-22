@@ -9,21 +9,15 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
   ALLOWLIST,
-  type Baseline,
   check,
-  compareToBaseline,
   countHits,
   formatHit,
   type Hit,
+  LAYER_RULES,
   lex,
-  loadBaseline,
-  parseBaseline,
-  RATCHET_RULES,
   RULE_IDS,
   type RuleId,
-  ratchetCounts,
   scanSource,
-  serializeBaseline,
   utilityOf,
 } from '../../scripts/lint-design.ts';
 
@@ -31,7 +25,7 @@ const PAGE = 'src/routes/sample.tsx';
 
 /** 只看严格规则 R0–R12 的命中（页面夹具常顺带踩到 R13–R20，那些在下面单独测）。 */
 function strictScan(source: string, file = PAGE): Hit[] {
-  return scanSource(source, file).filter((h) => !RATCHET_RULES.includes(h.rule));
+  return scanSource(source, file).filter((h) => !LAYER_RULES.includes(h.rule));
 }
 function rulesOf(source: string, file = PAGE): RuleId[] {
   return strictScan(source, file).map((h) => h.rule);
@@ -308,7 +302,7 @@ const BIZ = 'src/components/task-card.tsx';
 function ratchetOf(source: string, file = PAGE): RuleId[] {
   return scanSource(source, file)
     .map((h) => h.rule)
-    .filter((r) => RATCHET_RULES.includes(r));
+    .filter((r) => LAYER_RULES.includes(r));
 }
 
 describe('R13–R20 业务层规则：造红的报、合规的放', () => {
@@ -460,7 +454,7 @@ describe('R13–R20 业务层规则：造红的报、合规的放', () => {
       'R20',
     ]);
   });
-  test('R20 主按钮：.map( 里的报；同一文件第二个报', () => {
+  test('R20 主按钮：.map( 里的报；同一块区域第二个报', () => {
     expect(ratchetOf(`const A = () => rows.map((r) => <Button variant="primary">{r}</Button>);`)).toEqual([
       'R20',
     ]);
@@ -469,6 +463,46 @@ describe('R13–R20 业务层规则：造红的报、合规的放', () => {
         `const A = () => <><Button variant="primary">a</Button><Button variant="primary">b</Button></>;`,
       ),
     ).toEqual(['R20']);
+    // 同一个 Form / Section 里两个
+    expect(
+      ratchetOf(
+        `const A = () => <Section><Button variant="primary">a</Button><Stack><Button variant="primary">b</Button></Stack></Section>;`,
+      ),
+    ).toEqual(['R20']);
+  });
+  test('R20 按条件选主按钮也判：variant={条件 ? "primary" : …} 在 .map( 里报，同一块里和别的主按钮凑成两个也报（故意造红）', () => {
+    expect(
+      ratchetOf(
+        `const A = () => rows.map((r, i) => <Button variant={i === 0 ? 'primary' : 'secondary'}>{r}</Button>);`,
+      ),
+    ).toEqual(['R20']);
+    expect(
+      ratchetOf(
+        `const A = () => <Form><Button variant="primary">a</Button><Button variant={ok ? 'primary' : 'secondary'}>b</Button></Form>;`,
+      ),
+    ).toEqual(['R20']);
+    expect(
+      ratchetOf(
+        `const A = () => <Form><Button variant={ok && 'primary'}>a</Button><Button variant={ok ? 'primary' : 'outline'}>b</Button></Form>;`,
+      ),
+    ).toEqual(['R20']);
+  });
+  test('R20 放行：不同块里各一个主按钮（Form 里一个、外面一个）；条件主按钮单独一个；条件里没有 primary', () => {
+    expect(
+      ratchetOf(
+        `const A = () => <AuthCard><Form><Button variant="primary">登录</Button></Form><Button variant={only ? 'primary' : 'outline'}>飞书</Button></AuthCard>;`,
+      ),
+    ).toEqual([]);
+    expect(
+      ratchetOf(
+        `const A = () => <><Section><Button variant="primary">a</Button></Section><Section><Button variant="primary">b</Button></Section></>;`,
+      ),
+    ).toEqual([]);
+    expect(
+      ratchetOf(
+        `const A = () => <><Button variant={ok ? 'secondary' : 'outline'}>a</Button><Button variant="primary">b</Button></>;`,
+      ),
+    ).toEqual([]);
   });
   test('R20 放行：status= 取字典、一个主按钮、次按钮在 .map( 里、只有一个状态键的对象、组件层', () => {
     expect(ratchetOf(`const A = () => <StatusBadge status="task:running" />;`)).toEqual([]);
@@ -482,57 +516,37 @@ describe('R13–R20 业务层规则：造红的报、合规的放', () => {
   });
 });
 
-describe('棘轮：基线', () => {
+describe('R13–R20 也是严格模式：没有基线，一条都不放', () => {
   const hitsOf = (src: string, file: string) =>
-    scanSource(src, file).filter((h) => RATCHET_RULES.includes(h.rule));
-  const old = hitsOf(`<p className="text-ink-3 p-4" />`, 'src/routes/old.tsx'); // R13 ×2
+    scanSource(src, file).filter((h) => LAYER_RULES.includes(h.rule));
 
-  test('现数不超基线：通过；比基线少：也通过（数只许减）', () => {
-    expect(compareToBaseline(old, { 'src/routes/old.tsx': { R13: 2 } })).toEqual([]);
-    expect(compareToBaseline(old, { 'src/routes/old.tsx': { R13: 5 } })).toEqual([]);
+  test('任何文件（老文件、新文件一样）有一处 R13–R20 就报，不分基线（故意造红）', () => {
+    for (const file of ['src/routes/old.tsx', 'src/routes/brand-new.tsx']) {
+      const errors = check(hitsOf(`<p className="text-ink-3 p-4" />`, file));
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain(file);
+      expect(errors[0]).toContain('R13');
+    }
   });
-  test('超过基线就红：报文件、规则、基线数、现数，并列出每一处（故意造红）', () => {
-    const errors = compareToBaseline(old, { 'src/routes/old.tsx': { R13: 1 } });
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain('src/routes/old.tsx R13 基线 1，现在 2：只许减');
-    expect(errors[0]).toContain('src/routes/old.tsx:1');
+  test('合规的写法放行：check 返回空', () => {
+    expect(check(hitsOf(`<Text tone="secondary">x</Text>`, 'src/routes/old.tsx'))).toEqual([]);
   });
-  test('新文件（不在基线里）一律 0：有一处就红（故意造红）', () => {
-    const errors = compareToBaseline(hitsOf(`<p className="p-4" />`, 'src/routes/brand-new.tsx'), {
-      'src/routes/old.tsx': { R13: 2 },
-    });
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain('src/routes/brand-new.tsx R13 新文件不许有');
+  test('R0–R12 和 R13–R20 一起报，都不进任何清单', () => {
+    const errors = check(scanSource(`<p className="text-sm p-4" />`, 'src/routes/old.tsx'));
+    expect(errors.some((e) => e.includes('R2'))).toBe(true);
+    expect(errors.some((e) => e.includes('R13'))).toBe(true);
   });
-  test('基线里写了 R13 不能拿去放行 R14：按规则分开记', () => {
-    const hits = hitsOf(`import { Button } from '../components/ui/button';`, 'src/routes/old.tsx');
-    expect(compareToBaseline(hits, { 'src/routes/old.tsx': { R13: 9 } })).toHaveLength(1);
-  });
-  test('R0–R12 不进基线：它们一直严格，基线再大也报', () => {
-    const strict = strictScan(`<p className="text-sm" />`, 'src/routes/old.tsx');
-    expect(strict.map((h) => h.rule)).toEqual(['R2']);
-    expect(ratchetCounts(strict)).toEqual({});
-    expect(check({ 'src/routes/old.tsx': { R13: 99 } }, strict).length).toBe(1);
-  });
-  test('基线序列化后再读回一样；文件按名字排序', () => {
-    const base: Baseline = { 'src/routes/b.tsx': { R13: 2, R17: 1 }, 'src/routes/a.tsx': { R15: 3 } };
-    const text = serializeBaseline(base);
-    expect(text.indexOf('a.tsx')).toBeLessThan(text.indexOf('b.tsx'));
-    expect(parseBaseline(text)).toEqual(base);
-  });
-  test('基线格式坏了要明确报错，不当成 0（故意造红）', () => {
-    const bad = (t: string) => () => parseBaseline(t, 'baseline.json');
-    expect(bad('not json')).toThrow(/baseline\.json 格式不对：不是合法 JSON/);
-    expect(bad('[]')).toThrow(/最外层要是对象/);
-    expect(bad('{"files":{}}')).toThrow(/version 要是 1/);
-    expect(bad('{"version":1}')).toThrow(/files 要是对象/);
-    expect(bad('{"version":1,"files":{"a.tsx":5}}')).toThrow(/a\.tsx 的值要是对象/);
-    expect(bad('{"version":1,"files":{"a.tsx":{"R13":"3"}}}')).toThrow(/R13 要是正整数/);
-    expect(bad('{"version":1,"files":{"a.tsx":{"R13":0}}}')).toThrow(/R13 要是正整数/);
-    expect(bad('{"version":1,"files":{"a.tsx":{"R2":1}}}')).toThrow(/基线不管的规则「R2」/);
-    expect(() =>
-      loadBaseline(join(dirname(fileURLToPath(import.meta.url)), 'no-such-baseline.json')),
-    ).toThrow(/读不到基线文件/);
+  test('基线文件和棘轮入口已经删了：脚本不再导出基线函数', async () => {
+    const mod = (await import('../../scripts/lint-design.ts')) as Record<string, unknown>;
+    for (const gone of [
+      'loadBaseline',
+      'parseBaseline',
+      'compareToBaseline',
+      'ratchetCounts',
+      'BASELINE_PATH',
+    ]) {
+      expect(mod[gone], gone).toBeUndefined();
+    }
   });
 });
 

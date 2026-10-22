@@ -17,9 +17,10 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
   const button = await screen.findByRole('button', { name: '刷新' });
   await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false));
   // 刷新收成圆点版（页头右边已有一句汇总，#1922）：「最后更新」在悬停和读屏里，不再是摊开的一行字（原断言 getByText(/最后更新/)）
-  const fresh = document.querySelector('[data-refresh-bar="dot"] [data-freshness]');
+  const fresh = document.querySelector('[data-refresh-bar] [data-freshness]');
   expect(fresh?.getAttribute('title')).toMatch(/最后更新/);
-  expect(fresh?.getAttribute('aria-label')).toMatch(/最后更新/);
+  // 现在「最后更新」是摊开的一行灰字（全站同一种刷新条），读屏直接读得到
+  expect(fresh?.textContent).toMatch(/最后更新/);
   expect(screen.queryByText('数据已过期')).toBeNull();
 
   const before = routing.mock.calls.length;
@@ -35,7 +36,7 @@ test('【故意造出的失败】读成过、刷新时失败：照旧画上一�
   await screen.findByRole('list', { name: '渠道状态' });
   api.routing = () => Promise.reject(new ApiError(503, 'routing_unreadable', '库连不上'));
   const button = screen.getByRole('button', { name: '刷新' });
-  await waitFor(() => expect(button.getAttribute('aria-busy')).toBe('false'));
+  await waitFor(() => expect(button.getAttribute('aria-busy')).toBeNull());
   fireEvent.click(button);
   const alert = await screen.findByRole('alert', {}, { timeout: 4000 });
   expect(alert.textContent).toContain('渠道目录刷新没读成，下面是上一次读到的：库连不上');

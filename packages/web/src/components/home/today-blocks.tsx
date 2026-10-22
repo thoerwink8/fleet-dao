@@ -94,15 +94,12 @@ function AskRow({
   item,
   now,
   answering,
-  lead,
   onAnswer,
 }: {
   item: AskItem;
   now: number;
   /** 正在答的那一条和点的哪一项。 */
   answering: { id: string; optionId: string } | undefined;
-  /** 整块最上面的一条：它的推荐项是整页唯一的主按钮。 */
-  lead: boolean;
   onAnswer: (n: Notification, optionId: string) => void;
 }) {
   const { n } = item;
@@ -152,11 +149,11 @@ function AskRow({
               去回复
             </Button>
           ) : (
-            shown.map((o, i) => (
+            shown.map((o) => (
               <Button
                 key={o.id}
                 size="sm"
-                variant={lead && i === 0 && o.recommended ? 'primary' : 'secondary'}
+                variant="secondary"
                 title={o.detail}
                 loading={busy && answering?.optionId === o.id}
                 {...(busy && answering?.optionId !== o.id ? { disabledReason: '正在记上一个选择' } : {})}
@@ -224,15 +221,8 @@ export function AskBlock() {
       ) : (
         <>
           <List>
-            {items.map((it, i) => (
-              <AskRow
-                key={it.n.id}
-                item={it}
-                now={now}
-                answering={answering}
-                lead={i === 0}
-                onAnswer={onAnswer}
-              />
+            {items.map((it) => (
+              <AskRow key={it.n.id} item={it} now={now} answering={answering} onAnswer={onAnswer} />
             ))}
           </List>
           {q.data.nextCursor ? (

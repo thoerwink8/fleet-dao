@@ -1,6 +1,7 @@
 // 不带外壳的页（#3277）：没有侧栏、顶栏、底部导航，给弹出到新窗口的会话用。登录确认、推送更新和外壳里那一份一样。
 import { Outlet } from 'react-router';
 import { useLiveSync, useMe } from '../api/client';
+import { BareFrame } from '../components/layout/screen';
 import { RepoProvider } from '../components/repo-context';
 import { AuthGate } from './shell';
 
@@ -9,9 +10,9 @@ function Frame() {
   const { data: me } = useMe();
   useLiveSync(Boolean(me));
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-background">
+    <BareFrame>
       <Outlet />
-    </div>
+    </BareFrame>
   );
 }
 
