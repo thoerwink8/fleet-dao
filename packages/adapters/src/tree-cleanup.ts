@@ -86,7 +86,7 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
         maxBuffer: 128 * 1024,
         ...(options.signal ? { signal: options.signal } : {}),
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         if (error) {
           const exitCode = typeof error.code === 'number' ? error.code : null;
           // 取消先认（取消也会杀帮手）；回执超出缓冲是协议坏；剩下只有本端期限到了才会自己杀帮手。
@@ -98,7 +98,13 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
                 : error.killed && error.signal === 'SIGTERM'
                   ? 'timeout'
                   : 'call-failed';
-          return reject(fault(new TreeHelperError(`受管删树未完成：${reason}`, exitCode), reason, exitCode));
+          // tree-usage 的 unknown 会进入诊断通道，不能把帮手原文带出去；其它既有
+          // 受管动作仍保留原 detail，adopt/remove 的调用方依赖它给人解释失败。
+          const message =
+            args[0] === 'tree-usage'
+              ? `受管删树未完成：${reason}`
+              : `受管删树未完成：${stderr.slice(0, 1000)} ${stdout.slice(0, 2000)} ${error.message}`;
+          return reject(fault(new TreeHelperError(message, exitCode), reason, exitCode));
         }
         let unknownReply: Reply | undefined;
         try {
