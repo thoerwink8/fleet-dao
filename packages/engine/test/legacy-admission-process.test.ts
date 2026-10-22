@@ -22,7 +22,8 @@ const input: LegacyRequest['input'] = {
 };
 const audit = { actor: { kind: 'engine' as const, id: 'fixture' }, via: 'engine' as const };
 const databaseUrl = 'postgres://fixture:fixture@127.0.0.1/fixture';
-const options = (signal = new AbortController().signal, ms = 4000) => ({
+// 整套并行时夹具子进程冷启动能超过 4 秒，协议错误还没读到就被收成 deadline。期限用例自己传更短的。
+const options = (signal = new AbortController().signal, ms = 8_000) => ({
   signal,
   deadlineAt: performance.now() + ms,
 });

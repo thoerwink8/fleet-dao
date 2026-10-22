@@ -136,11 +136,15 @@ export function freshRepo(): Repo {
   return { ...REPO, id: `repo-${randomUUID().slice(0, 8)}`, name: `demo-${randomUUID().slice(0, 8)}` };
 }
 
-/** 真实时间里轮询，直到条件成立（测试服务端在有活动跑着时不跳时间）。 */
+/**
+ * 真实时间里轮询，直到条件成立（测试服务端在有活动跑着时不跳时间）。
+ * 默认 90 秒：多轮工作流在整套并行时一个工作流任务就能占满原先的 20 秒，状态还在往前走就被判失败。
+ * 条件成立就返回，不把通过的用例拖满。
+ */
 export async function waitUntil(
   check: () => boolean | Promise<boolean>,
   what: string,
-  timeoutMs = 20_000,
+  timeoutMs = 90_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -159,7 +163,7 @@ export async function pollQuery<S>(
   read: () => Promise<S>,
   check: (status: S) => boolean,
   what: string,
-  timeoutMs = 20_000,
+  timeoutMs = 90_000,
 ): Promise<S> {
   let last: S | undefined;
   let lastError: unknown;
@@ -196,7 +200,7 @@ export function queryUntil<S>(
   handle: WorkflowHandle,
   check: (status: S) => boolean,
   what: string,
-  timeoutMs = 20_000,
+  timeoutMs = 90_000,
 ): Promise<S> {
   return pollQuery(() => handle.query('status') as Promise<S>, check, what, timeoutMs);
 }

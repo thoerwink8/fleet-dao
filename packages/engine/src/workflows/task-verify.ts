@@ -5,6 +5,7 @@
 // 结果交给调用方等 CI 收场后再认；CI 不绿就不认，并取消这一次验收（patched('verify-cancel-on-ci-red')，省一次验收会话的 token）。
 // 引擎自测（决定 0093）的精炼输出只在测的就是要验的这个头时带上（testOutput）；老历史里没有自测，不带，入参和原来一样。
 // 第 2 轮起只复核上轮没过的条和这一轮的增量 diff（patched('verify-recheck')）：老历史没有这个标记，冷验收入参和原来一样。
+// 增量里主线同步和本单返工怎么拆，在活动读镜像时做，这里不改步序。
 
 // 验收会话脱开引擎跑（#2848）：活动交回 detached 时隔 VERIFY_REATTACH_SECONDS 带上 attach 再调同一次验收（patched('cold-verify-attach')），
 // 接回的结论照常认；接回没接成的活动回 retry（重验一次），不算一轮、不算没过，全程「冷验收被拒」的次数也不数它。
