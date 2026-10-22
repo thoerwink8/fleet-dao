@@ -36,8 +36,6 @@ export interface CloseOnMergeResult {
 
 const OPEN_PRS_PAGE = 100;
 
-// 旧评论展示标记，不参与验收授权。
-export const ACCEPTANCE_OPEN_MARK = '验收责任已记下';
 export const ACCEPTANCE_SETTLED_MARK = '最终验收完成：';
 
 /**

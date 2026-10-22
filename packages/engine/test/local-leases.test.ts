@@ -280,11 +280,29 @@ describe('sweepLocalLeases：验收责任跟着单子走（#3037）', () => {
     expect(w.bodies[0]).toContain('- PR #3031：现场 add/check 五条');
   });
 
-  it('没有验收责任：和原来一样退回', async () => {
-    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] }, merged: { 7: 3031 }, duties: {} });
+  it('没有验收责任、代码也没合：和原来一样退回', async () => {
+    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] }, duties: {} });
     const r = await w.run();
     expect(r).toMatchObject({ returned: 1, awaitingAcceptance: 0 });
     expect(w.steps).toEqual(['unmark 7', 'comment 7 local-lease-expired', 'settle t7 returned']);
+  });
+
+  it('#3601：#3591 起责任账恒为空，代码已合、单还开着、贴着「本机做」：不摘标签、不退回法国重做，记做完留着等人验', async () => {
+    for (const duties of [{}, undefined]) {
+      const w = world({
+        expired: [lease(7)],
+        open: { 7: [LOCAL_LABEL] },
+        merged: { 7: 3031 },
+        ...(duties === undefined ? {} : { duties }),
+        verdicts: {},
+      });
+      const r = await w.run();
+      expect(r).toMatchObject({ returned: 0, awaitingAcceptance: 1, unchecked: [] });
+      expect(w.steps).toEqual(['comment 7 local-lease-acceptance', 'settle t7 done']);
+      expect(w.steps).not.toContain('unmark 7');
+      expect(w.bodies[0]).toContain('PR #3031');
+      expect(w.bodies[0]).toContain('单子还开着');
+    }
   });
 
   it('【故意造出的失败】验收责任读不到：这一条记没查成，不摘标签、不退回、不改行（不当成没有待验的）', async () => {
