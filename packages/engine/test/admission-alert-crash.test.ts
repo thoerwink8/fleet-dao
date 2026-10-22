@@ -61,6 +61,33 @@ const count = () => {
     d.close();
   }
 };
+type CommitSample = number | 'unknown';
+function commitBoundaryDiag(input: {
+  stage?: string | undefined;
+  index?: number | undefined;
+  observed?: number | undefined;
+  mainBytes?: number | undefined;
+  journalBytes?: number | undefined;
+  blocksBytes?: number | undefined;
+  rssBytes?: number | undefined;
+}): string {
+  const sample = (value: number | undefined): CommitSample =>
+    typeof value === 'number' && Number.isFinite(value) ? value : 'unknown';
+  const stage =
+    input.stage === 'validate' || input.stage === 'commit' || input.stage === 'cleanup'
+      ? input.stage
+      : 'unknown';
+  return JSON.stringify({
+    synthetic: true,
+    stage,
+    index: sample(input.index),
+    observed: sample(input.observed),
+    mainBytes: sample(input.mainBytes),
+    journalBytes: sample(input.journalBytes),
+    blocksBytes: sample(input.blocksBytes),
+    rssBytes: sample(input.rssBytes),
+  });
+}
 async function bounded<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -189,8 +216,7 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(sink.status()).toEqual({ active: 0, cleanupPending: 0 });
     expect(existsSync(path)).toBe(false);
   }, 10000);
-  // 先同步写入 255 行，每行都重开库做 quick_check。整段 test:changed 里这一段超过 15 秒
-  // （这次约 19 秒）。同步写完才返回，时限必须盖住做完。后面两个 sink 的 10 秒期限不变。
+  // 两个 sink 的 10 秒期限不变。
   it('不同identity争最后一格：busy可有界重试，只承接一个且保全全部旧行', async () => {
     for (let n = 0; n < 255; n++) expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
     const a = observation(),
@@ -210,14 +236,46 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(records.filter((r) => r.kind === 'unknown' && r.code === 'capacity')).toHaveLength(1);
     expect(count()).toBe(256);
   }, 120000);
-  // 每条都走 recordAdmissionAlert：开库、quick_check、重读已有行。256 条近上限记录在整段
-  // test:changed 里超过 15 秒（本机约 20–28 秒）。函数是同步的，到点杀不掉，时限必须盖住做完。
+  it('COMMIT失败诊断只记合成阶段和资源读数，缺采样是 unknown', () => {
+    expect(JSON.parse(commitBoundaryDiag({}))).toEqual({
+      synthetic: true,
+      stage: 'unknown',
+      index: 'unknown',
+      observed: 'unknown',
+      mainBytes: 'unknown',
+      journalBytes: 'unknown',
+      blocksBytes: 'unknown',
+      rssBytes: 'unknown',
+    });
+    expect(JSON.parse(commitBoundaryDiag({ stage: 'teardown' })).stage).toBe('unknown');
+    expect(
+      JSON.parse(
+        commitBoundaryDiag({
+          stage: 'commit',
+          index: 4,
+          observed: 8,
+          mainBytes: 3,
+          journalBytes: 0,
+          blocksBytes: 512,
+          rssBytes: 9,
+        }),
+      ),
+    ).toMatchObject({ synthetic: true, stage: 'commit', index: 4, journalBytes: 0 });
+  });
+  // 失败才打一条诊断。阶段在 COMMIT 出错时冻结，后面的 close 不能把它改成收尾。
   it('256个近DTO上界记录的COMMIT边界：主库和journal峰值在固定字节界内', () => {
-    const original = DatabaseSync.prototype.exec;
+    const originalExec = DatabaseSync.prototype.exec;
+    const originalClose = DatabaseSync.prototype.close;
     let mainPeak = 0,
       journalPeak = 0,
-      blocksPeak = 0,
       observed = 0;
+    let sampled = false;
+    let mainBytes: number | undefined;
+    let journalBytes: number | undefined;
+    let blocksBytes: number | undefined;
+    let phase = 'unknown';
+    let frozen = false;
+    let index: number | undefined;
     const sample = () => {
       if (!existsSync(path)) return;
       for (const name of readdirSync(path))
@@ -228,40 +286,113 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       const rollback = existsSync(journal) ? statSync(journal) : undefined;
       mainPeak = Math.max(mainPeak, main?.size ?? 0);
       journalPeak = Math.max(journalPeak, rollback?.size ?? 0);
-      blocksPeak = Math.max(blocksPeak, ((main?.blocks ?? 0) + (rollback?.blocks ?? 0)) * 512);
+      sampled = true;
+      mainBytes = main?.size ?? 0;
+      journalBytes = rollback?.size ?? 0;
+      blocksBytes = ((main?.blocks ?? 0) + (rollback?.blocks ?? 0)) * 512;
       observed++;
     };
     DatabaseSync.prototype.exec = function (sql: string) {
-      if (sql === 'COMMIT') sample();
-      const result = original.call(this, sql);
-      if (sql === 'COMMIT') sample();
-      return result;
+      if (sql !== 'COMMIT') return originalExec.call(this, sql);
+      if (!frozen) phase = 'commit';
+      try {
+        sample();
+        originalExec.call(this, sql);
+      } catch (error) {
+        frozen = true;
+        throw error;
+      }
+      try {
+        sample();
+      } catch (error) {
+        frozen = true;
+        throw error;
+      }
+      phase = 'validate';
+    };
+    DatabaseSync.prototype.close = function () {
+      if (!frozen) phase = 'cleanup';
+      try {
+        return originalClose.call(this);
+      } catch (error) {
+        frozen = true;
+        throw error;
+      } finally {
+        if (!frozen) phase = 'validate';
+      }
     };
     try {
-      for (let n = 0; n < 256; n++) {
-        const o = observation();
-        o.identity.namespace = '\u0001'.repeat(300);
-        o.identity.workflowId = '\u0002'.repeat(300);
-        expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+      try {
+        const started = performance.now();
+        let noted = false;
+        for (let n = 0; n < 256; n++) {
+          if (!frozen) {
+            phase = 'validate';
+            index = n;
+          }
+          // 同步循环被 15 秒杀掉时 catch 跑不到。只有按当前速度会越过 15 秒才记一条，正常跑完不打印。
+          if (!noted && n >= 32) {
+            const elapsed = performance.now() - started;
+            if (elapsed >= 10000 && (elapsed / n) * 256 > 15000) {
+              noted = true;
+              let rssBytes: number | undefined;
+              try {
+                rssBytes = process.memoryUsage().rss;
+              } catch {
+                rssBytes = undefined;
+              }
+              console.log(
+                'SPOOL_COMMIT_DIAG=' +
+                  commitBoundaryDiag({
+                    stage: phase,
+                    index,
+                    observed: sampled ? observed : undefined,
+                    mainBytes: sampled ? mainBytes : undefined,
+                    journalBytes: sampled ? journalBytes : undefined,
+                    blocksBytes: sampled ? blocksBytes : undefined,
+                    rssBytes,
+                  }),
+              );
+            }
+          }
+          const o = observation();
+          o.identity.namespace = '\u0001'.repeat(300);
+          o.identity.workflowId = '\u0002'.repeat(300);
+          expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+        }
+      } finally {
+        DatabaseSync.prototype.exec = originalExec;
+        DatabaseSync.prototype.close = originalClose;
       }
-    } finally {
-      DatabaseSync.prototype.exec = original;
+      if (!frozen) phase = 'unknown';
+      expect(count()).toBe(256);
+      expect(observed).toBeGreaterThanOrEqual(512);
+      expect(mainPeak).toBeGreaterThan(1024 * 1024);
+      expect(journalPeak).toBeGreaterThan(0);
+      expect(mainPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.databaseBytes);
+      expect(journalPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.journalBytes);
+    } catch (error) {
+      let rssBytes: number | undefined;
+      try {
+        rssBytes = process.memoryUsage().rss;
+      } catch {
+        rssBytes = undefined;
+      }
+      console.log(
+        'SPOOL_COMMIT_DIAG=' +
+          commitBoundaryDiag({
+            stage: phase,
+            index,
+            observed: sampled ? observed : undefined,
+            mainBytes: sampled ? mainBytes : undefined,
+            journalBytes: sampled ? journalBytes : undefined,
+            blocksBytes: sampled ? blocksBytes : undefined,
+            rssBytes,
+          }),
+      );
+      throw error;
     }
-    expect(count()).toBe(256);
-    expect(observed).toBeGreaterThanOrEqual(512);
-    expect(mainPeak).toBeGreaterThan(1024 * 1024);
-    expect(journalPeak).toBeGreaterThan(0);
-    expect(mainPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.databaseBytes);
-    expect(journalPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.journalBytes);
-    const d = new DatabaseSync(join(path, 'pending.sqlite'));
-    const version = d.prepare('SELECT sqlite_version() version').get()?.version;
-    d.close();
-    // 这些是语句边界观测；运行期硬界另由固定SQL/SQLite pager不变量证明，不把采样当证明。
-    console.log(
-      'SPOOL_PEAK_EVIDENCE=' +
-        JSON.stringify({ uid: process.getuid?.(), version, mainPeak, journalPeak, blocksPeak, observed }),
-    );
-  }, 120_000);
+  }, 15000);
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
     (mode) => {
