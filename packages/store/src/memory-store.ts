@@ -464,7 +464,9 @@ export function createMemoryStore(
     };
   };
 
-  const checkoutFacts = (input: Parameters<Store['readHistoricalCheckout']>[0]): HistoricalCheckoutFacts => {
+  const checkoutFacts = (
+    input: Parameters<Store['readHistoricalCheckoutCandidate']>[0],
+  ): HistoricalCheckoutFacts => {
     const notification = data.notifications.find((n) => n.id === input.notificationId);
     if (!notification) throw new Error('原 checkout 通知不存在、不是报警、代次或 raisedAt 不匹配');
     if (
@@ -495,11 +497,7 @@ export function createMemoryStore(
       );
     });
     if (!run) throw new Error('原执行 run 不存在或不属于这张任务');
-    const runProblem = checkoutRunProblem(
-      run,
-      { ...input, issueNumber: input.issueNumber },
-      notification.raisedAt,
-    );
+    const runProblem = checkoutRunProblem(run, { ...input, issueNumber: input.issueNumber });
     if (runProblem) throw new Error(runProblem);
     const baseWorkflowId = baseWorkflowIdOf(input.workflowId);
     if (baseWorkflowId !== taskWorkflowId(actualRepo, task.issueNumber))
@@ -871,10 +869,10 @@ export function createMemoryStore(
       }
       return counts;
     },
-    async readHistoricalCheckout(input) {
+    async readHistoricalCheckoutCandidate(input) {
       return checkoutFacts(input);
     },
-    async archiveHistoricalCheckout(input, entry) {
+    async archiveHistoricalCheckout(input, entry, source) {
       const n = data.notifications.find((notification) => notification.id === input.notificationId);
       if (!n) return 'not_found';
       let facts: HistoricalCheckoutFacts;
@@ -901,7 +899,7 @@ export function createMemoryStore(
         facts.pullRequest.headSha !== input.head
       )
         return 'conflict';
-      if (checkoutAuditProblem(input, facts, entry)) return 'conflict';
+      if (checkoutAuditProblem(input, facts, entry, source)) return 'conflict';
       checkAudit(entry);
       if (!isNotificationOpen(n)) {
         const same =

@@ -338,8 +338,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     );
   }
 
-  async function readHistoricalCheckout(
-    input: Parameters<OpsStore['readHistoricalCheckout']>[0],
+  async function readHistoricalCheckoutCandidate(
+    input: Parameters<OpsStore['readHistoricalCheckoutCandidate']>[0],
     executor = db,
   ): Promise<HistoricalCheckoutFacts> {
     if (!isUuid(input.notificationId) || !isUuid(input.taskId)) {
@@ -411,7 +411,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         startedAt: iso(run.startedAt),
       },
       { ...input, issueNumber: input.issueNumber },
-      notificationRaisedAt,
     );
     if (runProblem) throw new Error(`历史 checkout ${runProblem}`);
     const activeRunIds = candidateRuns.filter((r) => r.endedAt === null).map((r) => r.id);
@@ -905,14 +904,15 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       for (const r of rows) counts[r.level] = r.n;
       return counts;
     },
-    async readHistoricalCheckout(input) {
-      return readHistoricalCheckout(input);
+    async readHistoricalCheckoutCandidate(input) {
+      return readHistoricalCheckoutCandidate(input);
     },
-    async archiveHistoricalCheckout(input, entry) {
+    async archiveHistoricalCheckout(input, entry, source) {
       if (!isUuid(input.notificationId) || !isUuid(input.taskId) || !isUuid(input.repoId)) {
         return 'not_found';
       }
       return db.transaction(async (tx) => {
+        await tx.execute(sql`set local lock_timeout = '5s'`);
         const [notification] = await tx
           .select()
           .from(notifications)
@@ -926,14 +926,19 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .where(and(eq(tasks.id, input.taskId), eq(tasks.repoId, input.repoId)))
           .for('update');
         if (!taskRow) return 'conflict';
+        // PR/head 也参与归档身份：锁住目标行，不能在本次核对与撤卡提交之间换头。
+        await tx
+          .select({ number: pullRequests.number })
+          .from(pullRequests)
+          .where(and(eq(pullRequests.repoId, input.repoId), eq(pullRequests.number, input.pr)))
+          .for('update');
         // task_id 为空的历史兼容 run 不受任务行锁约束：锁表挡住并发新增/改动 runs（读照常），
         // 这样下面数「在跑」的 run 和提交归档之间不会漏进新的活执行。拿不到锁就整笔失败、不归档。
-        await tx.execute(sql`set local lock_timeout = '5s'`);
         await tx.execute(sql`lock table ${runs} in share row exclusive mode`);
         // 身份、终态、活执行全部在锁内重读（和预检同一份判断），读不到或不完整一律 conflict。
         let facts: HistoricalCheckoutFacts;
         try {
-          facts = await readHistoricalCheckout(input, tx);
+          facts = await readHistoricalCheckoutCandidate(input, tx);
         } catch {
           return 'conflict';
         }
@@ -951,7 +956,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         ) {
           return 'conflict';
         }
-        const auditProblem = checkoutAuditProblem(input, facts, entry);
+        const auditProblem = checkoutAuditProblem(input, facts, entry, source);
         if (auditProblem) {
           return 'conflict';
         }

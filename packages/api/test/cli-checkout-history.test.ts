@@ -9,17 +9,20 @@ import {
   type Store,
 } from '@fleet-dao/store';
 import { seedPg } from '@fleet-dao/store/testing';
+import { temporal } from '@temporalio/proto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { type CheckoutExecutionReader, checkoutExecutionReader } from '../src/checkout-execution-reader.ts';
 import { runCheckoutHistory } from '../src/checkout-history-cli.ts';
 import { runCli } from '../src/cli.ts';
+import { CHECKOUT_EXECUTION_ID, checkoutFixture } from './checkout-execution-fixture.ts';
 
 const NOW = new Date('2026-10-19T05:00:00.000Z');
 const NOTIFICATION_ID = 'f0000000-0000-4000-8000-000000000099';
 const LEGACY_NOTIFICATION_ID = 'f0000000-0000-4000-8000-000000000098';
 const RUN_ID = 'd1000000-0000-4000-8000-000000013099';
 const OPEN_RUN_ID = 'd1000000-0000-4000-8000-000000013098';
-const TEMPORAL_RUN_ID = 'temporal-checkout-history-1';
+const TEMPORAL_RUN_ID = CHECKOUT_EXECUTION_ID;
 const WORKFLOW_ID = 'task:example/canary#13';
 const HEAD = 'b'.repeat(40);
 /** 照引擎 checkoutBlockedAlert 缺对象那一路写的整段正文。 */
@@ -88,15 +91,19 @@ async function pgStore() {
   return createPgStore(testDb.db, { now: () => NOW });
 }
 
-async function inputFor(store: Pick<Store, 'readHistoricalCheckout'>, temporalRunId = TEMPORAL_RUN_ID) {
-  const facts = await store.readHistoricalCheckout({
+async function inputFor(
+  store: Pick<Store, 'readHistoricalCheckoutCandidate'>,
+  temporalRunId = TEMPORAL_RUN_ID,
+  runId = RUN_ID,
+) {
+  const facts = await store.readHistoricalCheckoutCandidate({
     notificationId: NOTIFICATION_ID,
     dedupeKey: `cold-verify:checkout:${WORKFLOW_ID}`,
     repo: 'example/canary',
     taskId: IDS.task13,
     issueNumber: 13,
     workflowId: WORKFLOW_ID,
-    runId: RUN_ID,
+    runId,
     temporalRunId,
     pr: 39,
     head: HEAD,
@@ -119,8 +126,9 @@ async function inputFor(store: Pick<Store, 'readHistoricalCheckout'>, temporalRu
     taskId: IDS.task13,
     issueNumber: 13,
     workflowId: WORKFLOW_ID,
-    runId: RUN_ID,
+    runId,
     temporalRunId,
+    executionRunId: CHECKOUT_EXECUTION_ID,
     runSegment: facts.run.segment,
     runStartedAt: facts.run.startedAt,
     runEndedAt,
@@ -137,9 +145,20 @@ async function inputFor(store: Pick<Store, 'readHistoricalCheckout'>, temporalRu
   };
 }
 
-async function cli(store: Store, args: string[], body: string, operator = 'founder') {
+const reader: CheckoutExecutionReader = {
+  async read(id, signal) {
+    return checkoutFixture({
+      ...id,
+      runStartedAt: '2026-10-19T03:00:00.000Z',
+      runEndedAt: '2026-10-19T03:40:00.000Z',
+    }).reader.read(id, signal);
+  },
+};
+
+async function cli(store: Store, args: string[], body: string, operator = 'founder', sourceReader = reader) {
   const out: string[] = [];
   const code = await runCli(['checkout-history', ...args], {
+    checkoutExecutionReader: sourceReader,
     env: { DATABASE_URL: 'memory', FLEET_OPS_OPERATOR: operator },
     out: (text) => out.push(text),
     err: () => undefined,
@@ -160,6 +179,7 @@ describe('checkout-history 私有 CLI（内存版）', () => {
     const store = createMemoryStore(fixtureData(), { now: () => NOW });
     const archiveInput = await inputFor(store);
     const preflight = await runCheckoutHistory({
+      reader,
       store,
       body: JSON.stringify(archiveInput),
       archive: false,
@@ -168,6 +188,7 @@ describe('checkout-history 私有 CLI（内存版）', () => {
     expect(preflight.mode).toBe('preflight');
     expect((await notificationOf(store))?.resolvedAt).toBeUndefined();
     const archived = await runCheckoutHistory({
+      reader,
       store,
       body: JSON.stringify(archiveInput),
       archive: true,
@@ -176,6 +197,7 @@ describe('checkout-history 私有 CLI（内存版）', () => {
     expect(archived).toMatchObject({ result: 'ok', conclusion: 'historical_unproven' });
     expect((await notificationOf(store))?.resolvedBy).toBe('ops:checkout-history');
     const replay = await runCheckoutHistory({
+      reader,
       store,
       body: JSON.stringify(archiveInput),
       archive: true,
@@ -189,6 +211,120 @@ describe('checkout-history 私有 CLI（真实 Postgres Store）', () => {
   let store: Store;
   beforeEach(async () => {
     store = await pgStore();
+  });
+
+  it('#3546 首报旧 run 与后来正文 head 不得拼接为预检成功', async () => {
+    await testDb.db.update(runs).set({ temporalRunId: null }).where(eq(runs.id, RUN_ID));
+    // 通知正文/merged PR 是后来 HEAD；当前库没有 head 列，旧起止正好包含首报 raisedAt。
+    // 可信 reader 明确拒绝这个 run/head 关联，命令不得忽略来源仍回 ok。
+    const input = await inputFor(store, '');
+    const out: string[] = [];
+    const code = await runCli(['checkout-history'], {
+      env: { DATABASE_URL: 'memory', FLEET_OPS_OPERATOR: 'founder' },
+      out: (text) => out.push(text),
+      err: () => undefined,
+      readStdin: async () => JSON.stringify(input),
+      openStore: async () => ({ store, close: async () => undefined }),
+      now: () => NOW,
+      checkoutExecutionReader: { read: async () => ({ kind: 'unknown', code: 'run_head_conflict' }) },
+    });
+    expect(code).toBe(1);
+    expect((await notificationOf(store))?.resolvedAt).toBeUndefined();
+    expect(await audits(store)).toEqual([]);
+  });
+
+  it('#3546 两个NULL旧列的真实活动形状：旧run+新head拒绝，后来run保留首报raisedAt可归档', async () => {
+    await testDb.db.update(runs).set({ temporalRunId: null }).where(eq(runs.id, RUN_ID));
+    const laterId = 'd1000000-0000-4000-8000-000000013096';
+    await testDb.db.insert(runs).values({
+      id: laterId,
+      taskId: IDS.task13,
+      issueNumber: 13,
+      workflowId: WORKFLOW_ID,
+      temporalRunId: null,
+      segment: 'verify',
+      model: 'opus-5.5',
+      prNumber: 39,
+      outcome: 'done',
+      startedAt: new Date('2026-10-19T04:00:00.000Z'),
+      endedAt: new Date('2026-10-19T04:10:00.000Z'),
+    });
+    let reads = 0;
+    const original: CheckoutExecutionReader = {
+      async read(identity, signal) {
+        reads++;
+        const old = checkoutFixture({
+          ...identity,
+          head: 'a'.repeat(40),
+          runStartedAt: '2026-10-19T03:00:00.000Z',
+          runEndedAt: '2026-10-19T03:10:00.000Z',
+        });
+        const later = checkoutFixture({
+          ...identity,
+          head: HEAD,
+          runStartedAt: '2026-10-19T04:00:00.000Z',
+          runEndedAt: '2026-10-19T04:10:00.000Z',
+        });
+        const events = [...old.events.slice(0, 4), ...later.events.slice(1)];
+        events.forEach((event, i) => {
+          event.eventId = temporal.api.history.v1.HistoryEvent.fromObject({ eventId: String(i + 1) }).eventId;
+        });
+        events[5]!.activityTaskStartedEventAttributes!.scheduledEventId = events[4]!.eventId;
+        events[6]!.activityTaskCompletedEventAttributes!.scheduledEventId = events[4]!.eventId;
+        events[6]!.activityTaskCompletedEventAttributes!.startedEventId = events[5]!.eventId;
+        old.pages[0]!.history!.events = events;
+        old.description.workflowExecutionInfo!.historyLength = events[7]!.eventId;
+        return checkoutExecutionReader(old.connection as never, 'test').read(identity, signal);
+      },
+    };
+    const old = await inputFor(store, '');
+    expect((await cli(store, [], JSON.stringify(old), 'founder', original)).code).toBe(1);
+    expect((await cli(store, ['--archive'], JSON.stringify(old), 'founder', original)).code).toBe(1);
+    expect(await audits(store)).toEqual([]);
+    const later = await inputFor(store, '', laterId);
+    expect(later.raisedAt).toBe('2026-10-19T03:10:00.000Z');
+    expect((await cli(store, [], JSON.stringify(later), 'founder', original)).code).toBe(0);
+    expect((await notificationOf(store))?.resolvedAt).toBeUndefined();
+    expect((await cli(store, ['--archive'], JSON.stringify(later), 'founder', original)).code).toBe(0);
+    expect(reads).toBe(4);
+    expect((await notificationOf(store))?.raisedAt).toBe(later.raisedAt);
+    expect((await audits(store))[0]?.after).toMatchObject({
+      runId: laterId,
+      checkoutSource: { scheduled: '5', started: '6', completed: '7', head: HEAD },
+    });
+  });
+
+  it('预检和执行分别重取可信来源；执行读失败不重用旧凭据，也不接caller上传proof', async () => {
+    const input = await inputFor(store);
+    expect((await cli(store, [], JSON.stringify(input))).code).toBe(0);
+    const unreadable: CheckoutExecutionReader = {
+      read: async () => ({ kind: 'unknown', code: 'read_failed' }),
+    };
+    expect((await cli(store, ['--archive'], JSON.stringify(input), 'founder', unreadable)).code).toBe(1);
+    expect(
+      (await cli(store, ['--archive'], JSON.stringify({ ...input, checkoutSource: { trusted: true } }))).code,
+    ).toBe(1);
+    expect((await notificationOf(store))?.resolvedAt).toBeUndefined();
+    expect(await audits(store)).toEqual([]);
+  });
+
+  it('网络读取期间任务复活或通知换代：锁外取证完成后锁内CAS拒绝且不审计', async () => {
+    const input = await inputFor(store);
+    const changed: CheckoutExecutionReader = {
+      async read(identity, signal) {
+        const proof = await reader.read(identity, signal);
+        // 在 reader 里正常写同一测试库，证明 RPC 调用没有包在 PG 持锁事务中。
+        await testDb.db
+          .update(notifications)
+          .set({ raisedAt: new Date('2026-10-19T04:00:00.000Z') })
+          .where(eq(notifications.id, NOTIFICATION_ID));
+        return proof;
+      },
+    };
+    expect((await cli(store, ['--archive'], JSON.stringify(input), 'founder', changed)).code).toBe(1);
+    expect((await notificationOf(store))?.raisedAt).toBe('2026-10-19T04:00:00.000Z');
+    expect((await notificationOf(store))?.resolvedAt).toBeUndefined();
+    expect(await audits(store)).toEqual([]);
   });
 
   it('不带 --archive 是只读预检：回显事实，不写通知也不写审计', async () => {
@@ -423,8 +559,8 @@ describe('checkout-history 私有 CLI（真实 Postgres Store）', () => {
     const input = await inputFor(store);
     const body = JSON.stringify(input);
     const results = await Promise.all([
-      runCheckoutHistory({ store, body, archive: true, operator: 'founder' }),
-      runCheckoutHistory({ store, body, archive: true, operator: 'founder' }),
+      runCheckoutHistory({ reader, store, body, archive: true, operator: 'founder' }),
+      runCheckoutHistory({ reader, store, body, archive: true, operator: 'founder' }),
     ]);
     expect(results.map((r) => ('result' in r ? r.result : undefined)).sort()).toEqual([
       'already_archived',

@@ -677,7 +677,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           pr: 39,
           head: 'b'.repeat(40),
         };
-        await expect(store.readHistoricalCheckout(identity)).rejects.toThrow();
+        await expect(store.readHistoricalCheckoutCandidate(identity)).rejects.toThrow();
         expect(
           await store.archiveHistoricalCheckout(
             {
@@ -696,6 +696,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
               evidence: 'contract',
               gaps: 'contract',
               responsibility: 'contract',
+              executionRunId: '00000000-0000-4000-8000-000000000002',
               conclusion: 'historical_unproven',
             },
             {

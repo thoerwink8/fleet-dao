@@ -1125,19 +1125,21 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit
 
 ### 已结束任务的 checkout 历史归档
 
-checkout 失败卡不能用 `historical-audit` 冒充，也不能靠重派任务证明恢复。使用私有 `fleet-api checkout-history`：标准输入给通知、仓、任务、原工作流/run、Temporal run、PR 和 head 的精确身份；默认只读预检，不写库：
+checkout 失败卡不能用 `historical-audit` 冒充，也不能靠重派任务证明恢复。使用私有 `fleet-api checkout-history`：标准输入给通知、仓、任务、原工作流/run、PR 和 head 的精确身份。`temporalRunId` 必须原样匹配 runs 列（旧 NULL 填空串），另给 `executionRunId` 明确的原 Temporal execution UUID，不能填会话 UUID 或追 latest。默认只读预检，不写库：
 
 ```sh
 bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history < /受控目录/checkout-history.json
 ```
 
-预检通过后，人工把完整预检快照补齐 `raisedAt`、通知正文/link、仓 id、run 的 segment/起止/结局/PR、操作者、原因、证据、缺口、责任和固定 `conclusion: "historical_unproven"`，再显式执行：
+命令通过服务端 SDK 按精确 workflow/execution 鲜读完整连续历史，沿用验收 reader 的页数、事件、字节、超时及取消预算。所选 DB run 的起止必须严格被唯一 coldVerify 的真实 started/completed 区间包住，scheduled 输入必须绑定同一 task/repo/issue/PR/head，completed 必须精确回指同一 scheduled/started；重试、重叠活动、缺来源或读失败明确拒绝。不能只因同 PR、近似时间或载荷里出现 head 就授权，也不要求 checkout 失败活动的最终 pass。`raisedAt` 仍只作通知事故代次，不以 updatedAt 代替，不据首报时间选择后来正文的 run。
+
+预检通过后，人工把完整预检快照补齐 `raisedAt`、通知正文/link、仓 id、run 的 segment/起止/结局/PR、操作者、原因、证据、缺口、责任和固定 `conclusion: "historical_unproven"`，保留 `executionRunId`，再显式执行；不上传预检回显的 `checkoutSource`、history 或自填 proof：
 
 ```sh
 bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history --archive < /受控目录/checkout-history-archive.json
 ```
 
-归档在 Store 事务内（先锁 runs 表挡住并发新增，含 task_id 为空的历史兼容 run）重新核对全部身份、通知代次、通知标题/正文确为该目标该 head 的检出失败报警、原 run 确为该任务该 PR 已终态的 verify 段、终态、无在途 run、merged PR/head，并只撤旧通知、追加 `notification.checkout_history_archive` 审计；失败写审计会回滚撤卡。输出明确“历史归档、检出恢复未证实”，不修改任务、run、PR、正常冷验收账或验收责任。重复同一完整请求幂等，不同快照冲突；实际生产处置前仍须由指挥官独立核验。
+归档执行重新取得可信活动来源，网络读取全部在 PG 锁外；随后 Store 事务锁通知、任务、目标 PR 和 runs 表（挡住并发新增，含 task_id 为空的历史兼容 run），重新核对来源与全部 DB 身份、通知 body/raisedAt 代次、受管检出失败格式、原 verify run 起止/终态、无在途 run、merged PR/head。只撤旧通知、追加含确定来源摘要的 `notification.checkout_history_archive` 审计，审计失败会回滚撤卡。输出明确“历史归档、检出恢复未证实”，不修改任务、run、PR、正常冷验收账或验收责任。重复同一完整请求幂等，不同快照或来源冲突；实际生产处置前仍须由指挥官独立核验。
 
 ### 命令行工具升级（#1971）
 
