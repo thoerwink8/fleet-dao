@@ -208,6 +208,27 @@ describe('起子代理前取远端的时间预算', () => {
     expect(lib.SUBAGENT_FETCH_MS + lib.SUBAGENT_DIRECT_MS).toBeLessThanOrEqual(9_000);
     expect(lib.SUBAGENT_FETCH_MS).toBeGreaterThan(lib.SUBAGENT_DIRECT_MS);
   });
+
+  it('总预算 < 10 秒钩子超时，且够环境代理拖满 6 秒后直连和备用各留得下（单 #3588）', () => {
+    expect(lib.SUBAGENT_BUDGET_MS).toBeLessThan(10_000);
+    expect(lib.SUBAGENT_BUDGET_MS).toBeGreaterThanOrEqual(lib.SUBAGENT_FETCH_MS + lib.SUBAGENT_FALLBACK_MS);
+  });
+
+  it('不建工作树的派工（没写 isolation、remote）：一条 git 命令都不跑，直接放行；建工作树的照旧取', () => {
+    for (const input of [
+      { subagent_type: 'Explore', prompt: 'x' },
+      { isolation: 'remote' },
+      null,
+      undefined,
+    ]) {
+      const s = repoGit([refused()]);
+      expect(run(s.git, 'Agent', input)).toBeNull();
+      expect(s.calls).toHaveLength(0);
+    }
+    const w = repoGit([good()]);
+    expect(run(w.git, 'Agent', worktreeAgent)).toBeNull();
+    expect(w.calls.filter((c) => c[0] === 'fetch')).toHaveLength(1);
+  });
 });
 
 describe('起子代理前先把 origin/main 取到最新', () => {

@@ -1122,15 +1122,18 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         await resolveGenerationParkAlerts(db, ctx.workflowId, TASK_RESUMED_PARK_WHY);
     },
 
+    // 只读（#3591，决定 0113）：不再写 acceptance_duties，入参里的 record（老历史、在途重试还会带）不落库；
+    // 工作流自己记着这一条转人验收条，收尾时和这里读回的旧行并起来定关不关单。
     async acceptanceDuties(input) {
-      return { open: await recordAcceptanceDuties(db, input, clock()) };
+      return { open: await openAcceptanceDuties(db, input.taskId) };
     },
   };
 }
 
 // —— 验收责任（#3037，db 的 acceptance_duties）：冷验收转人的验收条，代码合了也留着原单，直到最终验收完成 ——
-// 写、读都在这几个函数里（工作流收尾的 acceptanceDuties 端口、冷验收转人、本机租约收回共用）。读不成、写不成一律抛
-// ACCEPTANCE_DUTY_UNCHECKED（可重试）：调用方记「没查成」，不回空数组冒充「没有待验的」。
+// #3591（决定 0113）起引擎不再写新行，只读已有的旧行（工作流收尾的 acceptanceDuties 端口、本机租约收回）；
+// recordAcceptanceDuties 只剩测试拿来造旧行，下一片连同结清一起删。读不成一律抛
+// ACCEPTANCE_DUTY_UNCHECKED（可重试）：调用方记「没查成」，不回空数组冒充「没有待验的」；读到空就是没有待验的。
 
 const dutyUnchecked = (what: string, error: unknown): PortError =>
   error instanceof PortError

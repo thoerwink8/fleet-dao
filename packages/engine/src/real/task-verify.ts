@@ -47,7 +47,7 @@
 //   可以重试。
 
 import { randomUUID } from 'node:crypto';
-import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
+import { COLD_VERIFY_CONTEXT, LOCAL_LABEL } from '@fleet-dao/conventions';
 import type { ClaimsGitHub, GitHub, RepoRef } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -63,13 +63,7 @@ import {
   runColdVerifyForPr,
 } from '../cold-verify-run.ts';
 import { createStatusMemo } from '../cold-verify-status.ts';
-import {
-  type EnginePorts,
-  type PickRouteInput,
-  type PickRouteResult,
-  type PortContext,
-  PortError,
-} from '../ports.ts';
+import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
 import { outstandingChangeRequests } from '../review-feedback.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
 import { type OneShotDeps, OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
@@ -163,7 +157,12 @@ export interface ColdVerifyActivityDeps {
    * 不给 = 留不了言，只写进结论的 notes。fetchCommitHead：生产在检出前补齐既定头；测试未接仍核原镜像。
    */
   gh: Pick<EngineGitHub, 'pullFiles' | 'claims'> &
-    Partial<Pick<GitHub, 'commentIssue' | 'fetchCommitHead' | 'fetchMainline' | 'readIssue' | 'readSpecDoc'>>;
+    Partial<
+      Pick<
+        GitHub,
+        'commentIssue' | 'addIssueLabel' | 'fetchCommitHead' | 'fetchMainline' | 'readIssue' | 'readSpecDoc'
+      >
+    >;
   /** 选路（store-ports 的 pickRoute）：按族问「这一族此刻有没有能派的路由」。 */
   pickRoute: (input: PickRouteInput, ctx: PortContext) => Promise<PickRouteResult>;
   /** 生产 Spawner 要的东西（路由查询、各家执行方式的驱动、会话临时目录、资源上限）；会话用户的空目录也经它的 trees 备。 */
@@ -182,11 +181,6 @@ export interface ColdVerifyActivityDeps {
    * 工作流交给下一轮动手会话。读不成抛错（这一次验收按失败分流重试），不回空。不给 = 不读（结论里没有这个字段）。
    */
   reviewChanges?: (repo: RepoRef, prNumber: number) => Promise<ReviewChange[]>;
-  /**
-   * 「不归我验」转给人时记下验收责任（#3037，store-ports 的 acceptanceDuties）：哪张单、哪个 PR、哪个头、原验收项，
-   * 按「单 + PR + 头」幂等。记不成不改结论（工作流收尾时凭结论里的 outOfScope 再记一遍），写进 notes。不给 = 不记。
-   */
-  recordDuty?: EnginePorts['acceptanceDuties'];
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
   /** 一次性会话的登记（#59，real/one-shot-sessions.ts）：切号照它停下这一次验收。不给 = 停不下，切号等它跑完。 */
@@ -1031,7 +1025,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     }
     const outOfScope = verdict.outOfScope ?? [];
     const handoff =
-      outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? [], ctx) : undefined;
+      outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? []) : undefined;
     const notes = [verdict.notes, handoff].filter((n): n is string => n !== undefined && n !== '').join('；');
     // 有结论了才读正式评审（#2991）：读在会话之后，会话跑着时新交的评审也赶得上这一次
     return withReviewChanges(
@@ -1050,46 +1044,14 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
 
   /**
    * 「不归我验」的验收条留言到单上，转给人（指挥官）验：不回炉、不挡合并闸（决定 0093）。同一个头只留一次（幂等键带头）。
-   * 先记验收责任（#3037：单、PR、头、原验收项，按「单 + PR + 头」幂等），工作流收尾照它留着原单、不关。
-   * 记不成、留不成都不改结论（验收本身已经做完；收尾时工作流凭结论里的 outOfScope 再记一遍），写进 notes 和日志。
+   * 不再记库（#3591，决定 0113）：工作流收尾凭结论里的 outOfScope 留着原单、不关。留不成不改结论，写进 notes 和日志。
    */
   async function handOff(
     input: ColdVerifyInput,
     items: readonly string[],
     suggestions: readonly string[],
-    ctx: PortContext,
   ): Promise<string> {
-    const recorded = await recordDuty(input, items, ctx);
-    const said = await commentHandoff(input, items, suggestions);
-    return recorded === undefined ? said : `${recorded}；${said}`;
-  }
-
-  /** 记验收责任；记成了回 undefined，没记成回一句说明（不抛）。 */
-  async function recordDuty(
-    input: ColdVerifyInput,
-    items: readonly string[],
-    ctx: PortContext,
-  ): Promise<string | undefined> {
-    if (deps.recordDuty === undefined) return undefined;
-    try {
-      await deps.recordDuty(
-        {
-          taskId: input.taskId,
-          repo: input.repo,
-          issueNumber: input.issueNumber,
-          record: [{ prNumber: input.prNumber, head: input.headSha, items: [...items] }],
-        },
-        ctx,
-      );
-      return undefined;
-    } catch (error) {
-      log('验收「不归我验」的验收责任没记成（结论不改，收尾时工作流再记）', {
-        issueNumber: input.issueNumber,
-        prNumber: input.prNumber,
-        error: errMessage(error),
-      });
-      return `验收责任没记成（${errMessage(error).slice(0, 200)}），收尾时再记`;
-    }
+    return commentHandoff(input, items, suggestions);
   }
 
   async function commentHandoff(
@@ -1098,24 +1060,46 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     suggestions: readonly string[],
   ): Promise<string> {
     const commentIssue = deps.gh.commentIssue;
-    if (commentIssue === undefined) return `不归我验的 ${items.length} 条没处留言（没接留言口），要人看结论`;
-    const body = handoffBody(input, items, suggestions);
+    let said: string;
+    if (commentIssue === undefined) {
+      said = `不归我验的 ${items.length} 条没处留言（没接留言口），要人看结论`;
+    } else {
+      try {
+        await commentIssue({
+          repo: refOf(input.repo),
+          issueNumber: input.issueNumber,
+          key: `cold-verify-out-of-scope:${input.prNumber}:${input.headSha}`,
+          body: handoffBody(input, items, suggestions),
+        });
+        said = `不归我验的 ${items.length} 条已留言到单 #${input.issueNumber}，转给人验`;
+      } catch (error) {
+        log('验收「不归我验」的条目没留成言（结论不改）', {
+          issueNumber: input.issueNumber,
+          prNumber: input.prNumber,
+          error: errMessage(error),
+        });
+        said = `不归我验的 ${items.length} 条没留成言（${errMessage(error).slice(0, 200)}），要人看结论`;
+      }
+    }
+    // #3601：#3591 起不再记库，单上的「本机做」是转人之后唯一让队列看得到这张单的东西。
+    // 在活动内部、和留言同一次写 GitHub 里贴，工作流步序不变；贴不成照实抛（可重试，留言有幂等键），不吞。
+    const addIssueLabel = deps.gh.addIssueLabel;
+    if (addIssueLabel === undefined) return `${said}；没接贴标签口，单上没贴「${LOCAL_LABEL}」`;
     try {
-      await commentIssue({
-        repo: refOf(input.repo),
-        issueNumber: input.issueNumber,
-        key: `cold-verify-out-of-scope:${input.prNumber}:${input.headSha}`,
-        body,
-      });
-      return `不归我验的 ${items.length} 条已留言到单 #${input.issueNumber}，转给人验`;
+      await addIssueLabel({ repo: refOf(input.repo), issueNumber: input.issueNumber, label: LOCAL_LABEL });
     } catch (error) {
-      log('验收「不归我验」的条目没留成言（结论不改）', {
+      log('验收转人后给单贴「本机做」没贴成', {
         issueNumber: input.issueNumber,
         prNumber: input.prNumber,
         error: errMessage(error),
       });
-      return `不归我验的 ${items.length} 条没留成言（${errMessage(error).slice(0, 200)}），要人看结论`;
+      throw new PortError(
+        'COLD_VERIFY_HANDOFF_LABEL_FAILED',
+        `验收转人后给单 #${input.issueNumber} 贴「${LOCAL_LABEL}」没贴成：${errMessage(error)}`,
+        { retryable: true },
+      );
     }
+    return `${said}；已贴「${LOCAL_LABEL}」`;
   }
 }
 
@@ -1202,7 +1186,7 @@ export function reviewChangesReader(w: {
 
 /**
  * 转给人验的留言正文：哪个 PR、哪个头、哪几条、为什么验收方验不了；建议附在后面（不挡）。
- * 写明代码照合、单子留着（#3037）：合并不等于验完，最终验收完成记下以后才关单。
+ * 写明代码照合、单子留着（#3037）：合并不等于验完，有人贴上验收证据才关单（#3591 起不再记库）。
  */
 export function handoffBody(
   input: Pick<ColdVerifyInput, 'prNumber' | 'headSha'>,
@@ -1214,7 +1198,7 @@ export function handoffBody(
     '',
     ...items.map((item) => `- ${item}`),
     '',
-    `验收责任已记下（头 ${input.headSha}）：代码照常合并，这张单留着不关，最终验收完成记下以后才关。`,
+    `已转人验（头 ${input.headSha}）：代码照常合并，这张单留着不关，有人贴上验收证据再关。`,
     ...(suggestions.length > 0
       ? ['', '验收方另外的建议（不挡）：', ...suggestions.map((x) => `- ${x}`)]
       : []),

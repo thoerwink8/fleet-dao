@@ -8,9 +8,9 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { COMMANDER_ACTOR } from '../src/commander-contract.ts';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
-import { createFakeWorld, fakeHead } from '../src/fakes.ts';
+import { createFakeWorld, FAKE_ROUTES, type FakeScript, fakeHead } from '../src/fakes.ts';
 import { DEFAULT_TASK_TOKEN_BUDGET } from '../src/limits.ts';
-import { PortError } from '../src/ports.ts';
+import { type PickRouteInput, PortError } from '../src/ports.ts';
 import { buildTaskBrief } from '../src/runner/task-brief.ts';
 import {
   type SelfCheckResult,
@@ -20,7 +20,11 @@ import {
   taskContinueSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { COMMIT_NUDGE_LINE, SELF_CHECK_RED_LINE } from '../src/workflows/task-support.ts';
+import {
+  COMMIT_NUDGE_LINE,
+  RESUME_STREAK_LIMIT,
+  SELF_CHECK_RED_LINE,
+} from '../src/workflows/task-support.ts';
 import { freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
 import { BODY, goodBrief, scripted } from './task-script.ts';
 
@@ -323,6 +327,104 @@ describe('返工续会话（决定 0093）', { timeout: 60_000 }, () => {
     const fresh = calls.segment[3]?.feedback ?? [];
     expect(fresh[0]).toContain('开新会话');
     expect(fresh.join('\n')).toContain('没做到验收条');
+  });
+});
+
+describe('CI 红返工粘住上一段的路由续原会话（#3603）', { timeout: 60_000 }, () => {
+  /**
+   * 选路的假样子：第一次照默认派 r1；之后没点名就落到 r3（另一种执行方式，模拟返工从空开始重选漂走），点名了照默认派点名的。
+   * 续会话只认 r1：换了执行方式就续不上。
+   */
+  const drifting = (picks: PickRouteInput[], ci: NonNullable<FakeScript['ci']>) =>
+    createFakeWorld({
+      ci,
+      route: (input, n) => {
+        picks.push(input);
+        if (n === 1 || input.preferRouteId || input.stickRouteId) return undefined;
+        const r3 = FAKE_ROUTES.find((r) => r.routeId === 'r3');
+        return r3 ? { ok: true, route: r3, why: '排第一的可用路由' } : undefined;
+      },
+    });
+  const resumeOnR1 = (i: { routeId: string }) =>
+    i.routeId === 'r1'
+      ? { kind: 'resume' as const, sessionId: 'sess-1', runId: 'run-1' }
+      : { kind: 'new' as const, reason: '换了执行方式（claude-code → api-shell）' };
+
+  it('CI 红返工：选路点名上一段的 routeId，planSegmentResume 判成续，续上原会话', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = drifting(picks, (_i, n) =>
+      n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL 第 1 次' } : undefined,
+    );
+    const { tasks, calls } = scripted({ resume: resumeOnR1 });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    // 第 1 轮没点名；CI 红返工那一轮点名上一段跑成的 r1
+    expect(picks[0]?.preferRouteId).toBeUndefined();
+    expect(picks[1]?.preferRouteId).toBe('r1');
+    expect(calls.segment.map((s) => s.route.routeId)).toEqual(['r1', 'r1']);
+    expect(calls.resume.map((r) => r.routeId)).toEqual(['r1']);
+    expect(calls.segment[1]?.resumeSessionId).toBe('sess-1');
+    expect(world.states.some((s) => s.doing.includes('没续上会话'))).toBe(false);
+  });
+
+  it('对照：验收没过的返工不点名，照旧从空选路，漂到别的执行方式就开新会话', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = drifting(picks, () => undefined);
+    const { tasks, calls } = scripted({
+      resume: resumeOnR1,
+      verify: (_i, n) =>
+        n === 1
+          ? { pass: false, problems: ['没做到验收条：页面上看不到「验收中」'], round: 1 }
+          : { pass: true, problems: [], round: 2 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(picks[1]?.preferRouteId).toBeUndefined();
+    expect(calls.segment[1]?.route.routeId).toBe('r3');
+    expect(calls.segment[1]?.resumeSessionId).toBeUndefined();
+  });
+
+  it(`连着续了 ${RESUME_STREAK_LIMIT} 次之后又是 CI 红：不清空，照旧续原会话（CI 红返工不受 RESUME_STREAK_LIMIT 限制）`, async () => {
+    // 重活：方案段 + 动手续方案段（连续 1），第 2 轮 CI 红续（连续 2），第 3 轮又是 CI 红：以前这里清空开新会话
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n <= 2 ? { state: 'red', failedChecks: ['test (engine)'], digest: `FAIL 第 ${n} 次` } : undefined,
+    });
+    const { tasks, calls } = scripted({
+      brief: () => ({
+        ok: true,
+        brief: { ...goodBrief(), tier: { tier: 'heavyweight', effort: 'high', reason: '测试定的档' } },
+      }),
+      resume: RESUME_ALWAYS,
+      segment: async (_i, n) => ({
+        ok: true as const,
+        runId: 'run-1',
+        answer:
+          n === 1
+            ? '```json\n{"files": ["packages/web/src/pages/a.tsx"], "addedLines": 80, "acceptance": [1]}\n```'
+            : '做完了',
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 3 });
+    expect(calls.segment.map((s) => s.mode)).toEqual(['plan', undefined, undefined, undefined]);
+    expect(calls.segment.map((s) => s.resumeSessionId)).toEqual([undefined, 'sess-1', 'sess-1', 'sess-1']);
+    expect(calls.segment[3]?.feedback.join('\n') ?? '').not.toContain('开新会话从头看');
   });
 });
 

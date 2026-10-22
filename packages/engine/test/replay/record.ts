@@ -251,6 +251,19 @@ const SCENARIOS: Record<string, Scenario> = {
       return { 'task-verify-reattach': handle };
     },
   },
+  // 冷验收回「不归我验」（#3037）：录在 #3591 停写验收责任之前的代码上——合并前（acceptance-duty-before-merge）和收尾
+  // （acceptance-duty）各调一次 acceptanceDuties 写库，读回开着的就不关单、改 PR 说明。重放它证明停写被新标记守住，
+  // 在途的老任务照老步序走。
+  'task-acceptance-duty-merged': {
+    tasks: scripted({
+      verify: () => ({ pass: true, problems: [], round: 1, outOfScope: ['现场 add/check 五条'] }),
+    }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-acceptance-duty-merged': handle };
+    },
+  },
   // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。
   'task-merging': {
     tasks: scripted({ merged: () => ({ state: 'waiting', detail: '必过检查还没齐' }) }).tasks,

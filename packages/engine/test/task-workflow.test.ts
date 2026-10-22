@@ -3215,7 +3215,7 @@ describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { ti
 describe('任务工作流 · 验收责任（#3037）：合并不等于关单', { timeout: 180_000 }, () => {
   const FIELD = ['现场 add/check 五条', '线上数据核对'];
 
-  it('验收过了、带「不归我验」：照常挂自动合并、合并；不关单，验收责任连 PR、头、合并回执记下，PR 说明改 Refs', async () => {
+  it('验收过了、带「不归我验」：照常挂自动合并、合并；不关单、PR 说明改 Refs，但库里一行都不写（#3591）', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       verify: (_i, n) => ({ pass: true, problems: [], round: n === 1 ? 1 : 2, outOfScope: FIELD }),
@@ -3232,25 +3232,12 @@ describe('任务工作流 · 验收责任（#3037）：合并不等于关单', {
     expect(run).toMatchObject({ outcome: 'merged', rounds: 1, verifyRounds: 1, acceptanceOpen: 1 });
     expect(calls.order).toEqual(['brief', 'segment', 'delivery', 'verify', 'guarded', 'arm', 'merged']);
     expect(world.count('closeIssue')).toBe(0);
-    // 记下的验收责任：精确到仓、单、PR、头，原验收项原样，带合并回执
-    expect(world.callsOf('acceptanceDuties').at(-1)?.input).toMatchObject({
-      taskId: i.taskId,
-      issueNumber: 12,
-      record: [{ prNumber: run.prNumber, head: run.head, items: FIELD, mergeCommit: 'abc1234567890' }],
-    });
-    expect(world.duties).toEqual([
-      {
-        taskId: i.taskId,
-        repo: `${i.repo.owner}/${i.repo.name}`,
-        issueNumber: 12,
-        prNumber: run.prNumber,
-        head: run.head,
-        items: FIELD,
-        source: 'cold_verify',
-        mergeCommit: 'abc1234567890',
-        settled: false,
-      },
-    ]);
+    // 停写（#3591）：活动只读库里旧行，工作流一条都不交去记；转人验收条只在工作流里，靠留着原单交给人
+    expect(world.count('acceptanceDuties')).toBeGreaterThan(0);
+    for (const call of world.callsOf('acceptanceDuties')) {
+      expect(call.input).toMatchObject({ taskId: i.taskId, issueNumber: 12, record: [] });
+    }
+    expect(world.duties).toEqual([]);
     const body = world.callsOf('updatePrBody').at(-1)?.input.body;
     expect(body).toMatchObject({ requirement: 12, requirementRefs: true });
     expect(body?.owed).toEqual(FIELD.map((x) => `待人验：${x}`));
@@ -3365,7 +3352,7 @@ describe('任务工作流 · 验收责任（#3037）：合并不等于关单', {
     expect(world.count('closeIssue')).toBe(0);
   });
 
-  it('同一个头转了两次人（验收重来）、合并回执再来一次：库里只一行，原验收项并起来', async () => {
+  it('同一个头转了两次人（验收重来）：库里一行都不写（#3591），欠项照样并起来、单子留着', async () => {
     const world = createFakeWorld();
     const { tasks } = scripted({
       verify: (_i, n) => ({
@@ -3379,26 +3366,25 @@ describe('任务工作流 · 验收责任（#3037）：合并不等于关单', {
         n === 1 ? { state: 'merged', mergeCommit: 'abc1234567890' } : { state: 'merged', mergeCommit: 'x' },
     });
     const i = input();
-    await withWorker(env, world, async (q) => (await start(q, i)).result() as Promise<TaskRun>, { tasks });
-    // 工作流把这一次的再交一遍：和活动那边记过的落在同一行，不重复
+    const run = await withWorker(env, world, async (q) => (await start(q, i)).result() as Promise<TaskRun>, {
+      tasks,
+    });
+    expect(run).toMatchObject({ outcome: 'merged', acceptanceOpen: 1 });
+    expect(world.count('closeIssue')).toBe(0);
+    expect(world.duties).toEqual([]);
+    const owed = world.callsOf('updatePrBody').at(-1)?.input.body.owed ?? [];
+    expect(owed).toContain(`待人验：${FIELD[0]}`);
+    // 老历史、在途重试还会带 record：端口照样只读，不落库
     const again = await world.ports.acceptanceDuties(
       {
         taskId: i.taskId,
         repo: i.repo,
         issueNumber: 12,
-        record: [
-          {
-            prNumber: world.duties[0]?.prNumber ?? 0,
-            head: world.duties[0]?.head ?? '',
-            items: FIELD,
-            mergeCommit: 'zzz',
-          },
-        ],
+        record: [{ prNumber: run.prNumber ?? 0, head: run.head ?? '', items: FIELD, mergeCommit: 'zzz' }],
       },
       { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1, lastHeartbeat: undefined },
     );
-    expect(again.open).toHaveLength(1);
-    expect(again.open[0]?.mergeCommit).toBe('abc1234567890');
-    expect(world.duties).toHaveLength(1);
+    expect(again.open).toEqual([]);
+    expect(world.duties).toEqual([]);
   });
 });
