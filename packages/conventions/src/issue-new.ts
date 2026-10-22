@@ -215,6 +215,28 @@ function impactProblem(doc: MdDoc): string | undefined {
   return undefined;
 }
 
+/** 缺陷单缺「## 影响」或这一节是空的时的原因；齐了回 undefined。不管别的节，只在类别是缺陷时用。 */
+export function defectImpactProblem(body: string): string | undefined {
+  return impactProblem(parseMd('body.md', body));
+}
+
+/**
+ * 机器要开一张缺陷单：正文过了检查（含写了字的「影响」）才开。
+ * 过不了就不开。comment 由调用方追加到已有的单上；没有已有的单就只不开。
+ */
+export function planDefectFiling(
+  body: string,
+  finding: string,
+): { open: true } | { open: false; comment: string } {
+  const checked = checkIssueBody(body, { kind: DEFECT_KIND });
+  if (checked.ok) return { open: true };
+  const clipped = finding.replace(/\s+/g, ' ').trim().slice(0, 500);
+  return {
+    open: false,
+    comment: `不开新的缺陷单：${checked.why}\n\n本来要记的：${clipped || '（没有摘要）'}`,
+  };
+}
+
 /** 「怎么算做完」里提到 PR 正文的写法（冷验收看不到，#1792 / #1764）。不分大小写。 */
 const PR_BODY_IN_DONE = /PR\s*(?:正文|描述|body)/i;
 

@@ -7,7 +7,8 @@
 //    不按第一次的 created_at，刚重开的不会被当成挂了一天。谁在处理现算，core 的 alertHandling。
 // 3. 同一条再立案（#1406，对 #445「不自动开跟进单」的有意收窄，只这一层、还限量）：alert 级、开着、这一次挂起超过 24 小时、
 //    alertHandling 判为没人处理、没静默、键不是自己会撤的、正文开头还没有单号的，开一张未排期的缺陷单。四节按整理会话
-//    同一份模板拼，再用 requiredSectionProblems 核过；不贴「要人拍」。单号写回这条提醒的正文开头。同一键只一张；那张关了
+//    同一份模板拼，另写「## 影响」（驾驶舱上这条报警还亮着、创始人被打扰）；再用 requiredSectionProblems 和
+//    defectImpactProblem 核过，说不清影响就不开。不贴「要人拍」。单号写回这条提醒的正文开头。同一键只一张；那张关了
 //    而提醒还在，隔 7 天才再开。每次对账最多 2 张，每个仓每天最多 4 张。GitHub 写不进记没立成、不回写单号，下一轮再试。
 //    reconcile:* 虽在「自己会撤」的前缀里（过期兜底不碰它们），条件没了的核对那一步已经撤了，还开着的是断链，要立案。
 //    其余自己会撤的（备份、切号……）不立案。任务的停下提醒（task:*:park:*）和指挥官的（commander:*:park:*）不立案：
@@ -66,7 +67,7 @@
 //   日报级（level = daily）不走这条：循环前按建立时刻算，开着超过 48 小时就收（「已撤：超过 48 小时自动收」），
 //   也不走规则。简报自己那一行（feishu:brief:）要留给飞书推，满 48 小时才由这里收。要你拍（decision）仍不自动收。
 
-import { doneSection, parseMd, requiredSectionProblems } from '@fleet-dao/conventions';
+import { defectImpactProblem, doneSection, parseMd, requiredSectionProblems } from '@fleet-dao/conventions';
 import { type AlertStage, criteriaOf, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
@@ -500,6 +501,10 @@ export function renderAlertIssueBody(
     '',
     scene,
     '',
+    '## 影响',
+    '',
+    `创始人看得见的现象：驾驶舱上这条卡住报警还亮着（键 ${alert.dedupeKey}，已经 ${days} 天没人处理），创始人被打扰次数上升。`,
+    '',
     '## 原话',
     '',
     `无（AI 发现：提醒 ${alert.dedupeKey} 第 ${days} 天没人处理）`,
@@ -754,9 +759,10 @@ async function fileStuckAlerts(
     const body = renderAlertIssueBody(alert, days, c.deps.doneItems?.(dedupeKey));
     const doc = parseMd('body.md', body);
     const problems = requiredSectionProblems(doc);
-    if (problems.length > 0 || doneSection(doc) !== 'ok') {
+    const impactWhy = defectImpactProblem(body);
+    if (problems.length > 0 || doneSection(doc) !== 'ok' || impactWhy) {
       c.part.unchecked.push(
-        `提醒 ${dedupeKey} 的单拼不出四节，没立案：${problems[0]?.why ?? '「怎么算做完」是空的'}`,
+        `提醒 ${dedupeKey} 的单拼不出合格正文，没立案：${problems[0]?.why ?? impactWhy ?? '「怎么算做完」是空的'}`,
       );
       continue;
     }

@@ -4,11 +4,13 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   checkIssueBody,
+  defectImpactProblem,
   describeOrder,
   type GhResult,
   ghRunner,
   issueBodyTooLong,
   issueNew,
+  planDefectFiling,
   prBodyAcceptanceItems,
   USAGE,
 } from '../src/issue-new.ts';
@@ -442,6 +444,25 @@ describe('checkIssueBody：开单脚本和驾驶舱提需求开单共用的那�
     it('需求、杂项和没说类别的不要求（老单、老调用方不受影响）', () => {
       expect(checkIssueBody(OK, { kind: '需求' }).ok).toBe(true);
       expect(checkIssueBody(OK, { kind: '杂项' }).ok).toBe(true);
+    });
+
+    it('机器开单：写了影响就开；缺或空就不开，评论里写明怎么写、本来要记什么', () => {
+      const finding = '验收责任绑错头';
+      expect(planDefectFiling(withImpact('冷验收拒绝上升：绑错头会让已合的单被重开。'), finding)).toEqual({
+        open: true,
+      });
+      const missing = planDefectFiling(OK, finding);
+      expect(missing.open).toBe(false);
+      if (!missing.open) {
+        expect(missing.comment).toMatch(/不开新的缺陷单/);
+        expect(missing.comment).toMatch(/没有「## 影响」一节/);
+        expect(missing.comment).toMatch(/一轮做成率.*冷验收拒绝.*主线 CI 红.*创始人被打扰次数/s);
+        expect(missing.comment).toContain(finding);
+      }
+      expect(defectImpactProblem(withImpact('   '))).toMatch(/「## 影响」一节是空的/);
+      const empty = planDefectFiling(withImpact('   '), finding);
+      expect(empty.open).toBe(false);
+      if (!empty.open) expect(empty.comment).toMatch(/是空的/);
     });
 
     it('issue:new --kind 缺陷：缺影响不开单（一次 gh 都不发），有影响照开', async () => {
