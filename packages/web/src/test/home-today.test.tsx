@@ -63,13 +63,14 @@ describe('工作台列表块', () => {
     expect(document.querySelector('[data-home]')?.textContent).not.toContain('额度读不到');
   });
 
-  test('列表行里不放主按钮：每条的选项都是灰的次按钮，推荐项写在文字里（「推荐：…」）', async () => {
+  test('整块只有一个主按钮：最上面一条的推荐项；其余选项都是次按钮，推荐项也写在文字里（「推荐：…」）', async () => {
     renderApp(<HomePage />);
     await ready();
     const home = document.querySelector('[data-home]') as HTMLElement;
-    expect(home.querySelectorAll('button[data-variant="primary"], a[data-variant="primary"]')).toHaveLength(
-      0,
-    );
+    const primaries = home.querySelectorAll('button[data-variant="primary"], a[data-variant="primary"]');
+    expect(primaries).toHaveLength(1);
+    const firstRow = block('ask').querySelector('[data-ask-row]') as HTMLElement;
+    expect(firstRow.contains(primaries[0] as Element)).toBe(true);
     expect(block('ask').querySelectorAll('[data-variant="secondary"]').length).toBeGreaterThan(0);
     expect(block('ask').textContent).toContain('推荐：');
     expect(home.querySelectorAll('[data-variant="outline"]')).toHaveLength(0);

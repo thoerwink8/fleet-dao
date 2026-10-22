@@ -470,12 +470,43 @@ describe('R13–R20 业务层规则：造红的报、合规的放', () => {
       ),
     ).toEqual(['R20']);
   });
-  test('R20 按条件选主按钮也判：variant={条件 ? "primary" : …} 在 .map( 里报，同一块里和别的主按钮凑成两个也报（故意造红）', () => {
+  test('R20 放行：列表里只给第一行（下标 === 0）或被选中那一行（=== selected…）画主按钮，整块恰好一个', () => {
     expect(
       ratchetOf(
         `const A = () => rows.map((r, i) => <Button variant={i === 0 ? 'primary' : 'secondary'}>{r}</Button>);`,
       ),
+    ).toEqual([]);
+    expect(
+      ratchetOf(
+        `const A = ({ lead }) => opts.map((o, i) => <Button variant={lead && i === 0 && o.recommended ? 'primary' : 'secondary'}>{o.label}</Button>);`,
+      ),
+    ).toEqual([]);
+    expect(
+      ratchetOf(
+        `const A = () => <Section>{rows.map((r) => <Button variant={r.id === selectedId ? 'primary' : 'secondary'}>{r.n}</Button>)}</Section>;`,
+      ),
+    ).toEqual([]);
+  });
+  test('R20 列表里的条件主按钮没把列表钉在一行上仍报；钉了一行但同一块里还有别的主按钮也报（故意造红）', () => {
+    // 条件可能放出多行
+    expect(
+      ratchetOf(
+        `const A = () => rows.map((r) => <Button variant={r.ok ? 'primary' : 'secondary'}>{r.n}</Button>);`,
+      ),
     ).toEqual(['R20']);
+    expect(
+      ratchetOf(
+        `const A = () => rows.map((r, i) => <Button variant={i === 0 || r.ok ? 'primary' : 'secondary'}>{r.n}</Button>);`,
+      ),
+    ).toEqual(['R20']);
+    // 第一行一个，块里另有写死的主按钮：两个
+    expect(
+      ratchetOf(
+        `const A = () => <Section><Button variant="primary">全部</Button>{rows.map((r, i) => <Button variant={i === 0 ? 'primary' : 'secondary'}>{r.n}</Button>)}</Section>;`,
+      ),
+    ).toEqual(['R20']);
+  });
+  test('R20 按条件选主按钮也判：variant={条件 ? "primary" : …} 同一块里和别的主按钮凑成两个也报（故意造红）', () => {
     expect(
       ratchetOf(
         `const A = () => <Form><Button variant="primary">a</Button><Button variant={ok ? 'primary' : 'secondary'}>b</Button></Form>;`,
