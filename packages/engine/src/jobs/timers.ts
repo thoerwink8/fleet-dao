@@ -5,6 +5,8 @@
 // - 一轮失败不停掉定时：下一格照样来（没跑成的一轮由各任务自己记进 schedule_runs，看门狗照登记表看）；
 // - 引擎重启后自己恢复：没有「暂停」这个持久状态，也就没有「重启不替人恢复暂停的」那个坑；要停就停引擎、或关项目的开关。
 // - 起来时先补记上一轮进程被腰斩、超过一轮工作上限还没结束的 schedule_runs（startEngineTimers，#1522），再按格子跑。
+//   起来时还不满一轮工作上限的前一实例遗留行（年轻保护漏过的），等本进程起满一轮工作上限后再补一次：边界是本进程的起点，
+//   在它之前开始、还没结束的行只可能是已经停掉的前一个实例留下的（单实例，发布先停旧再起新）。
 // 单实例假设：法国只有一个引擎进程（一个 systemd 单元，发布是先停旧的再起新的），「不叠着跑」只在进程内保证。
 // 将来要起第二个引擎进程（多机、蓝绿并起）时，每一轮开头要先抢一把锁（比如 Postgres 咨询锁 pg_try_advisory_lock(任务编号)），
 // 抢不到就跳过这一轮——现在不做，不为没有的需求写代码。
@@ -122,14 +124,89 @@ export async function startEngineTimers(
     host.log('error', `进程中断没收尾的定时任务没补记成：${message}`);
     throw error;
   }
-  return startTimers(jobs, host);
+  return startTimers(jobs, host, { since: at, close: closeInterrupted });
 }
 
-export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineTimers {
+/**
+ * 前一个引擎实例遗留行的二次补记（只给 startEngineTimers 用）：since 是本进程起来补记的时刻，即本进程的起点。
+ * 单实例、发布先停旧再起新：开始得比它早又没结束的行不可能是本进程写的，只能是已停掉的前一个实例留下的。
+ */
+export interface PreviousInstanceSweep {
+  since: Date;
+  close: InterruptedScheduleClose;
+}
+
+export function startTimers(
+  jobs: readonly TimerJob[],
+  host: TimerHost,
+  previous?: PreviousInstanceSweep,
+): EngineTimers {
   const inFlight = new Map<string, Promise<void>>();
   const handles = new Map<string, unknown>();
   let stopped = false;
   const startedAt = new Date(host.now());
+  const sweepHandles = new Map<string, unknown>();
+  const sweepPending = new Set<string>();
+  const sweeping = new Set<string>();
+
+  const armSweep = (job: TimerJob, delayMs: number): void => {
+    if (stopped || !sweepPending.has(job.id)) return;
+    sweepHandles.set(
+      job.id,
+      host.setTimeout(() => {
+        sweepHandles.delete(job.id);
+        void sweepPrevious(job);
+      }, delayMs),
+    );
+  };
+
+  /**
+   * 起来时年轻保护漏过的前一实例遗留行：本进程起满这个任务的一轮工作上限之后才补，边界是本进程起点（不含，等于边界的不动）。
+   * 没到点、已补过、正在补都直接回；写库失败记 error、仍算没补，等下一次重试（下一轮开头或重试定时器），不把失败当成补上。
+   */
+  const sweepPrevious = async (job: TimerJob): Promise<void> => {
+    if (!previous || stopped || !sweepPending.has(job.id) || sweeping.has(job.id)) return;
+    if (host.now() < previous.since.getTime() + job.overdueMinutes * MINUTE_MS) return;
+    sweeping.add(job.id);
+    try {
+      const ids = await previous.close({
+        jobs: [{ id: job.id, startedBefore: previous.since }],
+        at: new Date(host.now()),
+        why: INTERRUPTED_SCHEDULE_WHY,
+      });
+      sweepPending.delete(job.id);
+      if (ids.length > 0) {
+        host.log(
+          'info',
+          `定时任务 ${job.id}：补记了前一个引擎实例留下的 ${ids.length} 条没收尾的记录：${ids.join('、')}`,
+        );
+      }
+    } catch (error) {
+      host.log(
+        'error',
+        `定时任务 ${job.id}：前一个引擎实例留下的没收尾记录没补记成，仍留着，稍后重试：${error instanceof Error ? error.message : String(error)}`,
+      );
+      armSweep(job, job.overdueMinutes * MINUTE_MS);
+    } finally {
+      sweeping.delete(job.id);
+    }
+  };
+
+  if (previous) {
+    for (const job of jobs) {
+      // 认不出本进程起点、或这个任务的一轮工作上限，就证明不了行属于前一个实例：不补、留着，日志说清
+      if (
+        Number.isNaN(previous.since.getTime()) ||
+        !Number.isFinite(job.overdueMinutes) ||
+        job.overdueMinutes <= 0
+      ) {
+        host.log('warn', `定时任务 ${job.id}：认不出没收尾的记录是不是前一个引擎实例留下的，不补记、保留`);
+        continue;
+      }
+      sweepPending.add(job.id);
+      armSweep(job, Math.max(0, previous.since.getTime() + job.overdueMinutes * MINUTE_MS - host.now()));
+    }
+  }
 
   const runRound = (job: TimerJob, why: string): void => {
     if (stopped) return;
@@ -148,6 +225,7 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
         job.overdueMinutes * MINUTE_MS,
       );
       try {
+        await sweepPrevious(job);
         // 引擎总开关（#1086）：拉单这类要总开关开着才跑；关着（含读不到、认不出）这一轮不跑，记一笔 partial 说明原因
         if (job.needsMaster && host.master && !(await host.master.refresh())) {
           const why = `${MASTER_OFF_SKIP_WHY}${masterOffNote(host.master.state())}`;
@@ -224,6 +302,8 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
       stopped = true;
       for (const handle of handles.values()) host.clearTimeout(handle);
       handles.clear();
+      for (const handle of sweepHandles.values()) host.clearTimeout(handle);
+      sweepHandles.clear();
       if (inFlight.size === 0) return [];
       let graceTimer: unknown;
       await Promise.race([
