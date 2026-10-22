@@ -853,8 +853,11 @@ describe('入口', () => {
                 : args.some(a => a.endsWith('...HEAD')) ? ${JSON.stringify(`${changed.join('\0')}\0`)} : '';
               return { status: 0, stdout, stderr: '' };
             }
-            if (command === process.execPath && args[0].endsWith('vitest.mjs')) {
-              console.log('3011_SPAWN ' + JSON.stringify(args.slice(1)));
+            // 检查的子进程在 POSIX 上经 step-supervise.ts 看守拉起：[看守脚本, node, vitest.mjs, ...参数]，认到里面那条命令。
+            const wrapped = command === process.execPath && args[0].endsWith('step-supervise.ts');
+            const inner = wrapped ? args.slice(2) : args;
+            if ((wrapped ? args[1] === process.execPath : command === process.execPath) && inner[0].endsWith('vitest.mjs')) {
+              console.log('3011_SPAWN ' + JSON.stringify(inner.slice(1)));
               return { status: ${'runnerStatus' in test ? test.runnerStatus : 0}, signal: null };
             }
             throw Error('unexpected child process');
@@ -867,6 +870,7 @@ describe('入口', () => {
           ...process.env,
           CI: '',
           FLEET_RUN_ID: '',
+          FLEET_CHECK_SUPERVISED: '',
           FLEET_LOCAL_TEST_SLOT_HELD: '',
           FLEET_LOCAL_TEST_SLOTS: '1',
           FLEET_LOCAL_TEST_SLOTS_DIR: join(fixture, 'slots'),

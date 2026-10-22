@@ -24,7 +24,7 @@
 // - 验收会话的目录尽量放进 PR 头的完整检出（镜像里 git archive，放不进去就仍是空目录，不因此让验收失败）。
 //   _tmp 是 root:root 755 时先经 fleet-agent-scope ensure-tmp 把这一层改回引擎用户再试一次；仍放不进就记日志，
 //   并写一条驾驶舱报警（正文里有目录路径）。
-//   提示词允许在这个检出里读文件。diff 仍在提示词里。第 2 轮的 diff 是上一轮头到现在的头的增量，不是整张 PR。
+//   提示词允许在这个检出里读文件。diff 仍在提示词里。第 2 轮只把证得了是本单返工的改动算新增，同步进来的主线留在材料里作上下文，不是整张 PR。
 //   diff 超过 MAX_DIFF_CHARS：放不下的文件跳过并写明，不截断了假装看全。
 // - 有文本文件 GitHub 的文件接口没给 patch（大文件，#1308）：先用引擎镜像里的 git 补读（基线...头）；补出来超过
 //   MAX_FILE_DIFF_LINES 行就只给摘要（行数、头尾各几十行），diff 里明说「这个文件太大，只给了摘要」；接口和 git 两条路都读不到、
@@ -163,7 +163,7 @@ export interface ColdVerifyActivityDeps {
    * 不给 = 留不了言，只写进结论的 notes。fetchCommitHead：生产在检出前补齐既定头；测试未接仍核原镜像。
    */
   gh: Pick<EngineGitHub, 'pullFiles' | 'claims'> &
-    Partial<Pick<GitHub, 'commentIssue' | 'fetchCommitHead' | 'readIssue' | 'readSpecDoc'>>;
+    Partial<Pick<GitHub, 'commentIssue' | 'fetchCommitHead' | 'fetchMainline' | 'readIssue' | 'readSpecDoc'>>;
   /** 选路（store-ports 的 pickRoute）：按族问「这一族此刻有没有能派的路由」。 */
   pickRoute: (input: PickRouteInput, ctx: PortContext) => Promise<PickRouteResult>;
   /** 生产 Spawner 要的东西（路由查询、各家执行方式的驱动、会话临时目录、资源上限）；会话用户的空目录也经它的 trees 备。 */
@@ -199,13 +199,19 @@ export interface ColdVerifyActivityDeps {
    */
   fileDiff?: FileDiffReader;
   /**
-   * 第 2 轮的增量 diff（sinceSha..headSha）。不给就用引擎镜像（incrementalDiffAtHead）。
-   * 读不到抛错，这一轮验收失败，不退回整张 PR 的 diff。
+   * 第 2 轮的增量 diff。不给就现读可信主线，再用镜像里的 incrementalDiffAtHead 拆归属。
+   * 读不到抛错，这一轮验收失败，不退回整张 PR 的 diff，也不回空 diff。
+   * 注入的实现可以不读主线（测试）；生产这条不注入。
    */
   rangeDiff?: (args: {
     sinceSha: string;
     headSha: string;
     workflowId: string | undefined;
+    prNumber: number;
+    issueNumber: number;
+    baseSha: string;
+    repo: RepoRef;
+    mainlineSha?: string;
   }) => Promise<{ diffText: string; changedFiles: string[] }>;
   now?: () => Date;
   /** 以下测试用。 */
@@ -662,30 +668,67 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
 
     const beat = setInterval(() => ctx.heartbeat(), heartbeatEveryMs);
     let run: Awaited<ReturnType<typeof runColdVerifyForPr>>;
+    // 第 2 轮在起验收之前现读主线尖，并把旧验收头、当前头、记录的基线补进镜像。
+    // 这一步的 GitHub 故障是 PortError，按失败分流重试，不写成「读不到 diff」去停给人。
+    // 注入了 rangeDiff 的测试不读主线。读到的尖对不对、能不能拆，交给镜像里的增量读取，拆不开就失败，不回空 diff。
+    // 主线读完后 sources.pr 再读一次当前 PR 头，不用读主线之前捕获的那份。头变了回 headMoved，不按旧头验收、不贴状态。
+    let recheckMainline: string | undefined;
+    const fetchMainline = deps.gh.fetchMainline;
     try {
+      if (input.recheck && deps.rangeDiff === undefined && fetchMainline) {
+        const main = await mapped(() => fetchMainline({ repo, signal: ctx.signal }));
+        const tip = main.head.trim();
+        if (!/^[0-9a-f]{40}$/i.test(tip)) throw new Error('现读的可信主线不是完整提交号');
+        recheckMainline = tip;
+        const fetchCommit = deps.gh.fetchCommitHead;
+        if (fetchCommit) {
+          for (const sha of [input.headSha, input.recheck.sinceSha, input.baseSha]) {
+            await mapped(() => fetchCommit({ repo, headSha: sha, signal: ctx.signal }));
+          }
+        }
+      }
       run = await runColdVerifyForPr(prNumber, {
         sources: {
           pr: async () => {
-            if (pull.state !== 'open') {
-              throw new Error(`PR #${prNumber} ${pull.merged ? '已经合并' : '已经关闭'}了，没有要验的头`);
+            // 第 2 轮现读主线、补对象之后头可能已经变了。再读一次，不沿用上面捕获的 pull。
+            // 读失败经 mapped 成 PortError，由 runColdVerifyForPr 原样抛出（失败分流重试）。
+            const current =
+              input.recheck && deps.rangeDiff === undefined && fetchMainline
+                ? await mapped(() => deps.gh.claims.readPull(repo, prNumber))
+                : pull;
+            if (current.state !== 'open') {
+              throw new Error(`PR #${prNumber} ${current.merged ? '已经合并' : '已经关闭'}了，没有要验的头`);
             }
-            if (pull.headSha !== input.headSha) {
-              seen.headMoved = pull.headSha;
+            if (current.headSha !== input.headSha) {
+              seen.headMoved = current.headSha;
               throw new Error(
-                `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是要验的 ${short(input.headSha)}（有人推过新提交）`,
+                `PR #${prNumber} 的头是 ${short(current.headSha)}，不是要验的 ${short(input.headSha)}（有人推过新提交）`,
               );
             }
-            return { head: input.headSha, baseSha: input.baseSha, branch: input.branch, body: pull.body };
+            return {
+              head: input.headSha,
+              baseSha: input.baseSha,
+              branch: input.branch,
+              body: current.body,
+            };
           },
           diff: async () => {
             if (input.recheck) {
               const workflowId = ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber);
-              const read = deps.rangeDiff ?? incrementalDiffAtHead;
-              return read({
+              const identity = {
                 sinceSha: input.recheck.sinceSha,
                 headSha: input.headSha,
                 workflowId,
-              });
+                prNumber,
+                issueNumber: input.issueNumber,
+                baseSha: input.baseSha,
+                repo,
+              };
+              if (deps.rangeDiff) return deps.rangeDiff(identity);
+              if (recheckMainline === undefined) {
+                throw new Error('没有可信主线来源（主线没现读），不能把主线同步算进本单返工，也不回空 diff');
+              }
+              return incrementalDiffAtHead({ ...identity, mainlineSha: recheckMainline });
             }
             const { fileDiff } = deps;
             const complete = await fillMissingPatches(
