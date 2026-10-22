@@ -485,8 +485,29 @@ probe_mirasim() { # 用户 家目录
   printf '%s\n' "$base"
 }
 
+# reclaude --version 会先同步配置、再把被包装的 Claude Code 版本也打出来（「2.1.308 (Claude Code)」）。只认独占一行的
+# 「reclaude <版本>」；命令失败（含登录失效、设备被解绑）原样非 0 并带上它的原话；成功却没有这一行就是来源不明，不拿别的数顶。
+# 这里仍只跑 --version，不跑会话、不 logout/login、不 org use、不改 device/config。
+probe_reclaude() { # 用户 家目录
+  local user=$1 home=$2 bin out="" rc=0 line
+  bin=${RECLAUDE_TEST_BIN:-$home/.local/bin/reclaude}
+  out=$(probe_as "$user" "$home" "$bin" --version 2>&1) || rc=$?
+  if ((rc != 0)); then
+    printf '%s\n' "$out" >&2
+    exit "$rc"
+  fi
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^reclaude[[:space:]]+v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?[[:space:]]*$ ]]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+  done <<<"$out"
+  printf 'fleet-agent-scope：reclaude --version 的输出里没有它自己的版本行，来源不明（不拿 Claude Code 的版本顶）\n' >&2
+  exit 1
+}
+
 probe_one() { # 用户 工具
-  local user=$1 tool=$2 home script bin
+  local user=$1 tool=$2 home script
   home=$(probe_home "$user")
   [[ "$home" == /* ]] || die "找不到 $user 的家目录"
   case $tool in
@@ -498,10 +519,7 @@ probe_one() { # 用户 工具
     [[ -f "$script" ]] || die "找不到 cursor-agent 的版本脚本：$script"
     probe_as "$user" "$home" /bin/sh "$script" "$home/.local/share/cursor-agent/versions"
     ;;
-  reclaude)
-    bin=${RECLAUDE_TEST_BIN:-$home/.local/bin/reclaude}
-    probe_as "$user" "$home" "$bin" --version
-    ;;
+  reclaude) probe_reclaude "$user" "$home" ;;
   mirasim-server) probe_mirasim "$user" "$home" ;;
   *) die "不认识的工具：「$tool」" ;;
   esac

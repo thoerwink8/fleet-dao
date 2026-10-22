@@ -201,6 +201,12 @@ export function parseInstalledOutput(tool: string, stdout: string): string | nul
     const m = /codex-cli\s+(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/i.exec(text);
     return m?.[1] ?? null;
   }
+  if (tool === 'reclaude') {
+    // reclaude --version 会把被包装的 Claude Code 版本（「2.1.308 (Claude Code)」）也打出来，裸 semver 不能认成 reclaude 自己的。
+    // 只认独占一行、以工具名开头的「reclaude <版本>」；没有这一行就是来源不明。
+    const m = /^reclaude[ \t]+v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)[ \t]*$/im.exec(text);
+    return m?.[1] ?? null;
+  }
   const m = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(text);
   return m?.[1] ?? null;
 }

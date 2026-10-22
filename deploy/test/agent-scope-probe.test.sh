@@ -93,6 +93,28 @@ if [[ $rc -eq 0 && "$out" == *"2026.09.23-86fc751"* && "$args" == "--version" ]]
 out=$(run_scope probe --user pilot -- mirasim-server 2>&1) && rc=0 || rc=$?
 if [[ $rc -eq 0 && "$out" == "0.0.355" ]]; then pass "Mirasim 读目录名 0.0.355"; else flunk "mirasim 得到 $rc [$out]"; fi
 
+echo "reclaude：只认自己的版本行，Claude Code 版本、无版本、非零退出、设备解绑都不当成功"
+write_reclaude() { printf '#!/bin/sh\nprintf "%%s\\n" "$*" >"$HOME/reclaude-args"\n%s\n' "$1" >"$HOME_DIR/.local/bin/reclaude"; }
+write_reclaude 'printf "Syncing config...\nreclaude 1.5.0\n2.1.308 (Claude Code)\n"'
+out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
+args=$(cat "$HOME_DIR/reclaude-args" 2>/dev/null || true)
+if [[ $rc -eq 0 && "$out" == "reclaude 1.5.0" && "$args" == "--version" ]]; then pass "混合输出只取 reclaude 自己的行"; else flunk "混合输出得到 $rc args=[$args] [$out]"; fi
+
+write_reclaude 'printf "Syncing config...\n2.1.308 (Claude Code)\n"'
+out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
+if [[ $rc -ne 0 && "$out" == *来源不明* && "$out" != "2.1.308"* ]]; then pass "只有 Claude Code 版本：来源不明、非 0"; else flunk "Claude Code 版本该失败，得到 $rc [$out]"; fi
+
+write_reclaude 'printf "Syncing config...\n"'
+out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
+if [[ $rc -ne 0 && "$out" == *来源不明* ]]; then pass "没有版本：来源不明、非 0"; else flunk "无版本该失败，得到 $rc [$out]"; fi
+
+write_reclaude 'printf "Syncing config...\nlogin no longer valid: 此设备已被解绑\n" >&2; exit 3'
+out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
+if [[ $rc -eq 3 && "$out" == *此设备已被解绑* && "$out" != *来源不明* ]]; then pass "设备解绑：保留退出码和原话"; else flunk "设备解绑该原样失败，得到 $rc [$out]"; fi
+
+write_reclaude 'printf "reclaude 1.3.0\n"'
+chmod +x "$HOME_DIR/.local/bin/reclaude"
+
 echo "缺命令、指错目录：非 0，不写成成功"
 rm -f "$HOME_DIR/.local/bin/codex"
 out=$(run_scope probe --user pilot -- codex 2>&1) && rc=0 || rc=$?

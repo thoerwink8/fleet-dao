@@ -92,6 +92,45 @@ describe('命令行工具版本这一轮', () => {
     ]);
   });
 
+  it('【故意造出的失败】reclaude 只出 Claude Code 版本、设备已解绑：不存成 reclaude 版本，保留各自原因，这一轮 partial', async () => {
+    const outputs: Record<string, { stdout: string } | { error: string }> = {
+      'fleet-agent-carpool': { stdout: 'Syncing config...\n2.1.308 (Claude Code)\n' },
+      pilot: { error: 'Syncing config... login no longer valid：此设备已被解绑' },
+    };
+    const h = harness({
+      probeUser: async (user, tool) => {
+        if (tool === 'reclaude') return outputs[user] ?? { error: '没有输出' };
+        return { stdout: STDOUT[tool] ?? '' };
+      },
+    });
+    const result = await runCliVersionsJob(h.deps);
+    expect(result.outcome).toBe('partial');
+    const car = h.saved.find((r) => r.owner === 'fleet-agent-carpool' && r.tool === 'reclaude');
+    expect(car?.installedVersion).toBeNull();
+    expect(car?.installedError).toContain('认不出版本');
+    expect(car?.installedError).toContain('Claude Code');
+    const pilot = h.saved.find((r) => r.owner === 'pilot' && r.tool === 'reclaude');
+    expect(pilot?.installedVersion).toBeNull();
+    expect(pilot?.installedError).toContain('此设备已被解绑');
+    // 其它工具照常读成
+    expect(h.saved.find((r) => r.owner === 'pilot' && r.tool === 'claude')?.installedVersion).toBe('2.1.282');
+    for (const row of h.saved)
+      expect(Boolean(row.installedVersion) !== Boolean(row.installedError)).toBe(true);
+    expect(result.outcome === 'partial' && result.why).toContain('reclaude');
+  });
+
+  it('reclaude 带 Syncing 前缀但有自己的版本行：照常读成，且仍恰好一个有效', async () => {
+    const h = harness({
+      probeUser: async (_user, tool) => ({
+        stdout: tool === 'reclaude' ? 'Syncing config...\nreclaude 1.5.0\n' : (STDOUT[tool] ?? ''),
+      }),
+    });
+    await runCliVersionsJob(h.deps);
+    const rows = h.saved.filter((r) => r.tool === 'reclaude');
+    expect(rows.map((r) => r.installedVersion)).toEqual(['1.5.0', '1.5.0']);
+    expect(rows.every((r) => r.installedError === null)).toBe(true);
+  });
+
   it('【故意造出的失败】库写不进：这一轮记 failed 再抛，不当成跑成', async () => {
     const h = harness({
       save: async () => {

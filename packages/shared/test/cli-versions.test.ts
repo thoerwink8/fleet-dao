@@ -353,6 +353,20 @@ describe('发布源解析：认不出就写原因', () => {
     expect(parseInstalledOutput('mirasim-server', '0.0.355\n')).toBe('0.0.355');
   });
 
+  it('reclaude 只认自己的「reclaude <版本>」行：Claude Code 的版本、裸数字、没有版本都不当成它的', () => {
+    expect(parseInstalledOutput('reclaude', 'Syncing config...\nreclaude 1.5.0\n')).toBe('1.5.0');
+    expect(
+      parseInstalledOutput('reclaude', 'Syncing config...\nreclaude 1.5.0\n2.1.308 (Claude Code)\n'),
+    ).toBe('1.5.0');
+    expect(parseInstalledOutput('reclaude', '2.1.308 (Claude Code)\n')).toBeNull();
+    expect(parseInstalledOutput('reclaude', 'Syncing config...\n2.1.308 (Claude Code)\n')).toBeNull();
+    expect(parseInstalledOutput('reclaude', '1.5.0\n')).toBeNull();
+    expect(parseInstalledOutput('reclaude', 'reclaude 1.5.0 (Claude Code)\n')).toBeNull();
+    expect(parseInstalledOutput('reclaude', 'Syncing config...\n')).toBeNull();
+    expect(parseInstalledOutput('reclaude', '')).toBeNull();
+    expect(parseInstalledOutput('claude', '2.1.308 (Claude Code)\n')).toBe('2.1.308');
+  });
+
   it('Cursor 更新日志优先，失败再退回安装脚本；都没有就两个原因', () => {
     const md = '## v2026.10.08\n\n## v2026.10.01\n';
     expect(parseCursorChangelog(md)).toEqual({
