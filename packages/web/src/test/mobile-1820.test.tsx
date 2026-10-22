@@ -14,6 +14,7 @@ import NotificationsPage from '../routes/notifications';
 import TaskPage from '../routes/task';
 import TasksPage from '../routes/tasks';
 import { renderApp } from './harness';
+import { openNotice } from './notice-helpers';
 
 afterEach(() => {
   cleanup();
@@ -173,23 +174,16 @@ describe('任务详情手机首屏一行摘要', () => {
 describe('通知操作和标题同一行', () => {
   test('一条通知：内容和操作区是同一个容器里的两个兄弟；操作按钮手机上也带字（不再是无字图标，#1904）', async () => {
     renderApp(<NotificationsPage />, { route: '/notifications' });
-    const actions = await waitFor(() => {
-      const el = document.querySelector('[data-notice-actions]');
-      if (!el) throw new Error('还没出通知');
-      return el as HTMLElement;
-    });
-    const row = actions.closest('li[data-notice-row]') as HTMLElement;
-    expect(row).toBeTruthy();
-    // 内容块和操作区是兄弟；手机上操作排在内容下面一行，桌面（md）起并排在右侧
-    const content = actions.previousElementSibling as HTMLElement;
-    expect(content?.parentElement).toBe(actions.parentElement);
-    expect(content?.textContent).toContain('分钟前');
-    expect(actions.parentElement?.className).toContain('md:flex-row');
+    // 左列表右详情（#3533）：点开一条卡住报警，操作区在详情底部；手机上详情叠在列表下面
+    const detail = await openNotice('#17 子任务 A 停滞 22 分钟');
+    const actions = detail.querySelector('[data-notice-actions]') as HTMLElement;
+    expect(actions).toBeTruthy();
+    expect(detail.textContent).toContain('分钟前');
     // 按钮上的字手机上也看得见（没有 sr-only 包着），主操作写「处理了」
     const done = within(actions).getByRole('button', { name: '处理了' });
     expect(done.textContent).toBe('处理了');
     expect(done.querySelector('.sr-only, .max-md\\:sr-only')).toBeNull();
-    expect(within(actions).getByRole('button', { name: '打开' }).textContent).toBe('打开');
+    expect(within(actions).getByRole('link', { name: '打开' }).textContent).toBe('打开');
   });
 });
 

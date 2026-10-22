@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 设置页的 APP 状态（#2050）：安装、通知权限、角标三样都显示；读不到写「读不到」；权限只在点按钮时才请求。
+// 设置页的 APP 状态（#2050）：安装、通知权限两行（角标并进安装那行的说明）；读不到写「没读到」；权限只在点按钮时才请求。
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { PwaStatus } from '../components/pwa-status';
@@ -53,7 +53,8 @@ describe('PwaStatus', () => {
     render(<PwaStatus />);
     expect(within(row('安装')).getByText('现在不能安装')).toBeTruthy();
     expect(within(row('系统通知')).getByText('还没打开')).toBeTruthy();
-    expect(within(row('图标角标')).getByText('支持')).toBeTruthy();
+    // 角标不单占一行，并进「安装」那一行的说明（样稿）
+    expect(row('安装').textContent).toContain('待处理的件数显示在应用图标上');
   });
 
   test('页面加载时不请求通知权限；点「打开系统通知」才请求，之后显示已允许', async () => {
@@ -64,14 +65,14 @@ describe('PwaStatus', () => {
     await waitFor(() => expect(requestPermission).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(within(row('系统通知')).getByText('已允许')).toBeTruthy());
     expect(screen.queryByRole('button', { name: '打开系统通知' })).toBeNull();
-    expect(within(row('图标角标')).getByText('不支持')).toBeTruthy();
+    expect(row('安装').textContent).toContain('这个浏览器没有角标功能');
   });
 
-  test('读不到的写「读不到」：没有通知功能、没有 service worker', () => {
+  test('读不到的写「没读到」（状态字典的词）：没有通知功能、没有 service worker', () => {
     stubBrowser({ notification: false, serviceWorker: false });
     render(<PwaStatus />);
-    expect(within(row('安装')).getByText('读不到')).toBeTruthy();
-    expect(within(row('系统通知')).getByText('读不到')).toBeTruthy();
+    expect(within(row('安装')).getByText('没读到')).toBeTruthy();
+    expect(within(row('系统通知')).getByText('没读到')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '打开系统通知' })).toBeNull();
   });
 

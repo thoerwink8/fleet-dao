@@ -13,11 +13,23 @@ const COLS = {
 
 export type GridProps =
   | { cols: 1 | 2 | 3 | 4; preset?: undefined; children?: ReactNode }
-  | { cols?: undefined; preset: 'main' | 'split'; children: [ReactNode, ReactNode] };
+  | { cols?: undefined; preset: 'main' | 'split' | 'side'; children: [ReactNode, ReactNode] };
 
 export function Grid(props: GridProps) {
   if (props.preset !== undefined) {
     const [first, second] = Children.toArray(props.children);
+    // side：左边一列页内导航（Anchor，定宽，贴顶），右边是各节（设置页，样稿 .grid-side）
+    if (props.preset === 'side') {
+      return (
+        <div
+          data-preset="side"
+          className="grid min-w-0 grid-cols-1 items-start gap-4 lg:grid-cols-settings-shell lg:gap-8"
+        >
+          <div className="min-w-0">{first}</div>
+          <div className="min-w-0">{second}</div>
+        </div>
+      );
+    }
     const main = props.preset === 'main';
     return (
       <div data-preset={props.preset} className="flex min-w-0 flex-col items-start gap-4 lg:flex-row">

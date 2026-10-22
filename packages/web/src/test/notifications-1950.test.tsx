@@ -28,7 +28,13 @@ const RELEASE = '等你点头：发布 v2.3'; // 假数据里带选项的那条�
 const OLD = '#15 在问你：发新消息还是把旧的顶上来？'; // 没有选项的老通知（n-4）
 const APP = 'acme/fluxwatch：机器人还没装（还没装：「干活的」机器人）'; // n-11：上次「再查一次」没查成
 const TREE = '工作树里有没推的东西，删不删要你拍：acme_orbit/11-callback'; // n-12：删掉交给引擎
-const rowOf = (title: string) => screen.getByText(title).closest('li[data-notice-row]') as HTMLElement;
+/** 点开列表里这一条，回右边的详情区（选项、结果、修复区都在这里）。 */
+const rowOf = (title: string) => {
+  const [first] = screen.getAllByText(title);
+  if (!first) throw new Error(`找不到标题是「${title}」的通知`);
+  fireEvent.click(first);
+  return screen.getByRole('region', { name: '通知详情' });
+};
 
 /** 列表先放进缓存再画。页面不用等这一次读取才离开骨架；findBy 第一次就能看见标题。 */
 async function renderListed(api: MockApi = createMockApi({ live: false })) {
@@ -44,33 +50,28 @@ async function renderListed(api: MockApi = createMockApi({ live: false })) {
 }
 
 describe('「要你拍」选项直接摆在卡上（#2353）', () => {
-  test('标题加「等你拍板」、灰字写推荐哪项；选项、自己写一句、正文都直接在；没有「看选项」「处理了」，「打开」照旧在', async () => {
+  test('列表行写类型和多久前；点开后详情里选项（推荐的描边带理由）、自己写一句、正文都直接在；没有「看选项」「处理了」，「打开」照旧在', async () => {
     await renderListed();
     await screen.findByText(RELEASE);
+    const listed = (await screen.findAllByText(RELEASE))[0]?.closest('li[data-notice-row]') as HTMLElement;
+    expect(listed.textContent).toContain('要你拍');
+    expect(listed.textContent).toContain('分钟前');
     const row = rowOf(RELEASE);
-    const nameLine = row.querySelector('[data-row-name-line]') as HTMLElement;
-    expect(nameLine.querySelector('[data-tone="human"]')?.textContent).toBe('等你拍板');
-    const hint = within(row).getByTestId('decision-hint');
-    expect(hint.textContent).toBe('推荐：发布。CI 全绿、金丝雀跑过，能一键回滚，风险小');
-    expect(hint.className).toContain('truncate');
-    expect(hint.getAttribute('title')).toBe(hint.textContent);
-    expect(row.querySelector('[data-row-meta]')?.textContent).toContain('分钟前');
+    expect(row.textContent).toContain('分钟前');
     const picker = within(row).getByTestId('decision-picker');
     expect(within(picker).getByRole('textbox', { name: '自己写一句' })).toBeTruthy();
     expect(within(row).getByText('对外发布到生产，能一键回滚到上一版。')).toBeTruthy();
     expect(within(row).queryByRole('button', { name: '看选项' })).toBeNull();
     expect(within(row).queryByRole('button', { name: '处理了' })).toBeNull();
-    expect(within(row).getByRole('button', { name: '打开' })).toBeTruthy();
-    // 每个选项一行：名字、一句效果；推荐项带「推荐」；整行是按钮、占满一行，可点区至少 40 高（手机 44）
+    expect(within(row).getByRole('link', { name: '打开' })).toBeTruthy();
+    // 每个选项一行：左边是按钮，中间一句效果和推荐理由，右边「推荐」「上次选的」标
     const options = within(picker).getAllByRole('listitem');
     expect(options).toHaveLength(3);
     expect(within(options[0] as HTMLElement).getByText('推荐')).toBeTruthy();
+    expect(options[0]?.textContent).toContain('推荐理由：CI 全绿、金丝雀跑过，能一键回滚，风险小');
     expect(options[2]?.textContent).toContain('这条留着，这一版先压着，等我看过改动再拍');
     for (const li of options) {
-      const b = within(li as HTMLElement).getByRole('button');
-      expect(b.className).toContain('w-full');
-      expect(b.className).toContain('min-h-10');
-      expect(b.className).toContain('max-md:min-h-11');
+      expect(within(li as HTMLElement).getByRole('button').tagName).toBe('BUTTON');
     }
     // 卡住报警：没有选项区，「处理了」照旧
     const alert = rowOf('#17 子任务 A 停滞 22 分钟');
@@ -111,7 +112,7 @@ describe('「要你拍」选项直接摆在卡上（#2353）', () => {
         description: '假数据：没接 GitHub，acme/fluxwatch 的 GitHub App 没查成',
       }),
     );
-    expect(screen.getByText(APP)).toBeTruthy();
+    expect(screen.getAllByText(APP).length).toBeGreaterThan(0);
   });
 
   test('删掉工作树交给引擎：卡上写「交给引擎了」，选项先收起，点「改主意」再摆出来', async () => {

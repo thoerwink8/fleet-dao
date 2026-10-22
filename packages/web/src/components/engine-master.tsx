@@ -18,7 +18,6 @@ import { localizeIsoTimes } from '../lib/format';
 import { useNodeSelection, withNode } from '../lib/node';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
-import { StatusDot } from './layout/status-badge';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
@@ -166,44 +165,5 @@ export function EngineMasterBadge() {
         {remote ? '（远程环境只读：要开关请到那台上操作，说明在法国页）' : null}
       </TooltipContent>
     </Tooltip>
-  );
-}
-
-/** 设置 → 仓库一节开头的一句：总开关和每个项目的「让 AI 接活」是什么关系，并给出总开关现在的状态。 */
-export function EngineMasterRelation() {
-  const { view } = useMasterView();
-  // 一行不折（#1917，照路由页样板）：总开关现在怎样在前（不让位），两者的关系放不下就截断、整句在悬停里，去法国页的链接在最后不让位
-  const state =
-    view.kind === 'ok'
-      ? view.master.on
-        ? '总开关现在开着'
-        : '总开关现在关着'
-      : view.kind === 'absent'
-        ? '这个环境的版本还不带总开关'
-        : view.kind === 'error'
-          ? '总开关现在是开是关没查成'
-          : '正在读总开关';
-  const tone =
-    view.kind === 'ok' ? (view.master.on ? 'done' : 'stop') : view.kind === 'error' ? 'stall' : 'stop';
-  const relation = `每个项目的「让 AI 接活」要和引擎总开关一起看：总开关关＝全停，开＝只有这里接活开着的项目才派${
-    view.kind === 'ok' && !view.master.on ? '；现在下面哪个项目开着也不会派' : ''
-  }`;
-  return (
-    <p
-      className="mb-3 flex min-w-0 items-center gap-2 whitespace-nowrap text-meta text-muted-foreground"
-      data-testid="engine-master-relation"
-    >
-      <StatusDot tone={tone} />
-      <span className="shrink-0 font-medium text-foreground">{state}</span>
-      <span className="min-w-0 truncate" title={relation}>
-        {relation}
-      </span>
-      <Link
-        to="/france"
-        className="ml-auto shrink-0 underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:items-center"
-      >
-        去法国页开关
-      </Link>
-    </p>
   );
 }

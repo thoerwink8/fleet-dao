@@ -24,24 +24,25 @@ beforeEach(() => {
 
 const LABELS = ['全部', '要你拍', '卡住报警', '日报'] as const;
 
-/** 筛选按钮上的计数（「全部 5」这种名字里的那一截）。带 aria-pressed，别跟列表里「日报 N 条」折叠行混。 */
+/** 级别页签上的计数（「全部 5」这种名字里的那一截）。是 role=tab，别跟列表里「日报 N 条」折叠行混。 */
 function countOf(label: string): string {
-  const button = screen
-    .getAllByRole('button', { name: new RegExp(`^${label}\\s`) })
-    .find((b) => b.getAttribute('aria-pressed') != null);
-  if (!button) throw new Error(`${label} 没有筛选按钮`);
-  const num = button.querySelector('.num');
+  const tab = screen.getByRole('tab', { name: new RegExp(`^${label}\\s`) });
+  const num = tab.querySelector('[data-tab-count]');
   if (!num) throw new Error(`${label} 没有计数`);
   return num.textContent ?? '';
 }
 
-/** 级别筛选条上的「日报」按钮（不是列表里的折叠行）。 */
+/** 级别页签上的「日报」（不是列表里的折叠行）。 */
 function dailyTab(): HTMLElement {
-  const button = screen
-    .getAllByRole('button', { name: /^日报\s/ })
-    .find((b) => b.getAttribute('aria-pressed') != null);
-  if (!button) throw new Error('没有日报筛选按钮');
-  return button;
+  return screen.getByRole('tab', { name: /^日报\s/ });
+}
+
+/** 点开列表里这一条，回右边的详情区。 */
+function openRow(title: string): HTMLElement {
+  const [first] = screen.getAllByText(title);
+  if (!first) throw new Error(`找不到标题是「${title}」的通知`);
+  fireEvent.click(first);
+  return screen.getByRole('region', { name: '通知详情' });
 }
 
 const ONE: Notification = {
@@ -161,12 +162,7 @@ describe('通知数同一口径（#1745）', () => {
     expect(countOf('要你拍')).toBe('1');
     expect(countOf('卡住报警')).toBe('8');
     expect(countOf('日报')).toBe('8');
-    expect(screen.getByTestId('pending-rule').textContent).toContain('待处理 9 条');
-    // 说明行是写给创始人的白话，不再提「铃铛和侧栏角标同数」（#1821）
-    expect(screen.getByTestId('pending-rule').textContent).toContain(
-      '要你拍的和卡住的，处理了就从这里消失。',
-    );
-    expect(screen.getByTestId('pending-rule').textContent).not.toContain('角标');
+    expect(screen.getByTestId('pending-rule').textContent).toBe('待处理 9');
     expect(screen.getByText(/只取回了最近/).textContent).toContain('共 17 条');
   });
 
@@ -194,7 +190,7 @@ describe('通知数同一口径（#1745）', () => {
       .getAllByRole('link')
       .find((a) => a.getAttribute('href')?.startsWith('/notifications'));
     expect(side?.textContent).toContain('9');
-    await waitFor(() => expect(screen.getByTestId('pending-rule').textContent).toContain('待处理 9 条'));
+    await waitFor(() => expect(screen.getByTestId('pending-rule').textContent).toBe('待处理 9'));
     fireEvent.click(bell);
     expect((await screen.findByText('待处理的提醒')).parentElement?.textContent).toContain('9，另有日报 8');
   });
@@ -226,13 +222,14 @@ describe('通知中心日报折叠', () => {
     expect(countOf('日报')).toBe('2');
 
     const fold = screen.getByTestId('daily-fold');
+    const foldButton = within(fold).getByRole('button');
     expect(fold.textContent).toMatch(/日报\s*2\s*条/);
-    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(foldButton.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText('今日日报甲')).toBeNull();
     expect(screen.queryByText('今日日报乙')).toBeNull();
 
-    fireEvent.click(fold);
-    expect(fold.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(foldButton);
+    expect(foldButton.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByText('今日日报甲')).toBeTruthy();
     expect(screen.getByText('今日日报乙')).toBeTruthy();
 
@@ -252,11 +249,11 @@ describe('通知中心日报折叠', () => {
     api.notifications = () => Promise.resolve({ items: MIXED, counts: MIXED_COUNTS });
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
 
-    const pending = await screen.findByRole('tab', { name: '待处理' });
-    expect(pending.getAttribute('aria-selected')).toBe('true');
+    const pending = await screen.findByRole('button', { name: '待处理' });
+    expect(pending.getAttribute('aria-pressed')).toBe('true');
     const fold = await screen.findByTestId('daily-fold');
     expect(fold.textContent).toMatch(/日报\s*2\s*条/);
-    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(within(fold).getByRole('button').getAttribute('aria-expanded')).toBe('false');
     expect(screen.getByText('等你拍：发不发版')).toBeTruthy();
     expect(screen.getByText('卡住：测试没过')).toBeTruthy();
     // 折叠行在动作项之后：先看到要你拍/报警，再是日报折叠。
@@ -266,10 +263,10 @@ describe('通知中心日报折叠', () => {
   });
 });
 
-describe('通知卡：正文限两行、主操作带字、两组筛选分主次（#1904）', () => {
+describe('通知详情：正文全文、主操作带字、两组筛选分主次（#1904；#3533 改成左列表右详情）', () => {
   const LONG = Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行很长的说明`).join('\n');
 
-  test('正文默认只显两行，点一下展开、再点收起；「处理了」「打开」按钮上有字（要你拍的没有「处理了」，#2353）', async () => {
+  test('点开一条：正文全文都在详情里；「处理了」「打开」上有字（要你拍的没有「处理了」，#2353）', async () => {
     const api = createMockApi({ live: false });
     api.notifications = () =>
       Promise.resolve({
@@ -281,44 +278,32 @@ describe('通知卡：正文限两行、主操作带字、两组筛选分主次�
       });
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
 
-    // ONE 是待拍的「要你拍」：正文直接在卡上（#2353）
-    const body = (await screen.findAllByText(/第 1 行很长的说明/))[0]?.closest('button') as HTMLElement;
-    expect(body.className).toContain('line-clamp-2');
-    expect(body.getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(body);
-    expect(body.className).not.toContain('line-clamp-2');
-    expect(body.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.click(body);
-    expect(body.className).toContain('line-clamp-2');
-
-    const row = body.closest('li[data-notice-row]') as HTMLElement;
-    expect(within(row).queryByRole('button', { name: '处理了' })).toBeNull();
-    expect(within(row).getByRole('button', { name: '打开' }).textContent).toBe('打开');
-    const alertRow = screen.getByText('卡住：长正文').closest('li[data-notice-row]') as HTMLElement;
-    expect(within(alertRow).getByRole('button', { name: '处理了' }).textContent).toBe('处理了');
+    // ONE 是待拍的「要你拍」：点开后正文全文都在详情里（#2353），不再折成两行
+    await screen.findByText('等你拍一件');
+    const detail = openRow('等你拍一件');
+    for (let i = 1; i <= 12; i++) expect(detail.textContent).toContain(`第 ${i} 行很长的说明`);
+    expect(within(detail).queryByRole('button', { name: '处理了' })).toBeNull();
+    expect(within(detail).getByRole('link', { name: '打开' }).textContent).toBe('打开');
+    const alertDetail = openRow('卡住：长正文');
+    expect(within(alertDetail).getByRole('button', { name: '处理了' }).textContent).toBe('处理了');
   });
 
-  test('处理状态是主筛选（灰底轨道），级别是次级筛选（没有轨道）；级别标签的色和圆点同一个状态色', async () => {
+  test('处理状态是分段控件（一组互斥按钮），级别是页签；列表行灰字写类型', async () => {
     const api = createMockApi({ live: false });
     api.notifications = () => Promise.resolve({ items: MIXED, counts: MIXED_COUNTS });
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
     await screen.findByText('等你拍：发不发版');
-    expect(screen.getByRole('tablist', { name: '处理状态' }).getAttribute('data-variant')).toBe('primary');
-    expect(screen.getByRole('group', { name: '按级别' }).getAttribute('data-variant')).toBe('secondary');
+    expect(screen.getByRole('group', { name: '处理状态' }).getAttribute('data-variant')).toBe('segmented');
+    expect(screen.getByRole('tablist', { name: '按级别' }).getAttribute('data-variant')).toBe('primary');
     const row = screen.getByText('卡住：测试没过').closest('li') as HTMLElement;
-    const dotTone = row.querySelector('span[data-tone][aria-hidden]')?.getAttribute('data-tone');
-    const tagTone = Array.from(row.querySelectorAll('span[data-tone]'))
-      .find((e) => e.textContent === '卡住报警')
-      ?.getAttribute('data-tone');
-    expect(tagTone).toBeTruthy();
-    expect(tagTone).toBe(dotTone);
+    expect(row.textContent).toContain('卡住报警');
   });
 });
 
 describe('「要你拍」带选项（#1915）', () => {
   const RELEASE = '等你点头：发布 v2.3'; // 假数据里带选项的那条（n-1）
   const OLD = '#15 在问你：发新消息还是把旧的顶上来？'; // 假数据里没有选项的老通知（n-4）
-  const rowOf = (title: string) => screen.getByText(title).closest('li[data-notice-row]') as HTMLElement;
+  const rowOf = openRow;
 
   test('选项是可点的按钮，推荐那项标「推荐」并写理由；点选项记下答案，系统照着做、转已处理，页面上看得到选了什么', async () => {
     const api = createMockApi({ live: false });
@@ -362,11 +347,9 @@ describe('「要你拍」带选项（#1915）', () => {
     await screen.findByText(OLD);
     const picker = within(rowOf(OLD)).getByTestId('decision-picker');
     const submit = within(picker).getByRole('button', { name: '提交' });
-    expect(submit).toHaveProperty('disabled', true); // 空的不能交
+    expect(submit.getAttribute('aria-disabled')).toBe('true'); // 空的不能交
     // 这条没有要留着的选项：页面先说清自己写的会转已处理
-    expect(within(picker).getByTestId('custom-effect').textContent).toBe(
-      '自己写的：交给指挥官去办，交出去了这条转已处理',
-    );
+    expect(within(picker).getByText('自己写的：交给指挥官去办，交出去了这条转已处理')).toBeTruthy();
     fireEvent.change(within(picker).getByRole('textbox', { name: '自己写一句' }), {
       target: { value: '  发新消息  ' },
     });
@@ -384,9 +367,7 @@ describe('「要你拍」带选项（#1915）', () => {
     const answer = vi.spyOn(api, 'answerNotification');
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
     await screen.findByText(RELEASE);
-    expect(within(rowOf(RELEASE)).getByTestId('custom-effect').textContent).toBe(
-      '自己写的：交给指挥官去办，这条先留着',
-    );
+    expect(within(rowOf(RELEASE)).getByText('自己写的：交给指挥官去办，这条先留着')).toBeTruthy();
     fireEvent.click(within(rowOf(RELEASE)).getByRole('button', { name: '先不发' }));
     await waitFor(() => expect(answer).toHaveBeenCalledExactlyOnceWith('n-1', { optionId: 'hold' }));
     await waitFor(() =>
@@ -422,6 +403,6 @@ describe('「要你拍」带选项（#1915）', () => {
       expect(toast.error).toHaveBeenCalledWith('没记下', { description: '这条已经处理过了，答案没改' }),
     );
     expect(toast.success).not.toHaveBeenCalled();
-    expect(screen.getByText(RELEASE)).toBeTruthy();
+    expect(screen.getAllByText(RELEASE).length).toBeGreaterThan(0);
   });
 });

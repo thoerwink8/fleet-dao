@@ -25,7 +25,13 @@ export function ConfirmDialog({
   confirmText = '确定',
   cancelText = '先不',
   onConfirm,
+  confirmDisabled,
+  children,
 }: {
+  /** 确定键现在不能点（原因必填但还没填）。 */
+  confirmDisabled?: boolean;
+  /** 说明下面的内容：原因输入框这类。 */
+  children?: ReactNode;
   /** 受控：外面管开关。不传＝自己管（配 trigger 用）。 */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -47,10 +53,12 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           {description ? <AlertDialogDescription>{description}</AlertDialogDescription> : null}
         </AlertDialogHeader>
+        {children}
         <AlertDialogFooter>
           <AlertDialogCancel>{cancelText}</AlertDialogCancel>
           <AlertDialogAction
             variant={danger ? 'danger' : 'primary'}
+            {...(confirmDisabled ? { disabled: true } : {})}
             onConfirm={async () => {
               await onConfirm();
             }}

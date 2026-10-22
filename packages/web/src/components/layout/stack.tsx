@@ -2,6 +2,7 @@
 // 不收 className 和 style：要间距选 gap，要对齐选 align、justify，要换行选 wrap。
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
+import type { DataAttrs } from './data-attrs';
 
 /** 间距四档（设计值 8 / 12 / 16 / 24）。其余间距留给组件内部。 */
 export type StackGap = 'sm' | 'md' | 'lg' | 'xl';
@@ -28,7 +29,8 @@ export function Stack({
   justify,
   wrap,
   children,
-}: {
+  ...data
+}: DataAttrs & {
   /** vertical（默认）一列往下排，horizontal 一行往右排。 */
   direction?: 'vertical' | 'horizontal';
   /** 间距：sm 8、md 12、lg 16（默认）、xl 24。 */
@@ -41,6 +43,7 @@ export function Stack({
 }) {
   return (
     <div
+      {...data}
       data-direction={direction}
       className={cn(
         'flex min-w-0',

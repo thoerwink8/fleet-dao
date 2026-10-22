@@ -22,6 +22,15 @@ describe('AuthCard', () => {
     expect(container.querySelector('section')?.className).toContain('bg-card');
   });
 
+  test('logo：标题上面画品牌标志', () => {
+    const { container } = render(
+      <AuthCard title="t" logo>
+        x
+      </AuthCard>,
+    );
+    expect(container.querySelector('header svg')).not.toBeNull();
+  });
+
   test('embedded（陈列页里用）不撑满整屏', () => {
     const { container } = render(
       <AuthCard title="t" embedded>

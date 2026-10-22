@@ -1,8 +1,12 @@
-import { answerResolves, NO_OPTIONS_TEXT } from '@fleet-dao/shared';
+// 通知中心（/notifications；#3533 照 Arco 改版，样稿 canvas/Inbox.dc.html）：要你拍的、卡住报警、日报。
+// 一块卡头（待处理数、通知设置）带两组筛选；下面左边一列通知（标题一行、灰字一行），右边是选中那条的详情，
+// 「要你拍」的选项和自己写一句、看门狗卡的受控修复（#3034）都在详情里。
+// 数字是接口给的真实总数，读不到写「—」；读失败、刷新没成、谁在处理没算成，各有各的提示，不画成 0 或「正常」。
+// 页面只拼 components/layout 的件，不写样式类（design 第三节、lint-design R13–R20）。
 import { useQueryClient } from '@tanstack/react-query';
-import { ArrowUpRight, Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
-import { useEffect, useId, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router';
+import { Bell } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
 import {
@@ -14,28 +18,28 @@ import {
   useNotifications,
   useResolveNotification,
 } from '../api/client';
-import type { Me, Notification, NotificationLevel } from '../api/types';
-import { AlertRepairPanel, type RepairRefresh } from '../components/alert-repair';
-import { type AnswerInput, DecisionPicker } from '../components/decision-picker';
+import type { Notification, NotificationLevel } from '../api/types';
+import type { RepairRefresh } from '../components/alert-repair';
+import type { AnswerInput } from '../components/decision-picker';
+import { Button } from '../components/layout/button';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
-import { List, ListRow } from '../components/layout/list';
-import { LoadError, LoadingRows } from '../components/layout/load-state';
-import { Notice } from '../components/layout/notice';
+import { Grid } from '../components/layout/grid';
+import { TextLink } from '../components/layout/link';
+import { List } from '../components/layout/list';
+import { LoadError, LoadingRows, LoadPartial } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
-import { StatusBadge, StatusDot } from '../components/layout/status-badge';
+import { Stack } from '../components/layout/stack';
 import { Tag } from '../components/layout/tag';
-import { RepoLink } from '../components/repo-link';
-import { Button } from '../components/ui/button';
-import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
-import { handlingContradicted, isWatchdogAlert, linkPhase } from '../lib/alert-repair';
-import { decisionResult, decisionToast } from '../lib/decision-result';
-import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
+import { Text } from '../components/layout/text';
+import { type NoticeActions, NoticeDetail } from '../components/notice-center/notice-detail';
+import { DailyFold, type DayGroup, NoticeRows } from '../components/notice-center/notice-list';
+import { isWatchdogAlert } from '../lib/alert-repair';
+import { decisionToast } from '../lib/decision-result';
+import { TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { pendingCount } from '../lib/notice-count';
-import { isMine, noticeLevelMeta, type Tone } from '../lib/status';
-import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('通知中心') }];
@@ -58,521 +62,13 @@ function dayOf(iso: string, now: number): string {
   return `${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
-const DELIVERY_NAME: Record<string, string> = { feishu: '飞书' };
-
-/**
- * 飞书等渠道送没送到：没拿到消息编号就算没送到。送到了是一截灰字（平常事，不占色块）；
- * 没送到才是红标签。试了几次、最后一次、错误原因都在悬停里（路由页样板 #1914：一行只一个显眼的东西）。
- */
-function Deliveries({ n, compact = false }: { n: Notification; compact?: boolean }) {
-  // compact：收起的「要你拍」那一行（#1950），手机上把位置让给推荐理由；送到了、只在驾驶舱这类平常事不写，没送到照旧红标签
-  if (!n.deliveries.length)
-    return <span className={cn('shrink-0', compact && 'max-md:hidden')}>只在{brand.product}</span>;
-  return (
-    <>
-      {n.deliveries.map((d, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: 同一渠道可以发给好几个对象，契约里没有对象编号。
-        <Tooltip key={`${d.channel}-${i}`}>
-          <TooltipTrigger asChild>
-            {d.delivered ? (
-              <span
-                data-delivery="ok"
-                className={cn('inline-flex shrink-0 items-center gap-1', compact && 'max-md:hidden')}
-              >
-                <Send className="size-3" aria-hidden />
-                {DELIVERY_NAME[d.channel] ?? d.channel}已送到
-              </span>
-            ) : (
-              <Tag tone="fail" className="gap-1">
-                <TriangleAlert className="size-3" aria-hidden />
-                {DELIVERY_NAME[d.channel] ?? d.channel}没送到
-              </Tag>
-            )}
-          </TooltipTrigger>
-          <TooltipContent>
-            试了 {d.attempts} 次{d.lastAttemptAt ? ` · 最后一次 ${formatDateTime(d.lastAttemptAt)}` : ''}
-            {d.error ? ` · ${d.error}` : ''}
-          </TooltipContent>
-        </Tooltip>
-      ))}
-    </>
-  );
-}
-
-type Handling = NonNullable<Notification['handling']>;
-
-/** 处理到哪一步的颜色：没人管的偏红，有人在修的在跑，合了发布了的偏绿，静默的灰。 */
-const STAGE_TONE: Record<Handling['stage'], Tone> = {
-  resolved: 'done',
-  silenced: 'stop',
-  waiting_founder: 'human',
-  unclaimed: 'fail',
-  pr_open: 'run',
-  merged: 'wait',
-  deployed: 'done',
-};
-
-/** 跟进单、PR：外链（RepoLink 按品牌拼）。 */
-function WorkLink({
-  repo,
-  kind,
-  n,
-  label,
-}: {
-  repo: { owner: string; name: string };
-  kind: 'issues' | 'pull';
-  n: number;
-  label: string;
-}) {
-  return (
-    <RepoLink
-      repo={repo}
-      kind={kind}
-      n={n}
-      // 一行不折（#1939）：不靠 min-h 撑高这一行，手机上可点范围用伪元素往上下各撑 16（同路由页渠道卡头的链接）
-      className="relative inline-flex shrink-0 items-center gap-0.5 underline-offset-2 after:absolute after:inset-x-0 after:-inset-y-4 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
-      icon={<ExternalLink className="size-3" aria-hidden />}
-    >
-      {label}
-    </RepoLink>
-  );
-}
-
-/**
- * 谁在处理 · 链接 · 多久了（design 15.3「谁在处理」）：后端从认领、PR、发布记录现算的，这里只照着显示；
- * 没查成的（发布判不了之类）照实列出来。
- * 一行不折（#1939，路由页样板「行的小字只占一行」）：状态、多久、链接不让位；谁、静默说明、没查成的话放不下就截断，整句（后端给的 line）在悬停里。
- */
-function HandlingRow({ h, now, n }: { h: Handling; now: number; n: Notification }) {
-  // 这一行说「没人在修」，这次事故却明确关联了单（#3034 评审）：照关联现场写，不拿已知不对的「没人在修」顶着
-  const link = handlingContradicted(n) ? n.repair?.linked : undefined;
-  if (link) {
-    const phase = linkPhase(link);
-    const ref = `${link.issue.repo.owner}/${link.issue.repo.name}#${link.issue.number}`;
-    return (
-      <div
-        className="mt-1 flex min-w-0 items-center gap-x-2 overflow-hidden text-meta whitespace-nowrap text-muted-foreground"
-        title={`${link.text} · 处理人未知`}
-        data-testid="alert-handling"
-        data-from="linked"
-      >
-        <StatusBadge tone={phase.tone} label={phase.label} variant="dot" />
-        <span className="num shrink-0" title={formatDateTime(link.at)}>
-          {formatDuration(now - Date.parse(link.at))}
-        </span>
-        <WorkLink repo={link.issue.repo} kind="issues" n={link.issue.number} label={ref} />
-        {link.prNumber ? (
-          <WorkLink repo={link.issue.repo} kind="pull" n={link.prNumber} label={`PR #${link.prNumber}`} />
-        ) : null}
-        <span className="min-w-0 truncate">处理人未知</span>
-      </div>
-    );
-  }
-  const since = formatDuration(now - Date.parse(h.since));
-  const full = [h.line, ...h.problems].join(' · ');
-  return (
-    <div
-      className="mt-1 flex min-w-0 items-center gap-x-2 overflow-hidden text-meta whitespace-nowrap text-muted-foreground"
-      title={full}
-      data-testid="alert-handling"
-    >
-      <StatusBadge tone={STAGE_TONE[h.stage]} label={h.stageText} variant="dot" />
-      <span className="num shrink-0" title={formatDateTime(h.since)}>
-        {since}
-      </span>
-      {h.work ? (
-        <WorkLink
-          repo={h.work.repo}
-          kind="issues"
-          n={h.work.issueNumber}
-          label={`${h.work.repo.owner}/${h.work.repo.name}#${h.work.issueNumber}`}
-        />
-      ) : null}
-      {h.pr ? <WorkLink repo={h.pr.repo} kind="pull" n={h.pr.number} label={`PR #${h.pr.number}`} /> : null}
-      {h.who ? (
-        <span
-          className={cn(
-            'min-w-0 truncate text-foreground',
-            // 「谁」就是那个 PR（PR #16）时，手机上不再写第二遍，省出位置给链接
-            h.pr && h.who === `PR #${h.pr.number}` && 'max-md:hidden',
-          )}
-        >
-          {h.who}
-        </span>
-      ) : null}
-      {h.silence ? (
-        <span className="min-w-0 truncate">
-          {h.silence.comment} · 到 {formatDateTime(h.silence.endsAt)}
-        </span>
-      ) : null}
-      {h.problems.map((p) => (
-        <span key={p} className="min-w-0 truncate text-ink-fail">
-          {p}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-/** 正文默认只显两行，点一下展开、再点收起（长报警一张卡占满首屏，#1904）。 */
-function ClampedBody({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <button
-      type="button"
-      aria-expanded={open}
-      title={open ? '点一下收起' : '点一下看全文'}
-      onClick={() => setOpen((v) => !v)}
-      className={cn(
-        'mt-0.5 w-full text-left text-body whitespace-pre-wrap text-muted-foreground outline-none focus-visible:ring-focus focus-visible:ring-ring',
-        !open && 'line-clamp-2',
-      )}
-    >
-      {text}
-    </button>
-  );
-}
-
-/**
- * 「要你拍」收起时的那一句灰字（#1950）：不展开也知道系统怎么建议。
- * 有推荐项写「推荐：发布。理由」；拍过了不写（「我选了：…」那一行顶上）；没有选项的老通知写「没有选项，请直接回复」（展开、收起都在）。
- * 一行不折：放不下截断，整句在悬停里。
- */
-function DecisionHint({ n }: { n: Notification }) {
-  const options = n.options ?? [];
-  if (options.length === 0) {
-    return (
-      <p className="mt-1 truncate text-meta text-muted-foreground" data-testid="no-options">
-        {NO_OPTIONS_TEXT}
-      </p>
-    );
-  }
-  const rec = options.find((o) => o.recommended);
-  if (n.answer || !rec) return null;
-  const line = `推荐：${rec.label}。${rec.recommended}`;
-  return (
-    <p className="mt-1 truncate text-meta text-muted-foreground" data-testid="decision-hint" title={line}>
-      推荐：<span className="font-medium text-foreground">{rec.label}</span>。{rec.recommended}
-    </p>
-  );
-}
-
-const RESULT_TONE = { done: 'done', queued: 'info', failed: 'fail', pending: 'info' } as const;
-const RESULT_HEAD = { done: '照做了', queued: '交给引擎了', failed: '没做成', pending: '记下了' } as const;
-
-/**
- * 拍过的：谁选了什么、多久前，系统照着做的结果写在下面（#2353）。做成了绿、交给引擎了蓝、没做成红（卡留着，再选一次）。
- * 已处理的只写一行「我选了：…」加结果的话，不占色块。
- */
-function DecisionAnswerLine({
-  n,
-  me,
-  now,
-  plain = false,
-}: {
-  n: Notification;
-  me: Me | undefined;
-  now: number;
-  /** 已处理的卡：一行灰字，不画结果框。 */
-  plain?: boolean;
-}) {
-  const a = n.answer;
-  if (!a) return null;
-  const res = decisionResult(a);
-  const who = `${isMine(a.by, me) ? '我' : a.by}${a.optionId === undefined ? '自己写了：' : '选了：'}`;
-  if (plain) {
-    return (
-      <p
-        className="mt-1.5 flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground"
-        data-testid="decision-answer"
-        data-result={res.kind}
-        title={`${a.text} · ${formatDateTime(a.at)} · ${res.text}`}
-      >
-        <Check className="size-3.5 shrink-0 text-ink-done" aria-hidden />
-        <span className="min-w-0 truncate">
-          {who}
-          <span className="font-medium text-foreground">{a.text}</span>
-          {a.execution ? ` · ${res.text}` : ''}
-        </span>
-      </p>
-    );
-  }
-  return (
-    <Notice
-      tone={RESULT_TONE[res.kind]}
-      role="status"
-      className="mt-3 md:max-w-3xl"
-      title={
-        <span data-testid="decision-answer" data-result={res.kind} className="flex min-w-0 flex-wrap gap-x-2">
-          <span>
-            {RESULT_HEAD[res.kind]} · {who}
-            {a.text}
-          </span>
-          <span className="num font-normal opacity-80" title={formatDateTime(a.at)}>
-            {formatAgo(a.at, now)}
-          </span>
-        </span>
-      }
-    >
-      <span data-testid="decision-result" className="break-words">
-        {res.text}
-        {res.kind === 'failed' ? '。这条还开着，下面再选一次或自己写一句。' : ''}
-      </span>
-    </Notice>
-  );
-}
-
-function groupByDay(items: Notification[], now: number): Map<string, Notification[]> {
+function groupByDay(items: Notification[], now: number): DayGroup[] {
   const groups = new Map<string, Notification[]>();
   for (const n of items) {
     const k = dayOf(n.createdAt, now);
     groups.set(k, [...(groups.get(k) ?? []), n]);
   }
-  return groups;
-}
-
-interface RowActions {
-  resolvePending: boolean;
-  resolveId: string | undefined;
-  /** 正在回答的那一条（#1915）；没有在答的是 undefined。 */
-  answeringId: string | undefined;
-  onOpen: (link: string) => void;
-  onDone: (n: Notification) => void;
-  onAnswer: (n: Notification, input: AnswerInput) => void;
-  /** 看门狗修复点之前重读列表（#3034）：按钮已经不是现在的就不发。 */
-  onRefreshRepair: RepairRefresh;
-}
-
-function NotificationRow({
-  n,
-  now,
-  me,
-  resolvePending,
-  resolveId,
-  answeringId,
-  onOpen,
-  onDone,
-  onAnswer,
-  onRefreshRepair,
-}: { n: Notification; now: number; me: Me | undefined } & RowActions) {
-  const resolved = Boolean(n.resolvedAt);
-  const level = noticeLevelMeta[n.level];
-  // 待拍的「要你拍」（#2353）：选项、自己写一句直接摆在卡上，选完系统照着做、结果写回卡上；没有「处理了」。
-  // 交给引擎在做的（删工作树）先只摆结果，点「改主意」才再摆选项。
-  const deciding = !resolved && n.level === 'decision';
-  const queued = deciding && n.answer ? decisionResult(n.answer).kind === 'queued' : false;
-  const [repick, setRepick] = useState(false);
-  const [draft, setDraft] = useState('');
-  const pickerId = useId();
-  const meta = (
-    // 灰字一行不折：时间、送没送到、谁处理的；放不下截断
-    <div
-      data-row-meta
-      className={cn(
-        'flex min-w-0 items-center gap-x-3 overflow-hidden text-meta whitespace-nowrap text-muted-foreground',
-        deciding ? 'shrink-0' : 'mt-1.5',
-      )}
-    >
-      <span className="num shrink-0" title={formatClock(n.createdAt)}>
-        {formatAgo(n.createdAt, now)}
-      </span>
-      <Deliveries n={n} compact={deciding} />
-      {resolved && n.resolvedAt ? (
-        <span className="inline-flex min-w-0 items-center gap-1" title={formatDateTime(n.resolvedAt)}>
-          <Check className="size-3 shrink-0" aria-hidden />
-          <span className="truncate">
-            {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
-            <span className="num">{formatAgo(n.resolvedAt, now)}</span>
-          </span>
-        </span>
-      ) : null}
-    </div>
-  );
-  return (
-    <ListRow
-      data-notice-row
-      data-resolved={resolved || undefined}
-      data-deciding={deciding || undefined}
-      summary={
-        // 一条通知（#1939，照路由页样板）：第一行标题加一个级别标签；正文两行；谁在处理一行；
-        // 最后一行灰字写时间、送没送到、谁处理的。主操作带字（#1904），
-        // md 起在右上和标题同一行（不再在高卡片里垂直居中、飘在中间），手机上排在内容下面、按钮平分一行。
-        // 待拍的「要你拍」：标题、推荐那一句、正文，下面直接是结果和选项（#2353）。
-        <div className="flex w-full min-w-0 flex-col gap-3 py-1 md:flex-row md:items-start md:gap-6">
-          <div className="flex min-w-0 flex-1 gap-3">
-            <StatusDot tone={level.tone} className={cn('mt-2', resolved && 'opacity-40')} />
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-row-name-line>
-                <span
-                  data-row-name
-                  className={cn(
-                    'min-w-0 text-body break-words',
-                    resolved ? 'text-muted-foreground' : 'font-semibold',
-                  )}
-                >
-                  {n.title}
-                </span>
-                {deciding ? (
-                  <StatusBadge tone={level.tone} label="等你拍板" variant="dot" />
-                ) : (
-                  <Tag tone={level.tone}>{level.label}</Tag>
-                )}
-              </div>
-              {deciding ? (
-                <>
-                  {/* 第二行：推荐哪项（或没有选项）加时间、送没送到，一行不折 */}
-                  <div className="mt-1 flex min-w-0 items-center gap-x-3 overflow-hidden whitespace-nowrap">
-                    {/* 拍过了不写推荐（结果框顶上），这一格不占位，免得时间前面空一截 */}
-                    {n.answer && (n.options?.length ?? 0) > 0 ? null : (
-                      <div className="min-w-0 [&>p]:mt-0">
-                        <DecisionHint n={n} />
-                      </div>
-                    )}
-                    {meta}
-                  </div>
-                  <ClampedBody text={n.body} />
-                  {n.handling ? <HandlingRow h={n.handling} now={now} n={n} /> : null}
-                  <DecisionAnswerLine n={n} me={me} now={now} />
-                  {queued && !repick ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="mt-2"
-                      aria-controls={pickerId}
-                      aria-expanded={false}
-                      onClick={() => setRepick(true)}
-                    >
-                      改主意
-                    </Button>
-                  ) : (
-                    <DecisionPicker
-                      id={pickerId}
-                      options={n.options ?? []}
-                      lastOptionId={n.answer?.optionId}
-                      pending={answeringId === n.id}
-                      text={draft}
-                      onText={setDraft}
-                      onAnswer={(input) => {
-                        setRepick(false);
-                        onAnswer(n, input);
-                      }}
-                      effect={
-                        answerResolves(n.options ?? [], undefined)
-                          ? '自己写的：交给指挥官去办，交出去了这条转已处理'
-                          : '自己写的：交给指挥官去办，这条先留着'
-                      }
-                    />
-                  )}
-                </>
-              ) : (
-                <>
-                  <ClampedBody text={n.body} />
-                  {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} n={n} /> : null}
-                  <DecisionAnswerLine n={n} me={me} now={now} plain />
-                  {/* 看门狗的卡住报警：后端现算能点的修复、执行到哪、核验结果（#3034）；别的提醒不渲染 */}
-                  <AlertRepairPanel n={n} me={me} now={now} refresh={onRefreshRepair} />
-                  {meta}
-                </>
-              )}
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2 max-md:pl-5" data-notice-actions>
-            {/* 要你拍的不给「处理了」：只标已处理解决不了卡上的问题（#2353），选一个或写一句才算拍了 */}
-            {!resolved && n.level !== 'decision' ? (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={resolvePending && resolveId === n.id}
-                onClick={() => onDone(n)}
-                className="max-md:flex-1"
-              >
-                <Check />
-                处理了
-              </Button>
-            ) : null}
-            {n.link ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => onOpen(n.link ?? '/')}
-                className="max-md:flex-1"
-              >
-                <ArrowUpRight aria-hidden />
-                打开
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      }
-    />
-  );
-}
-
-/** 按天分组的通知列表。 */
-function DayGroups({
-  items,
-  now,
-  me,
-  ...actions
-}: { items: Notification[]; now: number; me: Me | undefined } & RowActions) {
-  const groups = groupByDay(items, now);
-  return (
-    <>
-      {[...groups.entries()].map(([day, dayItems]) => (
-        <section key={day}>
-          <h2 className="mb-2 px-1 text-meta font-medium text-muted-foreground">{day}</h2>
-          <Section flush>
-            <List>
-              {dayItems.map((n) => (
-                <NotificationRow key={n.id} n={n} now={now} me={me} {...actions} />
-              ))}
-            </List>
-          </Section>
-        </section>
-      ))}
-    </>
-  );
-}
-
-/**
- * 列表上面的结论块（#1939，照路由页样板的标题块）：一行 subtitle「待处理 N 条」；一行结论短话加一个状态
- * （有要你拍的写「等你拍板」，只剩卡住的写「有卡住」）；一行灰字写规则。三行都不折，放不下截断、整句在悬停里。
- * 数字是接口给的总数（#1745），和铃铛、侧栏角标同数，日报不算进待处理。
- */
-function PendingHero({ counts }: { counts: { decision: number; alert: number; daily: number } }) {
-  const pending = pendingCount(counts);
-  const parts = [
-    counts.decision > 0 ? `${counts.decision} 件要你拍` : null,
-    counts.alert > 0 ? `${counts.alert} 个卡住` : null,
-  ].filter(Boolean);
-  const line = parts.join('，');
-  const rule = `要你拍的和卡住的，处理了就从这里消失。${counts.daily > 0 ? `日报 ${counts.daily} 条看一眼就行。` : ''}`;
-  return (
-    <header data-testid="pending-rule" className="mb-6 flex min-w-0 flex-col">
-      <h2 className="truncate text-title whitespace-nowrap">
-        待处理 <span className="num">{pending}</span> 条
-      </h2>
-      {pending > 0 ? (
-        <p
-          data-hero-line
-          title={line}
-          className="mt-2 flex min-w-0 items-center gap-2.5 whitespace-nowrap text-heading font-normal"
-        >
-          <span className="min-w-0 truncate">{line}</span>
-          <span className="shrink-0">
-            {counts.decision > 0 ? (
-              <StatusBadge tone="human" label="等你拍板" />
-            ) : (
-              <StatusBadge tone="stall" label="有卡住" />
-            )}
-          </span>
-        </p>
-      ) : null}
-      <p data-hero-notes title={rule} className="mt-1.5 truncate text-meta text-muted-foreground">
-        {rule}
-      </p>
-    </header>
-  );
+  return [...groups.entries()].map(([day, dayItems]) => ({ day, items: dayItems }));
 }
 
 /** 通知靠推送更新，没有定时重拉。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
@@ -582,6 +78,7 @@ export default function Notifications() {
   const [params, setParams] = useSearchParams();
   const status = params.get('status') === 'all' ? 'all' : 'open';
   const level = (LEVELS.find((l) => l.id === params.get('level'))?.id ?? 'all') as 'all' | NotificationLevel;
+  const selectedId = params.get('id') ?? undefined;
   const [limit, setLimit] = useState(NOTIFICATIONS_PAGE);
   const qc = useQueryClient();
   // 必须在 useNotifications 订阅之前拍下来：订阅发生在渲染里，拍晚了看到的是这一页自己刚发起的那次。
@@ -622,22 +119,18 @@ export default function Notifications() {
   const { data: me } = useMe();
   const resolve = useResolveNotification();
   const answerMutation = useAnswerNotification();
-  const navigate = useNavigate();
   const now = useNow();
-  // 「全部」视图里日报默认收成一行；切回「全部」时重新折叠，避免上次展开还挂着。
-  const [dailyOpen, setDailyOpen] = useState(false);
-  useEffect(() => {
-    if (level === 'all') setDailyOpen(false);
-  }, [level]);
 
-  const all = data?.items ?? [];
+  // 没读到时 all 是空的，但下面先判 isLoading、!data、listEmpty 再画列表：读失败不会画成「没有提醒」
+  const all: Notification[] = data ? data.items : [];
   const totalCount = data ? data.counts.decision + data.counts.alert + data.counts.daily : 0;
-  const shownTotal = level === 'all' ? totalCount : (data?.counts[level] ?? 0);
+  const shownTotal = data && level !== 'all' ? data.counts[level] : totalCount;
   const list = all.filter((n) => level === 'all' || n.level === level);
   // 只在「全部」级别视图折叠日报；「日报」标签页直接铺开。待处理/连已处理只影响接口过滤，不改折叠。
   const foldDaily = level === 'all';
   const actionItems = foldDaily ? list.filter((n) => n.level !== 'daily') : list;
   const dailyItems = foldDaily ? list.filter((n) => n.level === 'daily') : [];
+  const selected = selectedId ? all.find((n) => n.id === selectedId) : undefined;
 
   const set = (key: string, value: string | null) => {
     const p = new URLSearchParams(params);
@@ -669,28 +162,27 @@ export default function Notifications() {
       },
     );
 
-  const open = (link: string) => navigate(link);
   // 修复点之前重读一次：读失败时 React Query 留着旧数据，不能拿旧的当现在的
   const refreshRepair: RepairRefresh = async (id) => {
     const r = await refetch();
     if (r.isError || !r.data) return { ok: false, why: r.error ? errorText(r.error) : '没读到' };
     return { ok: true, n: r.data.items.find((x) => x.id === id) };
   };
-  const actions: RowActions = {
+  const actions: NoticeActions = {
     resolvePending: resolve.isPending,
     resolveId: resolve.variables,
     answeringId: answerMutation.isPending ? answerMutation.variables?.id : undefined,
-    onOpen: open,
     onDone: done,
     onAnswer: answer,
     onRefreshRepair: refreshRepair,
   };
   const listEmpty = foldDaily ? actionItems.length === 0 && dailyItems.length === 0 : list.length === 0;
+  const handlingProblem = data?.handlingProblem;
+  const pick = (id: string) => set('id', id);
 
   return (
     <Page
       title="通知中心"
-      description="只有三类：要你拍的、卡住的、日报。飞书上推同样的三类，进度不主动推。"
       refresh={{
         onRefresh: () => void refetch(),
         isFetching,
@@ -698,114 +190,136 @@ export default function Notifications() {
         staleAfterMs: NOTIFICATIONS_STALE_AFTER_MS,
       }}
     >
-      {/* 两组筛选同一行（主：处理状态，次：级别）；窄屏各自一行、自己横滑，不折（路由页样板） */}
-      <div className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <FilterTabs
-          aria-label="处理状态"
-          items={[
-            { id: 'open', label: '待处理' },
-            { id: 'all', label: '连已处理的一起看' },
-          ]}
-          value={status}
-          onChange={(s) => set('status', s === 'open' ? null : 'all')}
-        />
-        <FilterTabs
-          mode="toggle"
-          variant="secondary"
-          aria-label="按级别"
-          items={LEVELS.map((l) => ({
-            id: l.id,
-            label: l.label,
-            // 数字是接口给的真实总数，不是这一页取回的条数（只取了前 N 条时也不会封顶）。
-            // 没读到就写「—」（count 传 null），不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
-            count: data ? (l.id === 'all' ? totalCount : data.counts[l.id]) : null,
-            ...(l.id !== 'all' ? { tone: noticeLevelMeta[l.id].tone } : {}),
-          }))}
-          value={level}
-          onChange={(id) => set('level', id === 'all' ? null : id)}
-        />
-      </div>
-      {/* 结论块只在「待处理」里有：接口的计数跟着视图走，「连已处理的」里那几个数不是待处理数 */}
-      {data && status === 'open' ? <PendingHero counts={data.counts} /> : null}
-      {error ? (
-        <div className="mb-4">
-          <LoadError what="提醒" error={error} />
-        </div>
-      ) : null}
-      {data?.handlingProblem ? (
-        <Notice tone="stall" className="mb-4">
-          {data.handlingProblem}（提醒照常列出，只是看不出谁在处理）
-        </Notice>
-      ) : null}
-      {isLoading ? (
-        <LoadingRows rows={5} />
-      ) : !data ? null : listEmpty ? (
-        <Section>
-          <EmptyState
-            icon={Bell}
-            title={status === 'open' ? '没有待处理的提醒' : '这里没有提醒'}
-            hint="要你拍板或有东西卡住时，这里和飞书会同时提醒。"
-          />
+      <Stack>
+        {/* 读失败：有旧数据时下面照旧列着上一次读到的（刷新条标「数据已过期」），不画成空，也不拿 0 冒充 */}
+        {error ? <LoadError what="提醒" error={error} onRetry={() => void refetch()} /> : null}
+        {handlingProblem ? (
+          <LoadPartial>{handlingProblem}（提醒照常列出，只是看不出谁在处理）</LoadPartial>
+        ) : null}
+
+        <Section
+          title={
+            <>
+              通知
+              {/* 结论只在「待处理」里有：接口的计数跟着视图走，「连已处理的」里那几个数不是待处理数 */}
+              {data && status === 'open' ? (
+                <Tag>
+                  <span data-testid="pending-rule">待处理 {pendingCount(data.counts)}</span>
+                </Tag>
+              ) : null}
+            </>
+          }
+          actions={<TextLink to="/settings#notify">通知设置</TextLink>}
+        >
+          <Stack gap="md">
+            <FilterTabs
+              mode="toggle"
+              variant="segmented"
+              aria-label="处理状态"
+              items={[
+                { id: 'open', label: '待处理' },
+                { id: 'all', label: '连已处理的一起看' },
+              ]}
+              value={status}
+              onChange={(s) => set('status', s === 'open' ? null : 'all')}
+            />
+            <FilterTabs
+              aria-label="按级别"
+              items={LEVELS.map((l) => ({
+                id: l.id,
+                label: l.label,
+                // 数字是接口给的真实总数，不是这一页取回的条数（只取了前 N 条时也不会封顶）。
+                // 没读到就写「—」（count 传 null），不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
+                count: data ? (l.id === 'all' ? totalCount : data.counts[l.id]) : null,
+              }))}
+              value={level}
+              onChange={(id) => set('level', id === 'all' ? null : id)}
+            />
+          </Stack>
         </Section>
-      ) : (
-        <div className="space-y-5">
-          <DayGroups items={actionItems} now={now} me={me} {...actions} />
-          {foldDaily && dailyItems.length > 0 ? (
-            <section>
-              <Section flush className="mb-2">
-                <button
-                  type="button"
-                  data-testid="daily-fold"
-                  aria-expanded={dailyOpen}
-                  onClick={() => setDailyOpen((v) => !v)}
-                  className="flex min-h-10 w-full items-center gap-1.5 px-4 py-2.5 text-left text-body text-foreground outline-none hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11"
-                >
-                  <ChevronDown
-                    className={cn(
-                      'size-4 shrink-0 text-muted-foreground transition-transform',
-                      dailyOpen && 'rotate-180',
-                    )}
-                    aria-hidden
+
+        {isLoading ? (
+          <Section>
+            <LoadingRows rows={5} />
+          </Section>
+        ) : !data ? null : listEmpty ? (
+          <Section>
+            <EmptyState
+              icon={Bell}
+              title={status === 'open' ? '没有待处理的提醒' : '这里没有提醒'}
+              hint="要你拍板或有东西卡住时，这里和飞书会同时提醒。"
+            />
+          </Section>
+        ) : (
+          <Grid preset="split">
+            <Stack>
+              <Section flush aria-label="通知列表">
+                <List>
+                  <NoticeRows
+                    groups={groupByDay(actionItems, now)}
+                    now={now}
+                    me={me}
+                    selectedId={selected?.id}
+                    handlingProblem={handlingProblem}
+                    onPick={pick}
                   />
-                  <StatusDot tone={noticeLevelMeta.daily.tone} className="size-1.5" />
-                  <span>
-                    日报 <span className="num">{dailyItems.length}</span> 条
-                  </span>
-                </button>
+                  {foldDaily && dailyItems.length > 0 ? (
+                    <DailyFold key="daily-fold" count={dailyItems.length}>
+                      <List>
+                        <NoticeRows
+                          groups={groupByDay(dailyItems, now)}
+                          now={now}
+                          me={me}
+                          selectedId={selected?.id}
+                          handlingProblem={handlingProblem}
+                          onPick={pick}
+                        />
+                      </List>
+                    </DailyFold>
+                  ) : null}
+                </List>
               </Section>
-              {dailyOpen ? <DayGroups items={dailyItems} now={now} me={me} {...actions} /> : null}
-            </section>
-          ) : null}
-          {data?.nextCursor ? (
-            <div className="flex flex-col items-center gap-2 text-meta text-muted-foreground">
-              <p>
-                只取回了最近 <span className="num">{all.length}</span> 条，共{' '}
-                <span className="num">{totalCount}</span> 条
-                {level === 'all' ? '' : `（${LEVELS.find((l) => l.id === level)?.label}共 ${shownTotal} 条）`}
-                。
-              </p>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={isFetching}
-                onClick={() => setLimit((v) => v + NOTIFICATIONS_PAGE)}
-              >
-                再多看 {NOTIFICATIONS_PAGE} 条
-              </Button>
-            </div>
-          ) : null}
-          <p className="text-center text-meta text-muted-foreground">
-            飞书的免打扰时段在{' '}
-            <Link
-              to="/settings#notify"
-              className="underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:min-w-10 max-md:items-center max-md:justify-center"
-            >
-              设置
-            </Link>{' '}
-            里改。
-          </p>
-        </div>
-      )}
+              {data.nextCursor ? (
+                <Section>
+                  <Stack gap="sm">
+                    <Text size="meta" tone="muted">
+                      只取回了最近 {all.length} 条，共 {totalCount} 条
+                      {level === 'all'
+                        ? ''
+                        : `（${LEVELS.find((l) => l.id === level)?.label}共 ${shownTotal} 条）`}
+                      。
+                    </Text>
+                    <Stack direction="horizontal">
+                      <Button
+                        size="sm"
+                        {...(isFetching ? { disabledReason: '正在读，等它回话' } : {})}
+                        onClick={() => setLimit((v) => v + NOTIFICATIONS_PAGE)}
+                      >
+                        再多看 {NOTIFICATIONS_PAGE} 条
+                      </Button>
+                    </Stack>
+                  </Stack>
+                </Section>
+              ) : null}
+            </Stack>
+            {selected ? (
+              <NoticeDetail
+                key={selected.id}
+                n={selected}
+                now={now}
+                me={me}
+                handlingProblem={handlingProblem}
+                onClose={() => set('id', null)}
+                {...actions}
+              />
+            ) : (
+              <Section aria-label="通知详情">
+                <EmptyState icon={Bell} title="还没选通知" hint="点左侧一行，在这里看详情和处理。" />
+              </Section>
+            )}
+          </Grid>
+        )}
+      </Stack>
     </Page>
   );
 }

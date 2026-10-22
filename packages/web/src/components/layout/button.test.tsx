@@ -65,6 +65,20 @@ test('disabledReason：置灰、悬停写原因、点了不触发；链接也不
   expect(screen.getByRole('button', { name: '去看' }).getAttribute('aria-disabled')).toBe('true');
 });
 
+test('native：后端地址用普通链接本窗口打开；block 撑满一行', () => {
+  render(
+    <MemoryRouter>
+      <Button href="/api/auth/feishu/login?next=%2F" native block>
+        用飞书登录
+      </Button>
+    </MemoryRouter>,
+  );
+  const link = screen.getByRole('link', { name: '用飞书登录' });
+  expect(link.getAttribute('href')).toBe('/api/auth/feishu/login?next=%2F');
+  expect(link.getAttribute('target')).toBeNull();
+  expect(link.className).toContain('w-full');
+});
+
 test('loading：忙时转圈并拦点击', () => {
   const onClick = vi.fn();
   render(

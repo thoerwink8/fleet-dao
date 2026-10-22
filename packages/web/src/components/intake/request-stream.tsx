@@ -1,22 +1,25 @@
 // 对话里的消息流（#2062，方案第四节）：电脑中栏和手机全屏聊天共用。
-// 我说的在右边带气泡；别人在左边、小头像，连续几条只在第一条上面写名字；指挥官在左边、不加气泡；系统的话居中一行小字。
+// 我说的在右边带蓝底；别人和指挥官在左边灰底，连续几条只在第一条上面写名字；系统的话居中一行小字。
 // 拍板卡（待拍板时在最后）：只有拍板人能点「同意做 / 不做 / 再聊聊」，别人看到「等谁拍」。草稿齐了的一张紧凑卡带「提交拍板 / 确定，开单」。
 // 结案后最后一行是结案分隔线。B、C 片的消息（指挥官一问的选项、建议改、进度卡、引擎提问的回答、别家意见、换模型分隔线、
 // 暂停原因、方案卡、指挥官正在回话）画法在 request-cards.tsx。
 import { isIdleCloseReason, pausedWhy } from '@fleet-dao/shared';
-import { CornerDownRight } from 'lucide-react';
 import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useRequestAction } from '../../api/client';
 import type { RequestDetail, RequestDraftField, RequestMessage } from '../../api/types';
 import { formatClock, formatDateTime } from '../../lib/format';
-import { cn } from '../../lib/utils';
-import { StatusDot } from '../layout/status-badge';
+import { Button } from '../layout/button';
+import { Chat, Message as ChatMessage } from '../layout/chat';
+import { Textarea } from '../layout/input';
+import { Inset, RuleLabel } from '../layout/inset';
+import { TextLink } from '../layout/link';
+import { Stack } from '../layout/stack';
+import { LevelDot } from '../layout/status-badge';
+import { Tag } from '../layout/tag';
+import { Text } from '../layout/text';
 import { MarkdownLite } from '../markdown-lite';
-import { Button } from '../ui/button';
-import { Textarea } from '../ui/textarea';
 import { useOpenIssueAction } from './open-issue';
-import { BotAvatar, PersonAvatar } from './people';
 import {
   CommanderLive,
   EngineAsk,
@@ -44,9 +47,9 @@ function withMentions(text: string): ReactNode[] {
   return text.split(/(@[^\s，。,.！？]+)/).map((part, i) =>
     part.startsWith('@') ? (
       // biome-ignore lint/suspicious/noArrayIndexKey: 文本切片按先后排
-      <span key={i} className="rounded-sm bg-accent px-1 font-medium">
+      <Text key={i} strong>
         {part}
-      </span>
+      </Text>
     ) : (
       // biome-ignore lint/suspicious/noArrayIndexKey: 文本切片按先后排
       <Fragment key={i}>{part}</Fragment>
@@ -63,23 +66,15 @@ export function withIssueLinks(text: string): ReactNode[] {
     const at = m.index ?? 0;
     if (at > last) out.push(text.slice(last, at));
     out.push(
-      <a
-        key={at}
-        href={m[2]}
-        target="_blank"
-        rel="noreferrer"
-        className="text-foreground underline-offset-2 hover:underline"
-      >
+      <TextLink key={at} href={m[2] as string}>
         #{m[3]}
-      </a>,
+      </TextLink>,
     );
     last = at + m[0].length;
   }
   if (last < text.length) out.push(text.slice(last));
   return out;
 }
-
-const SPACER = 'w-6 shrink-0';
 
 function sameSpeaker(a: RequestMessage | undefined, b: RequestMessage): boolean {
   if (!a || a.kind !== b.kind) return false;
@@ -118,46 +113,33 @@ function Message({
   const at = formatClock(m.createdAt);
   if (m.kind === 'system') {
     if (m.card?.type === 'model_switch') {
-      return (
-        <div className="flex items-center gap-3 text-meta text-muted-foreground" data-message="model-switch">
-          <span className="h-px flex-1 bg-border" />
-          <span className="min-w-0 text-center">{m.body}</span>
-          <span className="h-px flex-1 bg-border" />
-        </div>
-      );
+      return <RuleLabel data-message="model-switch">{m.body}</RuleLabel>;
     }
     if (m.card?.type === 'paused') {
       return (
-        <div className="flex justify-center" data-message="paused">
-          <span className="rounded-md border border-st-stall-line bg-st-stall-soft px-3 py-1 text-meta text-ink-stall">
-            {pausedWhy(m.card.why)}
-          </span>
-        </div>
+        <Stack align="center" data-message="paused">
+          <Tag tone="warning">{pausedWhy(m.card.why)}</Tag>
+        </Stack>
       );
     }
     const progress = progressCard(m, d);
     if (progress) return progress;
     return (
-      <div
-        className="text-center text-meta text-muted-foreground"
-        data-message="system"
-        title={formatDateTime(m.createdAt)}
-      >
-        {withIssueLinks(m.body)}
+      <div data-message="system" title={formatDateTime(m.createdAt)}>
+        <Stack align="center">
+          <Text size="meta" tone="muted">
+            {withIssueLinks(m.body)}
+          </Text>
+        </Stack>
       </div>
     );
   }
   if (m.kind === 'commander') {
     const fields = patchedFields(m);
     return (
-      <div className={cn('flex gap-2', !first && '-mt-1.5')} data-message="commander">
-        {first ? <BotAvatar who="commander" /> : <span className={SPACER} />}
-        <div className="min-w-0 max-w-2xl flex-1">
-          {first ? (
-            <div className="mb-0.5 text-meta text-muted-foreground">
-              指挥官 · <span className="tabular-nums">{at}</span>
-            </div>
-          ) : null}
+      // biome-ignore lint/a11y/useValidAriaRole: role 是消息的角色（me、other、tool），不是 ARIA role。
+      <ChatMessage role="other" data-message="commander" {...(first ? { meta: `指挥官 · ${at}` } : {})}>
+        <Stack gap="sm">
           <MarkdownLite source={m.body} />
           {m.card?.type === 'question' ? (
             <QuestionCard card={m.card} live={liveQuestion} onPick={onPick} />
@@ -169,95 +151,79 @@ function Message({
             <SuggestCard card={m.card} d={d} label={FIELD_LABELS[m.card.field]} phone={phone} />
           ) : null}
           {fields.length > 0 ? (
-            <button
-              type="button"
-              onClick={() => onOpenPanel(fields[0])}
-              disabled={phone}
-              className="mt-1 inline-flex min-h-6 items-center gap-1 rounded-sm bg-muted px-2 text-meta text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground disabled:pointer-events-none"
-              title="打开单子，看改了哪里"
-              data-draft-patch
-            >
-              <CornerDownRight className="size-3" aria-hidden />
-              改了单子：{fields.map((f) => FIELD_LABELS[f]).join('、')}
-            </button>
+            <Stack align="start">
+              {phone ? (
+                <div data-draft-patch="">
+                  <Text size="meta" tone="muted">
+                    改了单子：{fields.map((f) => FIELD_LABELS[f]).join('、')}
+                  </Text>
+                </div>
+              ) : (
+                <Button
+                  size="xs"
+                  variant="text"
+                  title="打开单子，看改了哪里"
+                  onClick={() => onOpenPanel(fields[0])}
+                  data-draft-patch=""
+                >
+                  改了单子：{fields.map((f) => FIELD_LABELS[f]).join('、')}
+                </Button>
+              )}
+            </Stack>
           ) : null}
-        </div>
-      </div>
+        </Stack>
+      </ChatMessage>
     );
   }
   if (m.kind === 'engine_ask' || m.kind === 'review') {
     const engine = m.kind === 'engine_ask';
     return (
-      <div className="flex gap-2" data-message={m.kind}>
-        <BotAvatar who={engine ? 'engine' : 'commander'} />
-        <div className="min-w-0 max-w-xl flex-1">
-          <div className="mb-0.5 text-meta text-muted-foreground">
-            {engine ? '引擎提问' : '别家挑错'} · <span className="tabular-nums">{at}</span>
+      // biome-ignore lint/a11y/useValidAriaRole: role 是消息的角色（me、other、tool），不是 ARIA role。
+      <ChatMessage
+        role="other"
+        data-message={m.kind}
+        meta={
+          <>
+            {engine ? '引擎提问' : '别家挑错'} · {at}
             {m.githubCommentRef ? (
               <>
                 {' · '}
-                <a
-                  href={m.githubCommentRef}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline-offset-2 hover:text-foreground hover:underline"
-                >
-                  单子上的那条评论
-                </a>
+                <TextLink href={m.githubCommentRef}>单子上的那条评论</TextLink>
               </>
             ) : null}
-          </div>
-          <div
-            className={cn(
-              'rounded-lg border px-3 py-2 text-body',
-              engine ? 'border-st-human-line bg-st-human-soft' : 'bg-muted',
-            )}
-          >
-            <p className="whitespace-pre-wrap">{m.body}</p>
-            {engine ? <EngineAsk m={m} d={d} meId={meId} /> : null}
-            {m.card?.type === 'review' ? <ReviewCard card={m.card} m={m} d={d} phone={phone} /> : null}
-          </div>
-        </div>
-      </div>
+          </>
+        }
+      >
+        <Stack gap="sm">
+          <Text pre>{m.body}</Text>
+          {engine ? <EngineAsk m={m} d={d} meId={meId} /> : null}
+          {m.card?.type === 'review' ? <ReviewCard card={m.card} m={m} d={d} phone={phone} /> : null}
+        </Stack>
+      </ChatMessage>
     );
   }
   const author = m.author ?? { id: '', name: '（不知道是谁）' };
   if (author.id === meId) {
     return (
-      <div
-        className={cn('flex justify-end', !first && '-mt-1.5')}
-        title={`${author.name} ${formatDateTime(m.createdAt)}`}
-        data-message="mine"
-      >
-        <div className="max-w-xl rounded-lg bg-selected px-3 py-2 text-body whitespace-pre-wrap">
-          {withMentions(m.body)}
-        </div>
-      </div>
+      // biome-ignore lint/a11y/useValidAriaRole: role 是消息的角色（me、other、tool），不是 ARIA role。
+      <ChatMessage role="me" data-message="mine" meta={at}>
+        <Text pre>{withMentions(m.body)}</Text>
+      </ChatMessage>
     );
   }
   return (
-    <div
-      className={cn('flex gap-2', !first && '-mt-1.5')}
-      title={`${author.name} ${formatDateTime(m.createdAt)}`}
+    // biome-ignore lint/a11y/useValidAriaRole: role 是消息的角色（me、other、tool），不是 ARIA role。
+    <ChatMessage
+      role="other"
       data-message="other"
+      {...(first ? { meta: `${author.name} · ${at}${m.channel === 'mobile' ? ' · 手机' : ''}` } : {})}
     >
-      {first ? <PersonAvatar person={author} me={false} /> : <span className={SPACER} />}
-      <div className="min-w-0 max-w-xl">
-        {first ? (
-          <div className="mb-0.5 text-meta text-muted-foreground">
-            {author.name} · <span className="tabular-nums">{at}</span>
-            {m.channel === 'mobile' ? ' · 手机' : ''}
-          </div>
-        ) : null}
-        <div className="w-fit rounded-lg bg-muted px-3 py-2 text-body whitespace-pre-wrap">
-          {withMentions(m.body)}
-        </div>
-      </div>
-    </div>
+      <Text pre>{withMentions(m.body)}</Text>
+    </ChatMessage>
   );
 }
 
-/** 草稿到了该交的时候：一张紧凑的卡，主按钮是「提交拍板」或「确定，开单」（看发起人要不要拍板）。 */
+/** 草稿到了该交的时候：一张紧凑的卡，按钮是「提交拍板」或「确定，开单」（看发起人要不要拍板）。 */
 function ReadyCard({
   d,
   meId,
@@ -277,40 +243,43 @@ function ReadyCard({
   const label = r.needsDecision ? '提交拍板' : '确定，开单';
   const go = () => act.run(r.seq, kind, r.draftVersion);
   return (
-    <div className="ml-8 max-w-xl rounded-lg border bg-background px-3 py-2.5" data-ready-card>
-      <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-body font-medium">{r.draft.title}</span>
-        <span className="shrink-0 text-meta text-muted-foreground tabular-nums">第 {r.draftVersion} 版</span>
-      </div>
-      <p className="mt-0.5 text-meta text-muted-foreground">
+    <Inset data-ready-card="">
+      <Stack direction="horizontal" gap="md" justify="between" align="baseline">
+        <Text strong truncate>
+          {r.draft.title}
+        </Text>
+        <Text size="meta" tone="muted">
+          第 {r.draftVersion} 版
+        </Text>
+      </Stack>
+      <Text size="meta" tone="muted">
         {verdict.allowed
           ? r.needsDecision
             ? `草稿齐了：提交后等拍板人拍，拍了「做」才开单`
             : '草稿齐了：确定后结案，交给引擎开单'
           : (verdict.why ?? '还不能交')}
-      </p>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      </Text>
+      <Stack direction="horizontal" gap="sm" align="center" wrap>
         {mine ? (
           <Button
-            variant="brand"
-            className="max-md:h-11"
-            disabled={!verdict.allowed}
+            variant="outline"
+            size="sm"
             loading={act.isPending}
+            {...(verdict.allowed ? {} : { disabledReason: verdict.why ?? '还不能交' })}
             onClick={go}
-            {...(verdict.allowed ? {} : { title: verdict.why })}
           >
             {label}
           </Button>
         ) : (
-          <span className="text-meta text-muted-foreground">
+          <Text size="meta" tone="muted">
             由发起人 {r.initiator.name} {label}
-          </span>
+          </Text>
         )}
-        <Button variant="ghost" className="max-md:h-11" onClick={onOpenPanel}>
+        <Button variant="text" size="sm" onClick={onOpenPanel}>
           {phone ? '看单子' : '看全文'}
         </Button>
-      </div>
-    </div>
+      </Stack>
+    </Inset>
   );
 }
 
@@ -349,115 +318,114 @@ function DecideCard({
     );
   };
   return (
-    <div
-      className="ml-8 max-w-xl rounded-lg border border-st-human-line bg-background px-3 py-2.5"
-      data-decide-card
-    >
-      <div className="flex items-center gap-2 text-body">
-        <PersonAvatar person={r.initiator} me={r.initiator.id === meId} size="sm" />
-        <span className="min-w-0 flex-1 font-medium">
+    <Inset data-decide-card="">
+      <Stack direction="horizontal" gap="sm" justify="between" align="baseline">
+        <Text strong>
           {r.initiator.name} 提交拍板 · 第 {r.draftVersion} 版
-        </span>
+        </Text>
         {submitted ? (
-          <span className="shrink-0 text-meta text-muted-foreground tabular-nums">
+          <Text size="meta" tone="muted">
             {formatClock(submitted.createdAt)}
-          </span>
+          </Text>
         ) : null}
-      </div>
+      </Stack>
       <DraftGist d={d} phone={phone} onOpenPanel={onOpenPanel} />
       {can ? (
         asking ? (
-          <div className="mt-2 space-y-2">
+          <Stack gap="sm">
             <Textarea
               rows={2}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="不做的理由（会留在这条需求里）……"
               aria-label="不做的理由"
-              className="min-h-0 bg-background"
             />
-            <div className="flex gap-2">
+            <Stack direction="horizontal" gap="sm">
               <Button
-                variant="destructive"
-                className="flex-1 max-md:h-11"
-                disabled={!reason.trim()}
+                variant="danger"
+                size="sm"
                 loading={act.isPending && which === 'reject'}
+                {...(reason.trim() ? {} : { disabledReason: '先写不做的理由' })}
                 onClick={() => go({ action: 'reject', reason: reason.trim() }, 'reject')}
               >
                 确认不做
               </Button>
-              <Button variant="outline" className="flex-1 max-md:h-11" onClick={() => setAsking(false)}>
+              <Button variant="secondary" size="sm" onClick={() => setAsking(false)}>
                 返回
               </Button>
-            </div>
-          </div>
+            </Stack>
+          </Stack>
         ) : (
-          <div className="mt-2 flex gap-2" data-decide-buttons>
+          <Stack direction="horizontal" gap="sm" wrap data-decide-buttons="">
             <Button
-              variant="brand"
-              className="flex-1 max-md:h-11"
+              variant="outline"
+              size="sm"
               loading={open.isPending}
               onClick={() => open.run(r.seq, 'approve', r.draftVersion)}
             >
               同意做
             </Button>
-            <Button variant="outline" className="flex-1 max-md:h-11" onClick={() => setAsking(true)}>
+            <Button variant="secondary" size="sm" onClick={() => setAsking(true)}>
               不做
             </Button>
             <Button
-              variant="outline"
-              className="flex-1 max-md:h-11"
+              variant="secondary"
+              size="sm"
               loading={act.isPending && which === 'rediscuss'}
               onClick={() => go({ action: 'rediscuss' }, 'rediscuss')}
             >
               再聊聊
             </Button>
-          </div>
+          </Stack>
         )
       ) : (
-        <div
-          className="mt-1 flex items-center gap-1.5 text-meta text-muted-foreground"
-          title={d.actions.approve.why}
-          data-decide-wait
-        >
-          <StatusDot tone="human" />等 {decider} 拍板
-          {d.actions.approve.why ? <span className="sr-only">：{d.actions.approve.why}</span> : null}
+        <div data-decide-wait="" {...(d.actions.approve.why ? { title: d.actions.approve.why } : {})}>
+          <Stack direction="horizontal" gap="sm" align="center">
+            <LevelDot level="default" />
+            <Text size="meta" tone="muted">
+              等 {decider} 拍板
+            </Text>
+          </Stack>
         </div>
       )}
-    </div>
+    </Inset>
   );
 }
 
-/** 要拍的那一版的要点：标题、场景（两行）、怎么算做完（前三条），再给「看全文」。 */
+/** 要拍的那一版的要点：标题、场景、怎么算做完（前三条），再给「看全文」。 */
 function DraftGist({ d, phone, onOpenPanel }: { d: RequestDetail; phone: boolean; onOpenPanel: () => void }) {
   const draft = d.request.draft;
   const done = draft.done ?? [];
   return (
-    <div className="mt-2 space-y-1.5 border-l-2 border-border pl-2.5 text-meta" data-decide-gist>
-      <p className="font-medium text-body">{draft.title}</p>
-      {draft.scene ? (
-        <p className="line-clamp-2 text-muted-foreground">
-          <span className="text-foreground">场景：</span>
-          {draft.scene}
-        </p>
-      ) : null}
-      {done.length > 0 ? (
-        <div className="text-muted-foreground">
-          <span className="text-foreground">怎么算做完：</span>
-          <ul className="mt-0.5 space-y-0.5">
+    <div data-decide-gist="">
+      <Stack gap="sm" align="start">
+        <Text strong>{draft.title}</Text>
+        {draft.scene ? (
+          <Text size="meta" tone="secondary">
+            场景：{draft.scene}
+          </Text>
+        ) : null}
+        {done.length > 0 ? (
+          <Stack gap="sm">
+            <Text size="meta" tone="secondary">
+              怎么算做完：
+            </Text>
             {done.slice(0, 3).map((x) => (
-              <li key={x} className="flex gap-1.5">
-                <span aria-hidden>·</span>
-                <span className="min-w-0 truncate">{x}</span>
-              </li>
+              <Text key={x} size="meta" tone="secondary" truncate>
+                · {x}
+              </Text>
             ))}
-          </ul>
-          {done.length > 3 ? <p className="mt-0.5">还有 {done.length - 3} 条，在全文里</p> : null}
-        </div>
-      ) : null}
-      <Button variant="ghost" size="sm" className="-ml-2 max-md:h-11" onClick={onOpenPanel}>
-        {phone ? '看单子' : '看全文'}
-      </Button>
+            {done.length > 3 ? (
+              <Text size="meta" tone="muted">
+                还有 {done.length - 3} 条，在全文里
+              </Text>
+            ) : null}
+          </Stack>
+        ) : null}
+        <Button variant="text" size="sm" onClick={onOpenPanel}>
+          {phone ? '看单子' : '看全文'}
+        </Button>
+      </Stack>
     </div>
   );
 }
@@ -511,21 +479,23 @@ export function MessageStream({
   }, [d.messages.length, r.status, r.seq]);
   const closed = r.status === 'closed_do' || r.status === 'closed_drop';
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-intake-stream>
-      <div className="mx-auto flex max-w-chat flex-col gap-3 px-4 py-4">
+    <div data-intake-stream="">
+      <Chat>
         {r.continuesSeq !== undefined ? (
-          <div className="text-center text-meta text-muted-foreground" data-continues>
-            接着 需求 {r.continuesSeq} 提的
+          <div data-continues="">
+            <Stack align="center">
+              <Text size="meta" tone="muted">
+                接着 需求 {r.continuesSeq} 提的
+              </Text>
+            </Stack>
           </div>
         ) : null}
         {d.messages.map((m, i) => (
           <Fragment key={m.id}>
             {m.id === firstUnread ? (
-              <div className="flex items-center gap-3 text-meta text-ink-human" data-unread-divider>
-                <span className="h-px flex-1 bg-st-human-line" />
+              <RuleLabel accent data-unread-divider="">
                 以下是新消息
-                <span className="h-px flex-1 bg-st-human-line" />
-              </div>
+              </RuleLabel>
             ) : null}
             <Message
               m={m}
@@ -547,23 +517,24 @@ export function MessageStream({
           <ReadyCard d={d} meId={meId} phone={phone} onOpenPanel={() => onOpenPanel()} />
         ) : null}
         {closed ? (
-          <div
-            className="flex items-center gap-3 text-meta text-muted-foreground"
-            data-closed-line
+          <RuleLabel
+            data-closed-line=""
             {...(isIdleCloseReason(r.closeReason) ? { 'data-close-reason': r.closeReason } : {})}
           >
-            <span className="h-px flex-1 bg-border" />
-            <span className="min-w-0 text-center">{closedLine(d)}</span>
-            <span className="h-px flex-1 bg-border" />
-          </div>
+            {closedLine(d)}
+          </RuleLabel>
         ) : null}
         {r.continuedBy.length > 0 ? (
-          <div className="text-center text-meta text-muted-foreground" data-continued-by>
-            接着这条提了：{r.continuedBy.map((s) => `需求 ${s}`).join('、')}
+          <div data-continued-by="">
+            <Stack align="center">
+              <Text size="meta" tone="muted">
+                接着这条提了：{r.continuedBy.map((s) => `需求 ${s}`).join('、')}
+              </Text>
+            </Stack>
           </div>
         ) : null}
         <div ref={endRef} />
-      </div>
+      </Chat>
     </div>
   );
 }

@@ -4,6 +4,7 @@
 import { CircleAlert, CircleCheck, Info, type LucideIcon, TriangleAlert } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
+import type { DataAttrs } from './data-attrs';
 
 export type NoticeTone = 'fail' | 'stall' | 'info' | 'done';
 
@@ -29,7 +30,8 @@ export function Notice({
   children,
   className,
   role,
-}: {
+  ...data
+}: DataAttrs & {
   tone?: NoticeTone;
   title?: ReactNode;
   /** 右侧的操作，例如「重试」。 */
@@ -43,6 +45,7 @@ export function Notice({
   return (
     <div
       role={role ?? (tone === 'fail' || tone === 'stall' ? 'alert' : 'status')}
+      {...data}
       data-tone={tone}
       data-look={look}
       className={cn(

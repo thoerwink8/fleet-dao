@@ -13,20 +13,12 @@ import { toast } from 'sonner';
 import { errorText, useUpdateSetting } from '../api/client';
 import type { Setting } from '../api/types';
 import { settingLabel } from '../lib/audit';
-import { FieldRow } from './layout/field-row';
+import { ConfirmDialog } from './layout/confirm-dialog';
 import { FilterTabs } from './layout/filter-tabs';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from './ui/alert-dialog';
-import { Input } from './ui/input';
-import { Label } from './ui/label';
+import { Form, FormItem } from './layout/form';
+import { Input, Label } from './layout/input';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 
 const CHOICES = [
   { id: 'three', label: '三段' },
@@ -96,53 +88,47 @@ export function FlowModeSetting({ s }: { s: Setting | undefined }) {
   const askLabel = ask ? choiceLabel(ask) : '';
 
   return (
-    <FieldRow
-      onSubmit={(e) => e.preventDefault()}
-      formLabel={settingLabel[FLOW_MODE_SETTING]}
-      label={settingLabel[FLOW_MODE_SETTING]}
-      error={failure ?? undefined}
-      hint={
-        <>
-          新开的单走哪一种。三段是对题、动手、验收各一段；对半分是大约一半走全程（split:50）；全程是一个会话自己走到合并。已经分过组的单保持分组时定下的模式。改的时候要写原因。
-          <p data-flow-mode-current>{flowModeSwitchText(reading)}</p>
-        </>
-      }
-    >
-      <FilterTabs mode="toggle" aria-label="全程模式" items={CHOICES} value={selected} onChange={pick} />
-      <AlertDialog
+    <Form aria-label={settingLabel[FLOW_MODE_SETTING]}>
+      <FormItem
+        label={settingLabel[FLOW_MODE_SETTING]}
+        error={failure ?? undefined}
+        help={
+          <>
+            新开的单走哪一种。三段是对题、动手、验收各一段；对半分是大约一半走全程（split:50）；全程是一个会话自己走到合并。已经分过组的单保持分组时定下的模式。改的时候要写原因。
+            <span data-flow-mode-current>
+              <Text size="meta" tone="muted" block>
+                {flowModeSwitchText(reading)}
+              </Text>
+            </span>
+          </>
+        }
+      >
+        <FilterTabs mode="toggle" aria-label="全程模式" items={CHOICES} value={selected} onChange={pick} />
+      </FormItem>
+      <ConfirmDialog
         open={ask !== null}
         onOpenChange={(open) => {
           if (open || update.isPending) return;
           setAsk(null);
           setReason('');
         }}
+        title={`改成「${askLabel}」？`}
+        description={`${ask ? DETAIL[ask] : ''}已经分过组的单保持分组时定下的模式。`}
+        confirmText={`确认改成${askLabel}`}
+        confirmDisabled={why === ''}
+        onConfirm={confirm}
       >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>改成「{askLabel}」？</AlertDialogTitle>
-            <AlertDialogDescription>
-              {ask ? DETAIL[ask] : ''}
-              已经分过组的单保持分组时定下的模式。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="flow-mode-reason">原因</Label>
-            <Input
-              id="flow-mode-reason"
-              value={reason}
-              maxLength={500}
-              placeholder="为什么改"
-              onChange={(e) => setReason(e.target.value)}
-            />
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction disabled={why === ''} onConfirm={confirm}>
-              确认改成{askLabel}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </FieldRow>
+        <Stack gap="sm">
+          <Label htmlFor="flow-mode-reason">原因</Label>
+          <Input
+            id="flow-mode-reason"
+            value={reason}
+            maxLength={500}
+            placeholder="为什么改"
+            onChange={(e) => setReason(e.target.value)}
+          />
+        </Stack>
+      </ConfirmDialog>
+    </Form>
   );
 }

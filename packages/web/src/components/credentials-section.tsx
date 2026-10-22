@@ -4,8 +4,7 @@
 // - 已经设过：改什么都要带当前密码；改了密码，别处已登的会话全部作废，这一处不掉线；
 // - 错误按 details.field 落在对应那一栏；锁了（429）、没资格（403）是整体错误。
 // 密码的规则只提示后端明说的最低长度，不替人定别的（NIST SP 800-63B 3.1.1.2 / OWASP：不加字符类型要求）；密码不写日志、不进地址。
-import { type FormEvent, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { brand } from '#brand';
 import { useCredentials, useUpdateCredentials } from '../api/client';
@@ -18,12 +17,17 @@ import {
 } from '../lib/credentials';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { Button } from './layout/button';
 import { FieldGroup, FieldRow } from './layout/field-row';
+import { Form } from './layout/form';
+import { Input } from './layout/input';
+import { TextLink } from './layout/link';
 import { LoadError, LoadingRows } from './layout/load-state';
 import { Notice } from './layout/notice';
 import { SaveButton } from './layout/save-button';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 import { PasswordField } from './password-field';
-import { Input } from './ui/input';
 
 /** 用户名栏的提示：就是后端 checkUsername 的规则，原话照抄，不另编。 */
 const USERNAME_HINT = '3–32 位，字母或数字开头，可以用字母、数字、点、下划线、连字符；大小写不区分。';
@@ -40,18 +44,15 @@ function passwordLength(p: string): number {
 function Status({ c }: { c: Credentials }) {
   const now = useNow();
   if (!c.hasPassword) {
-    return <p className="text-body text-muted-foreground">还没设过账密：现在只能用飞书登录。</p>;
+    return <Text tone="muted">还没设过账密：现在只能用飞书登录。</Text>;
   }
   return (
-    <p className="text-body">
-      已设账密：用户名 <span className="num font-medium">{c.username ?? '（没有用户名）'}</span>
+    <Text>
+      已设账密：用户名 <Text strong>{c.username ?? '（没有用户名）'}</Text>
       {c.passwordChangedAt ? (
-        <span className="text-muted-foreground">
-          {' '}
-          · 上次改密码 <span className="num">{formatAgo(c.passwordChangedAt, now)}</span>
-        </span>
+        <Text tone="muted"> · 上次改密码 {formatAgo(c.passwordChangedAt, now)}</Text>
       ) : null}
-    </p>
+    </Text>
   );
 }
 
@@ -72,8 +73,7 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
   const wantsPassword = newPassword !== '';
   const nothingToChange = first ? false : !usernameChanged && !wantsPassword;
 
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
+  const submit = async () => {
     if (update.isPending) return;
     const next: Errors = {};
     if (first && !name) next.username = '第一次设账密要同时设用户名。';
@@ -118,7 +118,7 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
 
   const busy = update.isPending;
   return (
-    <form onSubmit={submit} method="post" className="mt-3" aria-label={first ? '设账密' : '改账密'}>
+    <Form onSubmit={() => void submit()} aria-label={first ? '设账密' : '改账密'}>
       {/* 密码管理器 / 无障碍：密码表单要有 autocomplete=username 的用户名字段；看得见的那一栏另写，这里藏一份兜底。 */}
       <input
         type="text"
@@ -131,9 +131,9 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         aria-hidden
       />
       {blocked ? (
-        <p role="status" className="mb-2 rounded-lg bg-muted px-3 py-2 text-body text-muted-foreground">
+        <Notice tone="info">
           第一次设账密要在飞书登录后 10 分钟内设：请先退出，用飞书重新登录一次，再回到这里。
-        </p>
+        </Notice>
       ) : null}
       {/* 和运行设置、外观同一个样子：字段装进一组（FieldGroup），保存在组下面（#1917） */}
       <FieldGroup>
@@ -173,7 +173,7 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
             readOnly={busy}
             aria-invalid={errors.username ? true : undefined}
             aria-describedby={`cred-username-hint${errors.username ? ' cred-username-error' : ''}`}
-            className="max-w-sm"
+            width="search"
           />
         </FieldRow>
         <PasswordField
@@ -200,27 +200,16 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
           layout="row"
         />
       </FieldGroup>
-      {errors.form ? (
-        <Notice tone="fail" className="mt-2">
-          {errors.form}
-        </Notice>
-      ) : null}
-      <div className="flex flex-wrap items-center gap-3 pt-3">
+      {errors.form ? <Notice tone="fail">{errors.form}</Notice> : null}
+      <Stack direction="horizontal" gap="md" align="center" wrap>
         <SaveButton canSave={!blocked} pending={busy}>
           {busy ? '保存中…' : first ? '设账密' : '保存修改'}
         </SaveButton>
-        <span className="text-meta text-muted-foreground">
-          改动会记进
-          <Link
-            to="/audit"
-            className="underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:items-center"
-          >
-            操作记录
-          </Link>
-          （只记改了什么，不记密码）。
-        </span>
-      </div>
-    </form>
+        <Text size="meta" tone="muted">
+          改动会记进 <TextLink to="/audit">操作记录</TextLink>（只记改了什么，不记密码）。
+        </Text>
+      </Stack>
+    </Form>
   );
 }
 
@@ -228,23 +217,38 @@ export function CredentialsSection() {
   const creds = useCredentials();
   // 「做完了」的说明放在表单外面：设成功后表单会换成「改」的样子（下面的 key），说明不能跟着丢
   const [done, setDone] = useState<string | null>(null);
+  // 样稿：设过账密时平时只写用户名和上次改密码，点「改账密」才展开表单；还没设过时直接展开
+  const [editing, setEditing] = useState(false);
   if (creds.error)
     return <LoadError what="账密状态" error={creds.error} onRetry={() => void creds.refetch()} />;
   if (!creds.data) return <LoadingRows rows={2} />;
   // key 随服务端状态变：设成功后（没有密码 → 有密码）整张表单换成「改」的样子，旧的输入不残留
   const c = creds.data;
+  const open = !c.hasPassword || editing;
   return (
-    <div>
-      <Status c={c} />
-      <p className="mt-0.5 truncate whitespace-nowrap text-meta text-muted-foreground" title={CRED_NOTE}>
+    <Stack gap="md">
+      <Stack direction="horizontal" gap="md" align="center" justify="between" wrap>
+        <Status c={c} />
+        {c.hasPassword ? (
+          <Button size="sm" onClick={() => setEditing((v) => !v)}>
+            {editing ? '收起' : '改账密'}
+          </Button>
+        ) : null}
+      </Stack>
+      <Text size="meta" tone="muted" truncate title={CRED_NOTE}>
         {CRED_NOTE}
-      </p>
-      {done ? (
-        <p role="status" className="mt-3 max-w-md rounded-lg bg-muted px-3 py-2 text-body">
-          {done}
-        </p>
+      </Text>
+      {done ? <Notice tone="info">{done}</Notice> : null}
+      {open ? (
+        <CredentialsForm
+          key={`${c.hasPassword}:${c.username ?? ''}`}
+          c={c}
+          setDone={(text) => {
+            setDone(text);
+            if (text) setEditing(false);
+          }}
+        />
       ) : null}
-      <CredentialsForm key={`${c.hasPassword}:${c.username ?? ''}`} c={c} setDone={setDone} />
-    </div>
+    </Stack>
   );
 }

@@ -17,6 +17,7 @@ import { settingLabel } from '../lib/audit';
 import NotificationsPage from '../routes/notifications';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
+import { openNotice } from './notice-helpers';
 
 beforeEach(() => {
   for (const f of [toast.success, toast.error, toast.info, toast.warning]) f.mockClear();
@@ -126,12 +127,7 @@ describe('通知中心：处理了', () => {
     const first = open.find((n) => n.level !== 'decision');
     if (!first) throw new Error('假数据里没有待处理的提醒');
     renderApp(<NotificationsPage />, { api });
-    await screen.findByText(first.title);
-    fireEvent.click(
-      within(screen.getByText(first.title).closest('li') as HTMLElement).getByRole('button', {
-        name: '处理了',
-      }),
-    );
+    fireEvent.click(within(await openNotice(first.title)).getByRole('button', { name: '处理了' }));
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('处理了', { description: first.title }));
     expect(resolve).toHaveBeenCalledExactlyOnceWith(first.id);
     await waitFor(() => expect(screen.queryByText(first.title)).toBeNull());
@@ -145,28 +141,30 @@ describe('通知中心：处理了', () => {
     const first = (await api.notifications()).items.find((n) => n.level !== 'decision');
     if (!first) throw new Error('假数据里没有待处理的提醒');
     renderApp(<NotificationsPage />, { api });
-    await screen.findByText(first.title);
-    fireEvent.click(
-      within(screen.getByText(first.title).closest('li') as HTMLElement).getByRole('button', {
-        name: '处理了',
-      }),
-    );
+    fireEvent.click(within(await openNotice(first.title)).getByRole('button', { name: '处理了' }));
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('没处理成', { description: '没有这条通知' }),
     );
     expect(toast.success).not.toHaveBeenCalled();
-    expect(screen.getByText(first.title)).toBeTruthy();
+    expect(screen.getAllByText(first.title).length).toBeGreaterThan(0);
   });
 
-  test('已经处理过的（含已处理的列表）、要你拍的没有「处理了」按钮：按钮数 == 还没处理的非「要你拍」条数', async () => {
+  test('已经处理过的（含已处理的列表）、要你拍的没有「处理了」按钮：点开每一条，有按钮的 == 还没处理的非「要你拍」条', async () => {
     const api = createMockApi({ live: false });
     const all = (await api.notifications({ status: 'all' })).items;
     // 要你拍的只能选一个或写一句（#2353），不给「处理了」
-    const unresolved = all.filter((n) => !n.resolvedAt && n.level !== 'decision').length;
-    expect(all.length).toBeGreaterThan(unresolved); // 假数据里确有已处理的，否则这条测不出东西
+    const unresolved = all.filter((n) => !n.resolvedAt && n.level !== 'decision');
+    expect(all.length).toBeGreaterThan(unresolved.length); // 假数据里确有已处理的，否则这条测不出东西
     renderApp(<NotificationsPage />, { api, route: '/notifications?status=all' });
-    await screen.findAllByRole('button', { name: '处理了' });
-    expect(screen.getAllByRole('button', { name: '处理了' })).toHaveLength(unresolved);
+    await screen.findByText(all[0]?.title ?? '');
+    // 日报在「全部」里折成一行：先点开
+    fireEvent.click(within(await screen.findByTestId('daily-fold')).getByRole('button'));
+    const withButton: string[] = [];
+    for (const n of all) {
+      const detail = await openNotice(n.title);
+      if (within(detail).queryByRole('button', { name: '处理了' })) withButton.push(n.id);
+    }
+    expect(withButton.sort()).toEqual(unresolved.map((n) => n.id).sort());
   });
 });
 

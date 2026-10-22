@@ -144,11 +144,11 @@ describe('仓列表没读成，不冒充「没有仓」', () => {
     expect(screen.queryByText('还没有仓')).toBeNull();
   });
 
-  test('设置页：真读到一个空列表才说「还没有仓」', async () => {
+  test('设置页：真读到一个空列表才说「还没有仓库」', async () => {
     const api = createMockApi({ live: false });
     api.repos = async () => ({ repos: [] });
     renderApp(<SettingsPage />, { api });
-    expect(await screen.findByText('还没有仓')).toBeTruthy();
+    expect(await screen.findByText('还没有仓库')).toBeTruthy();
   });
 
   // 顶栏的「切换项目」在 #1065 到 #1998 之间没有（那阵子只有一个仓、被环境切换器替掉）；

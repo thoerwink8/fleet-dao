@@ -1,34 +1,16 @@
 // 一条需求的「⋯」菜单（#2062）：列表每行和对话头部共用。菜单项只出现详情 actions 里能做的（request-view.ts 的 menuFor），
 // 删不了时不出现「删除」，悬停「放下」「归档」写为什么不能删。删除先弹确认框（30 天后彻底删除，之前能在「最近删除」里恢复）；
 // 放下、改名要写一句，也在框里写。列表行没有详情：菜单打开时才去读这一条（读不到写原因，不出一个空菜单）。
-import { Copy, Ellipsis, LoaderCircle } from 'lucide-react';
+import { Copy, LoaderCircle } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useRequestAction, useRequestDetail } from '../../api/client';
 import type { RequestActionBody, RequestActions } from '../../api/types';
-import { cn } from '../../lib/utils';
-import { faintUntilRowHover } from '../layout/row-menu';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '../ui/alert-dialog';
-import { Button } from '../ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '../ui/dropdown-menu';
-import { Input } from '../ui/input';
-import { Textarea } from '../ui/textarea';
+import { ConfirmDialog } from '../layout/confirm-dialog';
+import { Input, Textarea } from '../layout/input';
+import { RowMenu, RowMenuItem, RowMenuLabel, RowMenuSeparator } from '../layout/row-menu';
+import { Stack } from '../layout/stack';
+import { Text } from '../layout/text';
 import { deleteNote, type MenuAction, menuFor } from './request-view';
 
 /** 删除确认框的话（方案第三节；测试和点验都按这一句找）。 */
@@ -46,8 +28,6 @@ const DONE_WORDS: Partial<Record<MenuAction, string>> = {
   drop: '已放下，进了已归档',
   rename: '已改名',
 };
-
-const ITEM = 'max-md:min-h-10 max-md:px-3';
 
 type Dialog = 'delete' | 'drop' | 'rename' | null;
 
@@ -113,126 +93,108 @@ export function RequestMenu({
 
   const items = actions ? menuFor(actions) : [];
   const note = actions ? deleteNote(actions) : undefined;
+  const close = (o: boolean) => {
+    if (!o) setDialog(null);
+  };
 
   return (
     <>
-      <DropdownMenu {...(open === undefined ? {} : { open })} {...(onOpenChange ? { onOpenChange } : {})}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            data-request-menu={seq}
-            className={cn('shrink-0 text-muted-foreground', variant === 'row' && faintUntilRowHover)}
-            aria-label={`更多操作：需求 ${seq}`}
-            title="更多操作"
+      <RowMenu
+        label={`更多操作：需求 ${seq}`}
+        title="更多操作"
+        reveal={variant === 'row'}
+        data-request-menu={String(seq)}
+        {...(open === undefined ? {} : { open })}
+        {...(onOpenChange ? { onOpenChange } : {})}
+      >
+        {header}
+        {header ? <RowMenuSeparator /> : null}
+        {loading && !actions ? (
+          <RowMenuLabel>
+            <LoaderCircle aria-hidden />
+            在读这条能做什么……
+          </RowMenuLabel>
+        ) : null}
+        {error && !actions ? <RowMenuLabel hint={`没读到这条能做什么：${error}`}>读失败</RowMenuLabel> : null}
+        {items.map((it) => (
+          <RowMenuItem
+            key={it.action}
+            data-menu-action={it.action}
+            {...(it.danger ? { variant: 'destructive' as const } : {})}
+            {...(it.title ? { title: it.title } : {})}
+            onSelect={() => pick(it.action)}
           >
-            <Ellipsis aria-hidden />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-52" data-request-menu-content={seq}>
-          {header}
-          {header ? <DropdownMenuSeparator /> : null}
-          {loading && !actions ? (
-            <DropdownMenuLabel className="flex items-center gap-2 font-normal text-muted-foreground">
-              <LoaderCircle className="size-4 animate-spin" aria-hidden />
-              在读这条能做什么……
-            </DropdownMenuLabel>
-          ) : null}
-          {error && !actions ? (
-            <DropdownMenuLabel className="max-w-64 font-normal whitespace-normal text-ink-fail" role="alert">
-              没读到这条能做什么：{error}
-            </DropdownMenuLabel>
-          ) : null}
-          {items.map((it) => (
-            <DropdownMenuItem
-              key={it.action}
-              className={ITEM}
-              data-menu-action={it.action}
-              {...(it.danger ? { variant: 'destructive' as const } : {})}
-              {...(it.title ? { title: it.title } : {})}
-              onSelect={() => pick(it.action)}
-            >
-              {it.label}
-            </DropdownMenuItem>
-          ))}
-          {note ? (
-            <DropdownMenuLabel
-              className="max-w-64 text-meta font-normal whitespace-normal text-muted-foreground"
-              data-delete-note
-            >
-              {note}
-            </DropdownMenuLabel>
-          ) : null}
-          {items.length > 0 || note ? <DropdownMenuSeparator /> : null}
-          <DropdownMenuItem className={ITEM} onSelect={copyLink}>
-            <Copy />
-            复制链接
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+            {it.label}
+          </RowMenuItem>
+        ))}
+        {note ? <RowMenuLabel hint={<span data-delete-note>{note}</span>}>删不了</RowMenuLabel> : null}
+        {items.length > 0 || note ? <RowMenuSeparator /> : null}
+        <RowMenuItem onSelect={copyLink}>
+          <Copy />
+          复制链接
+        </RowMenuItem>
+      </RowMenu>
 
-      <AlertDialog open={dialog === 'delete'} onOpenChange={(o) => !o && setDialog(null)}>
-        <AlertDialogContent data-delete-confirm>
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除「{title}」？</AlertDialogTitle>
-            <AlertDialogDescription>{DELETE_CONFIRM_TEXT}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>先不删</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onConfirm={() => run({ action: 'delete' }, 'delete')}>
-              删除
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={dialog === 'delete'}
+        onOpenChange={close}
+        title={`删除「${title}」？`}
+        description={DELETE_CONFIRM_TEXT}
+        danger
+        confirmText="删除"
+        cancelText="先不删"
+        onConfirm={() => run({ action: 'delete' }, 'delete')}
+      />
 
-      <AlertDialog open={dialog === 'drop'} onOpenChange={(o) => !o && setDialog(null)}>
-        <AlertDialogContent data-drop-confirm>
-          <AlertDialogHeader>
-            <AlertDialogTitle>放下「{title}」</AlertDialogTitle>
-            <AlertDialogDescription>
-              放下就是结案·不做，进「已归档」，内容不再改。写一句为什么，会留在这条需求里。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <Textarea
-            rows={3}
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            placeholder="为什么放下……"
-            aria-label="放下的理由"
-          />
-          <AlertDialogFooter>
-            <AlertDialogCancel>先不放</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={!reason.trim()}
-              onConfirm={() => run({ action: 'drop', reason: reason.trim() }, 'drop')}
-            >
-              放下
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={dialog === 'drop'}
+        onOpenChange={close}
+        title={`放下「${title}」`}
+        description="放下就是结案·不做，进「已归档」，内容不再改。写一句为什么，会留在这条需求里。"
+        confirmText="放下"
+        cancelText="先不放"
+        confirmDisabled={!reason.trim()}
+        onConfirm={() => run({ action: 'drop', reason: reason.trim() }, 'drop')}
+      >
+        <Textarea
+          rows={3}
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="为什么放下……"
+          aria-label="放下的理由"
+        />
+      </ConfirmDialog>
 
-      <AlertDialog open={dialog === 'rename'} onOpenChange={(o) => !o && setDialog(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>改名</AlertDialogTitle>
-            <AlertDialogDescription>改的是草稿的标题，草稿版本加 1。</AlertDialogDescription>
-          </AlertDialogHeader>
-          <Input value={name} maxLength={100} onChange={(e) => setName(e.target.value)} aria-label="新标题" />
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={!name.trim() || name.trim() === title}
-              onConfirm={() => run({ action: 'rename', title: name.trim() }, 'rename')}
-            >
-              改名
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={dialog === 'rename'}
+        onOpenChange={close}
+        title="改名"
+        description="改的是草稿的标题，草稿版本加 1。"
+        confirmText="改名"
+        cancelText="取消"
+        confirmDisabled={!name.trim() || name.trim() === title}
+        onConfirm={() => run({ action: 'rename', title: name.trim() }, 'rename')}
+      >
+        <Input value={name} maxLength={100} onChange={(e) => setName(e.target.value)} aria-label="新标题" />
+      </ConfirmDialog>
     </>
+  );
+}
+
+/** 菜单顶上两行：需求号、项目。 */
+export function RequestMenuHeader({ seq, repo }: { seq: number; repo: string }) {
+  return (
+    <Stack gap="sm">
+      <RowMenuLabel>需求 {seq}</RowMenuLabel>
+      <RowMenuLabel>
+        <Text size="meta" tone="muted">
+          项目{' '}
+          <Text size="meta" tone="muted" mono>
+            {repo}
+          </Text>
+        </Text>
+      </RowMenuLabel>
+    </Stack>
   );
 }
 

@@ -1,26 +1,30 @@
-// 登录页（在外壳外面）。四条路，按 shared/web-api.ts 的 AuthRoutes，显示哪几条由 /auth/config 决定：
+// 登录页（在外壳外面；#3533 照 Arco 改版，样稿 canvas/Login.dc.html，AuthCard）。四条路，按 shared/web-api.ts 的 AuthRoutes，显示哪几条由 /auth/config 决定：
 // - 账密（passwordLogin 为真）：用户名 + 密码，POST /auth/password/login，成功回到 next。错误分清「用户名或密码不对」「锁了」「读不到后端」，
 //   登录失败一律不透露账号在不在（后端对没这个人、没设过密码、密码错回同一句）。
 // - 浏览器：跳 /auth/feishu/login?next=<站内路径>，飞书授权完回到 next。
 // - 飞书客户端里：tt.requestAccess 拿 code，POST /auth/feishu/access（页面要先加载飞书 JSSDK 才有 tt）。
 // - 开发环境：POST /auth/dev-login 免登（后端开了 devLogin 才显示）。
+// 读登录配置失败要明说（连不上后端 + 重试 + 状态页），不冒充「没配好」；读成过又刷新失败，表单照旧，顶上一条橙条。
+// 页面只拼 components/layout 的件，不写样式类（lint-design R13–R20）。
 
 import { AUTH_PREFIX, AuthRoutes, safeNext } from '@fleet-dao/shared';
 import { useQueryClient } from '@tanstack/react-query';
-import { LoaderCircle, LogIn } from 'lucide-react';
+import { LogIn } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { ApiError, errorText, keys, useApi, useAuthConfig, useMe } from '../api/client';
 import type { Me } from '../api/types';
 import { GatewayHealthLink } from '../components/gateway-health-link';
+import { AuthCard } from '../components/layout/auth-card';
+import { Button } from '../components/layout/button';
+import { Form, FormItem } from '../components/layout/form';
+import { Input } from '../components/layout/input';
+import { LoadError, LoadingRows, LoadStale } from '../components/layout/load-state';
 import { Notice } from '../components/layout/notice';
-import { Section } from '../components/layout/section';
-import { LogoMark } from '../components/logo';
+import { Stack } from '../components/layout/stack';
+import { Text } from '../components/layout/text';
 import { PasswordField } from '../components/password-field';
-import { Button } from '../components/ui/button';
-import { Input } from '../components/ui/input';
-import { Label } from '../components/ui/label';
 import { loginErrorText, PASSWORD_MAX, USERNAME_MAX } from '../lib/credentials';
 
 export function meta() {
@@ -104,9 +108,10 @@ export default function LoginPage() {
   // 配置读到了、一个登录入口都没开：明说，不留一个灰按钮让人猜。
   const nothingReady = Boolean(config.data) && !passwordReady && !feishuReady && !devReady;
   const loginHref = `${AUTH_PREFIX}${AuthRoutes.feishuLogin.path}?next=${encodeURIComponent(next)}`;
+  const connectText = (cause: unknown) => `连不上${brand.product}后端：${errorText(cause)}`;
 
-  const passwordSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const passwordSubmit = async (e?: FormEvent) => {
+    e?.preventDefault();
     if (busy !== null) return;
     if (!username.trim() || !password) {
       report(null, '请填写用户名和密码。');
@@ -120,7 +125,7 @@ export default function LoginPage() {
     } catch (err) {
       report(err, loginErrorText(err));
       setBusy(null);
-      // 密码错了：清掉密码栏、光标回到密码栏重输；用户名留着
+      // 密码错了：清掉密码栏、光标回密码栏重输；用户名留着
       if (err instanceof ApiError && err.code === 'bad_credentials') {
         setPassword('');
         passwordRef.current?.focus();
@@ -128,8 +133,7 @@ export default function LoginPage() {
     }
   };
 
-  const devLogin = async (e: FormEvent) => {
-    e.preventDefault();
+  const devLogin = async () => {
     if (!userId.trim()) return;
     setBusy('dev');
     setError(null);
@@ -142,156 +146,162 @@ export default function LoginPage() {
   };
 
   const errorBox = error ? (
-    <Notice tone="fail" className="mt-3">
-      {error.text}
-      <GatewayHealthLink error={error.cause} />
+    <Notice tone="fail">
+      <Stack gap="sm">
+        <span>{error.text}</span>
+        <GatewayHealthLink error={error.cause} />
+      </Stack>
     </Notice>
   ) : null;
 
   return (
-    <main className="grid min-h-dvh place-items-center bg-background px-4 py-10">
-      <div className="w-full max-w-sm">
-        <div className="flex flex-col items-center text-center">
-          <LogoMark className="size-12" />
-          <h1 className="mt-4 text-title font-semibold">登录{brand.product}</h1>
-          <p className="mt-1.5 text-body text-muted-foreground">{brand.product}只放行创始人。</p>
-        </div>
+    <AuthCard
+      logo
+      title={`登录${brand.product}`}
+      footer={
+        <Stack gap="sm" align="center">
+          <Text size="meta" tone="muted">
+            {brand.product}只放行创始人。登录后回到{' '}
+            <Text size="meta" mono>
+              {next}
+            </Text>
+          </Text>
+          {passwordReady ? (
+            <Text size="meta" tone="muted">
+              还没设过账密？先用飞书登录，到「设置 →
+              账密登录」里设第一次。飞书进不去时，请管理员在服务器上设。
+            </Text>
+          ) : null}
+        </Stack>
+      }
+    >
+      <Stack>
+        {api.source === 'mock' ? (
+          <Stack align="center">
+            <Text tone="secondary">现在是假数据模式，不用登录。</Text>
+            <Button block onClick={() => navigate(next, { replace: true })}>
+              进{brand.product}
+            </Button>
+          </Stack>
+        ) : (
+          <>
+            {config.isPending ? <LoadingRows rows={2} /> : null}
+            {config.error && !config.data ? (
+              <Stack gap="sm">
+                <LoadError
+                  error={config.error}
+                  text={`没读到登录配置：${connectText(config.error)}`}
+                  onRetry={() => void config.refetch()}
+                />
+                <GatewayHealthLink error={config.error} />
+              </Stack>
+            ) : null}
+            {config.error && config.data ? (
+              <Stack gap="sm">
+                <LoadStale error={config.error} what="登录配置" onRetry={() => void config.refetch()} />
+                <GatewayHealthLink error={config.error} />
+              </Stack>
+            ) : null}
 
-        <Section className="mt-8">
-          {api.source === 'mock' ? (
-            <div className="space-y-3 text-center">
-              <p className="text-body text-muted-foreground">现在是假数据模式，不用登录。</p>
-              <Button className="w-full" onClick={() => navigate(next, { replace: true })}>
-                进{brand.product}
-              </Button>
-            </div>
-          ) : (
-            <>
-              {config.isPending ? (
-                <p className="text-center text-body text-muted-foreground">正在读登录配置…</p>
-              ) : null}
-              {config.error ? (
-                <div className="space-y-2 text-center">
-                  <p className="text-body text-ink-fail">
-                    连不上{brand.product}后端：{errorText(config.error)}
-                  </p>
-                  <GatewayHealthLink error={config.error} />
-                  <Button type="button" variant="outline" size="sm" onClick={() => void config.refetch()}>
-                    重试
-                  </Button>
-                </div>
-              ) : null}
-
-              {passwordReady ? (
-                <form onSubmit={passwordSubmit} method="post" className="space-y-4" aria-label="账号密码登录">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="login-username">用户名</Label>
-                    <Input
-                      ref={usernameRef}
-                      id="login-username"
-                      name="username"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                      autoComplete="username"
-                      autoCapitalize="none"
-                      autoCorrect="off"
-                      spellCheck={false}
-                      maxLength={USERNAME_MAX}
-                      readOnly={busy === 'password'}
-                    />
-                  </div>
-                  <PasswordField
-                    id="login-password"
-                    label="密码"
-                    value={password}
-                    onChange={setPassword}
-                    autoComplete="current-password"
-                    maxLength={PASSWORD_MAX}
+            {passwordReady ? (
+              <Form aria-label="账号密码登录" method="post" onSubmit={() => void passwordSubmit()}>
+                <FormItem label="用户名" layout="vertical" htmlFor="login-username">
+                  <Input
+                    ref={usernameRef}
+                    id="login-username"
+                    name="username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    maxLength={USERNAME_MAX}
                     readOnly={busy === 'password'}
-                    inputRef={passwordRef}
                   />
-                  {errorBox}
-                  <Button
-                    type="submit"
-                    className="h-10 w-full"
-                    disabled={busy !== null}
-                    aria-busy={busy === 'password'}
-                  >
-                    {busy === 'password' ? (
-                      <>
-                        <LoaderCircle className="animate-spin" aria-hidden />
-                        登录中…
-                      </>
-                    ) : (
-                      '登录'
-                    )}
-                  </Button>
-                </form>
-              ) : null}
-
-              {passwordReady && (feishuReady || busy === 'feishu') ? (
-                <div className="my-4 flex items-center gap-3 text-meta text-muted-foreground" aria-hidden>
-                  <span className="h-px flex-1 bg-border" />或<span className="h-px flex-1 bg-border" />
-                </div>
-              ) : null}
-
-              {busy === 'feishu' ? (
-                <Button className="h-10 w-full" disabled>
-                  <LogIn />
-                  正在用飞书身份登录…
+                </FormItem>
+                <PasswordField
+                  id="login-password"
+                  label="密码"
+                  value={password}
+                  onChange={setPassword}
+                  autoComplete="current-password"
+                  maxLength={PASSWORD_MAX}
+                  readOnly={busy === 'password'}
+                  inputRef={passwordRef}
+                />
+                {errorBox}
+                <Button
+                  type="submit"
+                  variant="primary"
+                  block
+                  loading={busy === 'password'}
+                  {...(busy !== null && busy !== 'password' ? { disabledReason: '正在登录，请稍等' } : {})}
+                >
+                  {busy === 'password' ? '登录中…' : '登录'}
                 </Button>
-              ) : feishuReady ? (
-                <Button asChild variant={passwordReady ? 'outline' : 'default'} className="h-10 w-full">
-                  <a href={loginHref}>
-                    <LogIn />
-                    用飞书登录
-                  </a>
-                </Button>
-              ) : null}
+              </Form>
+            ) : null}
 
-              {nothingReady ? (
-                <Notice tone="fail" title="登录没有配好：请在服务器上设置账密或飞书。">
-                  <span className="text-meta">
-                    后端的登录配置里，账密、飞书、开发免登都没有开，所以这里没有能点的入口。
-                  </span>
-                </Notice>
-              ) : null}
+            {passwordReady && (feishuReady || busy === 'feishu') ? (
+              <Stack align="center">
+                <Text size="meta" tone="muted">
+                  或
+                </Text>
+              </Stack>
+            ) : null}
 
-              {devReady ? (
-                <form onSubmit={devLogin} className="mt-5 space-y-2 rounded-lg border border-dashed p-3">
-                  <Label htmlFor="dev-user" className="text-meta text-muted-foreground">
-                    开发环境免登：填白名单里的用户编号
-                  </Label>
-                  <div className="flex gap-2">
+            {busy === 'feishu' ? (
+              <Button block disabledReason="飞书客户端里不用点，正在拿飞书身份换登录">
+                <LogIn />
+                正在用飞书身份登录…
+              </Button>
+            ) : feishuReady ? (
+              <Button block href={loginHref} native>
+                <LogIn />
+                用飞书登录
+              </Button>
+            ) : null}
+
+            {nothingReady ? (
+              <Notice tone="fail" title="登录没有配好：请在服务器上设置账密或飞书。">
+                后端的登录配置里，账密、飞书、开发免登都没有开，所以这里没有能点的入口。
+              </Notice>
+            ) : null}
+
+            {devReady ? (
+              <Form aria-label="开发环境免登" onSubmit={() => void devLogin()}>
+                <FormItem
+                  label="开发环境免登：填白名单里的用户编号"
+                  layout="vertical"
+                  htmlFor="dev-user"
+                  help="只在后端打开了开发免登的开发环境里出现。"
+                >
+                  <Stack direction="horizontal" gap="sm">
                     <Input
                       id="dev-user"
                       value={userId}
                       onChange={(e) => setUserId(e.target.value)}
                       placeholder="用户编号"
                       autoComplete="off"
-                      className="num"
                     />
-                    <Button type="submit" variant="secondary" disabled={!userId.trim() || busy !== null}>
+                    <Button
+                      type="submit"
+                      loading={busy === 'dev'}
+                      {...(!userId.trim() || (busy !== null && busy !== 'dev')
+                        ? { disabledReason: busy !== null ? '正在登录，请稍等' : '先填用户编号' }
+                        : {})}
+                    >
                       {busy === 'dev' ? '登录中…' : '免登'}
                     </Button>
-                  </div>
-                </form>
-              ) : null}
-            </>
-          )}
-          {passwordReady ? null : errorBox}
-        </Section>
-        <p className="mt-4 text-center text-meta text-muted-foreground">
-          登录后回到 <span className="num">{next}</span>
-        </p>
-        {passwordReady ? (
-          <p className="mx-auto mt-2 max-w-xs text-center text-meta text-balance text-muted-foreground">
-            {
-              '还没设过账密？先用飞书登录，到「设置 → 账密登录」里设第一次。飞书进不去时，请管理员在服务器上设。'
-            }
-          </p>
-        ) : null}
-      </div>
-    </main>
+                  </Stack>
+                </FormItem>
+              </Form>
+            ) : null}
+          </>
+        )}
+        {passwordReady ? null : errorBox}
+      </Stack>
+    </AuthCard>
   );
 }

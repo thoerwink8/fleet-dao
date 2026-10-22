@@ -86,8 +86,9 @@ describe('设置页留量线的窗口名', () => {
       expect(form.textContent).toContain('单模型周额度');
     });
     expect(form.textContent).not.toContain('7d_model');
-    expect(form.textContent).toContain('单模型周额度（opus）');
-    expect(form.textContent).toContain('单模型周额度（fable）');
+    // 表头是各渠道的组名合在一起；每个格子的名字（读屏、悬停）带自己那个渠道的组名
+    expect(within(form).getAllByLabelText(/单模型周额度（opus）/).length).toBeGreaterThan(0);
+    expect(within(form).getAllByLabelText(/单模型周额度（fable）/).length).toBeGreaterThan(0);
     expect(within(form).getAllByText('5 小时额度').length).toBeGreaterThan(0);
     expect(within(form).getAllByText('周额度').length).toBeGreaterThan(0);
     expect(within(form).getAllByText('月额度').length).toBeGreaterThan(0);
@@ -95,32 +96,23 @@ describe('设置页留量线的窗口名', () => {
   });
 });
 
-describe('设置页留量线：未配置显示占位，点了才变输入框（#1805）', () => {
-  test('灰色占位「—」点一下变输入框，填了保存仍走 updateSetting(engine.quotaReserve)', async () => {
+describe('设置页留量线：格子空着显示占位「—」（#1805；#3533 起照样稿，格子一直是输入框，不再点一下才变）', () => {
+  test('未配置的格子是空输入框、占位「—」；这个渠道没有的窗写「无此窗」；填了保存仍走 updateSetting(engine.quotaReserve)', async () => {
     const api = createMockApi({ live: false });
     const spy = vi.spyOn(api, 'updateSetting');
     renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
     const form = (await screen.findByTestId('reserve-source')).closest('form');
     if (!form) throw new Error('留量线没有表单');
-    const placeholder = 'button[title="未配置（不限），点一下填写"]';
-    await waitFor(() => expect(form.querySelectorAll(placeholder).length).toBeGreaterThan(0));
-    const before = form.querySelectorAll(placeholder).length;
-    const boxes = within(form).queryAllByRole('textbox').length;
-    const first = form.querySelector(placeholder) as HTMLButtonElement;
-    fireEvent.click(first);
-    // 点了才出输入框，占位少一个
-    await waitFor(() => expect(within(form).queryAllByRole('textbox')).toHaveLength(boxes + 1));
-    expect(form.querySelectorAll(placeholder)).toHaveLength(before - 1);
-    // 点开了但没填，离开输入框就缩回占位
-    const input = within(form).queryAllByRole('textbox')[0] as HTMLInputElement;
-    fireEvent.blur(input);
-    await waitFor(() => expect(form.querySelectorAll(placeholder)).toHaveLength(before));
-    // 再点开、填 80、保存
-    fireEvent.click(form.querySelector(placeholder) as HTMLButtonElement);
-    await waitFor(() => expect(within(form).queryAllByRole('textbox')).toHaveLength(boxes + 1));
-    const typed = within(form).queryAllByRole('textbox')[0] as HTMLInputElement;
-    fireEvent.change(typed, { target: { value: '80' } });
-    fireEvent.click(within(form).getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(within(form).queryAllByPlaceholderText('—').length).toBeGreaterThan(0));
+    // 没有的窗和「未配置」分开写
+    expect(within(form).getAllByText('无此窗').length).toBeGreaterThan(0);
+    const empty = within(form)
+      .getAllByPlaceholderText('—')
+      .filter((i) => (i as HTMLInputElement).value === '');
+    expect(empty.length).toBeGreaterThan(0);
+    // 填 80、保存
+    fireEvent.change(empty[0] as HTMLInputElement, { target: { value: '80' } });
+    fireEvent.click(within(form).getByRole('button', { name: '保存留量线' }));
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     const [key, body] = spy.mock.calls[0] ?? [];
     expect(key).toBe('engine.quotaReserve');
@@ -130,19 +122,16 @@ describe('设置页留量线：未配置显示占位，点了才变输入框（#
 });
 
 describe('设置页留量线：后台刷新池数据不清用户正在填的（#1871）', () => {
-  const placeholder = 'button[title="未配置（不限），点一下填写"]';
-
   async function openAndType(api: FleetApi) {
     const view = renderApp(<SettingsPage />, { api, route: '/settings' });
     const form = (await screen.findByTestId('reserve-source')).closest('form');
     if (!form) throw new Error('留量线没有表单');
-    await waitFor(() => expect(form.querySelectorAll(placeholder).length).toBeGreaterThan(0));
-    const boxes = within(form).queryAllByRole('textbox').length;
-    fireEvent.click(form.querySelector(placeholder) as HTMLButtonElement);
-    await waitFor(() => expect(within(form).queryAllByRole('textbox')).toHaveLength(boxes + 1));
-    fireEvent.change(within(form).queryAllByRole('textbox')[0] as HTMLInputElement, {
-      target: { value: '77' },
-    });
+    await waitFor(() => expect(within(form).queryAllByPlaceholderText('—').length).toBeGreaterThan(0));
+    const boxes = within(form).queryAllByRole('textbox').length - 1;
+    const empty = within(form)
+      .getAllByPlaceholderText('—')
+      .filter((i) => (i as HTMLInputElement).value === '');
+    fireEvent.change(empty[0] as HTMLInputElement, { target: { value: '77' } });
     await waitFor(() =>
       expect(
         within(form)
@@ -216,25 +205,24 @@ describe('设置页留量线：后台刷新池数据不清用户正在填的（#
 });
 
 describe('设置页字段行和页内导航（#1805）', () => {
-  test('每节的字段是标签左、控件右的行；页内导航有六个锚点，吸顶 / 吸左', async () => {
+  test('每节的字段是标签左、控件右的表单项；页内导航（Anchor）有六个锚点，吸在左边', async () => {
     renderApp(<SettingsPage />, { route: '/settings' });
     const concurrent = await screen.findByText('同时跑的会话上限');
-    const row = concurrent.closest('form');
-    expect(row?.className).toContain('md:grid-cols-field');
-    const nav = document.querySelector('[data-page-nav]') as HTMLElement;
-    expect(nav.className).toContain('sticky');
-    expect(nav.className).toContain('lg:self-start');
+    const item = concurrent.closest('[data-layout]');
+    expect(item?.getAttribute('data-layout')).toBe('horizontal');
+    const nav = screen.getByRole('navigation', { name: '本页目录' });
+    expect(nav.className).toContain('lg:sticky');
     const hrefs = [...nav.querySelectorAll('a')].map((a) => a.getAttribute('href'));
-    expect(hrefs).toEqual(['#repos', '#run', '#notify', '#account', '#look', '#about']);
+    expect(hrefs).toEqual(['#repos', '#run', '#reserve', '#notify', '#account', '#about']);
     for (const h of hrefs) expect(document.getElementById((h ?? '').slice(1))).toBeTruthy();
   });
 });
 
-describe('设置页外观只剩减少动效（#3509：主题只有一套，亮暗跟随系统）', () => {
-  test('外观一节没有主题色、深浅、密度，只有「减少动效」开关', async () => {
+describe('设置页外观只剩减少动效（#3509：主题只有一套，亮暗跟随系统；#3533 起并进「关于」那一节）', () => {
+  test('外观没有主题色、深浅、密度，只有「减少动效」开关', async () => {
     renderApp(<SettingsPage />, { route: '/settings' });
     const look = await waitFor(() => {
-      const el = document.getElementById('look');
+      const el = document.getElementById('about');
       expect(el).toBeTruthy();
       return el as HTMLElement;
     });
@@ -305,8 +293,8 @@ describe('设置页谁改的、额度窗名、仓名悬停', () => {
   });
 });
 
-describe('设置页保存按钮：能存是品牌实色，不能存是禁用样式（#1904）', () => {
-  test('没改动时禁用（data-state=disabled、灰底）；填了新值才变成品牌实色、能点', async () => {
+describe('设置页保存按钮：能存和不能存分得清（#1904；#3533 起设置页的保存键是次按钮，不和页面的主操作抢）', () => {
+  test('没改动时禁用（data-state=disabled、灰底）；填了新值才变成能点（data-state=ready）', async () => {
     const api = createMockApi({ live: false });
     renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
     const input = (await screen.findByPlaceholderText('没设')) as HTMLInputElement;
@@ -319,7 +307,7 @@ describe('设置页保存按钮：能存是品牌实色，不能存是禁用样�
     fireEvent.change(input, { target: { value: '9' } });
     await waitFor(() => expect(save.disabled).toBe(false));
     expect(save.getAttribute('data-state')).toBe('ready');
-    expect(save.className).toContain('bg-brand');
+    expect(save.className).not.toContain('bg-brand');
     expect(save.className).not.toContain('bg-muted');
   });
 

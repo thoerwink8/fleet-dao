@@ -7,6 +7,7 @@
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '../../lib/utils';
+import { type DataAttrs, pickData } from './data-attrs';
 import { StatusDot } from './status-badge';
 import type { LayoutTone } from './tone';
 
@@ -17,6 +18,8 @@ export interface FilterTabItem<Id extends string = string> {
   count?: number | string | null;
   /** 标签前面画这个状态的点。 */
   tone?: LayoutTone;
+  /** 挂在这一项按钮上的 data-*（测试、点验按它找）。 */
+  data?: DataAttrs;
 }
 
 export interface FilterTabGroup<Id extends string = string> {
@@ -204,6 +207,7 @@ export function FilterTabs<Id extends string = string>({
           <button
             key={it.id}
             type="button"
+            {...pickData(it.data ?? {})}
             {...(mode === 'tabs'
               ? {
                   role: 'tab',

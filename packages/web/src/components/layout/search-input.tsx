@@ -11,8 +11,11 @@ export function SearchInput({
   onKeyDown,
   placeholder,
   className,
+  inline,
   'aria-label': ariaLabel,
 }: {
+  /** 和别的筛选并排在一行：定宽 240，不撑满（筛选行用）。 */
+  inline?: boolean;
   value: string;
   onChange: (value: string) => void;
   onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
@@ -21,7 +24,13 @@ export function SearchInput({
   'aria-label'?: string;
 }) {
   return (
-    <div className={cn('relative w-full md:max-w-search', className)}>
+    <div
+      className={cn(
+        'relative w-full md:max-w-search',
+        inline && 'min-w-0 flex-1 md:w-60 md:flex-none',
+        className,
+      )}
+    >
       <Search
         className="pointer-events-none absolute top-1/2 left-2.5 z-10 size-4 -translate-y-1/2 text-ink-3"
         aria-hidden

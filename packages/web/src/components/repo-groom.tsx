@@ -1,89 +1,45 @@
-import { ChevronRight } from 'lucide-react';
+// 设置页仓库表里的「指挥官整理待办」（母单 #1335 第 4 片；#3533 照样稿拆成三块）：
+// - RepoNameCell：仓名加一行小字（主线）。
+// - GroomAction：操作格里的「整理待办」文字按钮；先确认（原因可空）再 POST，被拒时把后端的原话留在确认框里，不换成「出错了」。
+// - GroomDetail：展开区里的整理状态（整理到哪、今日剩余、最近一次结果、更早的记录、读不懂的记录数）。
+// 总开关读到关着才提前置灰；读不到（出错、还在读、远程快照没有这一格）不冒充关着，按钮保持能点。
 import { useId, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useGroomNow, useGroomStatus } from '../api/client';
-import type { GroomStatus, RepoDispatch } from '../api/types';
+import type { GroomStatus } from '../api/types';
 import { formatAgo, formatDateTime } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import type { Tone } from '../lib/status';
-import { cn } from '../lib/utils';
 import { useMasterView } from './engine-master';
-import { RowDetail, RowFrame } from './layout/list';
+import { Button } from './layout/button';
+import { ConfirmDialog } from './layout/confirm-dialog';
+import { Label, Textarea } from './layout/input';
 import { LoadError } from './layout/load-state';
-import { StatusDot } from './layout/status-badge';
-import { RepoDispatchControl } from './repo-dispatch';
+import { Notice } from './layout/notice';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 import { RepoLink } from './repo-link';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from './ui/alert-dialog';
-import { Button } from './ui/button';
-import { Label } from './ui/label';
-import { Textarea } from './ui/textarea';
 
 type GroomRequest = GroomStatus['recent'][number];
 
-const STATE_WORD: Record<GroomRequest['state'], string> = {
-  queued: '排队',
-  running: '在做',
-  done: '做成了',
-  failed: '没做成',
-  expired: '作废了',
-};
-
-/** 行尾状态点的颜色：做成绿、没做成红、排队在做蓝、作废灰。 */
-const STATE_TONE: Record<GroomRequest['state'], Tone> = {
-  queued: 'run',
-  running: 'run',
-  done: 'done',
-  failed: 'fail',
-  expired: 'stop',
-};
-
-/** 长说明默认折叠时露在外面的一行摘要（原仓库一节常显长文的压缩版）。 */
-const GROOM_HELP_SUMMARY = '老单要整理过才能进队；同一时刻一次，每仓每天最多 3 次。';
-
-/**
- * 点「展开」后才露的说明。正文是原 settings「仓库」一节 description 里铺满首屏的那段
- * （「让 AI 接活」开着/关着与整理准入），从常显挪进这里，默认不占屏。
- */
-const GROOM_HELP_DETAIL =
-  '「让 AI 接活」开着：引擎每 5 分钟自己按准入和排序挑单（老单要指挥官整理过），没单可挑会自动叫指挥官整理。关着：只有本机 fleet-api dispatch-issue 点名派。开单早于接活开关的老单要贴了「整理过」或「交给引擎」才进队。点下面按钮会记一条操作记录，引擎几秒内接手。';
-
-/** 「指挥官整理待办」的长说明：默认一行摘要 +「展开」，点开才铺全文。 */
-function GroomHelp() {
-  const [open, setOpen] = useState(false);
-  const bodyId = useId();
-  return (
-    <div className="mt-1.5 text-meta text-muted-foreground" data-testid="groom-help">
-      <div className="flex min-w-0 items-start gap-2">
-        <p className="min-w-0 flex-1 truncate" title={GROOM_HELP_SUMMARY}>
-          {GROOM_HELP_SUMMARY}
-        </p>
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={bodyId}
-          onClick={() => setOpen((v) => !v)}
-          className="shrink-0 underline-offset-2 hover:underline max-md:min-h-10 max-md:px-2"
-        >
-          {open ? '收起' : '展开'}
-        </button>
-      </div>
-      {open ? (
-        <p id={bodyId} className="mt-1 break-words">
-          {GROOM_HELP_DETAIL}
-        </p>
-      ) : null}
-    </div>
-  );
+/** 整理记录的状态词（句子里的一截，不是状态标签，所以不走 StatusBadge）。 */
+function stateWord(state: GroomRequest['state']): string {
+  switch (state) {
+    case 'queued':
+      return '排队';
+    case 'running':
+      return '在做';
+    case 'done':
+      return '做成了';
+    case 'failed':
+      return '没做成';
+    case 'expired':
+      return '作废了';
+  }
 }
+
+/** 展开区里的说明（原「展开」折叠里的那段，直接写在展开区，不再套一层折叠）。 */
+const GROOM_HELP =
+  '老单要整理过才能进队；同一时刻一次，每仓每天最多 3 次。开单早于接活开关的老单要贴了「整理过」或「交给引擎」才进队。点「整理待办」会记一条操作记录，引擎几秒内接手。';
 
 function whenOf(row: GroomRequest): string {
   return row.finishedAt ?? row.startedAt ?? row.requestedAt;
@@ -99,15 +55,10 @@ function IssueNums({
   return items.map((item, i) => (
     <span key={item.n}>
       {i > 0 ? '、' : null}
-      <RepoLink
-        repo={repo}
-        kind="issues"
-        n={item.n}
-        className="num underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:items-center"
-      >
+      <RepoLink repo={repo} kind="issues" n={item.n}>
         #{item.n}
       </RepoLink>
-      {item.title ? <span className="ml-1 text-muted-foreground">{item.title}</span> : null}
+      {item.title ? <Text tone="muted"> {item.title}</Text> : null}
     </span>
   ));
 }
@@ -127,253 +78,187 @@ function ResultSummary({
     { label: '贴要人拍', items: result.flagged.map((n) => ({ n })) },
   ];
   return (
-    <ul aria-label="最近一次结果" className="mt-1 space-y-0.5 text-meta">
+    <ul aria-label="最近一次结果">
       {lines.map((line) => (
         <li key={line.label}>
-          {line.label} {line.items.length} 张{line.items.length > 0 ? '：' : null}
-          <IssueNums repo={repo} items={line.items} />
+          <Text size="meta">
+            {line.label} {line.items.length} 张{line.items.length > 0 ? '：' : null}
+            <IssueNums repo={repo} items={line.items} />
+          </Text>
         </li>
       ))}
-      {result.summary ? <li className="text-muted-foreground">{result.summary}</li> : null}
+      {result.summary ? (
+        <li>
+          <Text size="meta" tone="muted">
+            {result.summary}
+          </Text>
+        </li>
+      ) : null}
     </ul>
   );
 }
 
-/**
- * 设置页仓库一节的一行（#1917，照路由页样板）：仓名加一行小字（主线、整理到哪、今日剩余）、一个状态（让 AI 接活）、
- * 「开启/关闭」和「整理」两个按钮同一行同宽。点仓名展开整理记录和长说明（RowDetail，和名字对齐）。
- * 「指挥官整理待办」：次数和最近结果读 GET；按钮先确认（原因可空）再 POST。被拒时把后端的原话留下，不换成「出错了」。
- */
-export function RepoRow({
-  repoId,
-  repo,
-  branch,
-  dispatch,
-}: {
-  repoId: string;
-  repo: { owner: string; name: string };
-  branch: string;
-  dispatch: RepoDispatch | undefined;
-}) {
+/** 仓名格：仓名（悬停给全名）加一行小字「主线 main」。 */
+export function RepoNameCell({ repo, branch }: { repo: { owner: string; name: string }; branch: string }) {
+  const name = `${repo.owner}/${repo.name}`;
+  return (
+    <Stack gap="sm">
+      <Text strong truncate title={name}>
+        {name}
+      </Text>
+      <Text size="meta" tone="muted">
+        主线 {branch}
+      </Text>
+    </Stack>
+  );
+}
+
+/** 操作格里的「整理待办」。 */
+export function GroomAction({ repoId, repo }: { repoId: string; repo: { owner: string; name: string } }) {
   const name = `${repo.owner}/${repo.name}`;
   const query = useGroomStatus(repoId);
   const groom = useGroomNow();
   const { view: masterView } = useMasterView();
-  // 读到总开关关着才提前置灰。读不到（出错、还在读、远程快照没有这一格）不冒充关着，按钮保持能点。
   const masterOff = masterView.kind === 'ok' && !masterView.master.on;
   const [asking, setAsking] = useState(false);
-  const [open, setOpen] = useState(false);
-  const detailId = useId();
-  const now = useNow();
   const [reason, setReason] = useState('');
-  const [writeError, setWriteError] = useState<unknown>(null);
   const reasonId = useId();
-  const status = query.data;
-  const latest = status?.recent[0];
-  const older = status?.recent.slice(1) ?? [];
-  const busy = status?.busy === true;
+  const busy = query.data?.busy === true;
+  const blocked = groom.isPending || busy || query.isLoading || masterOff;
 
   // 确定键用 onConfirm 等结果（#2012）：成功才关框、清原因；失败留在框里统一写原因，这里只负责打 toast、把错误抛回给框。
   const confirm = async () => {
     const text = reason.trim();
-    setWriteError(null);
     try {
       await groom.mutateAsync({ repoId, body: text ? { reason: text } : {} });
       setAsking(false);
       setReason('');
       toast.success(`已叫指挥官整理：${name}`);
     } catch (e) {
-      setWriteError(e);
       toast.error('没叫成', { description: errorText(e) });
       throw e;
     }
   };
 
-  // 小字一行里「整理到哪」那一段：整理中 / 做成了 N 分钟前 / 还没整理过；还在读就不写
-  const groomWord = busy
+  return (
+    <span data-testid={`groom-${repoId}`}>
+      <Button
+        size="sm"
+        variant="text"
+        disabledReason={
+          masterOff ? '引擎总开关关着，不整理' : blocked ? (busy ? '正在整理' : '正在读整理状态') : undefined
+        }
+        onClick={() => {
+          setReason('');
+          setAsking(true);
+        }}
+        aria-label={`让指挥官整理 ${name} 的待办`}
+        title="叫指挥官现在整理这个仓的待办"
+      >
+        整理待办
+      </Button>
+      <ConfirmDialog
+        open={asking}
+        onOpenChange={setAsking}
+        title={`让指挥官整理 ${name} 的待办？`}
+        description="记一条操作记录，引擎几秒内接手。同一时刻全局只做一次，这个仓每 24 小时最多 3 次。"
+        confirmText="确认整理"
+        onConfirm={confirm}
+      >
+        <Stack gap="sm">
+          <Label htmlFor={reasonId}>原因（可以不填）</Label>
+          <Textarea
+            id={reasonId}
+            value={reason}
+            maxLength={500}
+            placeholder="为什么现在整理"
+            onChange={(e) => setReason(e.target.value)}
+          />
+        </Stack>
+      </ConfirmDialog>
+    </span>
+  );
+}
+
+/** 展开区里的整理状态。 */
+export function GroomDetail({ repoId, repo }: { repoId: string; repo: { owner: string; name: string } }) {
+  const query = useGroomStatus(repoId);
+  const now = useNow();
+  const status = query.data;
+  const latest = status?.recent[0];
+  const older = status?.recent.slice(1) ?? [];
+  const busy = status?.busy === true;
+
+  const line = busy
     ? '整理中'
     : latest
-      ? `${STATE_WORD[latest.state]} ${formatAgo(whenOf(latest), now)}`
+      ? `${stateWord(latest.state)} ${formatAgo(whenOf(latest), now)}`
       : status
         ? '还没整理过'
         : null;
-  const dispatchWord = dispatch ? (dispatch.on ? '接活中' : '关着') : null;
-  const metaText = [
-    `主线 ${branch}`,
-    groomWord ? `整理 ${groomWord}` : null,
-    status ? `今日剩余 ${status.quota.remaining}/${status.quota.max}` : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
 
   return (
-    <section data-testid={`groom-${repoId}`} aria-label={`${name} 的指挥官整理待办`}>
-      <RowFrame tall>
-        {/* 点仓名展开整理记录（和路由页「点名字展开」同一个做法） */}
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={detailId}
-          aria-label={`${name} 的整理详情`}
-          onClick={() => setOpen((v) => !v)}
-          className="flex min-h-10 min-w-0 flex-1 flex-col justify-center rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring md:min-h-0"
-        >
-          <span className="flex min-w-0 max-w-full items-center gap-1">
-            <span className="num truncate text-body font-medium" title={name}>
-              {name}
+    <div data-testid={`groom-detail-${repoId}`}>
+      <Stack gap="sm">
+        <Text strong>整理待办</Text>
+        <Text size="meta" tone="muted">
+          {GROOM_HELP}
+        </Text>
+        {query.isLoading ? (
+          <Text size="meta" tone="muted">
+            在读…
+          </Text>
+        ) : null}
+        {query.error ? <LoadError what="指挥官整理待办" error={query.error} /> : null}
+        {status ? (
+          <Text size="meta" tone={!busy && latest?.state === 'failed' ? 'danger' : 'default'}>
+            {line}
+            {' · '}
+            <span data-testid={`groom-quota-${repoId}`}>
+              今日剩余 {status.quota.remaining}/{status.quota.max}
             </span>
-            <ChevronRight
-              className={cn(
-                'size-3.5 shrink-0 text-muted-foreground transition-transform duration-200',
-                open && 'rotate-90',
-              )}
-              aria-hidden
-            />
-          </span>
-          {/* 小字一行不折：放不下截断，整句在悬停里。手机上行里没有状态位，「接活中 / 关着」写在最前 */}
-          <span
-            data-row-meta
-            title={metaText}
-            className="block max-w-full truncate whitespace-nowrap text-meta text-muted-foreground"
-          >
-            {dispatchWord ? (
-              <span aria-hidden className="md:hidden">
-                <StatusDot tone={dispatch?.on ? 'done' : 'stop'} className="mr-1 align-middle" />
-                {dispatchWord} ·{' '}
-              </span>
+          </Text>
+        ) : null}
+        {status && status.unreadable > 0 ? (
+          <Notice tone="stall" role="status">
+            有 {status.unreadable} 条记录没读懂，下面不是全部。
+          </Notice>
+        ) : null}
+        {status && latest ? (
+          <>
+            <Text size="meta">
+              最近一次：{stateWord(latest.state)} · {formatDateTime(whenOf(latest))}
+            </Text>
+            {latest.why ? (
+              <Text size="meta" tone="muted">
+                {latest.why}
+              </Text>
             ) : null}
-            <span className="num">主线 {branch}</span>
-            {groomWord ? (
-              <>
-                {' · '}
-                <span
-                  className={cn(
-                    busy && 'font-medium text-ink-stall',
-                    !busy && latest && STATE_TONE[latest.state] === 'fail' && 'text-ink-fail',
-                  )}
-                >
-                  整理 {groomWord}
-                </span>
-              </>
+            {latest.result ? <ResultSummary result={latest.result} repo={repo} /> : null}
+            {!latest.result && (latest.state === 'queued' || latest.state === 'running') ? (
+              <Text size="meta" tone="muted">
+                还没有结果
+              </Text>
             ) : null}
-            {status ? (
-              <>
-                {' · '}
-                <span className="num" data-testid={`groom-quota-${repoId}`}>
-                  今日剩余 {status.quota.remaining}/{status.quota.max}
-                </span>
-              </>
-            ) : null}
-          </span>
-        </button>
-        <RepoDispatchControl repoId={repoId} name={name} row={dispatch} />
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="min-w-16"
-          disabled={groom.isPending || busy || query.isLoading || masterOff}
-          onClick={() => {
-            if (masterOff) return;
-            setReason('');
-            setAsking(true);
-          }}
-          aria-label={`让指挥官整理 ${name} 的待办`}
-          title={masterOff ? '引擎总开关关着，不整理' : '叫指挥官现在整理这个仓的待办'}
-        >
-          整理
-        </Button>
-        {/* 总开关关着时按钮置灰的原因：悬停和读屏里；页上一行已经写了总开关关着，行里不再重复 */}
-        {masterOff ? <span className="sr-only">引擎总开关关着，不整理</span> : null}
-      </RowFrame>
-
-      {open || query.error || writeError || (status && status.unreadable > 0) ? (
-        <RowDetail id={detailId} indent={false} className="min-w-0 pb-3">
-          <h3 className="text-meta font-medium">
-            指挥官整理待办
-            {/* 手机上行里的小字截断了，展开后在这里补上今日剩余 */}
-            {status ? (
-              <span className="num font-normal text-muted-foreground md:hidden">
-                {' '}
-                · 剩 {status.quota.remaining}/{status.quota.max} 次
-              </span>
-            ) : null}
-          </h3>
-          {open ? <GroomHelp /> : null}
-          {query.isLoading ? <p className="mt-1 text-meta text-muted-foreground">在读…</p> : null}
-          {query.error ? (
-            <div className="mt-2">
-              <LoadError what="指挥官整理待办" error={query.error} />
-            </div>
-          ) : null}
-          {status && status.unreadable > 0 ? (
-            <p className="mt-1 text-meta text-ink-fail">
-              有 {status.unreadable} 条记录没读懂，下面不是全部。
-            </p>
-          ) : null}
-
-          {open && status && latest ? (
-            <div className="mt-1.5">
-              <p className="text-meta">
-                最近一次：{STATE_WORD[latest.state]} ·{' '}
-                <span className="num">{formatDateTime(whenOf(latest))}</span>
-              </p>
-              {latest.why ? (
-                <p className="mt-0.5 break-words text-meta text-muted-foreground">{latest.why}</p>
-              ) : null}
-              {latest.result ? <ResultSummary result={latest.result} repo={repo} /> : null}
-              {!latest.result && (latest.state === 'queued' || latest.state === 'running') ? (
-                <p className="mt-0.5 text-meta text-muted-foreground">还没有结果</p>
-              ) : null}
-            </div>
-          ) : open && status ? (
-            <p className="mt-1.5 text-meta text-muted-foreground">还没整理过</p>
-          ) : null}
-
-          {open && older.length > 0 ? (
-            <ul aria-label="更早的整理" className="mt-1.5 space-y-0.5 text-meta text-muted-foreground">
-              {older.map((row) => (
-                <li key={row.requestId} className="break-words">
-                  {STATE_WORD[row.state]} · <span className="num">{formatDateTime(whenOf(row))}</span>
+          </>
+        ) : status ? (
+          <Text size="meta" tone="muted">
+            还没整理过
+          </Text>
+        ) : null}
+        {older.length > 0 ? (
+          <ul aria-label="更早的整理">
+            {older.map((row) => (
+              <li key={row.requestId}>
+                <Text size="meta" tone="muted">
+                  {stateWord(row.state)} · {formatDateTime(whenOf(row))}
                   {row.why ? ` · ${row.why}` : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {writeError ? (
-            <p role="alert" className="mt-1.5 break-words text-meta text-ink-fail">
-              {errorText(writeError)}
-            </p>
-          ) : null}
-        </RowDetail>
-      ) : null}
-
-      <AlertDialog open={asking} onOpenChange={setAsking}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>让指挥官整理 {name} 的待办？</AlertDialogTitle>
-            <AlertDialogDescription>
-              记一条操作记录，引擎几秒内接手。同一时刻全局只做一次，这个仓每 24 小时最多 3 次。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="grid gap-1.5">
-            <Label htmlFor={reasonId}>原因（可以不填）</Label>
-            <Textarea
-              id={reasonId}
-              value={reason}
-              maxLength={500}
-              placeholder="为什么现在整理"
-              onChange={(e) => setReason(e.target.value)}
-            />
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction loading={groom.isPending} loadingText="正在提交…" onConfirm={confirm}>
-              确认整理
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </section>
+                </Text>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </Stack>
+    </div>
   );
 }

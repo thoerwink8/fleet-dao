@@ -8,7 +8,10 @@ export function Form({
   onSubmit,
   children,
   'aria-label': ariaLabel,
+  method,
 }: {
+  /** 密码这类不能拼进地址的表单写 post：万一页面脚本没接住提交，浏览器也不会走 GET。 */
+  method?: 'post';
   /** 回车或点提交键时调用，已经 preventDefault。 */
   onSubmit?: () => void;
   children: ReactNode;
@@ -17,6 +20,7 @@ export function Form({
   return (
     <form
       {...(ariaLabel ? { 'aria-label': ariaLabel } : {})}
+      {...(method ? { method } : {})}
       onSubmit={(e: FormEvent) => {
         e.preventDefault();
         onSubmit?.();
@@ -35,8 +39,13 @@ export function FormItem({
   error,
   layout = 'horizontal',
   htmlFor,
+  helpId,
+  errorId,
   children,
 }: {
+  /** help、error 的元素 id，给控件的 aria-describedby 指过来。 */
+  helpId?: string;
+  errorId?: string;
   label: ReactNode;
   required?: boolean;
   help?: ReactNode;
@@ -72,11 +81,13 @@ export function FormItem({
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         {children}
         {error ? (
-          <span role="alert" className="text-meta text-fail-ink">
+          <span role="alert" id={errorId} className="text-meta text-fail-ink">
             {error}
           </span>
         ) : help ? (
-          <span className="text-meta text-ink-3">{help}</span>
+          <span id={helpId} className="text-meta text-ink-3">
+            {help}
+          </span>
         ) : null}
       </div>
     </div>

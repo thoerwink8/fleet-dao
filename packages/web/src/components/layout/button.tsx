@@ -6,28 +6,42 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Button as BaseButton } from '../ui/button';
+import type { DataAttrs } from './data-attrs';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'text' | 'danger';
 export type ButtonSize = 'xs' | 'sm' | 'md';
+
+const ICON_SIZE = { xs: 'icon-xs', sm: 'icon-sm', md: 'icon' } as const;
 
 export function Button({
   variant = 'secondary',
   size = 'md',
   href,
   external,
+  native,
   loading,
   disabledReason,
   onClick,
   title,
   type = 'button',
   children,
+  iconOnly,
+  block,
   ...aria
-}: {
+}: DataAttrs & {
+  /** 只有一个图标、没有字（要同时传 aria-label）：画成方形。 */
+  iconOnly?: boolean;
+  /** 撑满一行（登录卡片里的按钮）。 */
+  block?: boolean;
+  /** 开关式按钮（多选、静音）：现在按下了没有。 */
+  'aria-pressed'?: boolean;
   variant?: ButtonVariant;
   size?: ButtonSize;
   /** 整个按钮是链接：站内路径走路由，external 时开新窗口。 */
   href?: string | undefined;
   external?: boolean | undefined;
+  /** 链接要整页跳走（后端的登录地址，不是前端路由）：普通 <a>，本窗口打开。 */
+  native?: boolean | undefined;
   /** 正在发写请求：转圈、点不动。 */
   loading?: boolean | undefined;
   /** 现在点不了的原因：给了就置灰、悬停写这句话，点击不触发。 */
@@ -37,13 +51,22 @@ export function Button({
   type?: 'button' | 'submit';
   children?: ReactNode;
   'aria-label'?: string;
+  /** 展开收起的按钮：当前是不是展开着，和它控制的区块。 */
+  'aria-expanded'?: boolean;
+  'aria-controls'?: string;
+  'aria-describedby'?: string;
 }) {
   const blocked = disabledReason !== undefined;
   const hover = blocked ? disabledReason : title;
+  const baseSize = iconOnly ? ICON_SIZE[size] : size;
   if (href !== undefined && !blocked) {
     return (
-      <BaseButton asChild variant={variant} size={size}>
-        {external ? (
+      <BaseButton asChild variant={variant} size={baseSize} {...(block ? { className: 'w-full' } : {})}>
+        {native ? (
+          <a href={href} {...(hover ? { title: hover } : {})} {...aria}>
+            {children}
+          </a>
+        ) : external ? (
           <a href={href} target="_blank" rel="noreferrer" {...(hover ? { title: hover } : {})} {...aria}>
             {children}
           </a>
@@ -59,7 +82,8 @@ export function Button({
     <BaseButton
       type={type}
       variant={variant}
-      size={size}
+      size={baseSize}
+      {...(block ? { className: 'w-full' } : {})}
       {...(hover ? { title: hover } : {})}
       {...(blocked ? { 'aria-disabled': true } : {})}
       {...(loading !== undefined && !blocked ? { loading } : {})}

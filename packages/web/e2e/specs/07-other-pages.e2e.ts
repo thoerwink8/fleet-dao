@@ -173,9 +173,9 @@ test.describe('其余页面', () => {
     await shot(page, '07-更新日志');
   });
 
-  test('不存在的页面：404 页给回主页的路', async ({ page }) => {
+  test('不存在的页面：404 页给回工作台的路', async ({ page }) => {
     await page.goto('/no-such-page');
-    await expect(page.getByRole('link', { name: /主页/ }).first()).toBeVisible();
+    await expect(page.getByRole('link', { name: '回工作台' })).toBeVisible();
   });
 
   test('没做的页不占侧栏：账单仍写「还没做」；模型目录在路由页', async ({ page }) => {

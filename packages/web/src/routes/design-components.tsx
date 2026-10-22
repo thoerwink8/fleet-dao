@@ -24,6 +24,8 @@ import { Tag } from '../components/layout/tag';
 import { Text } from '../components/layout/text';
 import { Timeline } from '../components/layout/timeline';
 import { DOMAINS, STATUS_DICT, type StatusKey } from '../theme/status-dict';
+import { ControlsSection } from './design-controls';
+import { ConversationSection } from './design-conversation';
 
 interface DemoRow {
   id: string;
@@ -504,6 +506,8 @@ export function ComponentsGallery({ overlays, input }: { overlays: ReactNode; in
         组件（片 3 新件）
       </Text>
       <StatusSection />
+      <ControlsSection />
+      <ConversationSection />
       <LayoutSection />
       <TableSection />
       <ProgressSection />

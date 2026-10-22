@@ -337,6 +337,8 @@
   --spacing-routing-window: 27.5rem; /* 440 */
   /* 路由页「调整顺序」区域桌面（xl）下的高度：视口高减去顶栏、页头、页签、用途按钮和这一用途的标题（约 22rem，含底部留白），内部自己滚。 */
   --spacing-routing-desk: max(24rem, calc(100dvh - 22rem));
+  /* 提需求页工作区（左列表右对话）桌面下的高度：视口高减去顶栏 3.75rem、页头和内边距（约 11rem），列表和对话各自在里面滚。只在 components/layout/pane.tsx 的 Workspace 里用。 */
+  --spacing-intake-desk: max(28rem, calc(100dvh - 11rem));
   /* 弹层列表的最高：max-h-* 只认 --max-height/--height/--spacing，不认 --container。 */
   --max-height-notifications-list: 22.5rem; /* 360 */
   --max-height-command-list: 27.5rem; /* 440 */

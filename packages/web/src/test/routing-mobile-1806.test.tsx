@@ -293,10 +293,13 @@ describe('页头和操作记录不撑出屏幕', () => {
     const api = createMockApi({ live: false });
     renderApp(<AuditPage />, { route: '/audit', api });
     // #1940：改动明细改成点行尾展开钮才画（不再每行常驻一个 details）；先把有改动的行都展开，再量 pre
-    const expands = await screen.findAllByRole('button', { name: '看改了什么' });
+    // #3533：改成表格，行首的展开钮叫「展开」，原始数据是折叠（Collapse）里的 Text mono pre
+    const expands = await screen.findAllByRole('button', { name: '展开' });
     for (const b of expands) fireEvent.click(b);
-    await waitFor(() => expect(document.querySelectorAll('details').length).toBeGreaterThan(0));
-    const pres = Array.from(document.querySelectorAll('details pre'));
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-audit-detail] [aria-hidden]').length).toBeGreaterThan(0),
+    );
+    const pres = Array.from(document.querySelectorAll('[data-audit-detail] .font-mono.whitespace-pre-wrap'));
     expect(pres.length).toBeGreaterThan(0);
     for (const pre of pres) {
       expect(classes(pre)).toContain('whitespace-pre-wrap');

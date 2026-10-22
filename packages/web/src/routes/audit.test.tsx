@@ -14,25 +14,25 @@ const search = () => screen.getByLabelText('搜索操作记录');
 describe('操作记录页', () => {
   test('展开「看改了什么」默认是人话差异，原始 JSON 在「看原始数据」里且默认合上', async () => {
     // 展开后仍把 routeId 的 JSON 摊在外面，或人话里留着 r-ca-sonnet 没换成 Sonnet 5，这一条会红。
-    // #1940：「看改了什么」从行里的 details 折叠改成行尾的展开按钮（aria-expanded），明细在行下面的 RowDetail；
-    // 断言等价：点开前没有明细、点开后明细里是人话差异，原始数据仍是默认合上的 details。
+    // #3533：表格行首的展开按钮（aria-expanded），明细在行下面的展开行；
+    // 断言等价：点开前没有明细、点开后明细里是人话差异，原始数据仍是默认合上的折叠（Collapse）。
     renderApp(<AuditPage />);
-    const summary = (await screen.findAllByRole('button', { name: '看改了什么' }))[0];
-    if (!summary) throw new Error('没有「看改了什么」');
-    expect(summary.getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(summary);
-    expect(summary.getAttribute('aria-expanded')).toBe('true');
-    const block = document.getElementById(summary.getAttribute('aria-controls') ?? '');
+    const buttons = await screen.findAllByRole('button', { name: '展开' });
+    expect(buttons[0]?.getAttribute('aria-expanded')).toBe('false');
+    expect(document.querySelector('[data-audit-detail]')).toBeNull();
+    for (const b of buttons) fireEvent.click(b);
+    const stage = await screen.findAllByText('（无） → 分诊');
+    const block = stage[0]?.closest('[data-audit-detail]');
     if (!(block instanceof HTMLElement)) throw new Error('没有展开的明细');
-    expect(block.hasAttribute('data-row-detail')).toBe(true);
-    expect(within(block).getByText('阶段：（无） → 分诊')).toBeTruthy();
-    expect(await within(block).findByText('路由：（无） → Sonnet 5')).toBeTruthy();
-    const rawSummary = within(block).getByText('看原始数据');
-    const raw = rawSummary.closest('details');
-    if (!(raw instanceof HTMLDetailsElement)) throw new Error('原始数据不是折叠');
-    expect(raw.open).toBe(false);
+    expect(within(block).getByText('阶段')).toBeTruthy();
+    expect(await within(block).findByText('（无） → Sonnet 5')).toBeTruthy();
+    expect(within(block).getByText('路由')).toBeTruthy();
+    const rawToggle = within(block).getByRole('button', { name: '看原始数据' });
+    expect(rawToggle.getAttribute('aria-expanded')).toBe('false');
+    const raw = document.getElementById(rawToggle.getAttribute('aria-controls') ?? '');
+    if (!(raw instanceof HTMLElement)) throw new Error('原始数据不是折叠');
     expect(raw.textContent).toContain('"routeId": "r-ca-sonnet"');
-    expect(raw.contains(within(block).getByText('路由：（无） → Sonnet 5'))).toBe(false);
+    expect(raw.contains(within(block).getByText('（无） → Sonnet 5'))).toBe(false);
   });
 
   test('没做成的记录：行标 fail（竖线）、带「没做成」状态标签，做成的行没有', async () => {
@@ -49,11 +49,15 @@ describe('操作记录页', () => {
       });
     renderApp(<AuditPage />, { api });
     await screen.findAllByText('没权限');
-    const [good, bad] = document.querySelectorAll('li[data-audit-row]');
-    expect(good?.querySelector('[data-row-rail]')).toBeNull();
-    expect(good?.querySelector('[data-tone="fail"]')).toBeNull();
-    expect(bad?.querySelector('[data-row-rail]')).not.toBeNull();
-    expect(bad?.querySelector('[data-tone="fail"]')?.textContent).toBe('没做成');
+    const [good, bad] = document.querySelectorAll('tr[data-row-key]');
+    expect(good?.textContent).not.toContain('没做成');
+    expect(bad?.textContent).toContain('没做成');
+    // 折叠行里就能看到截断的出错原因，全文在展开里
+    expect(
+      within(bad as HTMLElement)
+        .getByText('没权限')
+        .getAttribute('title'),
+    ).toBe('没权限');
   });
 
   test('过滤后没有记录、也没有更早的：不提往前翻，没有按钮', async () => {
@@ -97,10 +101,9 @@ describe('操作记录页', () => {
     const box = title.parentElement;
     if (!box) throw new Error('空态没有外框');
     const loaded = first.items.length;
-    const button = within(box).getByRole('button', {
-      name: `只搜了已加载的 ${loaded} 条，点这里再往前翻`,
-    });
-    expect(screen.queryByRole('button', { name: '再看 50 条' })).toBeNull();
+    expect(box.textContent).toContain(`只搜了已加载的 ${loaded} 条`);
+    const button = within(box).getByRole('button', { name: '再看 50 条' });
+    expect(screen.getAllByRole('button', { name: '再看 50 条' })).toHaveLength(1);
     fireEvent.click(button);
     await waitFor(() => expect(screen.getByText('更早的人')).toBeTruthy());
   });
@@ -170,7 +173,7 @@ describe('操作记录页：50 条一页（#1837）', () => {
       });
     };
     renderApp(<AuditPage />, { api });
-    const rows = () => document.querySelectorAll('li[data-audit-row]').length;
+    const rows = () => document.querySelectorAll('tr[data-row-key]').length;
     await waitFor(() => expect(rows()).toBe(50));
     expect(limits).toEqual([50]);
     fireEvent.click(screen.getByRole('button', { name: '再看 50 条' }));
@@ -203,12 +206,13 @@ describe('操作记录页：事件名翻成中文（#1821）', () => {
     const done = (await screen.findAllByText('探针探完'))[0];
     expect(done?.getAttribute('title')).toBe('routing.probe.done');
     expect(screen.queryByText('routing.probe.done')).toBeNull();
-    // 认不出的键：显示默认译名「其他操作」，原键放等宽小字，页上任何地方都不写「没翻译」
+    // 认不出的键：只显示默认译名「其他操作」，原键收进展开后的「看原始数据」（动作原文），页上任何地方都不写「没翻译」
     const other = (await screen.findAllByText(/其他操作/))[0];
-    expect(other?.className).toContain('font-medium');
-    const key = screen.getByText('zzz.never.heard');
-    expect(key.className).toContain('font-mono');
-    expect(key.className).toContain('text-muted-foreground');
+    expect(other?.getAttribute('title')).toBe('zzz.never.heard');
+    expect(screen.queryByText('zzz.never.heard')).toBeNull();
+    fireEvent.click(within(other?.closest('tr') as HTMLElement).getByRole('button', { name: '展开' }));
+    const key = await screen.findByText('zzz.never.heard');
+    expect(key.closest('[data-audit-detail]')).not.toBeNull();
     expect(document.body.textContent).not.toContain('没翻译');
     expect(done?.textContent).not.toContain('zzz.never.heard');
   });
@@ -219,41 +223,34 @@ describe('操作记录页：事件名翻成中文（#1821）', () => {
     // 页上不再有一排排「经引擎」标签（下拉里的选项不算行）
     expect(screen.queryAllByText('经引擎').filter((el) => el.tagName !== 'OPTION')).toEqual([]);
     const via = screen.getByRole('combobox', { name: '按来路筛选' });
-    const all = document.querySelectorAll('[data-audit-row]').length;
+    const all = document.querySelectorAll('tr[data-row-key]').length;
     fireEvent.change(via, { target: { value: 'cockpit' } });
-    await waitFor(() => expect(document.querySelectorAll('[data-audit-row]').length).toBeLessThan(all));
-    expect(document.querySelectorAll('[data-audit-row]').length).toBeGreaterThan(0);
-    for (const row of document.querySelectorAll('[data-audit-row]')) {
+    await waitFor(() => expect(document.querySelectorAll('tr[data-row-key]').length).toBeLessThan(all));
+    expect(document.querySelectorAll('tr[data-row-key]').length).toBeGreaterThan(0);
+    for (const row of document.querySelectorAll('tr[data-row-key]')) {
       expect(row.querySelector('[title*="· 经"]')).not.toBeNull();
       expect(row.querySelector('[title*="经引擎"]')).toBeNull();
     }
   });
 
   test('有对照的行能点进对应的单：task 对象旁有「打开」链接去任务页', async () => {
-    // #1940：「打开」收进行尾「⋯」菜单（路由页样板）；断言等价：打开 task 行的菜单，里面有去任务页的「打开」链接。
+    // #3533：「打开」改成表里「操作」列的「查看」链接；断言等价：task 行的「查看」去任务页。
     renderApp(<AuditPage />);
     await screen.findAllByText('派了会话');
-    const row = screen.getAllByText('派了会话')[0]?.closest('li[data-audit-row]') as HTMLElement;
-    const trigger = within(row).getByRole('button', { name: /^更多操作/ });
-    trigger.focus();
-    fireEvent.keyDown(trigger, { key: 'Enter' });
-    const links = await screen.findAllByRole('menuitem', { name: '打开' });
-    expect(links.some((a) => a.getAttribute('href')?.startsWith('/tasks/'))).toBe(true);
+    const row = screen.getAllByText('派了会话')[0]?.closest('tr') as HTMLElement;
+    expect(within(row).getByRole('link', { name: '查看' }).getAttribute('href')).toMatch(/^\/tasks\//);
   });
 
-  test('手机上对象链接自己占一行：不和执行者、动作挤在同一个截断容器里', async () => {
-    // #1940：对象从行里的按钮变成第二行灰字（「只看这个对象」收进「⋯」）；断言等价：对象在小字行（data-row-meta）里，
-    // 不在执行者、动作那一行（data-row-name-line），两行各自一行不折。
+  test('表头是谁 / 做了什么 / 对象 / 时间 / 操作；每格各占自己那一列，对象不和执行者、动作挤在一格', async () => {
     renderApp(<AuditPage />);
     await screen.findAllByText('派了会话');
-    for (const row of document.querySelectorAll('li[data-audit-row]')) {
+    const heads = Array.from(document.querySelectorAll('th')).map((th) => th.textContent);
+    for (const h of ['谁', '做了什么', '对象', '时间', '操作']) expect(heads).toContain(h);
+    for (const row of document.querySelectorAll('tr[data-row-key]')) {
       const what = row.querySelector('[data-audit-what]');
-      const nameLine = row.querySelector('[data-row-name-line]');
-      expect(what?.closest('[data-row-meta]')).not.toBeNull();
-      expect(nameLine?.contains(what ?? null)).toBe(false);
-      expect(nameLine?.querySelector('[data-audit-who]')).not.toBeNull();
-      expect(nameLine?.className).toContain('whitespace-nowrap');
-      expect(what?.closest('[data-row-meta]')?.className).toContain('whitespace-nowrap');
+      const who = row.querySelector('[data-audit-who]');
+      expect(what?.closest('td')).not.toBe(who?.closest('td'));
+      expect(what?.closest('td')).not.toBeNull();
     }
   });
 });

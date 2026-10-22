@@ -5,9 +5,7 @@
 // 同一条通知撤销后重开（incident 换代）：回执、没收到回执、排队、选项、草稿和报错只认当前代次。
 // 上一代还在飞的成功或失败丢掉，不改这一代的执行状态，也不把那次请求再发一遍。
 // 服务端列表明示的上一代在途 / 结果未知 / 待核验仍照显示并挡住动作，不把异代记录一概滤掉。
-import { ExternalLink, ScrollText, Wrench } from 'lucide-react';
 import { useId, useRef, useState } from 'react';
-import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { ApiError, errorText, useExecuteAlertRepair } from '../api/client';
 import type { ExecuteAlertRepairBody, ExecuteAlertRepairResult, Me, Notification } from '../api/types';
@@ -16,7 +14,7 @@ import {
   isWatchdogAlert,
   KIND_LABEL,
   linkHandled,
-  linkPhase,
+  linkStatus,
   PHASE_META,
   type RepairAction,
   type RepairLink,
@@ -31,12 +29,18 @@ import {
 } from '../lib/alert-repair';
 import { formatAgo, formatDateTime } from '../lib/format';
 import { isMine } from '../lib/status';
+import type { StatusKey } from '../theme/status-dict';
 import { DecisionPicker } from './decision-picker';
+import { Button } from './layout/button';
+import { Collapse } from './layout/collapse';
+import { TextLink } from './layout/link';
+import { List, ListRow } from './layout/list';
 import { Notice, type NoticeTone } from './layout/notice';
+import { Stack } from './layout/stack';
 import { StatusBadge } from './layout/status-badge';
 import { Tag } from './layout/tag';
-import { RepoLink } from './repo-link';
-import { Button } from './ui/button';
+import { Text } from './layout/text';
+import { WorkRef } from './work-ref';
 
 /** 点之前重读一次列表：读成了回这一条现在的样子（不在列表里是 undefined），没读成回原因。 */
 export type RepairRefresh = (
@@ -134,86 +138,94 @@ function RepairRecordBox({
   now: number;
 }) {
   const phase = recordPhase(rec);
-  const meta = PHASE_META[phase];
   const who = isMine(rec.by, me) ? '我' : rec.by;
   return (
     <Notice
       tone={NOTICE_TONE[phase]}
       role="status"
-      className="mt-3 md:max-w-3xl"
       title={
-        <span
-          className="flex min-w-0 flex-wrap items-center gap-x-2"
+        <Stack
+          direction="horizontal"
+          gap="sm"
+          align="center"
+          wrap
           data-testid="repair-record"
           data-phase={phase}
         >
-          <StatusBadge tone={meta.tone} label={meta.label} variant="dot" />
-          <span>
+          <StatusBadge status={repairStatus(phase)} variant="dot" />
+          <Text strong>
             {KIND_LABEL[rec.kind]} · {who}点的
-          </span>
-          <span className="num font-normal opacity-80" title={formatDateTime(rec.at)}>
+          </Text>
+          <Text size="meta" tone="secondary" title={formatDateTime(rec.at)}>
             {formatAgo(rec.at, now)}
-          </span>
-        </span>
+          </Text>
+        </Stack>
       }
     >
-      <p className="break-words" data-testid="repair-text">
-        {rec.text}
-      </p>
-      {rec.check && phase !== 'verified' ? (
-        <p className="mt-1 break-words text-meta" data-testid="repair-check">
-          核验（{formatAgo(rec.check.at, now)}）：{rec.check.text}
-        </p>
-      ) : null}
-      {phase === 'verifying' ? (
-        <p className="mt-1 text-meta">
-          收到了不等于修好：后端重读原检测条件恢复了才写「已修复」，卡由看门狗自己撤。
-        </p>
-      ) : null}
-      {phase === 'unknown' ? (
-        <p className="mt-1 text-meta">结果未知不会自动重试，也不给新按钮：先看操作记录和现场，核实了再说。</p>
-      ) : null}
-      {phase === 'failed' ? <p className="mt-1 text-meta">这条还开着，下面按现在能点的再选。</p> : null}
-      {rec.issue ? (
-        <p className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 text-meta" data-testid="repair-issue">
-          <span>修复单</span>
-          <RepoLink
-            repo={rec.issue.repo}
-            kind="issues"
-            n={rec.issue.number}
-            className="inline-flex items-center gap-0.5 underline underline-offset-2"
-            icon={<ExternalLink className="size-3" aria-hidden />}
-          >
-            {`${rec.issue.repo.owner}/${rec.issue.repo.name}#${rec.issue.number}`}
-          </RepoLink>
-          <span>
-            {rec.issue.created ? '这次开的' : '同一次事故原有的那张'} · 处理人：{workerOf(n)}
-          </span>
-        </p>
-      ) : null}
-      <details className="mt-1 text-meta" data-testid="repair-detail">
-        <summary className="cursor-pointer underline-offset-2 hover:underline">具体操作</summary>
-        <ul className="mt-1 list-disc space-y-0.5 pl-5">
-          <li>动作：{KIND_LABEL[rec.kind]}</li>
-          {targetLines(rec.target).map((t) => (
-            <li key={t}>目标：{t}</li>
-          ))}
-          <li>
-            {who} · {formatDateTime(rec.at)} · 请求 <span className="num">{rec.requestId.slice(0, 8)}</span>
-          </li>
-          <li>
-            <Link
-              to={`/audit?target=${encodeURIComponent(`notification:${n.id}`)}`}
-              className="inline-flex items-center gap-1 underline underline-offset-2"
-            >
-              <ScrollText className="size-3" aria-hidden />
-              查这条的操作记录
-            </Link>
-          </li>
-        </ul>
-      </details>
+      <Stack gap="sm">
+        <Text data-testid="repair-text">{rec.text}</Text>
+        {rec.check && phase !== 'verified' ? (
+          <Text size="meta" tone="secondary" data-testid="repair-check">
+            核验（{formatAgo(rec.check.at, now)}）：{rec.check.text}
+          </Text>
+        ) : null}
+        {phase === 'verifying' ? (
+          <Text size="meta" tone="secondary">
+            收到了不等于修好：后端重读原检测条件恢复了才写「已修复」，卡由看门狗自己撤。
+          </Text>
+        ) : null}
+        {phase === 'unknown' ? (
+          <Text size="meta" tone="secondary">
+            结果未知不会自动重试，也不给新按钮：先看操作记录和现场，核实了再说。
+          </Text>
+        ) : null}
+        {phase === 'failed' ? (
+          <Text size="meta" tone="secondary">
+            这条还开着，下面按现在能点的再选。
+          </Text>
+        ) : null}
+        {rec.issue ? (
+          <Stack direction="horizontal" gap="sm" align="center" wrap data-testid="repair-issue">
+            <Text size="meta" tone="secondary">
+              修复单
+            </Text>
+            <WorkRef
+              repo={rec.issue.repo}
+              kind="issues"
+              n={rec.issue.number}
+              label={`${rec.issue.repo.owner}/${rec.issue.repo.name}#${rec.issue.number}`}
+            />
+            <Text size="meta" tone="secondary">
+              {rec.issue.created ? '这次开的' : '同一次事故原有的那张'} · 处理人：{workerOf(n)}
+            </Text>
+          </Stack>
+        ) : null}
+        <Stack gap="sm" data-testid="repair-detail">
+          <Collapse title="具体操作">
+            <Stack gap="sm">
+              <Text size="meta">动作：{KIND_LABEL[rec.kind]}</Text>
+              {targetLines(rec.target).map((t) => (
+                <Text key={t} size="meta">
+                  目标：{t}
+                </Text>
+              ))}
+              <Text size="meta">
+                {who} · {formatDateTime(rec.at)} · 请求 {rec.requestId.slice(0, 8)}
+              </Text>
+              <TextLink to={`/audit?target=${encodeURIComponent(`notification:${n.id}`)}`}>
+                查这条的操作记录
+              </TextLink>
+            </Stack>
+          </Collapse>
+        </Stack>
+      </Stack>
     </Notice>
   );
+}
+
+/** 修复这一段对应的字典键（颜色等级和字都在字典里）。 */
+function repairStatus(phase: RepairPhase): StatusKey {
+  return `notification:repair:${phase}`;
 }
 
 /** 修的人：「谁在处理」那一行登记了且和关联不冲突才用它；否则明说未知（关联的操作者不是修的人）。 */
@@ -237,66 +249,49 @@ function LinkedBox({
   me: Me | undefined;
   now: number;
 }) {
-  const phase = linkPhase(link);
   const ref = `${link.issue.repo.owner}/${link.issue.repo.name}#${link.issue.number}`;
   const by = isMine(link.by, me) ? '我' : link.by;
   return (
     <Notice
       tone={link.invalid ? 'fail' : 'info'}
       role="status"
-      className="mt-3 md:max-w-3xl"
       title={
-        <span
-          className="flex min-w-0 flex-wrap items-center gap-x-2"
+        <Stack
+          direction="horizontal"
+          gap="sm"
+          align="center"
+          wrap
           data-testid="repair-linked"
           data-stage={link.invalid ? 'invalid' : link.stage}
         >
-          <StatusBadge tone={phase.tone} label={phase.label} variant="dot" />
-          <span>已关联 {ref}</span>
-        </span>
+          <StatusBadge status={linkStatus(link)} variant="dot" />
+          <Text strong>已关联 {ref}</Text>
+        </Stack>
       }
     >
-      <p className="flex min-w-0 flex-wrap items-center gap-x-3 text-meta" data-testid="repair-linked-refs">
-        <RepoLink
-          repo={link.issue.repo}
-          kind="issues"
-          n={link.issue.number}
-          className="inline-flex items-center gap-0.5 underline underline-offset-2"
-          icon={<ExternalLink className="size-3" aria-hidden />}
-        >
-          {ref}
-        </RepoLink>
-        {link.prNumber ? (
-          <RepoLink
-            repo={link.issue.repo}
-            kind="pull"
-            n={link.prNumber}
-            className="inline-flex items-center gap-0.5 underline underline-offset-2"
-            icon={<ExternalLink className="size-3" aria-hidden />}
-          >
-            PR #{link.prNumber}
-          </RepoLink>
+      <Stack gap="sm">
+        <Stack direction="horizontal" gap="md" align="center" wrap data-testid="repair-linked-refs">
+          <WorkRef repo={link.issue.repo} kind="issues" n={link.issue.number} label={ref} />
+          {link.prNumber ? (
+            <WorkRef repo={link.issue.repo} kind="pull" n={link.prNumber} label={`PR #${link.prNumber}`} />
+          ) : null}
+          {link.taskId ? <TextLink to={`/tasks/${link.taskId}`}>看在做的任务</TextLink> : null}
+        </Stack>
+        <Text size="meta" tone="secondary">
+          {link.text}
+        </Text>
+        {link.invalid ? (
+          <Text size="meta" tone="secondary" data-testid="repair-linked-invalid">
+            失效原因（{formatAgo(link.invalid.at, now)}）：{link.invalid.text}
+          </Text>
         ) : null}
-        {link.taskId ? (
-          <Link to={`/tasks/${link.taskId}`} className="underline underline-offset-2">
-            看在做的任务
-          </Link>
-        ) : null}
-      </p>
-      <p className="mt-1 break-words text-meta">{link.text}</p>
-      {link.invalid ? (
-        <p className="mt-1 break-words text-meta" data-testid="repair-linked-invalid">
-          失效原因（{formatAgo(link.invalid.at, now)}）：{link.invalid.text}
-        </p>
-      ) : null}
-      <p className="mt-1 text-meta" data-testid="repair-linked-who">
-        处理人：{workerOf(n)} · {by}关联的（
-        <span className="num" title={formatDateTime(link.at)}>
-          {formatAgo(link.at, now)}
-        </span>
-        ，关联的人不是修的人）
-      </p>
-      <p className="mt-1 text-meta">关联不等于修好：原卡照旧开着，看门狗重读原检测条件恢复了才撤。</p>
+        <Text size="meta" tone="secondary" data-testid="repair-linked-who">
+          处理人：{workerOf(n)} · {by}关联的（{formatAgo(link.at, now)}，关联的人不是修的人）
+        </Text>
+        <Text size="meta" tone="secondary">
+          关联不等于修好：原卡照旧开着，看门狗重读原检测条件恢复了才撤。
+        </Text>
+      </Stack>
     </Notice>
   );
 }
@@ -312,22 +307,18 @@ function NoRepair({
   link: string | undefined;
 }) {
   return (
-    <Notice tone="stall" role="status" className="mt-3 md:max-w-3xl" title={title}>
-      <div data-testid="repair-none">
+    <Notice tone="stall" role="status" title={title}>
+      <Stack gap="sm" data-testid="repair-none">
         {lines.map((l) => (
-          <p key={l} className="break-words text-meta">
+          <Text key={l} size="meta" tone="secondary">
             {l}
-          </p>
+          </Text>
         ))}
-        <p className="mt-1 text-meta">
-          {link ? '点右边「打开」去现场看；' : ''}
-          要换个办法：
-          <Link to="/intake" className="underline underline-offset-2">
-            到「提需求」写一句
-          </Link>
-          ，这里不替你执行别的。
-        </p>
-      </div>
+        <Text size="meta" tone="secondary">
+          {link ? '点「打开」去现场看；' : ''}
+          要换个办法：<TextLink to="/intake">到「提需求」写一句</TextLink>，这里不替你执行别的。
+        </Text>
+      </Stack>
     </Notice>
   );
 }
@@ -511,38 +502,32 @@ export function AlertRepairPanel({
   };
 
   return (
-    <div data-testid="alert-repair" className="min-w-0">
+    <Stack gap="md" data-testid="alert-repair">
       {rec ? <RepairRecordBox n={n} rec={rec} me={me} now={now} /> : null}
       {link ? <LinkedBox n={n} link={link} me={me} now={now} /> : null}
       {resolved && recPhase !== 'verified' ? (
-        <p className="mt-1.5 text-meta text-muted-foreground" data-testid="repair-manual">
+        <Text size="meta" tone="muted" data-testid="repair-manual">
           手动标了已处理：只是不再提醒，没核实修好。
-        </p>
+        </Text>
       ) : null}
       {busy ? (
-        <Notice
-          tone="info"
-          role="status"
-          className="mt-3 md:max-w-3xl"
-          title={`${PHASE_META.queued.label}：${busy.label}`}
-        >
-          <span data-testid="repair-busy" data-step={busy.step}>
+        <Notice tone="info" role="status" title={`${PHASE_META.queued.label}：${busy.label}`}>
+          <Text data-testid="repair-busy" data-step={busy.step}>
             {busy.step === 'checking' ? '先重读一次，核对按钮还是不是现在的…' : '已发出，等后端接活和回话…'}
-          </span>
+          </Text>
         </Notice>
       ) : null}
       {pendingReceipt && !busy ? (
         <Notice
           tone="stall"
           role="status"
-          className="mt-3 md:max-w-3xl"
           title={
-            <span data-testid="repair-record" data-phase="no-receipt">
+            <Text strong data-testid="repair-record" data-phase="no-receipt">
               {PHASE_META['no-receipt'].label}：{pendingReceipt.label}
-            </span>
+            </Text>
           }
           action={
-            <Button size="sm" variant="outline" onClick={askAgain}>
+            <Button size="sm" onClick={askAgain}>
               再问一次（同一请求）
             </Button>
           }
@@ -551,13 +536,9 @@ export function AlertRepairPanel({
         </Notice>
       ) : null}
       {note ? (
-        <p
-          className="mt-2 break-words text-meta text-ink-stall md:max-w-3xl"
-          role="status"
-          data-testid="repair-note"
-        >
+        <Notice tone="stall" role="status" data-testid="repair-note">
           {note}
-        </p>
+        </Notice>
       ) : null}
       {resolved ? null : !repair ? (
         <NoRepair
@@ -566,77 +547,83 @@ export function AlertRepairPanel({
           link={n.link}
         />
       ) : actions.length > 0 ? (
-        <div className="mt-3 md:max-w-3xl" data-testid="repair-actions">
-          <p className="mb-1.5 flex items-center gap-1.5 text-meta text-muted-foreground">
-            <Wrench className="size-3.5" aria-hidden />
+        <Stack gap="sm" data-testid="repair-actions">
+          <Text size="meta" tone="muted">
             现在能点的修复（后端按现场算的，点之前会再核一次）
-          </p>
-          <ul className="divide-y divide-border rounded-md border" aria-label="修复动作">
+          </Text>
+          <List aria-label="修复动作">
             {actions.map((a) => {
               const why = whyYouDecide(a);
               const recommended = rec2?.id === a.id;
               return (
-                <li key={a.id} data-repair-action={a.kind}>
-                  <button
-                    type="button"
-                    aria-label={a.label}
-                    aria-expanded={a.choice ? choiceOpen === a.id : undefined}
-                    disabled={Boolean(busy)}
-                    onClick={() =>
-                      a.choice
-                        ? writeCurrent((h) =>
-                            applyHeld(h, { choiceOpen: h.choiceOpen === a.id ? undefined : a.id }),
-                          )
-                        : void pick(a)
-                    }
-                    className="flex min-h-10 w-full flex-col gap-0.5 px-3 py-2 text-left outline-none first:rounded-t-md last:rounded-b-md hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 max-md:min-h-11 md:flex-row md:items-baseline md:gap-4"
-                  >
-                    <span className="flex shrink-0 flex-wrap items-center gap-1.5 text-body font-medium md:w-56">
-                      {a.label}
-                      {recommended ? <Tag tone="brand">推荐</Tag> : null}
-                      {a.choice ? <Tag tone="human">要你拍</Tag> : null}
-                    </span>
-                    <span className="min-w-0 flex-1 text-meta text-muted-foreground">
-                      {a.kind === 'hand-to-repair' && link && !link.invalid
-                        ? `已关联 ${linkRef}：交给修复沿用这张单派工，不另开单`
-                        : a.detail}
-                      {recommended && rec2 ? (
-                        <span className="text-foreground">。推荐：{rec2.why}</span>
+                <ListRow
+                  key={a.id}
+                  data-repair-action={a.kind}
+                  summary={
+                    <Stack gap="md">
+                      <Stack direction="horizontal" gap="md" align="start" wrap>
+                        <Button
+                          size="sm"
+                          variant={recommended ? 'outline' : 'secondary'}
+                          aria-label={a.label}
+                          {...(a.choice ? { 'aria-expanded': choiceOpen === a.id } : {})}
+                          loading={Boolean(busy)}
+                          onClick={() =>
+                            a.choice
+                              ? writeCurrent((h) =>
+                                  applyHeld(h, { choiceOpen: h.choiceOpen === a.id ? undefined : a.id }),
+                                )
+                              : void pick(a)
+                          }
+                        >
+                          {a.label}
+                        </Button>
+                        <Stack gap="sm">
+                          <Text size="meta" tone="muted">
+                            {a.kind === 'hand-to-repair' && link && !link.invalid
+                              ? `已关联 ${linkRef}：交给修复沿用这张单派工，不另开单`
+                              : a.detail}
+                          </Text>
+                          {recommended && rec2 ? (
+                            <Text size="meta" tone="muted">
+                              推荐：{rec2.why}
+                            </Text>
+                          ) : null}
+                        </Stack>
+                        {recommended ? <Tag>推荐</Tag> : null}
+                        {a.choice ? <Tag>要你拍</Tag> : null}
+                      </Stack>
+                      {a.choice && choiceOpen === a.id ? (
+                        <Stack gap="sm">
+                          <Text size="meta" tone="secondary" data-testid="repair-why-you">
+                            要你本人拍：{why}
+                          </Text>
+                          <DecisionPicker
+                            id={`${pickerId}-${a.kind}`}
+                            options={a.choice.options}
+                            pending={Boolean(busy)}
+                            text={draft}
+                            onText={(text) => writeCurrent((h) => applyHeld(h, { draft: text }))}
+                            onAnswer={(input) => void pick(a, input)}
+                            effect="自己写的：只记下，不执行这个动作"
+                          />
+                        </Stack>
                       ) : null}
-                    </span>
-                  </button>
-                  {a.choice && choiceOpen === a.id ? (
-                    <div className="px-3 pb-3">
-                      <p className="mt-2 text-meta text-ink-human" data-testid="repair-why-you">
-                        要你本人拍：{why}
-                      </p>
-                      <DecisionPicker
-                        id={`${pickerId}-${a.kind}`}
-                        options={a.choice.options}
-                        pending={Boolean(busy)}
-                        text={draft}
-                        onText={(text) => writeCurrent((h) => applyHeld(h, { draft: text }))}
-                        onAnswer={(input) => void pick(a, input)}
-                        effect="自己写的：只记下，不执行这个动作"
-                      />
-                    </div>
-                  ) : null}
-                </li>
+                    </Stack>
+                  }
+                />
               );
             })}
-          </ul>
+          </List>
           {repair.problems.map((p) => (
-            <p key={p} className="mt-1 break-words text-meta text-muted-foreground">
+            <Text key={p} size="meta" tone="muted">
               {p}
-            </p>
+            </Text>
           ))}
-          <p className="mt-1 text-meta text-muted-foreground">
-            都不合适？
-            <Link to="/intake" className="underline underline-offset-2">
-              到「提需求」写一句
-            </Link>
-          </p>
-        </div>
+          <Text size="meta" tone="muted">
+            都不合适？<TextLink to="/intake">到「提需求」写一句</TextLink>
+          </Text>
+        </Stack>
       ) : !blocked && !link ? (
         <NoRepair
           title="现在没有能直接点的修复"
@@ -644,14 +631,14 @@ export function AlertRepairPanel({
           link={n.link}
         />
       ) : repair.problems.length > 0 && !busy ? (
-        <div className="mt-1">
+        <Stack gap="sm">
           {repair.problems.map((p) => (
-            <p key={p} className="break-words text-meta text-muted-foreground">
+            <Text key={p} size="meta" tone="muted">
               {p}
-            </p>
+            </Text>
           ))}
-        </div>
+        </Stack>
       ) : null}
-    </div>
+    </Stack>
   );
 }
