@@ -62,7 +62,7 @@ export type AcceptanceExecutionRead =
 export interface AcceptanceExecutionReader {
   read(identity: AcceptanceExecutionIdentity, signal?: AbortSignal): Promise<AcceptanceExecutionRead>;
 }
-type HistoryConnection = Pick<Connection, 'withDeadline' | 'withAbortSignal' | 'options'> & {
+export type HistoryConnection = Pick<Connection, 'withDeadline' | 'withAbortSignal' | 'options'> & {
   workflowService: Pick<
     Connection['workflowService'],
     'describeWorkflowExecution' | 'getWorkflowExecutionHistory'
@@ -70,18 +70,19 @@ type HistoryConnection = Pick<Connection, 'withDeadline' | 'withAbortSignal' | '
 };
 type Payload = Temporal.api.common.v1.IPayload;
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
-function fail(code: string): never {
+export function executionFailure(code: string): never {
   throw new ReaderFailure(code);
 }
 class ReaderFailure extends Error {}
 function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return fail('decode_failed');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return executionFailure('decode_failed');
   return value as Record<string, unknown>;
 }
-function payload(values: Temporal.api.common.v1.IPayloads | null | undefined) {
-  if (values?.payloads?.length !== 1) return fail('malformed_payload');
+export function executionPayload(values: Temporal.api.common.v1.IPayloads | null | undefined) {
+  if (values?.payloads?.length !== 1) return executionFailure('malformed_payload');
   const p = values.payloads[0];
-  if (!p?.data || p.data.byteLength > ACCEPTANCE_HISTORY_LIMITS.payloadBytes) return fail('limit');
+  if (!p?.data || p.data.byteLength > ACCEPTANCE_HISTORY_LIMITS.payloadBytes)
+    return executionFailure('limit');
   const m = p.metadata;
   if (
     !m ||
@@ -90,7 +91,7 @@ function payload(values: Temporal.api.common.v1.IPayloads | null | undefined) {
     m.encoding.byteLength > 32 ||
     new TextDecoder('utf-8', { fatal: true }).decode(m.encoding) !== 'json/plain'
   )
-    return fail('unsupported_encoding');
+    return executionFailure('unsupported_encoding');
   new TextDecoder('utf-8', { fatal: true }).decode(p.data);
   return { value: object(defaultPayloadConverter.fromPayload(p as Required<Payload>)), hash: digest(p.data) };
 }
@@ -105,7 +106,7 @@ function sameTask(v: Record<string, unknown>, id: AcceptanceExecutionIdentity) {
 }
 function items(v: unknown): string[] {
   if (!Array.isArray(v) || v.length > 2048 || v.some((x) => typeof x !== 'string' || !x.length))
-    return fail('malformed_items');
+    return executionFailure('malformed_items');
   return v as string[];
 }
 const closeEventTypes: Record<number, number> = { 2: 2, 3: 3, 4: 21, 5: 27, 6: 28, 7: 4 };
@@ -118,12 +119,127 @@ const closeTypes: Record<number, string> = {
   7: 'workflowExecutionTimedOutEventAttributes',
 };
 
-/** 专用连接必须由公开 SDK 创建且明确限接收。测试可注入同一公开 RPC 接口。 */
+export interface ExecutionContext {
+  namespace: string;
+  workflowId: string;
+  runId: string;
+  taskId: string;
+  repo: string;
+  issueNumber: number;
+  workflowType: string;
+  taskQueue: string;
+  startHash: string;
+  closeEvent: string;
+  status: number;
+}
+export interface ExecutionInterpreter<T> {
+  event(event: Temporal.api.history.v1.IHistoryEvent, check: () => void): void;
+  finish(context: ExecutionContext): T;
+}
+export type ExecutionRead<T> =
+  | { kind: 'observed'; proof: T; stats: { events: number; pages: number; bytes: number } }
+  | { kind: 'unknown'; code: string };
+export interface ExecutionReader<T, I extends AcceptanceExecutionIdentity = AcceptanceExecutionIdentity> {
+  read(identity: I, signal?: AbortSignal): Promise<ExecutionRead<T>>;
+}
+function acceptanceInterpreter(
+  id: AcceptanceExecutionIdentity,
+): ExecutionInterpreter<AcceptanceExecutionProof> {
+  const scheduled = new Map<string, { kind: string; value: Record<string, unknown>; hash: string }>();
+  const sources: AcceptanceItemProof[] = [];
+  let final: AcceptanceExecutionProof['final'] | undefined;
+  return {
+    event(event) {
+      const n = BigInt(event.eventId?.toString() ?? '0');
+      const a = event.activityTaskScheduledEventAttributes;
+      if (a?.activityType?.name === 'acceptanceDuties' || a?.activityType?.name === 'coldVerify') {
+        if (event.eventType !== 10) executionFailure('malformed_history');
+        const decoded = executionPayload(a.input);
+        if (!sameTask(decoded.value, id)) executionFailure('identity_conflict');
+        scheduled.set(n.toString(), {
+          kind: a.activityType.name,
+          value: decoded.value,
+          hash: decoded.hash,
+        });
+      }
+      const c = event.activityTaskCompletedEventAttributes;
+      if (c) {
+        const sid = c.scheduledEventId?.toString() ?? '',
+          record = scheduled.get(sid);
+        if (record) {
+          if (event.eventType !== 12) executionFailure('malformed_history');
+          const result = executionPayload(c.result);
+          if (record.kind === 'acceptanceDuties') {
+            if (!Array.isArray(record.value.record) || record.value.record.length > 64)
+              executionFailure('malformed_items');
+            for (const raw of record.value.record) {
+              const r = object(raw);
+              if (
+                typeof r.prNumber !== 'number' ||
+                !Number.isSafeInteger(r.prNumber) ||
+                typeof r.head !== 'string'
+              )
+                executionFailure('identity_conflict');
+              sources.push({
+                kind: 'acceptanceDuties',
+                prNumber: r.prNumber,
+                head: r.head,
+                items: items(r.items),
+                scheduled: sid,
+                completed: n.toString(),
+                payloadHash: record.hash,
+              });
+            }
+          } else {
+            const v = record.value;
+            if (typeof v.prNumber !== 'number' || typeof v.headSha !== 'string')
+              executionFailure('identity_conflict');
+            if (result.value.outOfScope !== undefined)
+              sources.push({
+                kind: 'coldVerify',
+                prNumber: v.prNumber,
+                head: v.headSha,
+                items: items(result.value.outOfScope),
+                scheduled: sid,
+                completed: n.toString(),
+                payloadHash: result.hash,
+              });
+            if (v.prNumber === id.prNumber && v.headSha === id.head)
+              final =
+                result.value.pass === true
+                  ? {
+                      scheduled: sid,
+                      completed: n.toString(),
+                      payloadHash: result.hash,
+                      head: id.head,
+                      prNumber: id.prNumber,
+                    }
+                  : undefined;
+          }
+        }
+      }
+    },
+    finish(context) {
+      if (!final) executionFailure('incomplete_proof');
+      return { ...context, final, sources };
+    },
+  };
+}
 export function acceptanceExecutionReader(
   connection: HistoryConnection,
   namespace: string,
   remainingMs: number = ACCEPTANCE_HISTORY_LIMITS.totalMs,
 ): AcceptanceExecutionReader {
+  return boundedExecutionReader(connection, namespace, acceptanceInterpreter, remainingMs);
+}
+
+/** 专用连接必须由公开 SDK 创建且明确限接收。测试可注入同一公开 RPC 接口。 */
+export function boundedExecutionReader<T, I extends AcceptanceExecutionIdentity>(
+  connection: HistoryConnection,
+  namespace: string,
+  createInterpreter: (identity: I) => ExecutionInterpreter<T>,
+  remainingMs: number = ACCEPTANCE_HISTORY_LIMITS.totalMs,
+): ExecutionReader<T, I> {
   const receive = connection.options.channelArgs?.['grpc.max_receive_message_length'];
   if (typeof receive !== 'number' || receive <= 0 || receive > ACCEPTANCE_HISTORY_LIMITS.responseBytes)
     throw new Error('验收历史连接必须明确限制接收字节');
@@ -136,8 +252,8 @@ export function acceptanceExecutionReader(
       parentSignal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(abort, Math.max(0, deadline - performance.now()));
       const check = () => {
-        if (parentSignal?.aborted) fail('cancelled');
-        if (performance.now() >= deadline || controller.signal.aborted) fail('deadline');
+        if (parentSignal?.aborted) executionFailure('cancelled');
+        if (performance.now() >= deadline || controller.signal.aborted) executionFailure('deadline');
       };
       const rpc = async <T>(fn: () => Promise<T>): Promise<T> => {
         check();
@@ -156,7 +272,7 @@ export function acceptanceExecutionReader(
             (v) => typeof v === 'string' && !!v && v.trim() === v && Buffer.byteLength(v) <= 1024,
           )
         )
-          fail('invalid_context');
+          executionFailure('invalid_context');
         const execution = { workflowId: id.workflowId, runId: id.temporalRunId };
         const desc = await rpc(() =>
           connection.workflowService.describeWorkflowExecution({ namespace, execution }),
@@ -171,11 +287,9 @@ export function acceptanceExecutionReader(
           !closeTypes[info.status ?? 0] ||
           !desc.executionConfig?.taskQueue?.name
         )
-          fail('identity_conflict');
+          executionFailure('identity_conflict');
         const taskQueue = desc.executionConfig.taskQueue.name;
-        const scheduled = new Map<string, { kind: string; value: Record<string, unknown>; hash: string }>();
-        const sources: AcceptanceItemProof[] = [];
-        let final: AcceptanceExecutionProof['final'] | undefined;
+        const interpreter = createInterpreter(id);
         let token: Uint8Array = new Uint8Array(),
           last = 0n,
           events = 0,
@@ -208,15 +322,15 @@ export function acceptanceExecutionReader(
             pages > ACCEPTANCE_HISTORY_LIMITS.pages ||
             events + (es?.length ?? 0) > ACCEPTANCE_HISTORY_LIMITS.events
           )
-            fail('limit');
-          if (response.rawHistory?.length || response.archived) fail('malformed_history');
+            executionFailure('limit');
+          if (response.rawHistory?.length || response.archived) executionFailure('malformed_history');
           // 分页只按 token 耗尽收尾（官方 SDK 同）：空页可在终态前后出现，不能单独证明缺事件；
           // 缺事件由连续 eventId、historyLength、唯一终态和 token 耗尽后的完整来源判据兜住，
           // 空页个数只受总页数、token 循环、字节和时间预算约束。
           for (const event of es ?? []) {
             check();
             const n = BigInt(event.eventId?.toString() ?? '0');
-            if (closed || n !== last + 1n) fail('malformed_history');
+            if (closed || n !== last + 1n) executionFailure('malformed_history');
             last = n;
             events++;
             if (n === 1n) {
@@ -227,95 +341,31 @@ export function acceptanceExecutionReader(
                 start.workflowType?.name !== 'taskWorkflow' ||
                 start.taskQueue?.name !== taskQueue
               )
-                fail('identity_conflict');
-              const decoded = payload(start.input);
-              if (!sameTask(decoded.value, id)) fail('identity_conflict');
+                executionFailure('identity_conflict');
+              const decoded = executionPayload(start.input);
+              if (!sameTask(decoded.value, id)) executionFailure('identity_conflict');
               startHash = decoded.hash;
             }
-            if (n !== 1n && event.workflowExecutionStartedEventAttributes) fail('malformed_history');
-            const a = event.activityTaskScheduledEventAttributes;
-            if (a?.activityType?.name === 'acceptanceDuties' || a?.activityType?.name === 'coldVerify') {
-              if (event.eventType !== 10) fail('malformed_history');
-              const decoded = payload(a.input);
-              if (!sameTask(decoded.value, id)) fail('identity_conflict');
-              scheduled.set(n.toString(), {
-                kind: a.activityType.name,
-                value: decoded.value,
-                hash: decoded.hash,
-              });
-            }
-            const c = event.activityTaskCompletedEventAttributes;
-            if (c) {
-              const sid = c.scheduledEventId?.toString() ?? '',
-                record = scheduled.get(sid);
-              if (record) {
-                if (event.eventType !== 12) fail('malformed_history');
-                const result = payload(c.result);
-                if (record.kind === 'acceptanceDuties') {
-                  if (!Array.isArray(record.value.record) || record.value.record.length > 64)
-                    fail('malformed_items');
-                  for (const raw of record.value.record) {
-                    const r = object(raw);
-                    if (
-                      typeof r.prNumber !== 'number' ||
-                      !Number.isSafeInteger(r.prNumber) ||
-                      typeof r.head !== 'string'
-                    )
-                      fail('identity_conflict');
-                    sources.push({
-                      kind: 'acceptanceDuties',
-                      prNumber: r.prNumber,
-                      head: r.head,
-                      items: items(r.items),
-                      scheduled: sid,
-                      completed: n.toString(),
-                      payloadHash: record.hash,
-                    });
-                  }
-                } else {
-                  const v = record.value;
-                  if (typeof v.prNumber !== 'number' || typeof v.headSha !== 'string')
-                    fail('identity_conflict');
-                  if (result.value.outOfScope !== undefined)
-                    sources.push({
-                      kind: 'coldVerify',
-                      prNumber: v.prNumber,
-                      head: v.headSha,
-                      items: items(result.value.outOfScope),
-                      scheduled: sid,
-                      completed: n.toString(),
-                      payloadHash: result.hash,
-                    });
-                  if (v.prNumber === id.prNumber && v.headSha === id.head)
-                    final =
-                      result.value.pass === true
-                        ? {
-                            scheduled: sid,
-                            completed: n.toString(),
-                            payloadHash: result.hash,
-                            head: id.head,
-                            prNumber: id.prNumber,
-                          }
-                        : undefined;
-                }
-              }
-            }
+            if (n !== 1n && event.workflowExecutionStartedEventAttributes)
+              executionFailure('malformed_history');
+            interpreter.event(event, check);
             const kind = closeTypes[info.status ?? 0];
             if (kind && (event as Record<string, unknown>)[kind]) {
-              if (event.eventType !== closeEventTypes[info.status ?? 0]) fail('identity_conflict');
+              if (event.eventType !== closeEventTypes[info.status ?? 0])
+                executionFailure('identity_conflict');
               closed = true;
             } else if (Object.values(closeTypes).some((k) => !!(event as Record<string, unknown>)[k]))
-              fail('identity_conflict');
+              executionFailure('identity_conflict');
           }
           token = response.nextPageToken ?? new Uint8Array();
           if (!token.byteLength) break;
-          if (token.byteLength > ACCEPTANCE_HISTORY_LIMITS.tokenBytes) fail('limit');
+          if (token.byteLength > ACCEPTANCE_HISTORY_LIMITS.tokenBytes) executionFailure('limit');
           const key = Buffer.from(token).toString('base64');
-          if (seen.has(key)) fail('malformed_history');
+          if (seen.has(key)) executionFailure('malformed_history');
           seen.add(key);
         }
-        if (!closed || !startHash || !final || info.historyLength?.toString() !== last.toString())
-          fail('incomplete_proof');
+        if (!closed || !startHash || info.historyLength?.toString() !== last.toString())
+          executionFailure('incomplete_proof');
         const after = await rpc(() =>
           connection.workflowService.describeWorkflowExecution({ namespace, execution }),
         );
@@ -328,11 +378,11 @@ export function acceptanceExecutionReader(
             type: v.workflowExecutionInfo?.type,
             queue: v.executionConfig?.taskQueue,
           });
-        if (stable(desc) !== stable(after)) fail('identity_conflict');
+        if (stable(desc) !== stable(after)) executionFailure('identity_conflict');
         check();
         return {
           kind: 'observed',
-          proof: {
+          proof: interpreter.finish({
             namespace,
             workflowId: id.workflowId,
             runId: id.temporalRunId,
@@ -344,9 +394,7 @@ export function acceptanceExecutionReader(
             startHash,
             closeEvent: last.toString(),
             status: info.status!,
-            final,
-            sources,
-          },
+          }),
           stats: { events, pages, bytes },
         };
       } catch (error) {
@@ -374,6 +422,12 @@ export function acceptanceExecutionReader(
 export function openAcceptanceExecutionReader(
   env: Record<string, string | undefined>,
 ): AcceptanceExecutionReader {
+  return openExecutionReader(env, acceptanceExecutionReader);
+}
+export function openExecutionReader<T, I extends AcceptanceExecutionIdentity>(
+  env: Record<string, string | undefined>,
+  factory: (connection: HistoryConnection, namespace: string, remainingMs: number) => ExecutionReader<T, I>,
+): ExecutionReader<T, I> {
   const config = temporalSettings(env);
   return {
     async read(identity, signal) {
@@ -393,10 +447,7 @@ export function openAcceptanceExecutionReader(
         if (signal?.aborted) return { kind: 'unknown', code: 'cancelled' };
         const remaining = ACCEPTANCE_HISTORY_LIMITS.totalMs - (performance.now() - started);
         if (remaining <= 0) return { kind: 'unknown', code: 'deadline' };
-        return await acceptanceExecutionReader(connection, config.temporalNamespace, remaining).read(
-          identity,
-          signal,
-        );
+        return await factory(connection, config.temporalNamespace, remaining).read(identity, signal);
       } catch {
         return {
           kind: 'unknown',

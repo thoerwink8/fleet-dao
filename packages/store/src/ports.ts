@@ -30,6 +30,7 @@ import type {
   WorktreeInventory,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
+import type { CheckoutSource } from './checkout-source.ts';
 
 /** 任务列表的一页：行、各组的数、下一页游标。 */
 export interface TaskListPage {
@@ -233,7 +234,7 @@ export interface PullRequestRecord {
   title?: string | undefined;
 }
 
-/** 历史 checkout 处置要钉住的原始 runs 身份；缺任一关键列都不能把它当成完整证据。 */
+/** 历史 checkout 的 DB 候选 runs 身份；旧 Temporal 空列保留原样，精确来源另由可信 reader 核验。 */
 export interface HistoricalCheckoutRun {
   id: string;
   segment: string;
@@ -265,6 +266,7 @@ export interface HistoricalCheckoutArchiveInput {
   workflowId: string;
   runId: string;
   temporalRunId: string;
+  executionRunId: string;
   runSegment: string;
   runStartedAt: string;
   runEndedAt: string;
@@ -565,8 +567,8 @@ export interface OpsStore {
   listNotifications(query: { status: 'open' | 'all' } & PageRequest): Promise<Page<NotificationRecord>>;
   /** 各级别的真实条数（不受分页上限影响）；status 口径同 listNotifications。 */
   countNotifications(query: { status: 'open' | 'all' }): Promise<Record<NotificationRecord['level'], number>>;
-  /** 只读现查任务、原工作流 run、旧 checkout 卡和 merged PR；不会写任何东西。 */
-  readHistoricalCheckout(input: {
+  /** 只读 DB 候选事实；不是预检授权。必须另经服务端原 execution reader 验证 run/head 来源；不会写任何东西。 */
+  readHistoricalCheckoutCandidate(input: {
     notificationId: string;
     dedupeKey: string;
     repo: string;
@@ -585,6 +587,7 @@ export interface OpsStore {
   archiveHistoricalCheckout(
     input: HistoricalCheckoutArchiveInput,
     audit: NewAuditEntry,
+    source?: CheckoutSource,
   ): Promise<'ok' | 'already_archived' | 'not_found' | 'conflict'>;
   /** 只读现查任务账、全部 run 和已有的受管纠正；不写任何东西。任务不存在或编号看不懂回 null。 */
   readMergedCorrection(input: {

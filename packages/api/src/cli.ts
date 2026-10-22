@@ -3,6 +3,7 @@ import {
   type AcceptanceExecutionReader,
   openAcceptanceExecutionReader,
 } from './acceptance-execution-reader.ts';
+import { type CheckoutExecutionReader, openCheckoutExecutionReader } from './checkout-execution-reader.ts';
 import {
   CHECKOUT_HISTORY_USAGE,
   parseCheckoutHistoryArgs,
@@ -1068,6 +1069,7 @@ export type CliEnv = Readonly<Record<string, string | undefined>>;
 /** 命令行碰外面的几样：环境变量、输出、连库、读 GitHub、连 Temporal、钟。测试换成内存库和假的，收下输出。 */
 export interface CliDeps {
   acceptanceExecutionReader?: AcceptanceExecutionReader;
+  checkoutExecutionReader?: CheckoutExecutionReader;
   openHistoricalAuditSource?: (
     url: string,
   ) => Promise<{ source: HistoricalAuditSource; close(): Promise<void> }>;
@@ -1542,6 +1544,7 @@ async function runCheckoutHistoryCommand(rest: readonly string[], deps: CliDeps)
             store,
             body,
             archive: args.archive,
+            reader: deps.checkoutExecutionReader ?? openCheckoutExecutionReader(deps.env),
             operator: operatorName(deps.env),
           }),
         ),
