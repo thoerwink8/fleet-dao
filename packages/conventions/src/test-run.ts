@@ -7,6 +7,8 @@
 // fleet-agents.slice（软上限 10152M）下面、共用 6 个核。只看自己那层，每个会话都以为自己能开 5 个进程：三个会话同时 pnpm check，
 // 池子冲到 10.8G（超了软上限）、整机可用只剩 1.2G、swap 用了 2.7G，1 分钟负载 29（6 核），测试被压着回收、互相抢核，变慢、超时。
 // 所以内存按「这一层上限 − 同层别的会话已用」算，核按「在跑的会话数」平分。父节点、兄弟会话读不到就按原来的只看上限、不分核，不报错。
+// 同 scope 里已经占用的匿名内存（会话进程、pnpm check 前面那几步）不在「别的会话」里。预留只按大约 360 MiB 的会话进程算过；
+// 超出的部分引擎会话和本机再扣，否则 5888 MiB 的空 scope 仍会开 5 个，和已经很大的会话叠到硬上限 6144 MiB。专用 CI 不扣。
 //
 // 为什么本机降一档：vitest 默认开「核数 - 1」个进程，本机同时还有别的会话、浏览器、另一个测试槽
 // （test-slots.ts 同时放 2 个）在跑，十几个进程抢核时起子进程的测试常超 vitest 的 5 秒（单跑 1–2 秒的也会），假红。
@@ -47,6 +49,16 @@ export const WORKER_MIB = 900;
  * 一直是 360 上下）。
  */
 export const RESERVE_MIB = 1300;
+/**
+ * RESERVE_MIB 里已经按「会话自己的进程 + 外面那层 pnpm」算过的（300 + 60）。
+ * 本 scope 的匿名占用（memory.stat 的 anon，不含可回收的页缓存）超出这份，才再从能用的内存里扣。
+ * 用 anon 不用 memory.current：pnpm check 先跑的 tsc 退出后，页缓存还挂在 current 上，按 current 扣会把校准过的
+ * 「5888 MiB 开 5 个」误降下去；匿名内存回收不掉，才是和后开的测试进程叠在同一道硬上限上的那部分。
+ * 没超出、或读不到，不扣。专用 CI（没有 FLEET_RUN_ID）不扣，避免按运行机上作业已用的内存改进程数。
+ */
+export const RESERVE_ALREADY_RESIDENT_MIB = 300 + 60;
+/** 单个 node 堆离本 scope 硬上限留的空（MiB），和软硬上限之间那道 256 夹缝一样宽。 */
+export const HEAP_MARGIN_MIB = 256;
 
 const MIB = 1024 * 1024;
 const CGROUP_ROOT = '/sys/fs/cgroup';
@@ -132,10 +144,19 @@ export function realTestRunEnv(): TestRunEnv {
 /**
  * mib 是这次能用的：那一层的上限（limitMib）减掉同层别的会话已用的（othersMib，= 那一层 memory.current − 自己这层的）。
  * 本进程自己那层、或上面那层的 memory.current 读不到时只按上限算（没有 othersMib），和原来一样。
+ * selfMib 是 testWorkers 事后扣的本 scope 匿名占用，不是这一趟 cgroup 行走出来的。
  */
 export type MemoryLimit =
   | { kind: 'none' }
-  | { kind: 'limited'; mib: number; source: string; limitMib?: number; othersMib?: number };
+  | {
+      kind: 'limited';
+      mib: number;
+      source: string;
+      limitMib?: number;
+      othersMib?: number;
+      /** 本 scope 的匿名占用（MiB）。超出 RESERVE_ALREADY_RESIDENT_MIB 的部分已经从 mib 里扣掉。 */
+      selfMib?: number;
+    };
 
 const OVERRIDE_HINT = '要跑就用 VITEST_MAX_WORKERS=<进程数> 指定';
 
@@ -169,7 +190,8 @@ type Limited = Extract<MemoryLimit, { kind: 'limited' }>;
 /**
  * 本进程这次能用多少内存：从自己那层往上走到根，每层取 memory.high（软上限：超了被压着回收）和 memory.max（硬上限）里小的那个；
  * 上面的层（法国是 fleet-agents.slice，几个会话共用）再减掉同层别的会话已用的（那一层的 memory.current − 自己这层的），
- * 各层里取最小。自己这层只看上限：自己已用的（Claude Code、pnpm、vitest 主进程）在 RESERVE_MIB 里算过了。
+ * 各层里取最小。自己这层这里只看上限：预留盖得住的会话进程在 RESERVE_MIB 里；超出那份的匿名占用由 testWorkers 再扣
+ * （applySelfAnon），不放进这一趟，免得专用 CI 的进程数跟着作业已用内存变。
  * 某层没有上限文件是那层没开内存控制（根上本来就没有），不算读不到；memory.current 读不到就只按上限算（原来的算法），不报错。
  * 只认 cgroup v2。
  */
@@ -297,6 +319,76 @@ export function workersThatFit(limitMib: number): number {
   return Math.max(Math.floor((limitMib - RESERVE_MIB) / WORKER_MIB), 1);
 }
 
+/** memory.stat 的 anon（字节）。不在、认不出、读出错都回 undefined：调用方不扣、不封堆。 */
+function readAnonBytes(env: TestRunEnv, dir: string): number | undefined {
+  try {
+    const matched = env.read(`${dir}/memory.stat`)?.match(/^anon (\d+)$/m);
+    return matched ? Number(matched[1]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function ownCgroupDir(env: TestRunEnv): string | undefined {
+  const self = env.read('/proc/self/cgroup');
+  const path = self === undefined ? undefined : selfCgroupPath(self);
+  return path === undefined ? undefined : cgroupDir(path);
+}
+
+/**
+ * 本 scope 匿名占用超出预留里那份会话进程时，从已经取过最小的上限里再扣。
+ * 父层剩下的算法是「父上限 −（父 current − 自己 current）」，把本 scope 已用的加回去了；这里扣的是匿名超出预留的部分，
+ * 不和「同层别的会话」算两次。读不到 anon 就原样返回。
+ */
+function applySelfAnon(limit: MemoryLimit, env: TestRunEnv): MemoryLimit {
+  if (limit.kind !== 'limited') return limit;
+  const dir = ownCgroupDir(env);
+  const anon = dir === undefined ? undefined : readAnonBytes(env, dir);
+  if (anon === undefined) return limit;
+  const selfMib = Math.floor(anon / MIB);
+  const extra = selfMib - RESERVE_ALREADY_RESIDENT_MIB;
+  if (extra <= 0) return limit;
+  return {
+    ...limit,
+    mib: Math.max(limit.mib - extra, 0),
+    limitMib: limit.limitMib ?? limit.mib,
+    selfMib,
+  };
+}
+
+/**
+ * tsc 这一步的 node 堆上限（MiB）：本 scope 的 memory.max 减去匿名已用，再留 HEAP_MARGIN_MIB。
+ * 只封这一步，不封 vitest：工人各是一个进程，堆上限盖在每个上面不会让它们的和变小。
+ * 没有硬上限、认不出、不是 Linux，都不封（回 undefined），不拿猜的数去让类型检查假红。
+ * 算出来不够 1 MiB 就封到 32：与其让内核在同 scope 里挑一个 node 杀掉，不如这一步自己退。
+ */
+export function nodeHeapCapMib(env: TestRunEnv): number | undefined {
+  if (env.platform !== 'linux') return undefined;
+  const dir = ownCgroupDir(env);
+  if (dir === undefined) return undefined;
+  const raw = env.read(`${dir}/memory.max`)?.trim();
+  if (raw === undefined || raw === 'max' || !/^\d+$/.test(raw)) return undefined;
+  const anon = readAnonBytes(env, dir);
+  if (anon === undefined) return undefined;
+  const cap = Math.floor((Number(raw) - anon) / MIB) - HEAP_MARGIN_MIB;
+  if (!Number.isFinite(cap)) return undefined;
+  return Math.max(cap, 32);
+}
+
+/** 已经写了 --max-old-space-size 的不动。没写并且给了上限，就接在现有 NODE_OPTIONS 后面。 */
+export function withHeapCap(
+  env: Readonly<Record<string, string | undefined>>,
+  capMib: number | undefined,
+): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  if (capMib === undefined) return out;
+  const existing = out.NODE_OPTIONS ?? '';
+  if (/--max-old-space-size(?:=|\s+)\d+/.test(existing)) return out;
+  const flag = `--max-old-space-size=${capMib}`;
+  out.NODE_OPTIONS = existing.trim() === '' ? flag : `${existing.trim()} ${flag}`;
+  return out;
+}
+
 /**
  * 本机人手跑时开几个：vitest 默认（核数 - 1）的一半，再不超过「空着的核数 - 1」（busy 量不出就只取一半），至少 1 个。
  * 16 核空闲开 7 个；整机忙一半开 7 个；忙到 75% 开 3 个。
@@ -315,10 +407,15 @@ function isCi(env: Readonly<Record<string, string | undefined>>): boolean {
 }
 
 function describeMemory(limit: Limited): string {
-  const base =
-    limit.othersMib === undefined
-      ? `内存上限 ${limit.mib} MiB（${limit.source}）`
-      : `内存能用 ${limit.mib} MiB（${limit.source} 是 ${limit.limitMib} MiB，同层别的会话已用 ${limit.othersMib} MiB）`;
+  let base: string;
+  if (limit.othersMib === undefined && limit.selfMib === undefined) {
+    base = `内存上限 ${limit.mib} MiB（${limit.source}）`;
+  } else {
+    const parts = [`${limit.source} 是 ${limit.limitMib} MiB`];
+    if (limit.othersMib !== undefined) parts.push(`同层别的会话已用 ${limit.othersMib} MiB`);
+    if (limit.selfMib !== undefined) parts.push(`本 scope 匿名已用 ${limit.selfMib} MiB`);
+    base = `内存能用 ${limit.mib} MiB（${parts.join('，')}）`;
+  }
   return limit.mib < RESERVE_MIB + WORKER_MIB
     ? `${base}，连一个都不够（要 ${RESERVE_MIB + WORKER_MIB} MiB），照样开 1 个、会很慢`
     : base;
@@ -346,12 +443,13 @@ export function testWorkers(env: TestRunEnv = realTestRunEnv()): TestWorkers {
   }
   const byDefault = Math.max(env.cpus - 1, 1);
   const linux = env.platform === 'linux';
-  const limit: MemoryLimit = linux ? memoryLimitOf(env) : { kind: 'none' };
+  // 先认引擎的会话再认 CI：会话里的写码 CLI 给它起的命令设 CI=1（法国实测 grok 的 run_terminal_command，vitest 主进程里是
+  // CI=true），先认 CI 会话就走成「不分核」；真 CI 里没有 FLEET_RUN_ID。匿名占用也只在引擎会话和本机扣，专用 CI 不扣。
+  const engine = Boolean(env.env.FLEET_RUN_ID?.trim());
+  const rawLimit: MemoryLimit = linux ? memoryLimitOf(env) : { kind: 'none' };
+  const limit = linux && (engine || !isCi(env.env)) ? applySelfAnon(rawLimit, env) : rawLimit;
   const byMemory = limit.kind === 'limited' ? workersThatFit(limit.mib) : byDefault;
   const memNote = limit.kind === 'limited' && byMemory < byDefault ? describeMemory(limit) : undefined;
-  // 先认引擎的会话再认 CI：会话里的写码 CLI 给它起的命令设 CI=1（法国实测 grok 的 run_terminal_command，vitest 主进程里是
-  // CI=true），先认 CI 会话就走成「不分核」；真 CI 里没有 FLEET_RUN_ID。
-  const engine = Boolean(env.env.FLEET_RUN_ID?.trim());
   if (!engine && isCi(env.env)) {
     if (limit.kind === 'none') return { maxWorkers: undefined };
     const maxWorkers = Math.min(byDefault, byMemory);
