@@ -24,6 +24,78 @@ const ISSUE_2082_DONE = [
   '4. 顺带：恢复指挥官到法国机的 SSH（见 #1775），以便断链时能做最小恢复。',
 ].join('\n');
 
+// 诊断型（#3591）：真单 #3414 / #3450 / #3413 的「怎么算做完」原文（2026-10-22 从 GitHub 读的）。
+// 要的是原场景那一次 CI 里卡在哪一步，冷验收在 diff 和这一次的测试输出里核实不了，反复被拒。
+const ISSUE_3414_DONE = [
+  '- diff与测试输出能核实原场景卡在哪个COMMIT/等待/收尾边界；新增失败诊断只记录合成数据、阶段与必要资源读数，成功静默，缺采样明确unknown。不能把teardown错误直接当根因。',
+  '- 原完整256条样本、固定字节峰值、真实事务/崩溃边界和15000ms限制保持，不能加重试、跳过或rerun碰绿；定位到原因时增加能击中原因的回归并修对应实现。',
+  '- 若本PR只交付诊断，需求使用Refs关联并明确分片、关不了它与剩余根因欠项，不能Closes或写欠无。',
+  '- 相关测试、类型格式卫生及完整CI/check/独立合并闸通过，不改3249的预算和其它执行护栏，不误关3249或把一次绿称作旧故障已修。',
+].join('\n');
+
+const ISSUE_3450_DONE = [
+  '1. 在既有失败用例和帮手调用链取得可核的等待阶段证据，区分启动、协议读取、退出和异步收尾；沿用现有测试/错误证据口，不另起巡检器、告警或表。证据不打印环境、凭据、完整命令行或不受限进程原文。原首红5000ms和精确head/run/attempt保持可查；仅有再次通过时明确首次失败的具体等待原因仍未知。',
+  '2. 以可控依赖/假帮手或已有精确失败条件验证真实原因并修在必经点；故意延迟、拒绝/异常、缺失输出或不完整回执不得静默变成空/ok。若采用廉价协议单测加最小真实帮手对照，必须仍覆盖实际调用/退出/错误路径，不拿全mock替代协议接线。未取得足够证据时保留明确未知，不编造根因或提前说修复完成。',
+].join('\n');
+
+const ISSUE_3413_DONE = [
+  '- 用diff可核的回归或失败取证明确原用例实际等待的是哪一步，绑定其真实workflow/run；仅针对合成假端口，失败或既有watchdog时保全完整protobuf/describe与阶段，hash/分帧/缺失明确可核，成功保持静默，不输出凭据或业务正文。',
+  '- 保留原60秒、业务断言、worker替换与缓存设置；不加重试、sleep、预算或rerun碰绿，不拿新history替换旧失败历史。已有原证据无论是否重现都保留。',
+  '- 定位到可修原因时在对应必经点修并增加真实回归；如只完成诊断，PR需求使用 Refs #本单（分片、关不了它），写明剩余根因欠项，不能写 Closes 或欠无。',
+  '- 相关测试、类型格式卫生和完整CI/check/独立闸通过；不能从单次绿推定旧失败已修，也不能把另一台park-kind错误当本用例原因。',
+].join('\n');
+
+describe('诊断型验收条（#3591）：要原场景卡在哪的，判成 diff 外', () => {
+  it('#3414：「核实原场景卡在哪个…边界」写了 diff 与测试输出也拦，别的条不误拦', () => {
+    const hits = offDiffAcceptanceItems(ISSUE_3414_DONE);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.item).toContain('核实原场景卡在哪个COMMIT');
+    expect(hits[0]?.words).toContain('核实原场景卡在');
+  });
+
+  it('#3450：「明确首次失败的具体等待原因」拦，修在必经点那条不拦', () => {
+    const hits = offDiffAcceptanceItems(ISSUE_3450_DONE);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.item).toContain('取得可核的等待阶段证据');
+    expect(hits[0]?.words).toContain('明确首次失败的具体等待');
+  });
+
+  it('#3413：「明确原用例实际等待的是哪一步」拦，保留原设置、Refs 分片那几条不拦', () => {
+    const hits = offDiffAcceptanceItems(ISSUE_3413_DONE);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.item).toContain('明确原用例实际等待的是哪一步');
+    expect(hits[0]?.words).toContain('明确原用例实际等待');
+  });
+
+  it.each([
+    [
+      '定位…的真实阶段',
+      '- 定位 admission-alert-crash 那条用例超时的真实阶段（只要求定位不要求修）。',
+      '定位 admission-alert-crash 那条用例超时的真实阶段',
+    ],
+    ['完整 CI 的 N 秒超时', '- 查清它在完整 CI 的 15 秒超时。', '完整 CI 的 15 秒超时'],
+  ])('%s', (_name, item, word) => {
+    expect(offDiffWords(item)).toContain(word);
+  });
+
+  it.each([
+    [
+      '界面显示卡在哪一步（diff 里看得见）',
+      '- 驾驶舱任务页显示卡在哪一步（`packages/web/test/task-page.test.ts` 断言）。',
+    ],
+    [
+      '保留原失败原因（代码行为）',
+      '- 合并失败时保留原失败原因，`packages/engine/test/merge.test.ts` 断言 notes 里有原文。',
+    ],
+    [
+      '定位到冲突文件（代码行为）',
+      '- 冲突提示定位到冲突文件和行号（`packages/engine/test/conflict.test.ts` 断言）。',
+    ],
+  ])('反例不拦：%s', (_name, item) => {
+    expect(offDiffWords(item)).toEqual([]);
+  });
+});
+
 describe('offDiffWords：该拦的', () => {
   it.each([
     ['截图', '- 手机宽度（390）下按钮点击区不小于 44px，截图贴在 PR 里。', '截图'],

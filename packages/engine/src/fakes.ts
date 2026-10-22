@@ -248,28 +248,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     },
     async closeIssue() {},
     async acceptanceDuties(input) {
-      // 和真库同一套：按「单 + PR + 头」只一行，原验收项只并不删，合并回执只补不改
-      for (const r of input.record) {
-        const same = duties.find(
-          (d) => d.taskId === input.taskId && d.prNumber === r.prNumber && d.head === r.head,
-        );
-        if (same) {
-          same.items = [...new Set([...same.items, ...r.items])];
-          if (same.mergeCommit === null && r.mergeCommit) same.mergeCommit = r.mergeCommit;
-          continue;
-        }
-        duties.push({
-          taskId: input.taskId,
-          repo: `${input.repo.owner}/${input.repo.name}`,
-          issueNumber: input.issueNumber,
-          prNumber: r.prNumber,
-          head: r.head,
-          items: [...r.items],
-          source: r.prNumber === 0 ? 'coordination' : 'cold_verify',
-          mergeCommit: r.mergeCommit ?? null,
-          settled: false,
-        });
-      }
+      // 和真库同一套（#3591）：只读旧行，record 不落库
       return {
         open: duties
           .filter((d) => d.taskId === input.taskId && !d.settled)

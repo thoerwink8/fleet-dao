@@ -67,7 +67,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 「派出过没有」只有 `jobs/dispatch-standing.ts` 一份（拉单、点名派单共用）。本机领单不新起一代，所以本机退回法国队列（租约到期 `task.local.expire`+returned、放手 `task.local.finish`+released）的行，各代都结束后要靠操作记录里的退回时刻晚于最后一代的 Temporal `closeTime` 认成「重新派」（起 `:rN+1`，#3461）；退回时刻读不到、结束时刻读不到都不判，不猜。法国接不了的单（验收要 diff 外证据、交代不全、改标准……）不能退回：租约到期先 `franceVerdict` 试判，放手来的由拉单 `holdReturned` 贴回「本机做」；通知键只报一次（`insertAlertOnce`），别改成 `upsertAlert`（会把人处理掉的重开）。这些 `local-kept:` 提醒跟着单子走：每个仓准入走完，单关了或「本机做」摘了的撤掉（`settleLocalKept`，处理人 `engine:intake`），报给本机或贴回「本机做」那两步写不成的这轮也算留着。退回单挡着的地方改好了（`releaseReturned`：库里还挂着 `intake-returned-blocked` 提醒、单仍贴着「本机做」、行仍是没人接的退回行、`franceVerdict` 试判过了）拉单自己摘「本机做」，提醒跟着撤；本机已重新领走的不摘。
 - 引擎自己挑单，进队条件见 design 第九节。要它接：单的四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。
 
-- 冷验收转人的待验条持久写入 `acceptance_duties`；管理归并初建的待验目标（`management_merge`）按原来源读回，不改写成冷验收，认不出的来源记没查成。合并前通过 `acceptance-duty-before-merge` 分支读取全部待验责任、将 PR 正文写成 Refs 分片并现读核对，失败重试或停下，不带旧正文进入合并。代码仍可正常合并，收尾有待验责任不关单。责任项原子并集，新增项递增代次并撤销旧结清；没有新项时重放不把已验的再开回去。最终验收和替代仍走原来的精确仓、单、PR、head、责任 id 和代次 CAS，不认评论文本；换代后旧代次收不掉，替代要按新代重绑。
+- 引擎不再写 `acceptance_duties`（#3591，决定 0113）：冷验收活动不记库，`acceptanceDuties` 端口只读旧行，入参 record（新工作流恒空，老历史和在途重试还会带）不落库。冷验收转人的待验条只记在工作流状态（`rt.handedOver`），`openDuties` 把它并上库里旧的开着的行：合并前（`acceptance-duty-before-merge`）有就把 PR 正文写成 Refs 分片，收尾有就不关单；读不成照旧重试或停下，读到空就是没有待验的。步序没变，没加新标记；`test/replay/fixtures/task-acceptance-duty-merged.json` 是停写前录的老历史。旧行的读法不变：管理归并初建的待验目标（`management_merge`）按原来源读回，认不出的来源记没查成；最终验收和替代仍走精确仓、单、PR、head、责任 id 和代次 CAS，不认评论文本。
 
 ## 改它时要连带改
 

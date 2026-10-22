@@ -97,9 +97,10 @@
 //   三段的单（和老历史 rt.flowMode 为 null）走原来的路，一步不差。
 // - 收树先核对界面截图（#2983，patched('shots-delivery')，cleanup 给 removeWorktree 带 shots）：远端 shots/<单号> 读不到就存进受限归档，
 //   存不成不删树。合并后 PR 说明代码、图片分开写（shotsPrLines，多一次 updatePrBody），有欠项进「还欠什么」。老历史不带 shots，不多调。
-// - 合并不等于关单（#3037，patched('acceptance-duty')，finish）：冷验收转给人的验收条（outOfScope）不挡合并，可收尾先记、读验收责任
-//   （acceptanceDuties 活动，库里 acceptance_duties），还有开着的就不 closeIssue：单子留着，PR 说明「需求」改 Refs 标分片、原验收项进
-//   「还欠什么」。读不成按失败分流重试或停下，不当成没有。没有 outOfScope 的单照旧关。老历史没有这个标记，照旧直接关单。
+// - 合并不等于关单（#3037，patched('acceptance-duty')，finish）：冷验收转给人的验收条（outOfScope）不挡合并，收尾读库里旧的验收责任
+//   （acceptanceDuties 活动，只读）并上这条工作流记着的转人验收条，还有就不 closeIssue：单子留着，PR 说明「需求」改 Refs 标分片、原验收项进
+//   「还欠什么」。#3591（决定 0113）起不再写 acceptance_duties（活动只读、record 恒空），步序不变。读不成按失败分流重试或停下，
+//   不当成没有。没有 outOfScope 的单照旧关。老历史没有 acceptance-duty 标记，照旧直接关单。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { clipCauseSummary } from '@fleet-dao/shared/run-cause';
@@ -1234,8 +1235,8 @@ class TaskFlow {
 
   /**
    * 收尾：关单、收工作树、写库。
-   * 验收责任还开着（#3037，patched('acceptance-duty')）：代码已合（决定 0093：不归我验不挡合并），可单子不关——先把这条工作流
-   * 见过的转人验收条连合并回执记进库（按「单 + PR + 头」幂等，冷验收活动记过的不重复），再读回这张单还开着的全部；
+   * 验收还欠着（#3037，patched('acceptance-duty')）：代码已合（决定 0093：不归我验不挡合并），可单子不关——读库里旧的验收责任
+   * （只读，#3591 起不再写），并上这条工作流见过的转人验收条（openDuties）；
    * 有就留着原单，PR 说明「需求」栏改成 Refs 标分片，原验收项写进「还欠什么」。读不成按失败分流重试或停下，不当成没有、不关单。
    * 老历史没有这个标记，照旧直接关单。
    */
@@ -1312,25 +1313,36 @@ class TaskFlow {
   }
 
   /**
-   * 记下这条工作流见过的转人验收条（合进主线的那个 PR 带上合并回执），读回这张单还开着的验收责任（#3037）。
-   * 读不成、写不成由 step 按失败分流重试或停下等人：不回空数组冒充「没有待验的」。
+   * 这张单还欠着的转人验收条：库里旧的验收责任（#3037 时期记下的，只读）并上这条工作流自己见过的「不归我验」。
+   * #3591（决定 0113）起不再写库：record 恒为空，活动只读；转人验收条只活在工作流状态里，靠留着原单、PR 说明写 Refs 交给人。
+   * 步序没变（照旧一次 acceptanceDuties），不用新标记。读不成由 step 按失败分流重试或停下等人：不回空数组冒充「没有待验的」。
    */
   private async openDuties(commit?: string): Promise<AcceptanceDuty[]> {
     const rt = this.rt;
-    const record = rt.handedOver.map((d) => ({
-      ...d,
-      items: [...d.items],
-      ...(commit && d.prNumber === rt.prNumber ? { mergeCommit: commit } : {}),
-    }));
     const read = await rt.step('acceptanceDuties', () =>
       rt.acts.acceptanceDuties({
         taskId: rt.input.taskId,
         repo: rt.input.repo,
         issueNumber: rt.input.issueNumber,
-        record,
+        record: [],
       }),
     );
-    return read.open;
+    const repo = `${rt.input.repo.owner}/${rt.input.repo.name}`;
+    const open = [...read.open];
+    for (const d of rt.handedOver) {
+      // 老历史写过库：读回来的已经带着这一条（同 PR 同头），不重复算
+      if (open.some((o) => o.prNumber === d.prNumber && o.head === d.head)) continue;
+      open.push({
+        repo,
+        issueNumber: rt.input.issueNumber,
+        prNumber: d.prNumber,
+        head: d.head,
+        items: [...d.items],
+        source: d.prNumber === 0 ? 'coordination' : 'cold_verify',
+        mergeCommit: commit && d.prNumber === rt.prNumber ? commit : null,
+      });
+    }
+    return open;
   }
 
   /**
