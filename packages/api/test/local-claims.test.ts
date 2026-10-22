@@ -1,7 +1,13 @@
 // 本机领单（决定 0096）：POST /api/nodes/claims，本机会话心跳同一个通行证；不成的回 409 / 404 带原因，没接库回 503。
 import { NODE_REPORT_HEADER } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { engineTakeOver, type LocalClaimsPort, pgLocalClaims } from '../src/local-claims.ts';
+import {
+  engineTakeOver,
+  type LocalClaimsPort,
+  pgLocalClaims,
+  readTaskWorkflow,
+  signalTaskRun,
+} from '../src/local-claims.ts';
 import { nodeKeyHash } from '../src/node-report.ts';
 import { type WorkflowControl, WorkflowGoneError, WorkflowUnavailableError } from '../src/ports.ts';
 import { harness } from './harness.ts';
@@ -157,5 +163,152 @@ describe('engineTakeOver / pgLocalClaims：接手停下的单要叫停引擎任�
     await pgLocalClaims(ops).apply({ nodeId: 'n', request: req, now: new Date() });
     expect(typeof seen[0]).toBe('function');
     expect(seen[1]).toBeUndefined();
+  });
+});
+
+describe('受管接手 PR：后端装配', () => {
+  const HEAD = 'a'.repeat(40);
+  const pr = { pr: 9, head: HEAD };
+  const okResult = {
+    ok: true as const,
+    taskId: 't',
+    state: 'running',
+    executor: 'local' as const,
+    leaseUntil: new Date('2026-10-14T14:00:00.000Z'),
+  };
+  const wf = (over: Partial<WorkflowControl> = {}) =>
+    ({
+      signal: async () => {},
+      runningTaskWorkflow: async () => 'task-acme-app-42-g2',
+      taskWorkflowExecution: async (id: string) => ({ workflowId: id, runId: 'run-7', running: true }),
+      ...over,
+    }) as WorkflowControl;
+
+  it('readTaskWorkflow：读到精确 run；没有精确读能力、读失败都明确失败，不猜', async () => {
+    const task = { taskId: 't', issueNumber: 42 };
+    expect(await readTaskWorkflow(wf(), 'acme/app')(task)).toEqual({
+      ok: true,
+      workflowId: 'task-acme-app-42-g2',
+      runId: 'run-7',
+      running: true,
+    });
+    expect(
+      await readTaskWorkflow({ signal: async () => {} } as WorkflowControl, 'acme/app')(task),
+    ).toMatchObject({ ok: false });
+    const failed = await readTaskWorkflow(
+      wf({
+        taskWorkflowExecution: async () => {
+          throw new Error('describe 超时');
+        },
+      }),
+      'acme/app',
+    )(task);
+    expect(failed).toMatchObject({ ok: false });
+    expect(failed.ok ? '' : failed.why).toContain('describe 超时');
+  });
+
+  it('signalTaskRun：taskAbandon 只发给读到的 workflow + run；Gone 当已结束；连不上、别的错带原因拒', async () => {
+    const sent: unknown[] = [];
+    const run = { workflowId: 'w', runId: 'r', running: true };
+    const ok = wf({
+      signal: async (...a) => {
+        sent.push(a);
+      },
+    });
+    expect(await signalTaskRun(ok, 'founder-pc')({ taskId: 't', issueNumber: 1 }, run)).toEqual({ ok: true });
+    expect(sent).toEqual([['w', { name: 'taskAbandon', by: 'node:founder-pc', reason: '本机接手' }, 'r']]);
+    const gone = wf({
+      signal: async () => {
+        throw new WorkflowGoneError('w');
+      },
+    });
+    expect(await signalTaskRun(gone, 'n')({ taskId: 't', issueNumber: 1 }, run)).toEqual({ ok: true });
+    const down = wf({
+      signal: async () => {
+        throw new WorkflowUnavailableError('连不上');
+      },
+    });
+    expect(await signalTaskRun(down, 'n')({ taskId: 't', issueNumber: 1 }, run)).toMatchObject({
+      ok: false,
+    });
+  });
+
+  const ops = (over: Record<string, unknown> = {}) => ({
+    claim: async (i: { takeoverPr?: unknown }) => {
+      seen.push(i);
+      return okResult;
+    },
+    confirmTakeover: async (i: unknown) => {
+      seen.push(i);
+      return okResult;
+    },
+    renew: async () => okResult,
+    finish: async () => okResult,
+    list: async () => [],
+    ...over,
+  });
+  const seen: unknown[] = [];
+
+  it('claim 带 takeoverPr 才传精确身份回调；确认走 confirmTakeover；请求里的身份原样转给 db 现核', async () => {
+    seen.length = 0;
+    const port = pgLocalClaims({ ...ops(), workflows: wf() });
+    await port.apply({
+      nodeId: 'n',
+      request: { action: 'claim', repo: 'acme/app', issue: 42, title: 'x', takeoverPr: pr },
+      now: new Date(),
+    });
+    expect(seen[0]).toMatchObject({ takeoverPr: { pr: 9, head: HEAD } });
+    expect(typeof (seen[0] as { takeoverPr: { readWorkflow: unknown } }).takeoverPr.readWorkflow).toBe(
+      'function',
+    );
+    await port.apply({
+      nodeId: 'n',
+      request: { action: 'claim', repo: 'acme/app', issue: 42, title: 'x' },
+      now: new Date(),
+    });
+    expect((seen[1] as { takeoverPr?: unknown }).takeoverPr).toBeUndefined();
+    const confirmed = await port.apply({
+      nodeId: 'n',
+      request: { action: 'takeover_confirm', repo: 'acme/app', issue: 42, takeoverPr: pr },
+      now: new Date(),
+    });
+    expect(confirmed).toMatchObject({ ok: true, leaseUntil: '2026-10-14T14:00:00.000Z' });
+    expect(seen[2]).toMatchObject({ pr: 9, head: HEAD });
+  });
+
+  it('【故意造出的失败】没接工作流或确认口：接手和确认都拒（不退化成普通 claim）', async () => {
+    seen.length = 0;
+    const noWf = pgLocalClaims(ops());
+    const noConfirm = pgLocalClaims({ ...ops({ confirmTakeover: undefined }), workflows: wf() });
+    for (const p of [noWf, noConfirm]) {
+      expect(
+        await p.apply({
+          nodeId: 'n',
+          request: { action: 'claim', repo: 'acme/app', issue: 42, title: 'x', takeoverPr: pr },
+          now: new Date(),
+        }),
+      ).toMatchObject({ ok: false, code: 'takeover_refused' });
+      expect(
+        await p.apply({
+          nodeId: 'n',
+          request: { action: 'takeover_confirm', repo: 'acme/app', issue: 42, takeoverPr: pr },
+          now: new Date(),
+        }),
+      ).toMatchObject({ ok: false, code: 'takeover_refused' });
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('HTTP：takeover_pending / takeover_refused 回 409 带 code；请求多带「已核」字段 400', async () => {
+    const h = harness({
+      config: { nodeKeys: KEYS },
+      localClaims: port({ ok: false, code: 'takeover_pending', why: '还没结束' }).p,
+    });
+    const confirm = { action: 'takeover_confirm', repo: 'acme/app', issue: 42, takeoverPr: pr };
+    const res = await post(h, confirm);
+    expect(res.status).toBe(409);
+    expect(await codeOf(res)).toBe('takeover_pending');
+    expect((await post(h, { ...confirm, verified: true })).status).toBe(400);
+    expect((await post(h, { ...CLAIM, takeoverPr: { ...pr, verified: true } })).status).toBe(400);
   });
 });

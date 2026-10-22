@@ -322,3 +322,182 @@ describe('显式目标仓：work 识仓带上 GH_REPO，对不上就不登记', 
     expect(illegal.text()).toContain('不是 owner/name');
   });
 });
+
+describe('pnpm work claim --takeover-pr：受管接手已有 PR 的停下的单', () => {
+  const HEAD = 'a'.repeat(40);
+  const PR = { number: 50, body: '**需求**：\nCloses #42\n', headRefName: 'fleet/42-tabcdef12' };
+  const view = (over: Record<string, unknown> = {}) => ({
+    number: 50,
+    state: 'OPEN',
+    headRefOid: HEAD,
+    headRefName: 'fleet/42-tabcdef12',
+    isCrossRepository: false,
+    ...over,
+  });
+  const GOOD = {
+    status: 200,
+    body: {
+      ok: true,
+      taskId: 't1',
+      state: 'running',
+      executor: 'local',
+      leaseUntil: '2026-10-14T12:00:00.000Z',
+    },
+  };
+  const refusal = (code: string, message: string) => ({ status: 409, body: { error: { code, message } } });
+
+  /** posts 按顺序给每次 POST 的回话（用完重复最后一个）；pulls / view 是 gh 的回话。 */
+  function takeoverWorld(
+    o: {
+      pulls?: unknown[];
+      view?: unknown | (() => unknown);
+      posts?: ({ status: number; body: unknown } | Error)[];
+      label?: GhResult;
+    } = {},
+  ) {
+    const sent: LocalClaimRequest[] = [];
+    const gh: string[][] = [];
+    const out: string[] = [];
+    const err: string[] = [];
+    const sleeps: number[] = [];
+    const posts = o.posts ?? [GOOD, GOOD];
+    const run = (...argv: string[]) =>
+      work(argv, {
+        gh: async (args) => {
+          gh.push(args);
+          if (args[0] === 'repo') return ok(JSON.stringify({ nameWithOwner: 'acme/app' }));
+          if (args[0] === 'issue' && args[1] === 'view')
+            return ok(JSON.stringify({ title: 'Fix it', state: 'OPEN' }));
+          if (args[0] === 'pr' && args[1] === 'list') return ok(JSON.stringify(o.pulls ?? [PR]));
+          if (args[0] === 'pr' && args[1] === 'view') {
+            const v = typeof o.view === 'function' ? (o.view as () => unknown)() : (o.view ?? view());
+            return ok(JSON.stringify(v));
+          }
+          if (args[0] === 'issue' && args[1] === 'edit') return o.label ?? ok();
+          return bad(`没想到的 gh：${args.join(' ')}`);
+        },
+        post: async (body) => {
+          sent.push(body);
+          const r = posts[Math.min(sent.length - 1, posts.length - 1)];
+          if (r instanceof Error) throw r;
+          if (!r) throw new Error('没设回话');
+          return { status: r.status, text: JSON.stringify(r.body) };
+        },
+        out: (l) => out.push(l),
+        err: (l) => err.push(l),
+        takeoverWait: {
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          intervalMs: 5,
+          attempts: 3,
+        },
+      });
+    return { sent, gh, run, sleeps, text: () => [...out, ...err].join('\n') };
+  }
+  const args = ['claim', '42', '--takeover-pr', '50', '--head', HEAD];
+  const pendingThenOk = [GOOD, refusal('takeover_pending', '原工作流还没确认结束'), GOOD];
+
+  it('成功：精确身份发给后端 → 先登记 → 确认（含一次还没结束）→ 贴标签 → 才说可以继续，沿用原分支不开新 PR', async () => {
+    const w = takeoverWorld({ posts: pendingThenOk });
+    expect(await w.run(...args)).toBe(0);
+    expect(w.sent).toEqual([
+      { action: 'claim', repo: 'acme/app', issue: 42, title: 'Fix it', takeoverPr: { pr: 50, head: HEAD } },
+      { action: 'takeover_confirm', repo: 'acme/app', issue: 42, takeoverPr: { pr: 50, head: HEAD } },
+      { action: 'takeover_confirm', repo: 'acme/app', issue: 42, takeoverPr: { pr: 50, head: HEAD } },
+    ]);
+    expect(w.sleeps).toEqual([5]);
+    expect(w.gh.some((a) => a.join(' ') === 'issue edit 42 --add-label 本机做')).toBe(true);
+    expect(w.text()).toContain('fleet/42-tabcdef12');
+    expect(w.text()).toContain('不要另开 PR');
+  });
+
+  it('【故意造出的失败】普通 claim 仍拒绝同单开放 PR；只给一半参数、短 head 也拒，什么都不发', async () => {
+    const plain = takeoverWorld();
+    expect(await plain.run('claim', '42')).toBe(1);
+    expect(plain.sent).toEqual([]);
+    for (const bad of [
+      ['claim', '42', '--takeover-pr', '50'],
+      ['claim', '42', '--head', HEAD],
+      ['claim', '42', '--takeover-pr', '50', '--head', 'abc'],
+      ['claim', '42', '--takeover-pr', 'x', '--head', HEAD],
+      ['renew', '42', '--takeover-pr', '50', '--head', HEAD],
+    ]) {
+      const w = takeoverWorld();
+      expect(await w.run(...bad)).toBe(1);
+      expect(w.sent).toEqual([]);
+    }
+  });
+
+  it('【故意造出的失败】本机侧身份对不上：换头、串仓（fork）、多 PR、PR 号不是它、分支不受管、缺字段：都拒，什么都不发', async () => {
+    const cases: Parameters<typeof takeoverWorld>[0][] = [
+      { view: view({ headRefOid: 'b'.repeat(40) }) },
+      { view: view({ isCrossRepository: true }) },
+      { view: view({ isCrossRepository: undefined }) },
+      { view: view({ headRefOid: undefined }) },
+      { view: view({ state: 'CLOSED' }) },
+      { view: view({ headRefName: 'local/42-x' }) },
+      { pulls: [PR, { number: 51, body: '**需求**：\nCloses #42\n', headRefName: 'feat/x' }] },
+      { pulls: [{ ...PR, number: 51 }] },
+      { pulls: [] },
+    ];
+    for (const c of cases) {
+      const w = takeoverWorld(c);
+      expect(await w.run(...args)).toBe(1);
+      expect(w.sent).toEqual([]);
+      expect(w.gh.some((a) => a[1] === 'edit')).toBe(false);
+    }
+  });
+
+  it('【故意造出的失败】后端拒绝（活工人、引擎没停、PR 对不上）：原话照报，不确认、不贴标签', async () => {
+    const w = takeoverWorld({ posts: [refusal('takeover_refused', '这张任务还有未结束的 run')] });
+    expect(await w.run(...args)).toBe(1);
+    expect(w.text()).toContain('未结束的 run');
+    expect(w.sent).toHaveLength(1);
+    expect(w.gh.some((a) => a[1] === 'edit')).toBe(false);
+  });
+
+  it('【故意造出的失败】确认一直 pending（原工作流终态晚到）：不贴标签、不说可继续，退出码 1 并写明可重跑', async () => {
+    const w = takeoverWorld({ posts: [GOOD, refusal('takeover_pending', '原工作流还没确认结束')] });
+    expect(await w.run(...args)).toBe(1);
+    expect(w.sent.map((s) => s.action)).toEqual([
+      'claim',
+      'takeover_confirm',
+      'takeover_confirm',
+      'takeover_confirm',
+    ]);
+    expect(w.text()).toContain('交接未完成');
+    expect(w.text()).toContain('重跑同一条命令');
+    expect(w.text()).not.toContain('接手了 #42');
+    expect(w.gh.some((a) => a[1] === 'edit')).toBe(false);
+  });
+
+  it('【故意造出的失败】发送已收但回执丢失（断线）：写「结果未知」，责任保留；重跑同一命令复核成功，不新起工人', async () => {
+    const lost = takeoverWorld({ posts: [new Error('ECONNRESET')] });
+    expect(await lost.run(...args)).toBe(1);
+    expect(lost.text()).toContain('结果未知');
+    expect(lost.text()).toContain('重跑同一条命令');
+    expect(lost.gh.some((a) => a[1] === 'edit')).toBe(false);
+    // 重跑：后端把它当同一次接手，只续租并确认
+    const again = takeoverWorld({ posts: [GOOD, GOOD] });
+    expect(await again.run(...args)).toBe(0);
+  });
+
+  it('【故意造出的失败】确认通过后断线 / 贴标签失败：不宣称完成；重跑补上', async () => {
+    const dropped = takeoverWorld({ posts: [GOOD, new Error('ECONNRESET')] });
+    expect(await dropped.run(...args)).toBe(1);
+    expect(dropped.text()).toContain('交接未完成');
+    const label = takeoverWorld({ label: bad('HTTP 502') });
+    expect(await label.run(...args)).toBe(1);
+    expect(label.text()).toContain('没贴上');
+    expect(label.text()).not.toContain('接手了 #42');
+  });
+
+  it('【故意造出的失败】确认后 PR 又换头：不贴标签、不宣称完成', async () => {
+    let n = 0;
+    const w = takeoverWorld({ view: () => view(n++ === 0 ? {} : { headRefOid: 'c'.repeat(40) }) });
+    expect(await w.run(...args)).toBe(1);
+    expect(w.text()).toContain('对不上');
+    expect(w.gh.some((a) => a[1] === 'edit')).toBe(false);
+  });
+});
