@@ -454,7 +454,7 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
 });
 
 // 单 #2731（决定 0094）：收轮前对账。10-16 15:06 旧会话说「本机现在没有工人在跑」就收了，队列里还有 4 件。
-// 人在不在场都判：本机队列有可接的活、容量够、没有子代理在跑（只有后台命令、监视器在跑也算没有）→ 挡回，理由列前三件；连挡 3 次放行一次。
+// 只在无人值守开着（on）时判（单 #3588）：本机队列有可接的活、容量够、没有子代理在跑（只有后台命令、监视器在跑也算没有）→ 挡回，理由列前三件；连挡 3 次放行一次。
 // 队列、容量读不成不挡、明说没查成；不在 fleet-dao 检出里不管。判法读数换成假的；命令行外壳那几条用假的 work.ts。
 interface Reading {
   ok: boolean;
@@ -478,6 +478,8 @@ interface QueueStopLib {
     sessionId: string;
     readQueue?: (root: string) => Promise<QueueRead>;
     readCap?: () => Promise<Reading>;
+    judgeQueue?: boolean;
+    enforceStats?: (root: string) => { ran: boolean; why?: string; notice?: string };
   }): Promise<Decision>;
   parseQueue(text: string): QueueRead | { ok: false; why: string };
 }
@@ -537,7 +539,28 @@ describe('规矩：收轮前对账——有可接的活、容量够、没有子�
     return { p, calls, dir };
   }
 
-  it('人在场（没开无人值守）也判：有可接的活、容量够、什么都没在跑 → 挡回，理由列前三件可接的和读数', async () => {
+  it('judgeQueue:false（stop.mjs 在无人值守没开时传）：队列、容量都不读，--enforce 的提示照旧出现（单 #3588）', async () => {
+    const calls = { queue: 0, cap: 0 };
+    const r = await queueStop.decideQueueStop({
+      input: { hook_event_name: 'Stop', session_id: SID, cwd: fakeRepo(), background_tasks: [] },
+      dir: temp('state'),
+      sessionId: SID,
+      judgeQueue: false,
+      enforceStats: () => ({ ran: true, notice: '返工率超线，已收回 Haiku' }),
+      readQueue: async () => {
+        calls.queue++;
+        return { ok: true, items, problems: [] };
+      },
+      readCap: async () => {
+        calls.cap++;
+        return enough;
+      },
+    });
+    expect(calls).toEqual({ queue: 0, cap: 0 });
+    expect(r).toEqual({ block: false, notice: '返工率超线，已收回 Haiku' });
+  });
+
+  it('judgeQueue 缺省（stop.mjs 在无人值守 on 时）：有可接的活、容量够、什么都没在跑 → 挡回，理由列前三件可接的和读数', async () => {
     const { p } = decide();
     const r = await p;
     expect(r.block).toBe(true);
@@ -662,16 +685,43 @@ describe('规矩：收轮前对账——有可接的活、容量够、没有子�
 
     it('【故意造出的失败】队列命令自己失败：不挡，systemMessage 写明没查成和它的 stderr', () => {
       const root = fakeRepo("console.error('gh: HTTP 502'); process.exit(1)");
+      // 状态是 on 才对账；on 又没挡住（这里用刚过期的状态，decideStop 只提示不挡）时才走到队列这一步
+      const stateDir = temp('state');
+      const env = isolatedEnv(stateDir, SID);
+      writeFileSync(
+        join(stateDir, `${SID}.json`),
+        JSON.stringify({
+          state: 'on',
+          expiresAt: new Date(Date.now() - 1_000).toISOString(),
+          totalBlocks: 0,
+        }),
+      );
       const r = run(
         JSON.stringify({ hook_event_name: 'Stop', session_id: SID, cwd: root, background_tasks: [] }),
         undefined,
-        isolatedEnv(temp('state'), SID),
+        env,
       );
       expect(r.status).toBe(0);
       expect(blocked(r.stdout)).toBe(false);
       expect(JSON.parse(r.stdout.trim()).systemMessage).toContain(
         '没查成本机队列：队列命令退出码 1：gh: HTTP 502',
       );
+    });
+
+    it('没开无人值守：真起 stop.mjs 不跑队列命令（假 work.ts 一跑就留痕）、不挡、不出声（单 #3588）', () => {
+      const dir = temp('state');
+      const marker = join(dir, 'queue-ran');
+      const root = fakeRepo(
+        `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'x'); console.log(${JSON.stringify(queueJson)})`,
+      );
+      const r = run(
+        JSON.stringify({ hook_event_name: 'Stop', session_id: SID, cwd: root, background_tasks: [] }),
+        undefined,
+        { ...isolatedEnv(dir, SID), FLEET_SUBAGENT_ENFORCE: 'off' },
+      );
+      expect(r.status).toBe(0);
+      expect(blocked(r.stdout)).toBe(false);
+      expect(existsSync(marker)).toBe(false);
     });
 
     it('机器派的会话（工人，FLEET_WORKER=1）：不对账、不出声', () => {
