@@ -83,6 +83,9 @@ export function ListRow({
   rail,
   expandable,
   defaultOpen = false,
+  open: openProp,
+  onOpenChange,
+  rowLabel,
   details,
   tall = false,
   wrapTrailing = false,
@@ -90,6 +93,11 @@ export function ListRow({
   children,
   ...rest
 }: {
+  /** 受控展开（手风琴：一次只开一行）：给了就以它为准，点一下只回调 onOpenChange。 */
+  open?: boolean | undefined;
+  onOpenChange?: ((open: boolean) => void) | undefined;
+  /** 整行那个按钮（或链接）的读屏名字；选中的按钮行同时带 aria-current。 */
+  rowLabel?: string | undefined;
   /** 行尾放的是按钮这类宽东西：手机上行尾整块落到文字下面，标题不截断、换行写全（工作台「要你拍的」，不再把文字挤成一条缝）。 */
   wrapTrailing?: boolean | undefined;
   /** 两行的行（主行一行加一行小字）：行高取 row-tall（标准 48、紧凑 40），和 RowFrame tall 同高（任务列表，#1919）。 */
@@ -119,8 +127,15 @@ export function ListRow({
   /** 同 details（展开的明细），写在标签里面更顺手时用。 */
   children?: ReactNode;
 } & Omit<ComponentProps<'li'>, 'children' | 'title' | 'onClick'>) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [innerOpen, setInnerOpen] = useState(defaultOpen);
+  const open = openProp ?? innerOpen;
+  const toggle = () => {
+    if (openProp === undefined) setInnerOpen(!open);
+    onOpenChange?.(!open);
+  };
   const bodyId = useId();
+  const labelAttrs = rowLabel ? { 'aria-label': rowLabel } : {};
+  const currentAttrs = selected && rowLabel ? { 'aria-current': 'true' as const } : {};
   const body = summary ?? (
     <>
       {leading}
@@ -157,7 +172,8 @@ export function ListRow({
             type="button"
             aria-expanded={open}
             aria-controls={bodyId}
-            onClick={() => setOpen((v) => !v)}
+            {...labelAttrs}
+            onClick={toggle}
             className={rowClass}
           >
             {body}
@@ -176,11 +192,11 @@ export function ListRow({
           ) : null}
         </>
       ) : href ? (
-        <Link to={href} className={rowClass}>
+        <Link to={href} {...labelAttrs} {...currentAttrs} className={rowClass}>
           {body}
         </Link>
       ) : onClick ? (
-        <button type="button" onClick={onClick} className={rowClass}>
+        <button type="button" onClick={onClick} {...labelAttrs} {...currentAttrs} className={rowClass}>
           {body}
         </button>
       ) : (

@@ -4,7 +4,11 @@
 
 import type { ReactNode } from 'react';
 import type { RoutingLayers } from '../api/types';
+import { List } from './layout/list';
 import { Section } from './layout/section';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
+import { Title } from './layout/title';
 
 /** 没有差集时的那一句。个数没随接口来就不编数字。 */
 function matchedSentence(roster: NonNullable<RoutingLayers['modelRoster']>): string {
@@ -41,8 +45,10 @@ export function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
   ) {
     // 都对得上是好消息：一行淡字，不占一张卡（#1916，样板：好消息不上色、不抢地方）
     return (
-      <section aria-label="渠道模型表" className="mb-3 truncate text-meta text-muted-foreground">
-        {matchedSentence(roster)}
+      <section aria-label="渠道模型表">
+        <Text size="meta" tone="muted" truncate>
+          {matchedSentence(roster)}
+        </Text>
       </section>
     );
   } else if (
@@ -52,43 +58,43 @@ export function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
     roster.notYet.length === 0
   ) {
     body = (
-      <div className="space-y-3">
+      <Stack gap="md">
         <p>{matchedSentence(roster)}</p>
         {manualBlock}
-      </div>
+      </Stack>
     );
   } else {
     body = (
-      <div className="space-y-3">
-        <div>
-          <h2 className="text-body font-semibold">渠道里有、目录里还没有的模型</h2>
+      <Stack gap="md">
+        <Stack gap="sm">
+          <Title level={3}>渠道里有、目录里还没有的模型</Title>
           {roster.missingFromCatalog.length === 0 ? (
-            <p className="mt-1 text-muted-foreground">没有</p>
+            <Text tone="muted">没有</Text>
           ) : (
-            <ul className="mt-1 list-disc pl-5">
+            <List divided={false}>
               {roster.missingFromCatalog.map((item) => (
                 <li key={`${item.channelId}:${item.modelKey}`}>
                   {item.channelName}：{item.modelKey}
                 </li>
               ))}
-            </ul>
+            </List>
           )}
-        </div>
-        <div>
-          <h2 className="text-body font-semibold">目录里有、渠道已不认的路由</h2>
+        </Stack>
+        <Stack gap="sm">
+          <Title level={3}>目录里有、渠道已不认的路由</Title>
           {roster.goneRoutes.length === 0 ? (
-            <p className="mt-1 text-muted-foreground">没有</p>
+            <Text tone="muted">没有</Text>
           ) : (
-            <ul className="mt-1 list-disc pl-5">
+            <List divided={false}>
               {roster.goneRoutes.map((item) => (
                 <li key={item.routeId}>
                   {item.channelName} 的路由 {item.routeId}（模型 {item.modelId}，
                   {item.upstreamModel ? `上游串 ${item.upstreamModel}` : '目录没写上游串'}）
                 </li>
               ))}
-            </ul>
+            </List>
           )}
-        </div>
+        </Stack>
         {roster.failed.map((item) => (
           <p key={item.channelId}>
             {item.channelName} 没读成（{item.code}）：{item.message}
@@ -98,12 +104,12 @@ export function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
           <p key={item.channelId}>{item.channelName} 还没读过</p>
         ))}
         {manualBlock}
-      </div>
+      </Stack>
     );
   }
   return (
-    <Section aria-label="渠道模型表" className="mb-4">
-      <div className="text-body">{body}</div>
+    <Section aria-label="渠道模型表">
+      <Text as="div">{body}</Text>
     </Section>
   );
 }

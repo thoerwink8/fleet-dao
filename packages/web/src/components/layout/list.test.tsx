@@ -89,6 +89,35 @@ describe('ListRow', () => {
     expect(document.querySelector('[data-row-rail]')).toBeNull();
   });
 
+  test('受控展开（手风琴）：open 以外面为准，点一下只回调 onOpenChange', () => {
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <List>
+        <ListRow title="行" expandable open={false} onOpenChange={onOpenChange} details={<p>明细</p>} />
+      </List>,
+    );
+    fireEvent.click(screen.getByRole('button'));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    expect(screen.queryByText('明细')).toBeNull();
+    rerender(
+      <List>
+        <ListRow title="行" expandable open onOpenChange={onOpenChange} details={<p>明细</p>} />
+      </List>,
+    );
+    expect(screen.getByText('明细')).toBeTruthy();
+  });
+
+  test('rowLabel 给整行按钮读屏名字，选中的按钮行带 aria-current', () => {
+    render(
+      <List>
+        <ListRow title="甲" rowLabel="甲：在线" selected onClick={() => {}} />
+        <ListRow title="乙" rowLabel="乙：故障" onClick={() => {}} />
+      </List>,
+    );
+    expect(screen.getByRole('button', { name: '甲：在线' }).getAttribute('aria-current')).toBe('true');
+    expect(screen.getByRole('button', { name: '乙：故障' }).hasAttribute('aria-current')).toBe(false);
+  });
+
   test('wrapTrailing：行尾是按钮时，手机上落到文字下面，标题不截断', () => {
     render(
       <List>

@@ -17,6 +17,8 @@ export interface TableColumn<T> {
   width?: number;
   /** 这一列的字可以折行（备注、原因这类长句）；不写＝不折，列宽跟着内容。折行的列至少 16rem 宽，窄了表格自己横滚。 */
   wrap?: boolean;
+  /** 这一列吃剩下的宽、字可以折行或截断（一格内放着截断的一行字时用）；和 wrap 二选一。 */
+  fill?: boolean;
   /** 自己画这一格。value 是 row[key]。 */
   render?: (value: unknown, row: T, index: number) => ReactNode;
 }
@@ -58,7 +60,13 @@ export function Table<T extends object>({
   empty,
   load,
   caption,
+  groupRow,
+  subRow,
 }: {
+  /** 这一行上面的分组行（整行通栏、fill-1 底，如渠道名和它的批量操作）：返回 null 不画。 */
+  groupRow?: (row: T, index: number) => ReactNode;
+  /** 这一行下面的附加行（整行通栏，如就地展开的表单）：返回 null 不画。 */
+  subRow?: (row: T, index: number) => ReactNode;
   columns: readonly TableColumn<T>[];
   rows: readonly T[];
   /** 行的身份：字段名或函数。 */
@@ -216,6 +224,7 @@ export function Table<T extends object>({
                           cellCls,
                           ALIGN[c.align ?? 'left'],
                           c.wrap && 'min-w-64 whitespace-normal break-words',
+                          c.fill && 'max-w-0 whitespace-normal',
                         )}
                       >
                         {c.render ? c.render(value, row, index) : cellText(value)}
@@ -224,18 +233,41 @@ export function Table<T extends object>({
                   })}
                 </tr>
               );
-              if (!expanded || !expandable) return [main];
-              return [
-                main,
-                <tr key={`${key}:detail`} data-detail-for={key}>
-                  <td
-                    colSpan={span}
-                    className="animate-in border-b border-line bg-fill-1 px-4 py-3 duration-200 fade-in-0"
-                  >
-                    {expandable.render(row)}
-                  </td>
-                </tr>,
-              ];
+              const group = groupRow?.(row, index);
+              const sub = subRow?.(row, index);
+              const out: ReactNode[] = [];
+              if (group !== null && group !== undefined) {
+                out.push(
+                  <tr key={`${key}:group`} data-group-for={key}>
+                    <td colSpan={span} className="border-b border-line bg-fill-1 px-4 py-2 text-ink">
+                      {group}
+                    </td>
+                  </tr>,
+                );
+              }
+              out.push(main);
+              if (expanded && expandable) {
+                out.push(
+                  <tr key={`${key}:detail`} data-detail-for={key}>
+                    <td
+                      colSpan={span}
+                      className="animate-in border-b border-line bg-fill-1 px-4 py-3 duration-200 fade-in-0"
+                    >
+                      {expandable.render(row)}
+                    </td>
+                  </tr>,
+                );
+              }
+              if (sub !== null && sub !== undefined) {
+                out.push(
+                  <tr key={`${key}:sub`} data-sub-for={key}>
+                    <td colSpan={span} className="border-b border-line bg-fill-1 px-4 py-3 text-ink">
+                      {sub}
+                    </td>
+                  </tr>,
+                );
+              }
+              return out;
             })
           )}
         </tbody>

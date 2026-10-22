@@ -9,9 +9,7 @@
 // - 开关走 routing-edit.tsx 里现成的确认弹窗和接口；Fable 的「只有创始人在驾驶舱能开」判在后端，这里只标一句。
 
 import { founderOnlyFor } from '@fleet-dao/shared';
-import { ChevronRight } from 'lucide-react';
-import { type CSSProperties, type ReactNode, useMemo, useState } from 'react';
-import { Link } from 'react-router';
+import { type ReactNode, useMemo, useState } from 'react';
 import { useRouting } from '../api/client';
 import type { Route, RoutingLayerModel, RoutingLayers } from '../api/types';
 import { hostLabel } from '../lib/catalog';
@@ -43,16 +41,22 @@ import {
   groupCatalog,
   NO_CATALOG_FILTER,
 } from '../lib/routing-browse';
-import type { Tone } from '../lib/status';
-import { cn } from '../lib/utils';
+import type { StatusKey } from '../theme/status-dict';
+import { Button } from './layout/button';
 import { EmptyState } from './layout/empty-state';
-import { RowFrame } from './layout/list';
+import { List, RowDetail, RowFrame } from './layout/list';
 import { LoadError, LoadingRows } from './layout/load-state';
 import { NativeSelect } from './layout/native-select';
+import { DisclosureIcon, RowButton } from './layout/row-button';
+import { ScrollRow } from './layout/scroll-row';
 import { SearchInput } from './layout/search-input';
-import { Section } from './layout/section';
+import { Section, SectionGrid } from './layout/section';
+import { Stack } from './layout/stack';
 import { StatusBadge } from './layout/status-badge';
 import { Tag, type TagTone } from './layout/tag';
+import { Text } from './layout/text';
+import { Toggle } from './layout/toggle';
+import { RowItem, WindowBox, WindowList } from './layout/windowed';
 import { ModelStrengthBadge } from './model-strength-badge';
 import { ChannelSwitch, FounderOnlyBadge, ModelSwitch } from './routing-edit';
 import { RouteEffortInline } from './routing-efforts';
@@ -60,8 +64,6 @@ import { KindChip, KindDot, useKindEnv } from './routing-kinds';
 import { isManualChannel, ManualModelForm } from './routing-membership';
 import { ModelRosterNotice } from './routing-roster';
 import { ModelRoutes, OrderSummaryLine, RouteItem, useRouteOrder } from './routing-routes';
-import { Button } from './ui/button';
-import { Toggle } from './ui/toggle';
 
 /**
  * 定高行的高度（像素）和一屏高度：窗口化按它们算位置。
@@ -114,49 +116,47 @@ export function ListFilterBar({
 }) {
   const filtering = active ?? filterActive(filter);
   return (
-    <div className="border-b">
-      <div className="flex items-center gap-3 px-3 pt-3 pb-2">
-        <SearchInput
-          value={filter.query}
-          onChange={(query) => onChange({ ...filter, query })}
-          placeholder={`搜${noun}的名字、编号`}
-          aria-label={`搜索${noun}`}
-          className="min-w-0 flex-1"
-        />
-        <span
-          className="num ml-auto shrink-0 text-meta whitespace-nowrap text-muted-foreground"
-          aria-live="polite"
-        >
-          {filtering ? `显示 ${shown} / 共 ${total} 个` : `共 ${total} 个`}
-        </span>
-      </div>
+    <List>
+      <li>
+        <RowFrame>
+          <SearchInput
+            value={filter.query}
+            onChange={(query) => onChange({ ...filter, query })}
+            placeholder={`搜${noun}的名字、编号`}
+            aria-label={`搜索${noun}`}
+            className="min-w-0 flex-1"
+          />
+          <span className="num shrink-0 whitespace-nowrap" aria-live="polite">
+            <Text size="meta" tone="muted">
+              {filtering ? `显示 ${shown} / 共 ${total} 个` : `共 ${total} 个`}
+            </Text>
+          </span>
+        </RowFrame>
+      </li>
       {/* 手机上放不下就横滑，右端渐隐提示还能往右滑（和用途那一排一样） */}
-      <div
-        style={{ '--fade-end': '1.5rem' } as CSSProperties}
-        className="scrollbar-thin flex items-center gap-2 overflow-x-auto px-3 pb-3 whitespace-nowrap max-md:fade-edges-x"
-      >
-        <Toggle
-          size="sm"
-          pressed={filter.onlyEnabled}
-          onPressedChange={(onlyEnabled) => onChange({ ...filter, onlyEnabled })}
-          className="shrink-0"
-        >
-          只看已开启
-        </Toggle>
-        {children}
-        {filtering ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="shrink-0 text-muted-foreground"
-            onClick={() => (onClear ? onClear() : onChange({ ...filter, query: '', onlyEnabled: false }))}
-          >
-            清除筛选
-          </Button>
-        ) : null}
-      </div>
-    </div>
+      <li>
+        <RowFrame>
+          <ScrollRow>
+            <Toggle
+              pressed={filter.onlyEnabled}
+              onPressedChange={(onlyEnabled) => onChange({ ...filter, onlyEnabled })}
+            >
+              只看已开启
+            </Toggle>
+            {children}
+            {filtering ? (
+              <Button
+                variant="text"
+                size="sm"
+                onClick={() => (onClear ? onClear() : onChange({ ...filter, query: '', onlyEnabled: false }))}
+              >
+                清除筛选
+              </Button>
+            ) : null}
+          </ScrollRow>
+        </RowFrame>
+      </li>
+    </List>
   );
 }
 
@@ -167,7 +167,7 @@ export function WindowedRows<T>({
   itemId,
   empty,
   rowProps,
-  rowClassName,
+  isSelected,
   rowHeight = ROW_HEIGHT,
   flow = false,
   children,
@@ -177,7 +177,8 @@ export function WindowedRows<T>({
   itemId: (item: T) => string;
   empty: string;
   rowProps?: (item: T) => Record<string, string | undefined>;
-  rowClassName?: (item: T) => string | undefined;
+  /** 选中的行换底色。 */
+  isSelected?: (item: T) => boolean;
   rowHeight?: number;
   /** 手机宽度：去掉内部定高滚动，行高仍给定，整列随页面滚。 */
   flow?: boolean;
@@ -185,78 +186,64 @@ export function WindowedRows<T>({
 }) {
   const [scrollTop, setScrollTop] = useState(0);
   if (items.length === 0) {
-    return <EmptyState size="inline" title={empty} className="py-6" />;
+    return <EmptyState size="inline" title={empty} />;
   }
   const total = items.length * rowHeight;
-  // 行和行之间只有一根细线（样板）；悬停 bg-accent，选中由调用方给 bg-selected
-  const rowBase = 'border-b border-border last:border-b-0 hover:bg-accent';
   if (flow) {
     return (
-      <div
-        data-page-scroll="true"
-        className="h-auto overflow-visible md:h-routing-window md:overflow-y-auto md:overscroll-contain"
-      >
-        <ul aria-label={ariaLabel}>
+      <WindowBox flow>
+        <WindowList ariaLabel={ariaLabel}>
           {items.map((item, k) => (
-            <li
+            <RowItem
               key={itemId(item)}
-              {...(rowProps?.(item) ?? {})}
-              aria-posinset={k + 1}
-              aria-setsize={items.length}
-              style={{ height: rowHeight }}
-              className={cn(rowBase, rowClassName?.(item))}
+              attrs={rowProps?.(item) ?? {}}
+              selected={isSelected?.(item) ?? false}
+              height={rowHeight}
+              posinset={k + 1}
+              setsize={items.length}
             >
               {children(item)}
-            </li>
+            </RowItem>
           ))}
-        </ul>
-      </div>
+        </WindowList>
+      </WindowBox>
     );
   }
   // 窗口高和 CSS 的 h-routing-window 同一个数
   const listHeight = LIST_HEIGHT;
   const range = windowRange({ count: items.length, rowHeight, height: listHeight, scrollTop });
   return (
-    <div
-      data-windowed={items.length > WINDOW_MIN_ROWS ? 'true' : undefined}
-      style={{ height: Math.min(listHeight, total) }}
-      className="overflow-y-auto overscroll-contain"
-      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+    <WindowBox
+      windowed={items.length > WINDOW_MIN_ROWS}
+      height={Math.min(listHeight, total)}
+      onScrollTop={setScrollTop}
     >
-      <ul aria-label={ariaLabel} className="relative" style={{ height: total }}>
+      <WindowList ariaLabel={ariaLabel} total={total}>
         {items.slice(range.start, range.end).map((item, k) => (
-          <li
+          <RowItem
             key={itemId(item)}
-            {...(rowProps?.(item) ?? {})}
-            aria-posinset={range.start + k + 1}
-            aria-setsize={items.length}
-            style={{
-              position: 'absolute',
-              left: 0,
-              right: 0,
-              top: (range.start + k) * rowHeight,
-              height: rowHeight,
-            }}
-            className={cn(rowBase, rowClassName?.(item))}
+            attrs={rowProps?.(item) ?? {}}
+            selected={isSelected?.(item) ?? false}
+            top={(range.start + k) * rowHeight}
+            height={rowHeight}
+            posinset={range.start + k + 1}
+            setsize={items.length}
           >
             {children(item)}
-          </li>
+          </RowItem>
         ))}
-      </ul>
-    </div>
+      </WindowList>
+    </WindowBox>
   );
 }
 
-/** 库里留着的老状态词（已不再写）按「没探」说。 */
-const PROBE_WORD: Readonly<Record<string, string>> = {
-  ok: '探通',
-  failed: '不通',
-  skipped: '没探',
-  not_wired: '插头没接',
+/** 库里留着的老状态词（已不再写）按「没探」说；词和颜色都从状态字典取。 */
+const PROBE_STATUS: Readonly<Record<string, StatusKey>> = {
+  ok: 'route:probe:passed',
+  failed: 'route:probe:failed',
+  skipped: 'route:probe:not_probed',
+  not_wired: 'route:probe:not_probed',
 };
-
-/** 探针那一句的颜色：探通是好消息，不通画红，其余（没探、插头没接、探针还没看过）是不知道。 */
-const PROBE_TONE: Readonly<Record<string, Tone>> = { ok: 'done', failed: 'fail' };
 
 /**
  * 一行两行字的骨架（样板 #1914）：左边按钮（第一行名字加一个状态，第二行灰字小字），右边开关。
@@ -274,7 +261,7 @@ function TwoLineRow({
   meta,
   metaTitle,
   trailing,
-  className,
+  nested = false,
 }: {
   /** 按钮的读屏名字（「查看 X 的路由」）。 */
   label: string;
@@ -290,38 +277,32 @@ function TwoLineRow({
   meta: ReactNode;
   metaTitle: string;
   trailing: ReactNode;
-  className?: string;
+  /** 分组下面的变体：行首缩进一格。 */
+  nested?: boolean;
 }) {
   return (
-    <RowFrame tall className={cn('h-full', className)}>
-      <button
-        type="button"
-        onClick={onPick}
-        aria-pressed={selected}
-        aria-label={label}
-        className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 self-stretch rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring"
-      >
-        <span data-row-name-line className="flex min-w-0 items-center gap-2 whitespace-nowrap">
-          <span
-            data-row-name
-            title={nameTitle ?? name}
-            className={cn('min-w-0 truncate text-body font-medium', quiet && 'text-muted-foreground')}
-          >
-            {name}
-          </span>
-          {badges}
-          <span data-status-word className="inline-flex shrink-0 items-center">
-            {status}
-          </span>
+    <RowFrame tall className="h-full">
+      {nested ? <span aria-hidden className="w-6 shrink-0" /> : null}
+      <RowButton layout="column" onClick={onPick} pressed={selected} label={label}>
+        <span data-row-name-line className="min-w-0 whitespace-nowrap">
+          <Stack direction="horizontal" gap="sm" align="center">
+            <span data-row-name title={nameTitle ?? name} className="min-w-0">
+              <Text strong truncate tone={quiet ? 'muted' : 'default'}>
+                {name}
+              </Text>
+            </span>
+            {badges}
+            <span data-status-word className="inline-flex shrink-0 items-center">
+              {status}
+            </span>
+          </Stack>
         </span>
-        <span
-          data-row-meta
-          title={metaTitle}
-          className="block truncate whitespace-nowrap text-meta text-muted-foreground"
-        >
-          {meta}
+        <span data-row-meta title={metaTitle} className="block truncate whitespace-nowrap">
+          <Text size="meta" tone="muted">
+            {meta}
+          </Text>
         </span>
-      </button>
+      </RowButton>
       <span data-row-actions className="flex shrink-0 items-center">
         {trailing}
       </span>
@@ -346,6 +327,8 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
   const [filter, setFilter] = useState<CatalogFilter>(NO_CATALOG_FILTER);
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
   const [picked, setPicked] = useState<string | null>(null);
+  // 目录没读到时下拉里只有「全部渠道」；读失败的横幅在上面写着，不拿空列表冒充「没有渠道」
+  const channelOptions = routing.data ? routing.data.channels : [];
   const shown = useMemo(() => filterCatalog(entries, filter, now), [entries, filter, now]);
   const visuals = useMemo(() => flattenCatalog(groupCatalog(shown), openGroups), [shown, openGroups]);
   const vendors = useMemo(
@@ -369,14 +352,10 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
         : [...prev.statuses, status],
     }));
   return (
-    <>
+    <Stack>
       <ModelRosterNotice layers={layers} />
-      {routing.error ? (
-        <div className="mb-4">
-          <LoadError what="模型目录（没配进用途的模型读不到）" error={routing.error} />
-        </div>
-      ) : null}
-      <div className="grid items-start gap-4 lg:grid-cols-2">
+      {routing.error ? <LoadError what="模型目录（没配进用途的模型读不到）" error={routing.error} /> : null}
+      <SectionGrid cols={2} className="items-start">
         <Section flush aria-label="模型目录">
           <ListFilterBar
             noun="模型"
@@ -409,7 +388,7 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
               className="max-w-40 shrink-0"
             >
               <option value="">全部渠道</option>
-              {(routing.data?.channels ?? []).map((channel) => (
+              {channelOptions.map((channel) => (
                 <option key={channel.id} value={channel.id}>
                   {channel.name}
                 </option>
@@ -418,10 +397,8 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
             {CATALOG_STATUSES.map((status) => (
               <Toggle
                 key={status}
-                size="sm"
                 pressed={filter.statuses.includes(status)}
                 onPressedChange={() => toggleStatus(status)}
-                className="shrink-0"
               >
                 {STATUS_LABEL[status]}
               </Toggle>
@@ -445,11 +422,7 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
                 ? { 'data-catalog': row.entry.modelId }
                 : { 'data-catalog-group': row.group.key }
             }
-            rowClassName={(row) =>
-              row.kind === 'entry' && row.entry.modelId === current?.modelId
-                ? 'bg-selected shadow-row-selected hover:bg-selected'
-                : undefined
-            }
+            isSelected={(row) => row.kind === 'entry' && row.entry.modelId === current?.modelId}
           >
             {(row) => (
               <CatalogVisualRow
@@ -469,8 +442,8 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
         <div id="routing-catalog-detail" className="min-w-0 scroll-mt-4">
           {current ? <CatalogDetail entry={current} now={now} /> : null}
         </div>
-      </div>
-    </>
+      </SectionGrid>
+    </Stack>
   );
 }
 
@@ -497,9 +470,11 @@ function CatalogMark({
   title?: string | undefined;
 }) {
   return (
-    <span data-catalog-mark={tone} title={title} className="mr-1.5 inline-flex shrink-0 align-middle">
-      <Tag tone={MARK_TONE[tone]}>{children}</Tag>
-    </span>
+    <>
+      <span data-catalog-mark={tone} title={title} className="inline-flex shrink-0 align-middle">
+        <Tag tone={MARK_TONE[tone]}>{children}</Tag>
+      </span>{' '}
+    </>
   );
 }
 
@@ -522,23 +497,21 @@ function CatalogVisualRow({
     const enabledCount = row.group.members.filter((member) => member.switchKnown && member.enabled).length;
     return (
       <RowFrame tall className="h-full">
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-label={`${open ? '收起' : '展开'} ${row.group.label} 的变体`}
+        <RowButton
+          expanded={open}
+          label={`${open ? '收起' : '展开'} ${row.group.label} 的变体`}
           onClick={() => onToggle(row.group.key)}
-          className="flex min-w-0 flex-1 items-center gap-2 self-stretch rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring"
         >
-          <ChevronRight
-            aria-hidden
-            data-variant-arrow={open ? 'open' : 'closed'}
-            className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')}
-          />
-          <span className="min-w-0 truncate text-body font-medium">{row.group.label}</span>
-          <span className="shrink-0 text-meta whitespace-nowrap text-muted-foreground">
-            {row.group.members.length} 个变体 · {enabledCount} 个已开
+          <DisclosureIcon open={open} />
+          <Text strong truncate>
+            {row.group.label}
+          </Text>
+          <span className="shrink-0 whitespace-nowrap">
+            <Text size="meta" tone="muted">
+              {row.group.members.length} 个变体 · {enabledCount} 个已开
+            </Text>
           </span>
-        </button>
+        </RowButton>
       </RowFrame>
     );
   }
@@ -589,7 +562,7 @@ function CatalogRow({
       selected={selected}
       name={e.displayName}
       quiet={kind === null || kind === 'retired'}
-      className={cn(nested && 'pl-10')}
+      nested={nested}
       badges={
         <>
           <ModelStrengthBadge strength={e.strength} />
@@ -601,10 +574,10 @@ function CatalogRow({
           <KindChip kind={kind} variant="dot" />
         ) : (
           // 判不了的不画态：读屏写为什么，看得见的只写一遍「没配进用途」
-          <span className="inline-flex items-center text-meta text-muted-foreground">
+          <Text size="meta" tone="muted">
             <KindDot kind={null} whyNot={e.purposes.length === 0 ? '没配进用途，没算过' : '一条路由都没有'} />
             {notUsed}
-          </span>
+          </Text>
         )
       }
       metaTitle={metaTitle}
@@ -655,7 +628,8 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
     routes: e.routes,
   };
   const order = useRouteOrder(model);
-  const raw = (routing.data?.routes ?? []).filter((r) => r.modelId === e.modelId);
+  // 目录没读到时这里没有可列的路由；读失败的横幅在模型目录顶上，不在这里写成「一条都没有」
+  const raw = routing.data ? routing.data.routes.filter((r) => r.modelId === e.modelId) : [];
   const channelName = (id: string) => routing.data?.channels.find((c) => c.id === id)?.name ?? id;
   const kind = modelKind(e, useKindEnv());
   return (
@@ -678,14 +652,18 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
       {e.switchKnown ? (
         <ModelRoutes key={model.modelId} model={model} now={now} summary={false} />
       ) : (
-        <div>
-          <p role="note" className="border-b px-4 py-2.5 text-body text-muted-foreground">
-            {e.purposes.length === 0
-              ? '这个模型还没配进任何用途，路由开着没有读不到，开关先置灰；在用途里排上它之后就能开关。'
-              : '这个模型下一条路由都没有：排了它也派不到它。'}
-          </p>
+        <>
+          <RowFrame>
+            <span role="note">
+              <Text tone="muted">
+                {e.purposes.length === 0
+                  ? '这个模型还没配进任何用途，路由开着没有读不到，开关先置灰；在用途里排上它之后就能开关。'
+                  : '这个模型下一条路由都没有：排了它也派不到它。'}
+              </Text>
+            </span>
+          </RowFrame>
           {raw.length === 0 ? null : (
-            <ul aria-label={`${e.displayName} 在目录里的路由`} className="divide-y divide-border">
+            <List aria-label={`${e.displayName} 在目录里的路由`}>
               {raw.map((r) => (
                 <UnassignedRouteRow
                   key={r.id}
@@ -695,9 +673,9 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
                   name={`${channelName(r.channelId)} · ${r.poolId}`}
                 />
               ))}
-            </ul>
+            </List>
           )}
-        </div>
+        </>
       )}
     </Section>
   );
@@ -722,24 +700,23 @@ function UnassignedRouteRow({
   /** 渠道页里写明这条路由属于哪个模型。 */
   modelLabel?: string;
 }) {
-  const probe = r.probe ? (PROBE_WORD[r.probe.state] ?? '没探') : '探针还没看过';
-  const tone: Tone = r.probe ? (PROBE_TONE[r.probe.state] ?? 'stall') : 'stall';
+  const probe: StatusKey = r.probe
+    ? (PROBE_STATUS[r.probe.state] ?? 'route:probe:not_probed')
+    : 'route:unprobed';
   const meta = [modelLabel, hostLabel[r.hostId]].filter(Boolean).join(' · ');
   return (
     <li data-route={r.id}>
       <RowFrame tall>
-        <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
-          <span className="flex min-w-0 items-center gap-2 whitespace-nowrap">
-            <span className="min-w-0 truncate text-body font-medium" title={`${name} · ${r.id}`}>
+        <span className="flex min-w-0 flex-1 flex-col justify-center">
+          <Stack direction="horizontal" gap="sm" align="center">
+            <Text strong truncate title={`${name} · ${r.id}`}>
               {name}
-            </span>
-            <span className="inline-flex shrink-0">
-              <StatusBadge tone={tone} label={probe} variant="dot" />
-            </span>
-          </span>
-          <span className="block truncate text-meta whitespace-nowrap text-muted-foreground" title={meta}>
+            </Text>
+            <StatusBadge status={probe} variant="dot" />
+          </Stack>
+          <Text size="meta" tone="muted" truncate title={meta}>
             {meta}
-          </span>
+          </Text>
         </span>
         {/* 没配进用途的路由也能先配档位（#1914 第 5 轮） */}
         <RouteEffortInline modelId={modelId} modelName={modelName} routeId={r.id} routeName={name} />
@@ -755,6 +732,21 @@ function channelRouteLine(counts: KindCounts): string {
   let total = 0;
   for (const n of Object.values(counts)) total += n;
   return `${total} 条路，${counts.live} 条活`;
+}
+
+/** 渠道这一行的状态词：从渠道卡的事实对到状态字典的键（词和颜色等级都从字典取，页面不自己写）。 */
+function channelStatusKey(c: ChannelCard): StatusKey {
+  if (!c.channel.enabled) return 'route:off';
+  if (c.state === 'idle') return `route:${c.kind}`;
+  if (c.failover) return 'route:channel:failover';
+  if (c.interrupted) return 'route:interrupted';
+  if (c.quota && c.state === 'ok') {
+    return c.quota.routes === c.activeRoutes ? 'route:channel:quota-all' : 'route:channel:quota-part';
+  }
+  if (c.state === 'ok') return 'route:live';
+  if (c.state === 'partial') return 'route:channel:partial';
+  if (c.state === 'down') return 'route:fault';
+  return c.channel.billing === 'metered' ? 'route:channel:metered' : 'route:unprobed';
 }
 
 export function ChannelTab({ layers }: { layers: RoutingLayers }) {
@@ -781,7 +773,7 @@ export function ChannelTab({ layers }: { layers: RoutingLayers }) {
   if (!routing.data) return <LoadingRows rows={4} />;
   const current = cards.find((c) => c.channel.id === picked) ?? shown[0];
   return (
-    <div className="grid items-start gap-4 lg:grid-cols-2">
+    <SectionGrid cols={2} className="items-start">
       <Section flush aria-label="渠道">
         <ListFilterBar
           noun="渠道"
@@ -799,11 +791,7 @@ export function ChannelTab({ layers }: { layers: RoutingLayers }) {
             cards.length === 0 ? '目录里一个渠道都没有' : '没有符合的渠道：换个搜索词，或关掉「只看已开启」'
           }
           rowProps={(c) => ({ 'data-channel': c.channel.id, 'data-kind': c.kind })}
-          rowClassName={(c) =>
-            c.channel.id === current?.channel.id
-              ? 'bg-selected shadow-row-selected hover:bg-selected'
-              : undefined
-          }
+          isSelected={(c) => c.channel.id === current?.channel.id}
         >
           {(c) => (
             <ChannelRow
@@ -820,7 +808,7 @@ export function ChannelTab({ layers }: { layers: RoutingLayers }) {
       <div id="routing-channel-detail" className="min-w-0 scroll-mt-4">
         {current ? <ChannelDetail key={current.channel.id} card={current} layers={layers} now={now} /> : null}
       </div>
-    </div>
+    </SectionGrid>
   );
 }
 
@@ -842,7 +830,7 @@ function ChannelRow({
       selected={selected}
       name={c.channel.name}
       quiet={quiet}
-      status={<StatusBadge tone={c.tone} label={c.label} variant="dot" />}
+      status={<StatusBadge status={channelStatusKey(c)} variant="dot" />}
       metaTitle={c.reason ? `${line} · ${c.reason}` : line}
       meta={<span data-route-summary>{line}</span>}
       trailing={<ChannelSwitch channelId={c.channel.id} name={c.channel.name} enabled={c.channel.enabled} />}
@@ -867,41 +855,39 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
         <span className="whitespace-nowrap" title={c.reason ?? countsText(c.counts)}>
           {c.reason ? <span className="max-md:hidden">{c.reason} · </span> : null}
           {countsText(c.counts)} ·{' '}
-          <Link
-            to={`/routing/status?p=${encodeURIComponent(c.channel.id)}`}
-            // 手机上可点范围往上下各撑 16（伪元素），不把卡头那一行撑高
-            className="relative underline underline-offset-2 after:absolute after:inset-x-0 after:-inset-y-4 hover:text-foreground"
-          >
+          <Button variant="text" size="xs" href={`/routing/status?p=${encodeURIComponent(c.channel.id)}`}>
             看原文、立即探测
-          </Link>
+          </Button>
         </span>
       }
-      actions={<StatusBadge tone={c.tone} label={c.label} variant="dot" />}
+      actions={<StatusBadge status={channelStatusKey(c)} variant="dot" />}
       flush
     >
       {isManualChannel(c.channel.id, c.channel.name, layers.modelRoster?.manual) ? (
         <ManualModelForm channelId={c.channel.id} />
       ) : null}
       {inLayers.length === 0 && others.length === 0 ? (
-        <p className="px-4 py-6 text-center text-body text-muted-foreground">这个渠道下一条路由都没有</p>
+        <EmptyState size="inline" title="这个渠道下一条路由都没有" />
       ) : null}
       {hidden > 0 ? (
-        <div className="flex items-center gap-2 px-4 pt-2">
-          <Toggle size="sm" pressed={showAll} onPressedChange={setShowAll} className="shrink-0">
-            显示全部
-          </Toggle>
-          {showAll ? null : (
-            <span className="text-meta text-muted-foreground">
-              还有 <span className="num">{hidden}</span> 条没开或没配进用途
-            </span>
-          )}
-        </div>
+        <RowDetail indent={false}>
+          <Stack direction="horizontal" gap="sm" align="center">
+            <Toggle pressed={showAll} onPressedChange={setShowAll}>
+              显示全部
+            </Toggle>
+            {showAll ? null : (
+              <Text size="meta" tone="muted">
+                还有 <span className="num">{hidden}</span> 条没开或没配进用途
+              </Text>
+            )}
+          </Stack>
+        </RowDetail>
       ) : null}
       {visibleInLayers.length > 0 ? (
-        <ol aria-label={`${c.channel.name} 的路由`} className="divide-y divide-border">
+        <WindowList as="ol" ariaLabel={`${c.channel.name} 的路由`}>
           {visibleInLayers.map(({ route, modelId, modelName }) => (
             // 行高、内边距由 RouteItem 的行框（RowFrame）给；关着的只变淡，不整行灰底（路由页样板 #1914）
-            <li key={route.routeId} data-route={route.routeId} className="relative hover:bg-accent">
+            <RowItem key={route.routeId} attrs={{ 'data-route': route.routeId }}>
               <RouteItem
                 route={route}
                 modelId={modelId}
@@ -909,15 +895,19 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
                 modelLabel={modelName}
                 now={now}
               />
-            </li>
+            </RowItem>
           ))}
-        </ol>
+        </WindowList>
       ) : null}
       {visibleOthers.length > 0 ? (
-        <div className={cn(visibleInLayers.length > 0 && 'border-t')}>
+        <>
           {/* 分组小标题：淡字一行，不再是灰底横条 */}
-          <p className="px-4 pt-3 pb-1 text-meta text-muted-foreground">没配进任何用途的路由（读不到开关）</p>
-          <ul aria-label={`${c.channel.name} 里没配进用途的路由`} className="divide-y divide-border">
+          <RowFrame>
+            <Text size="meta" tone="muted">
+              没配进任何用途的路由（读不到开关）
+            </Text>
+          </RowFrame>
+          <List aria-label={`${c.channel.name} 里没配进用途的路由`}>
             {visibleOthers.map(({ route, modelName }) => (
               <UnassignedRouteRow
                 key={route.id}
@@ -928,8 +918,8 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
                 name={routeTitle({ channelName: c.channel.name, poolId: route.poolId })}
               />
             ))}
-          </ul>
-        </div>
+          </List>
+        </>
       ) : null}
     </Section>
   );

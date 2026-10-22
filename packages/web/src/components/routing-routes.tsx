@@ -8,9 +8,8 @@
 // - 渠道已关时这条路由不画开关，写「渠道已关」；池停着、暂停设置没读成时开关置灰并写原因。
 
 import { type HostId, routeEffortChoices } from '@fleet-dao/shared';
-import { ChevronRight, Hourglass } from 'lucide-react';
+import { Hourglass } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
-import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { errorText, usePoolHolds, useRouting, useUpdateModelRoute } from '../api/client';
 import type { LivenessFact, RoutingLayerModel, RoutingLayerRoute } from '../api/types';
@@ -19,7 +18,7 @@ import { poolIsHeld } from '../lib/pool-holds';
 import { nextProbeLine } from '../lib/probe-pace-view';
 import { routeKind } from '../lib/route-kinds';
 import { shareBanners } from '../lib/route-share';
-import { probeInterrupted, routeStateLabel, routeStateTone } from '../lib/route-state';
+import { probeInterrupted, routeStateLabel } from '../lib/route-state';
 import { routeHost, routeSlots, routeTitle } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
 import {
@@ -30,13 +29,19 @@ import {
   slotWord,
   summarizeOrder,
 } from '../lib/routing-order';
-import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
+import { statusEntry } from '../theme/status-dict';
+import { Button } from './layout/button';
 import { Code } from './layout/code';
+import { Grid } from './layout/grid';
 import { RowDetail, RowFrame } from './layout/list';
+import { DisclosureIcon, FoldBar, RowButton } from './layout/row-button';
 import { RowMenu, RowMenuItem } from './layout/row-menu';
-import { StatusDot } from './layout/status-badge';
+import { Stack } from './layout/stack';
+import { LevelDot } from './layout/status-badge';
 import { Tag } from './layout/tag';
+import { Text } from './layout/text';
+import { Toggle } from './layout/toggle';
 import { PoolProblemLine, usePoolProblems } from './pool-problem';
 import {
   ROW_MENU_TITLE,
@@ -48,7 +53,6 @@ import {
 } from './routing-edit';
 import { RouteEffortField, useConfiguredRouteEffort } from './routing-efforts';
 import { KindChip, useKindEnv } from './routing-kinds';
-import { Toggle } from './ui/toggle';
 
 /**
  * 档位配不了时的长说明（「没有单独的档位参数……不带方括号」等）：行内不铺开，
@@ -99,24 +103,14 @@ export function CollapsibleOffModelRoutes({
   const n = model.routes.length;
   return (
     <>
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={`off-routes-${model.modelId}`}
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-body text-muted-foreground hover:bg-accent hover:text-foreground"
-      >
-        <ChevronRight
-          className={cn('size-4 shrink-0 transition-transform duration-200', open && 'rotate-90')}
-          aria-hidden
-        />
+      <FoldBar open={open} onToggle={() => setOpen((v) => !v)} controls={`off-routes-${model.modelId}`}>
         <span data-position className="num shrink-0">
           {position}
         </span>
         <span>
           已关 <span className="num">{n}</span> 条路由
         </span>
-      </button>
+      </FoldBar>
       <div id={`off-routes-${model.modelId}`} hidden={!open}>
         {open ? (
           <ModelRoutes
@@ -170,7 +164,11 @@ export function ModelRoutes({
     }
   };
   if (m.routes.length === 0) {
-    return <p className="px-4 py-3 text-body text-ink-fail">这个模型下一条路由都没有：排了它也派不到它</p>;
+    return (
+      <RowFrame>
+        <Text tone="danger">这个模型下一条路由都没有：排了它也派不到它</Text>
+      </RowFrame>
+    );
   }
   // 引擎自动跳过关着的、顺延给下一个：实际顺位只数开着的（lib/routing-order.ts）。筛选不改这个数。
   const states = m.routes.map((r) => routeSlotState(r, env.channelEnabled));
@@ -187,9 +185,11 @@ export function ModelRoutes({
   return (
     <>
       {summary ? (
-        <p className="px-4 pt-2 text-meta">
-          <OrderSummaryLine summary={summarizeOrder(states, '路由')} noun="路由" />
-        </p>
+        <RowDetail indent={false}>
+          <Text size="meta" as="p">
+            <OrderSummaryLine summary={summarizeOrder(states, '路由')} noun="路由" />
+          </Text>
+        </RowDetail>
       ) : null}
       {shareBanners(
         m.routes.flatMap((r) =>
@@ -205,21 +205,25 @@ export function ModelRoutes({
               ],
         ),
       ).map((text) => (
-        <p key={text} data-route-share className="px-4 pt-2 text-meta text-muted-foreground">
-          {text}
-        </p>
+        <RowDetail key={text} indent={false} data-route-share>
+          <Text size="meta" tone="muted" as="p">
+            {text}
+          </Text>
+        </RowDetail>
       ))}
       {hidden > 0 ? (
-        <div className="flex items-center gap-2 px-4 pt-2">
-          <Toggle size="sm" pressed={showAll} onPressedChange={setShowAll} className="shrink-0">
-            显示全部
-          </Toggle>
-          {showAll ? null : (
-            <span className="text-meta text-muted-foreground">
-              还有 <span className="num">{hidden}</span> 条关着的
-            </span>
-          )}
-        </div>
+        <RowDetail indent={false}>
+          <Stack direction="horizontal" gap="sm" align="center">
+            <Toggle pressed={showAll} onPressedChange={setShowAll}>
+              显示全部
+            </Toggle>
+            {showAll ? null : (
+              <Text size="meta" tone="muted">
+                还有 <span className="num">{hidden}</span> 条关着的
+              </Text>
+            )}
+          </Stack>
+        </RowDetail>
       ) : null}
       <SortableList
         ariaLabel={`${m.displayName} 的路由`}
@@ -229,8 +233,6 @@ export function ModelRoutes({
         disabled={edit.disabledWhy !== null || filtered}
         busy={edit.busy}
         disabledWhy={edit.disabledWhy ?? hideWhy}
-        className="divide-y divide-border"
-        rowClassName={() => 'hover:bg-accent'}
         rowProps={(r) => ({ 'data-route': r.routeId })}
         onSave={(order, expected, movedId) =>
           edit.reorderRoutes({ modelId: m.modelId, movedId, order, expected })
@@ -273,14 +275,11 @@ export function OrderSummaryLine({ summary, noun }: { summary: OrderSummary; nou
       }排头的是配置里第 ${summary.firstPosition} 个`
     : summary.why;
   return (
-    <span
-      role="status"
-      title={full}
-      data-order-summary={summary.ok ? 'ok' : 'none'}
-      className={summary.ok ? 'text-muted-foreground' : 'font-medium text-ink-fail'}
-    >
-      <span className="max-md:hidden">{text}</span>
-      <span className="md:hidden">{short}</span>
+    <span role="status" title={full} data-order-summary={summary.ok ? 'ok' : 'none'}>
+      <Text size="meta" tone={summary.ok ? 'muted' : 'danger'} strong={!summary.ok}>
+        <span className="max-md:hidden">{text}</span>
+        <span className="md:hidden">{short}</span>
+      </Text>
     </span>
   );
 }
@@ -387,187 +386,185 @@ export function RouteItem({
     <>
       <RowFrame tall className="items-start">
         {rowControls?.grip}
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={factsId}
+        <RowButton
+          layout="top"
+          expanded={open}
+          controls={factsId}
           title="接得上、额度够、禁令与开关三件事的原因"
+          dim={dim}
           onClick={() => setOpen((v) => !v)}
-          className="flex min-w-0 flex-1 items-start gap-2 rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring"
         >
-          <ChevronRight
-            className={cn(
-              'mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-200',
-              open && 'rotate-90',
-            )}
-            aria-hidden
-          />
+          <DisclosureIcon open={open} />
           {/* 序号占定宽（渠道块里不分先后也留着）：下面展开的明细按这个宽缩进，和名字对齐（RowDetail） */}
-          <span className="num w-4 shrink-0 text-body text-muted-foreground">
-            {index === undefined ? null : index + 1}
+          <span className="num w-4 shrink-0">
+            <Text tone="muted">{index === undefined ? null : index + 1}</Text>
           </span>
-          <span className={cn('min-w-0 flex-1', dim && 'opacity-60')}>
+          <span className="min-w-0 flex-1">
             {/* 名字后面紧跟这条路由的状态（一行一个状态）；右边只留开关和「⋯」，手机上也放得下 */}
             {/* 小字一行不折（#1914 第 5 轮）：放不下截断，整句在悬停里。名字是认路的那一样，不截断，真放不下宁可换行 */}
-            <span data-route-name-line className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
-              <span className="text-body font-medium break-words">{name}</span>
-              {/* 手机上名字后面只留状态点（词在读屏和悬停里）：点加词会把状态挤到第二行（#1916，390 宽量到） */}
-              <span className="max-md:hidden">
-                <KindChip kind={kind} variant="dot" />
-              </span>
-              <span className="inline-flex items-center md:hidden" title={routeStateLabel[kind]}>
-                <StatusDot tone={routeStateTone[kind]} />
-                {/* 一段字（不拆成「：」和词两段）：同一个词在行里只算一次 */}
-                <span className="sr-only">{`（${routeStateLabel[kind]}）`}</span>
-              </span>
+            <span data-route-name-line>
+              <Stack direction="horizontal" gap="sm" align="center" wrap>
+                <span className="break-words">
+                  <Text strong>{name}</Text>
+                </span>
+                {/* 手机上名字后面只留状态点（词在读屏和悬停里）：点加词会把状态挤到第二行（#1916，390 宽量到） */}
+                <span className="max-md:hidden">
+                  <KindChip kind={kind} variant="dot" />
+                </span>
+                <span className="inline-flex items-center md:hidden" title={routeStateLabel[kind]}>
+                  <LevelDot level={statusEntry(`route:${kind}`).level} />
+                  {/* 一段字（不拆成「：」和词两段）：同一个词在行里只算一次 */}
+                  <span className="sr-only">{`（${routeStateLabel[kind]}）`}</span>
+                </span>
+              </Stack>
             </span>
-            <span
-              data-route-meta
-              title={metaTitle}
-              className="mt-0.5 block truncate whitespace-nowrap text-meta text-muted-foreground"
-            >
+            <span data-route-meta title={metaTitle} className="block truncate whitespace-nowrap">
               {/* 「顺位第一条活的」放小字最前面：窄屏截断时截掉的是后面的在跑几个、第几位，不是它（#1916，原来放末尾，手机上被截掉） */}
-              {isFirst ? <Tag className="mr-2 align-middle">顺位第一条活的</Tag> : null}
-              {/* 渠道页里写明这条路由属于哪个模型：放小字最前面，名字那行只写「渠道 · 池」，窄屏不挤（#1916） */}
-              {modelLabel ? (
-                <>
-                  <span data-route-model className="text-foreground">
-                    {modelLabel}
+              {isFirst ? <Tag>顺位第一条活的</Tag> : null}
+              {isFirst ? ' ' : null}
+              <Text size="meta" tone="muted">
+                {/* 渠道页里写明这条路由属于哪个模型：放小字最前面，名字那行只写「渠道 · 池」，窄屏不挤（#1916） */}
+                {modelLabel ? (
+                  <>
+                    <span data-route-model>
+                      <Text size="meta">{modelLabel}</Text>
+                    </span>
+                    {' · '}
+                  </>
+                ) : null}
+                {routeHost(r)} · <span className="num">{slots.text}</span>
+                {slots.full ? (
+                  // 池满了是等空位、不算故障：一个小图标，话在悬停和读屏里，窄屏小字不折两行
+                  <span data-pool-full title="满了，等空位，不算故障">
+                    {' '}
+                    <Text tone="warning">
+                      <Hourglass className="inline size-3" aria-hidden />
+                    </Text>
+                    <span className="sr-only">（满了，等空位，不算故障）</span>
                   </span>
-                  {' · '}
-                </>
-              ) : null}
-              {routeHost(r)} · <span className="num">{slots.text}</span>
-              {slots.full ? (
-                // 池满了是等空位、不算故障：一个小图标，话在悬停和读屏里，窄屏小字不折两行
-                <span
-                  data-pool-full
-                  title="满了，等空位，不算故障"
-                  className="ml-1 inline-flex align-middle text-ink-stall"
-                >
-                  <Hourglass className="size-3" aria-hidden />
-                  <span className="sr-only">（满了，等空位，不算故障）</span>
-                </span>
-              ) : null}
-              {slot ? (
-                <>
-                  {' · '}
-                  <span data-slot-state={slot.state} className={cn(slot.state === 'on' && 'num')}>
-                    {slotWord(slot.state, slot.rank, '路由')}
+                ) : null}
+                {slot ? (
+                  <>
+                    {' · '}
+                    <span data-slot-state={slot.state} className={cn(slot.state === 'on' && 'num')}>
+                      {slotWord(slot.state, slot.rank, '路由')}
+                    </span>
+                  </>
+                ) : null}
+                {effort ? (
+                  <span data-route-effort-word title="这条路配的思考档位上限；点开这条路由能改">
+                    {' · '}档位上限 <span className="num">{effort}</span>
                   </span>
-                </>
-              ) : null}
-              {effort ? (
-                <span data-route-effort-word title="这条路配的思考档位上限；点开这条路由能改">
-                  {' · '}档位上限 <span className="num">{effort}</span>
-                </span>
-              ) : null}
-              {/* 整池暂停不另贴小标签：名字后面的状态已经写「池暂停」（#1914 第 4 轮，原来写两遍） */}
+                ) : null}
+                {/* 整池暂停不另贴小标签：名字后面的状态已经写「池暂停」（#1914 第 4 轮，原来写两遍） */}
+              </Text>
             </span>
           </span>
-        </button>
-        <span className="flex shrink-0 items-center gap-1">
-          {channelOff ? (
-            <span className="text-meta text-muted-foreground" title="渠道关了，这里不能单独开">
-              渠道已关
-            </span>
-          ) : (
-            <RouteSwitch
-              label={name}
-              enabled={r.enabled}
-              lockedWhy={lockWhy}
-              onToggle={() =>
-                edit.toggleRoute({
-                  modelId,
-                  modelName,
-                  routeId: r.routeId,
-                  routeName: name,
-                  enabled: r.enabled,
-                })
-              }
-            />
-          )}
-          {rowControls ? (
-            <RowMenu label={`更多操作：${rowControls.moves.label}`} title={ROW_MENU_TITLE}>
-              <RowMoveItems moves={rowControls.moves} />
-              {onShare && prev ? (
-                <RowMenuItem disabled={shareOff} onSelect={() => void joinPrevious()}>
-                  和上一条同一档
-                </RowMenuItem>
-              ) : null}
-              {onShare && r.shareBand !== undefined ? (
-                <RowMenuItem
-                  disabled={shareOff}
-                  onSelect={() =>
-                    void onShare(r.routeId, {
-                      shareBand: null,
-                      shareWeight: 1,
-                      expectedVersion: shareVersionNow,
-                    })
-                  }
-                >
-                  单独成档
-                </RowMenuItem>
-              ) : null}
-              {onShare && r.shareBand !== undefined
-                ? [1, 2, 3, 4].map((w) => (
-                    <RowMenuItem
-                      key={w}
-                      disabled={shareOff || r.shareWeight === w}
-                      onSelect={() =>
-                        void onShare(r.routeId, {
-                          shareBand: r.shareBand ?? 0,
-                          shareWeight: w,
-                          expectedVersion: shareVersionNow,
-                        })
-                      }
-                    >
-                      权重 {w}
-                    </RowMenuItem>
-                  ))
-                : null}
-            </RowMenu>
-          ) : null}
+        </RowButton>
+        <span className="shrink-0">
+          <Stack direction="horizontal" gap="sm" align="center">
+            {channelOff ? (
+              <Text size="meta" tone="muted" title="渠道关了，这里不能单独开">
+                渠道已关
+              </Text>
+            ) : (
+              <RouteSwitch
+                label={name}
+                enabled={r.enabled}
+                lockedWhy={lockWhy}
+                onToggle={() =>
+                  edit.toggleRoute({
+                    modelId,
+                    modelName,
+                    routeId: r.routeId,
+                    routeName: name,
+                    enabled: r.enabled,
+                  })
+                }
+              />
+            )}
+            {rowControls ? (
+              <RowMenu label={`更多操作：${rowControls.moves.label}`} title={ROW_MENU_TITLE}>
+                <RowMoveItems moves={rowControls.moves} />
+                {onShare && prev ? (
+                  <RowMenuItem disabled={shareOff} onSelect={() => void joinPrevious()}>
+                    和上一条同一档
+                  </RowMenuItem>
+                ) : null}
+                {onShare && r.shareBand !== undefined ? (
+                  <RowMenuItem
+                    disabled={shareOff}
+                    onSelect={() =>
+                      void onShare(r.routeId, {
+                        shareBand: null,
+                        shareWeight: 1,
+                        expectedVersion: shareVersionNow,
+                      })
+                    }
+                  >
+                    单独成档
+                  </RowMenuItem>
+                ) : null}
+                {onShare && r.shareBand !== undefined
+                  ? [1, 2, 3, 4].map((w) => (
+                      <RowMenuItem
+                        key={w}
+                        disabled={shareOff || r.shareWeight === w}
+                        onSelect={() =>
+                          void onShare(r.routeId, {
+                            shareBand: r.shareBand ?? 0,
+                            shareWeight: w,
+                            expectedVersion: shareVersionNow,
+                          })
+                        }
+                      >
+                        权重 {w}
+                      </RowMenuItem>
+                    ))
+                  : null}
+              </RowMenu>
+            ) : null}
+          </Stack>
         </span>
       </RowFrame>
       {backoff || poolProblem ? (
-        <RowDetail className="-mt-1 space-y-1 pb-2">
-          {backoff ? (
-            <p
-              data-probe-backoff
-              className={cn(
-                'text-meta',
-                backoff.tone === 'fail' ? 'font-medium text-ink-fail' : 'text-ink-stall',
-              )}
-            >
-              {backoff.text}
-            </p>
-          ) : null}
-          {poolProblem ? <PoolProblemLine problem={poolProblem} now={now} /> : null}
+        <RowDetail>
+          <Stack gap="sm">
+            {backoff ? (
+              <div data-probe-backoff>
+                <Text
+                  size="meta"
+                  tone={backoff.tone === 'fail' ? 'danger' : 'warning'}
+                  strong={backoff.tone === 'fail'}
+                  as="p"
+                >
+                  {backoff.text}
+                </Text>
+              </div>
+            ) : null}
+            {poolProblem ? <PoolProblemLine problem={poolProblem} now={now} /> : null}
+          </Stack>
         </RowDetail>
       ) : null}
-      <RowDetail id={factsId} hidden={!open} className="pb-3">
-        <div className="rounded-lg bg-muted p-3">
-          <p className="mb-2 text-meta text-muted-foreground">
+      <RowDetail id={factsId} hidden={!open}>
+        <Stack gap="md">
+          <Text size="meta" tone="muted" as="p">
             路由编号 <Code>{r.routeId}</Code>
-          </p>
-          <div className="grid gap-x-4 gap-y-3 md:grid-cols-3">
+          </Text>
+          <Grid cols={3}>
             <Fact label="接得上" fact={r.connect} red={kind === 'fault' || kind === 'interrupted'}>
               {r.probedAt ? (
                 stale ? (
-                  <span className="text-ink-fail">
+                  <Text size="meta" tone="danger">
                     检测中断：{formatAgo(r.probedAt, now)}的结论，晚于下次探测时刻 20 分钟还没探，探针可能停了
-                  </span>
+                  </Text>
                 ) : (
                   <>{formatAgo(r.probedAt, now)}探的</>
                 )
               ) : null}{' '}
-              <Link
-                to={`/routing/status?p=${encodeURIComponent(r.channelId)}`}
-                className="whitespace-nowrap underline underline-offset-2 hover:text-foreground"
-              >
+              <Button variant="text" size="xs" href={`/routing/status?p=${encodeURIComponent(r.channelId)}`}>
                 原文、立即探测
-              </Link>
+              </Button>
             </Fact>
             <Fact label="额度够" fact={r.quota}>
               {r.exhausted.length > 0
@@ -579,19 +576,12 @@ export function RouteItem({
                 : null}
             </Fact>
             <Fact label="禁令与开关" fact={r.ban} />
-          </div>
+          </Grid>
           {/* 思考档位按「模型 × 路由」配，就在这条路由上改（#1914 第 5 轮）。展开了才读、才画 */}
           {open ? (
-            <div className="mt-3 border-t pt-3">
-              <RouteEffortField
-                modelId={modelId}
-                modelName={modelName}
-                routeId={r.routeId}
-                routeName={name}
-              />
-            </div>
+            <RouteEffortField modelId={modelId} modelName={modelName} routeId={r.routeId} routeName={name} />
           ) : null}
-        </div>
+        </Stack>
       </RowDetail>
     </>
   );
@@ -612,24 +602,27 @@ function Fact({
   red?: boolean;
   children?: ReactNode;
 }) {
-  const tone: Tone = fact.verdict === 'live' ? 'done' : fact.verdict === 'dead' && red ? 'fail' : 'stall';
+  const level = fact.verdict === 'live' ? 'success' : fact.verdict === 'dead' && red ? 'error' : 'warning';
   return (
-    <div className="min-w-0">
-      <div className="text-meta text-muted-foreground">{label}</div>
-      <div className="mt-0.5 flex items-start gap-1.5 text-body">
-        <StatusDot tone={tone} className="mt-1" />
+    <Stack gap="sm">
+      <Text size="meta" tone="muted">
+        {label}
+      </Text>
+      <Stack direction="horizontal" gap="sm" align="center">
+        <LevelDot level={level} />
         {/* 过了的一件用灰字，没过的（死、不知道）才上色：一眼先看到卡在哪 */}
-        <span
-          className={cn(
-            'min-w-0 break-words',
-            fact.verdict === 'live' ? 'text-muted-foreground' : toneText[tone],
-          )}
-        >
-          <span className="sr-only">{FACT_WORD[fact.verdict]}：</span>
-          {fact.reason}
+        <span className="min-w-0 break-words">
+          <Text tone={level === 'success' ? 'muted' : level === 'error' ? 'danger' : 'warning'}>
+            <span className="sr-only">{FACT_WORD[fact.verdict]}：</span>
+            {fact.reason}
+          </Text>
         </span>
-      </div>
-      {children ? <div className="mt-0.5 pl-4 text-meta text-muted-foreground">{children}</div> : null}
-    </div>
+      </Stack>
+      {children ? (
+        <Text size="meta" tone="muted" as="div">
+          {children}
+        </Text>
+      ) : null}
+    </Stack>
   );
 }

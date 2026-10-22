@@ -56,6 +56,17 @@ describe('Drawer', () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  test('side="bottom" 从底部上来，data 标记写在抽屉本体上（手机看详情）', () => {
+    render(
+      <Drawer open side="bottom" data={{ 'data-channel-drawer': '' }} title="t">
+        x
+      </Drawer>,
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.hasAttribute('data-channel-drawer')).toBe(true);
+    expect(dialog.className).toContain('inset-x-0');
+  });
+
   test('trigger 打开', async () => {
     render(
       <Drawer trigger={<button type="button">看详情</button>} title="详情">

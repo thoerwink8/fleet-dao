@@ -47,11 +47,11 @@ const body = (spy: { mock: { calls: unknown[][] } }, n = 0) =>
 /** 渲染额度页并等暂停设置读到（渠道头的按钮从「没查成」的禁用变成可点）。 */
 async function open(api: MockApi) {
   renderApp(<QuotaPage />, { api });
-  await screen.findByRole('columnheader', { name: '周期美元' });
+  await screen.findByRole('columnheader', { name: '启用' });
   await waitFor(() => {
     const b = pauseBtn() ?? resumeBtn();
     expect(b).toBeTruthy();
-    expect((b as HTMLButtonElement).disabled).toBe(false);
+    expect(b?.getAttribute('aria-disabled')).not.toBe('true');
   });
 }
 
@@ -70,12 +70,12 @@ describe('整渠道暂停：全开', () => {
     fireEvent.click(pauseBtn() as HTMLButtonElement);
     expect(await screen.findByText(/将暂停 2 个池：claude-a、claude-b/)).toBeTruthy();
     const confirm = screen.getByRole('button', { name: '确认暂停整渠道' }) as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true);
+    expect(confirm.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(confirm);
     expect(spy).not.toHaveBeenCalled();
 
     fill('原因', '这个渠道先停');
-    expect(confirm.disabled).toBe(false);
+    expect(confirm.getAttribute('aria-disabled')).not.toBe('true');
     fireEvent.click(confirm);
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(spy.mock.calls[0]?.[0]).toBe(KEY);
@@ -102,9 +102,9 @@ describe('整渠道暂停：全开', () => {
     fill('原因', '先停');
     fill('复查日期（可不填）', '2026-13-45');
     const confirm = (await screen.findByRole('button', { name: '确认暂停整渠道' })) as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true);
+    expect(confirm.getAttribute('aria-disabled')).toBe('true');
     fill('复查日期（可不填）', '2026-12-01');
-    expect(confirm.disabled).toBe(false);
+    expect(confirm.getAttribute('aria-disabled')).not.toBe('true');
     fireEvent.click(confirm);
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(body(spy).value).toEqual({
@@ -118,13 +118,13 @@ describe('整渠道暂停：全开', () => {
     const spy = vi.spyOn(api, 'updateSetting');
     await open(api);
     fireEvent.click(pauseBtn() as HTMLButtonElement);
-    await screen.findByRole('group', { name: 'Claude 订阅 的整渠道暂停' });
+    await screen.findByRole('form', { name: 'Claude 订阅 的整渠道暂停' });
     fireEvent.click(switchOf('relay'));
-    expect(await screen.findByRole('group', { name: 'relay 的停用' })).toBeTruthy();
-    expect(screen.queryByRole('group', { name: 'Claude 订阅 的整渠道暂停' })).toBeNull();
+    expect(await screen.findByRole('form', { name: 'relay 的停用' })).toBeTruthy();
+    expect(screen.queryByRole('form', { name: 'Claude 订阅 的整渠道暂停' })).toBeNull();
     fireEvent.click(pauseBtn() as HTMLButtonElement);
     fireEvent.click(await screen.findByRole('button', { name: '取消' }));
-    expect(screen.queryByRole('group', { name: 'Claude 订阅 的整渠道暂停' })).toBeNull();
+    expect(screen.queryByRole('form', { name: 'Claude 订阅 的整渠道暂停' })).toBeNull();
     expect(spy).not.toHaveBeenCalled();
   });
 });
@@ -146,7 +146,7 @@ describe('整渠道放开：全停', () => {
     fireEvent.click(resumeBtn() as HTMLButtonElement);
     expect(await screen.findByText(/将放开 2 个池：claude-a、claude-b/)).toBeTruthy();
     const confirm = screen.getByRole('button', { name: '确认放开整渠道' }) as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true);
+    expect(confirm.getAttribute('aria-disabled')).toBe('true');
     expect(screen.queryByLabelText('复查日期（可不填）')).toBeNull();
     fireEvent.click(confirm);
     expect(spy).not.toHaveBeenCalled();
@@ -295,7 +295,7 @@ describe('整渠道：认不出的项和封号原样留着', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认放开整渠道' }));
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(body(spy).value).toEqual({});
-    expect(document.querySelector('tr[data-pool="claude-b"] [data-pool-flag="封号"]')).toBeTruthy();
+    expect(document.querySelector('tr[data-row-key="claude-b"] [data-pool-flag="封号"]')).toBeTruthy();
   });
 });
 
@@ -309,14 +309,14 @@ describe('整渠道：整份认不出或读不到', () => {
     };
     const spy = vi.spyOn(api, 'updateSetting');
     renderApp(<QuotaPage />, { api });
-    await screen.findByRole('columnheader', { name: '周期美元' });
+    await screen.findByRole('columnheader', { name: '启用' });
     await waitFor(() => expect(pauseBtn()?.title).toContain('暂停设置没查成'));
-    expect(pauseBtn()?.disabled).toBe(true);
-    expect(resumeBtn()?.disabled).toBe(true);
+    expect(pauseBtn()?.getAttribute('aria-disabled')).toBe('true');
+    expect(resumeBtn()?.getAttribute('aria-disabled')).toBe('true');
     expect(state()).toBeNull();
     fireEvent.click(pauseBtn() as HTMLButtonElement);
     fireEvent.click(resumeBtn() as HTMLButtonElement);
-    expect(screen.queryByRole('group', { name: /整渠道/ })).toBeNull();
+    expect(screen.queryByRole('form', { name: /整渠道/ })).toBeNull();
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -326,12 +326,12 @@ describe('整渠道：整份认不出或读不到', () => {
       throw new Error('库连不上');
     };
     renderApp(<QuotaPage />, { api });
-    await screen.findByRole('columnheader', { name: '周期美元' });
+    await screen.findByRole('columnheader', { name: '启用' });
     await waitFor(() =>
       expect(document.querySelectorAll('[data-pool-flag="没查成"]').length).toBeGreaterThan(0),
     );
-    expect(pauseBtn()?.disabled).toBe(true);
-    expect(resumeBtn()?.disabled).toBe(true);
+    expect(pauseBtn()?.getAttribute('aria-disabled')).toBe('true');
+    expect(resumeBtn()?.getAttribute('aria-disabled')).toBe('true');
   });
 });
 
@@ -378,6 +378,6 @@ describe('整渠道：设置版本冲突', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认暂停整渠道' }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('没保存上', { description: '后端出错了' }));
     expect(toast.success).not.toHaveBeenCalled();
-    expect(screen.getByRole('group', { name: 'Claude 订阅 的整渠道暂停' })).toBeTruthy();
+    expect(screen.getByRole('form', { name: 'Claude 订阅 的整渠道暂停' })).toBeTruthy();
   });
 });

@@ -12,12 +12,15 @@ const LEVEL = {
 
 export function Title({
   level = 2,
+  look,
   truncate,
   title,
   children,
   ...rest
 }: {
   level?: 1 | 2 | 3;
+  /** 字号字重照哪一档画（不写＝照 level）：页内的名字要大一号、但不该是第二个 h1 时，level 2 配 look 1。 */
+  look?: 1 | 2 | 3;
   truncate?: boolean;
   /** 悬停给全文（truncate 时用）。 */
   title?: string;
@@ -28,7 +31,7 @@ export function Title({
     <Tag
       {...(title !== undefined ? { title } : {})}
       {...pickData(rest)}
-      className={cn(LEVEL[level], truncate && 'min-w-0 truncate')}
+      className={cn(LEVEL[look ?? level], truncate && 'min-w-0 truncate')}
     >
       {children}
     </Tag>

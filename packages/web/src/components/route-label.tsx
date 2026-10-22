@@ -1,7 +1,8 @@
 import type { Routing } from '../api/types';
 import { routeInfo } from '../lib/catalog';
-import { cn } from '../lib/utils';
 import { Code } from './layout/code';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 
 /** 路由的名字：模型用等宽粗体，渠道和账号池用普通字。modelName 优先用后端给的。 */
 export function RouteLabel({
@@ -9,28 +10,28 @@ export function RouteLabel({
   routeId,
   modelName,
   showHost,
-  className,
 }: {
   routing: Routing | undefined;
   routeId: string;
   modelName?: string | undefined;
   showHost?: boolean;
-  className?: string;
 }) {
   const info = routing ? routeInfo(routing, routeId) : undefined;
   return (
-    <span className={cn('inline-flex max-w-full min-w-0 items-baseline gap-1.5', className)}>
+    <Stack direction="horizontal" gap="sm" align="baseline">
       {(modelName ?? info?.model) ? (
-        <span className="num shrink-0 font-semibold">{modelName ?? info?.model}</span>
+        <span className="num shrink-0">
+          <Text strong>{modelName ?? info?.model}</Text>
+        </span>
       ) : (
         <Code>{routeId}</Code>
       )}
       {info ? (
-        <span className="truncate text-muted-foreground">
+        <Text tone="muted" truncate>
           {info.channel} · {info.poolId}
           {showHost ? ` · ${info.host}` : ''}
-        </span>
+        </Text>
       ) : null}
-    </span>
+    </Stack>
   );
 }

@@ -6,8 +6,9 @@ import { usePoolHolds, useRouting } from '../api/client';
 import { useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import type { KindEnv } from '../lib/route-kinds';
-import { type RouteStateKind, routeStateLabel, routeStateTone, routeStateWhy } from '../lib/route-state';
-import { StatusBadge, type StatusBadgeVariant, StatusDot } from './layout/status-badge';
+import { type RouteStateKind, routeStateLabel, routeStateWhy } from '../lib/route-state';
+import { statusEntry } from '../theme/status-dict';
+import { LevelDot, StatusBadge, type StatusBadgeVariant } from './layout/status-badge';
 
 export function useKindEnv(): KindEnv {
   const routing = useRouting();
@@ -36,57 +37,37 @@ export function useKindEnv(): KindEnv {
  */
 export function KindChip({ kind, variant }: { kind: RouteStateKind; variant?: StatusBadgeVariant }) {
   const why = routeStateWhy[kind];
-  // 疑似换模型和探测记录里的「疑似换模型」同一个橙色，和不通的红分开（#1748、#1798）
-  if (kind === 'degraded') return <DoubtChip label={routeStateLabel[kind]} title={why} variant={variant} />;
+  // 字典里「疑似换模型」是橙（和不通的红分开，#1748、#1798）；完整的词「疑似换模型·已按不在线处理」留给读屏和文字内容
   return (
-    <StatusBadge
-      tone={routeStateTone[kind]}
-      label={routeStateLabel[kind]}
-      title={why}
-      {...(variant ? { variant } : {})}
-    />
+    <>
+      <StatusBadge status={`route:${kind}`} title={why} variant={variant === 'dot' ? 'dot' : 'auto'} />
+      {kind === 'degraded' ? (
+        <span className="sr-only">{routeStateLabel[kind].replace('疑似换模型', '')}</span>
+      ) : null}
+    </>
   );
 }
 
-/** 橙色的「疑似换模型」芯片：身份题说出了旧答案，已按不在线处理，不是红的故障。 */
-export function DoubtChip({
-  label,
-  title,
-  variant,
-}: {
-  label: string;
-  title?: string;
-  variant?: StatusBadgeVariant | undefined;
-}) {
-  return (
-    <span title={title} className="inline-flex shrink-0">
-      <StatusBadge tone="doubt" label={label} {...(variant ? { variant } : {})} />
-    </span>
-  );
-}
-
-/** 状态点：颜色按八态，读屏和悬停写词和一句意思；null = 判不了，不画态（留同样宽的空位，行不跳）。 */
+/** 状态点：颜色按状态字典的等级，读屏和悬停写词和一句意思；null = 判不了，不画态（留同样宽的空位，行不跳）。 */
 export function KindDot({
   kind,
-  className,
   whyNot,
 }: {
   kind: RouteStateKind | null;
-  className?: string;
   /** kind 为空时读屏写什么。 */
   whyNot: string;
 }) {
   if (kind === null) {
     return (
       <>
-        <span aria-hidden className={`inline-block size-2 shrink-0 ${className ?? ''}`} />
+        <span aria-hidden className="inline-block size-1.5 shrink-0" />
         <span className="sr-only">：{whyNot}</span>
       </>
     );
   }
   return (
     <>
-      <StatusDot tone={routeStateTone[kind]} {...(className ? { className } : {})} />
+      <LevelDot level={statusEntry(`route:${kind}`).level} />
       <span className="sr-only" title={routeStateWhy[kind]}>
         ：{routeStateLabel[kind]}
       </span>

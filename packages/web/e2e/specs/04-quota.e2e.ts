@@ -28,22 +28,27 @@ test.describe('额度页', () => {
     expect(Number.isFinite(left)).toBe(true);
     await expect(page.getByText(new RegExp(`约 ${left} 分钟后用满`))).toBeVisible();
 
-    // 池 × 窗口的矩阵（下面的「作废预估」也是每池一行，按池名找行要限在矩阵里）
+    // 池 × 窗口的表（下面的「作废预估」也是每池一行，按池名找行要限在这张表里）；一个池的一个窗口一行
     const matrix = page.locator('[data-quota-matrix]');
     // 拼车额度：美元窗口 $38.00 / $100，用了 38%
-    const carpool = matrix.getByRole('row', { name: /claude-carpool/ });
-    await expect(carpool).toContainText('$38.00');
+    const carpool = matrix
+      .getByRole('row', { name: /claude-carpool/ })
+      .filter({ hasText: '$38.00' })
+      .first();
     await expect(carpool).toContainText('$100');
     await expect(carpool).toContainText('38%');
 
-    // 独享额度：5 小时窗 55%、周窗 31%
+    // 独享额度：5 小时窗 55%、周窗 31%（各占一行）
     const solo = matrix.getByRole('row', { name: /claude-solo/ });
-    await expect(solo).toContainText('55%');
-    await expect(solo).toContainText('31%');
+    await expect(solo.filter({ hasText: '55%' }).first()).toBeVisible();
+    await expect(solo.filter({ hasText: '31%' }).first()).toBeVisible();
 
     // 读数过期的池要明说（Cursor 两小时前读的），一次没读成的池写「没查成」
     await expect(page.getByText(/读数过期或没查成/)).toBeVisible();
-    await expect(matrix.getByRole('row', { name: /cursor/ }).first()).toContainText('估算');
+    // 一行一个状态：过期的读数写「读数过期」，读数旁写「2 小时前算」（估算的，不是实读）
+    const cursor = matrix.getByRole('row', { name: /cursor/ }).first();
+    await expect(cursor).toContainText('读数过期');
+    await expect(cursor).toContainText('前算');
     // 作废预估（#2737）：每个池一行，独享池也在里面
     await expect(page.locator('[data-quota-pressure] [data-pressure-pool="claude-solo"]')).toBeVisible();
 
@@ -55,12 +60,13 @@ test.describe('额度页', () => {
   test('额度快用完的池进「快用完」，不在「先用它」里', async ({ page }) => {
     await page.goto('/quota');
     // Mirasim 5 小时窗用了 93%
-    // 顶上三块是收起的标签（#1805、#1852）：点开「快用完」才出明细，明细是带说明句的那块面板
+    // 表上面的页签（全部 / 该先用 / 快用完 / 读数过期或没查成）把表筛一遍：点「快用完」，表里只剩快用完的行
     await page
       .locator('[data-quota-summary]')
-      .getByRole('button', { name: /快用完/ })
+      .getByRole('tab', { name: /快用完/ })
       .click();
-    const near = page.locator('[data-quota-panel]', { hasText: '用了九成以上，调度会先绕开' });
+    const near = page.locator('[data-quota-matrix]');
     await expect(near).toContainText('93%');
+    await expect(near).toContainText('快用完');
   });
 });

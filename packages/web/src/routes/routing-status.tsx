@@ -1,21 +1,23 @@
-// 渠道状态页（#1087；近 60 次真历史 #1139；重做 #1366）：左边一列折叠的渠道摘要行，右边（手机上是整页）点开的渠道详情。
-// 默认全部折叠：一行只写名字、状态、几条在线/故障/已关、最近一次探测。故障的渠道置顶；顶上有搜索和状态筛选。
+// 渠道状态页（#1087；近 60 次真历史 #1139；重做 #1366；照 Arco 迁 #3533，样稿 canvas/RoutingStatus.dc.html）：
+// 左边一卡「渠道」（搜索、状态筛选、一列摘要行），右边（窄屏是抽屉）点开的渠道详情：头部、路由、探测记录三块。
+// 默认全部折叠：一行只写名字、状态、顺位、几条在线/故障/已关、最近一次探测。故障的渠道置顶；低频的「全部立即探测」收进卡头「更多」。
 // 详情里才有每条路由（手风琴，一次只开一条）、原文、立即探测；再下面是「探测记录」（components/probe-log.tsx，#1638）：
 // 每一次探测一行，新的在上，点一行（或点上面的格子）展开请求、响应原文。
+// 页面只拼 components/layout 的件，不写样式类（design 第三节、lint-design R13–R20）；出问题的行只留状态标签，不画红边线、红框。
 // 改这里之前必须知道：
 // - 通不通、排第几、运行中失败、检测中断都在 lib/channel-status.ts 判，和路由页顶上那一行同一份；这里只画。
 // - 状态种类（在线、故障、已关、未被用途使用、池暂停、已下架、未探）在 lib/route-state.ts：只有「该在线却探不通」才是故障、画红。
-//   人关的、没用途在用的、整池暂停的不是坏了，也不进「故障」的数。
+//   人关的、没用途在用的、整池暂停的不是坏了，也不进「故障」的数。状态词全走字典（theme/status-dict.ts 的 route 域）。
 // - 「立即探测」点下去由法国引擎接手（engine/src/jobs/route-probe-now.ts），走到哪由后端从操作记录现算；页面在探的时候
-//   每 3 秒重拉一次，探完自己把路由目录也重拉（api/client.tsx 的 useRouteProbeStatus）。
+//   每 3 秒重拉一次，探完自己把路由目录也重拉（api/client.tsx 的 useRouteProbeStatus）。已经在探的路由不能再点。
 // - 探不了要说清是哪样：引擎关着、没连上、没查成、没人接手、引擎说没探成，各有一句，不显示成「通」或空白。
 // - 近 60 次来自探针历史（route_probe_history），本渠道所有路由按时间排，一次一格。没探和不通颜色分开。
 //   均耗时、可用率按这 60 格算。库读不到写「没查成」，不拿空格子冒充没有。引擎关着这一份照样读。
+// - 路由折叠区（已关、未使用）先铺 20 条，每次「再看」加 50 条；账号池的毛病（额度读数过期、要人处理）挂在渠道和路由上。
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
-import { ChevronDown, ChevronRight, Info, LoaderCircle, Radar, SatelliteDish, SearchX } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import {
   errorText,
@@ -38,25 +40,29 @@ import {
   ChannelFilterBar,
   type ChannelHistory,
   ChannelList,
+  channelStatusKey,
   FailoverNote,
   HistoryStrip,
+  kindStatus,
 } from '../components/channel-status';
+import { Button } from '../components/layout/button';
+import { Code } from '../components/layout/code';
+import { Descriptions, type DescriptionsItem } from '../components/layout/descriptions';
+import { Drawer } from '../components/layout/drawer';
 import { EmptyState } from '../components/layout/empty-state';
-import { KeyValue } from '../components/layout/key-value';
-import { RowDetail, RowFrame } from '../components/layout/list';
+import { Grid } from '../components/layout/grid';
+import { List, ListRow } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Notice, type NoticeTone } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
 import { RowMenu, RowMenuItem } from '../components/layout/row-menu';
 import { Section } from '../components/layout/section';
-import { StatusBadge, StatusDot } from '../components/layout/status-badge';
+import { Stack } from '../components/layout/stack';
+import { StatusBadge } from '../components/layout/status-badge';
+import { Tag } from '../components/layout/tag';
+import { Text } from '../components/layout/text';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
 import { ProbeLog } from '../components/probe-log';
-import { MOBILE_MQ } from '../components/routing-browse';
-import { KindChip } from '../components/routing-kinds';
-import { Button } from '../components/ui/button';
-import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../components/ui/sheet';
 import {
   buildChannelCards,
   type ChannelCard,
@@ -94,8 +100,8 @@ import {
   STATE_FILTERS,
   type StateFilter,
 } from '../lib/route-state';
-import type { Tone } from '../lib/status';
-import { cn } from '../lib/utils';
+import { usePhone } from '../lib/viewport';
+import type { StatusKey } from '../theme/status-dict';
 
 export function meta() {
   return [{ title: brand.title('渠道状态') }];
@@ -111,14 +117,16 @@ const ROUTING_STATUS_STALE_AFTER_MS = 5 * TIME.MIN;
 /** 两栏（列表 + 详情）从 lg（1024）起；再窄只画列表，详情改抽屉（#1806）。 */
 const DRAWER_MQ = '(max-width: 1023px)';
 
-const STATE_WORD: Readonly<Record<string, { label: string; tone: Tone }>> = {
-  ok: { label: '通过', tone: 'done' },
-  failed: { label: '不通', tone: 'fail' },
-  skipped: { label: '没探', tone: 'stall' },
-  not_wired: { label: '插头没接', tone: 'stall' },
-};
-/** 库里留着的老状态词（已不再写）：当没探。 */
-const OLD_STATE_WORD = { label: '没探', tone: 'stall' } as const satisfies { label: string; tone: Tone };
+/** 立即探测的记录没读到时的占位：读不到由 engineBlock 单独写一句，所有探测按钮跟着置灰，不当成「没有在探的」。 */
+const NO_REQUESTS: readonly RouteProbeRequest[] = [];
+
+/** 一条路由探针的结论对应的字典键（库里留着的老状态词当没探）。 */
+function probeStateStatus(state: string): StatusKey {
+  if (state === 'ok') return 'route:probe:passed';
+  if (state === 'failed') return 'route:probe:failed';
+  if (state === 'not_wired') return 'route:probe:not_wired';
+  return 'route:probe:not_probed';
+}
 
 /** 引擎此刻能不能接立即探测：不能就一句话说清是哪样，按钮跟着置灰。 */
 function engineBlock(status: RouteProbeStatus | undefined, error: unknown): string | undefined {
@@ -182,9 +190,10 @@ export default function RoutingStatus() {
   const [routePick, setRoutePick] = useState<{ channelId: string; routeId: string } | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<StateFilter>('all');
+  const [helpOpen, setHelpOpen] = useState(false);
   // 不到 lg 只画列表，点一行开详情抽屉（宽屏两栏并排，不看它）；手机抽屉从底部上来，平板从右侧出来
   const drawer = useMediaQuery(DRAWER_MQ);
-  const phone = useMediaQuery(MOBILE_MQ);
+  const phone = usePhone();
   const [detailOpen, setDetailOpen] = useState(() => params.has('p'));
 
   const poolHeld = useMemo(
@@ -238,7 +247,7 @@ export default function RoutingStatus() {
     return out;
   }, [routing.data]);
 
-  const requests = probe.data?.requests ?? [];
+  const requests = probe.data === undefined ? NO_REQUESTS : probe.data.requests;
   const blocked = engineBlock(probe.data, probe.error);
   const history = toHistory(historyQuery.data, historyQuery.error);
 
@@ -246,14 +255,14 @@ export default function RoutingStatus() {
   if ((routing.error && !routing.data) || (layers.error && !layers.data)) {
     return (
       <Page title="渠道状态" description={SUMMARY} detail={DESCRIPTION}>
-        <div className="space-y-2">
+        <Stack gap="md">
           {routing.error ? (
             <LoadError what="渠道目录" error={routing.error} onRetry={() => void routing.refetch()} />
           ) : null}
           {layers.error ? (
             <LoadError what="路由两层" error={layers.error} onRetry={() => void layers.refetch()} />
           ) : null}
-        </div>
+        </Stack>
       </Page>
     );
   }
@@ -268,11 +277,7 @@ export default function RoutingStatus() {
     return (
       <Page title="渠道状态" description={SUMMARY} detail={DESCRIPTION}>
         <Section>
-          <EmptyState
-            icon={SatelliteDish}
-            title="目录里一个渠道都没有"
-            hint="渠道在库里没配上：去看后端日志"
-          />
+          <EmptyState title="目录里一个渠道都没有" hint="渠道在库里没配上：去看后端日志" />
         </Section>
       </Page>
     );
@@ -317,14 +322,12 @@ export default function RoutingStatus() {
     if (!list.includes(p)) channelProblems.set(r.channelId, [...list, p]);
   }
   const probing = new Set(allRoutes.filter((r) => activeFor(requests, r.id)).map((r) => r.channelId));
-  // 三样分开数：在线、故障（该修）、待查（还没探到、按量不探、检测中断）；已关、未被用途使用另数，不算坏
-  const open = cards.filter((c) => c.state !== 'off' && c.state !== 'idle');
-  const okCount = open.filter((c) => (c.state === 'ok' || c.state === 'partial') && !c.interrupted).length;
-  const downCount = open.filter((c) => c.state === 'down' && !c.interrupted).length;
-  const unknownCount = open.length - okCount - downCount;
-  const quietCount = cards.length - open.length;
   const allActive = requests.some((r) => isActive(r) && r.routeIds === undefined);
-  const fire = (routeIds?: string[]) => probeNow.mutate(routeIds ? { routeIds } : {});
+  const fire = (routeIds?: string[]) => {
+    // 同一帧里的第二下挡掉：已经有一次在发就不再发
+    if (probeNow.isPending) return;
+    probeNow.mutate(routeIds ? { routeIds } : {});
+  };
 
   const detail = current ? (
     <ChannelDetail
@@ -350,6 +353,90 @@ export default function RoutingStatus() {
     />
   ) : null;
 
+  const list = (
+    <Section
+      flush
+      title={
+        <>
+          渠道 <Tag>{cards.length}</Tag>
+        </>
+      }
+      actions={
+        // 低频：整个目录一起探。放卡头「更多」里，不占页头
+        <RowMenu label="更多操作：渠道" title="全部立即探测" reveal={false}>
+          <RowMenuItem
+            disabled={blocked !== undefined || allActive || probeNow.isPending}
+            onSelect={() => fire()}
+          >
+            {blocked
+              ? `全部立即探测（${blocked}）`
+              : allActive
+                ? '全部立即探测（全部路由正在探）'
+                : '全部立即探测'}
+          </RowMenuItem>
+        </RowMenu>
+      }
+      toolbar={
+        <ChannelFilterBar
+          search={search}
+          onSearch={setSearch}
+          filter={filter}
+          onFilter={setFilter}
+          counts={filterCounts}
+        />
+      }
+      footer={
+        <Stack gap="sm">
+          <div>
+            <Button variant="text" size="xs" aria-expanded={helpOpen} onClick={() => setHelpOpen((v) => !v)}>
+              怎么看这些状态
+            </Button>
+          </div>
+          {helpOpen ? (
+            <Notice tone="info">
+              <Stack gap="sm">
+                <Text>绿灯只表示本节点最近一轮抽测通过，不保证每次使用都正常。</Text>
+                <Text>晚于「下次探测时刻」20 分钟还没探，就显示「检测中断」并标红，不拿旧绿灯掩盖中断。</Text>
+                <Text>已关（人关的）、未被用途使用、池暂停、已下架都不是坏了，只有「故障」才要修。</Text>
+                <Text>
+                  名字下面的顺位是优先级：数字小的先用。路由表里该修的在前，已关、未使用的折在最后。
+                </Text>
+                <Text>可用率按近 60 次真探算，没真探的不进可用率。</Text>
+                <Text>
+                  每个用途排哪些模型、能不能派，看{' '}
+                  <Button variant="text" size="xs" href="/routing">
+                    路由
+                  </Button>
+                  。
+                </Text>
+              </Stack>
+            </Notice>
+          ) : null}
+        </Stack>
+      }
+    >
+      {visible.length === 0 ? (
+        <div role="status">
+          <EmptyState
+            size="inline"
+            title={`没有符合的渠道${q ? `：「${search.trim()}」` : ''}${
+              filter !== 'all' ? `，筛选在「${STATE_FILTERS.find((f) => f.id === filter)?.label}」` : ''
+            }`}
+          />
+        </div>
+      ) : (
+        <ChannelList
+          cards={visible}
+          selected={drawer && !detailOpen ? undefined : (picked ?? undefined)}
+          probing={probing}
+          problems={channelProblems}
+          now={now}
+          onPick={pickChannel}
+        />
+      )}
+    </Section>
+  );
+
   return (
     <Page
       title="渠道状态"
@@ -364,27 +451,12 @@ export default function RoutingStatus() {
         // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
         dataUpdatedAt: routing.dataUpdatedAt > now ? now : routing.dataUpdatedAt,
         staleAfterMs: ROUTING_STATUS_STALE_AFTER_MS,
-        // 右上已经有一句汇总：刷新收成一个图标钮，最后更新在悬停和读屏里（路由页样板 #1914）
+        // 刷新收成一个图标钮，最后更新在悬停和读屏里（路由页样板 #1914）
         variant: 'dot',
       }}
-      actions={
-        <>
-          <ChannelSummary ok={okCount} down={downCount} unknown={unknownCount} quiet={quietCount} />
-          <Button
-            size="sm"
-            loading={probeNow.isPending}
-            onClick={() => fire()}
-            disabled={blocked !== undefined || allActive}
-            title={blocked ?? (allActive ? '全部路由正在探' : '让引擎现在就把全部路由探一遍')}
-          >
-            <Radar aria-hidden />
-            全部立即探测
-          </Button>
-        </>
-      }
     >
-      {routing.error || layers.error ? (
-        <div className="mb-4">
+      <Stack>
+        {routing.error || layers.error ? (
           <LoadError
             text={`${routing.error ? '渠道目录' : '路由两层'}刷新没读成，下面是上一次读到的：${errorText(routing.error ?? layers.error)}`}
             error={routing.error ?? layers.error}
@@ -393,157 +465,44 @@ export default function RoutingStatus() {
               void layers.refetch();
             }}
           />
-        </div>
-      ) : null}
-      <ProbeBanner
-        requests={requests}
-        now={now}
-        blocked={blocked}
-        error={probeNow.error}
-        onDismissError={() => probeNow.reset()}
-      />
-      <div className="grid items-start gap-4 lg:grid-cols-routing">
-        <div className="min-w-0">
-          <ChannelFilterBar
-            search={search}
-            onSearch={setSearch}
-            filter={filter}
-            onFilter={setFilter}
-            counts={filterCounts}
-          />
-          {visible.length === 0 ? (
-            <Section>
-              <div role="status">
-                <EmptyState
-                  icon={SearchX}
-                  title={`没有符合的渠道${q ? `：「${search.trim()}」` : ''}${
-                    filter !== 'all' ? `，筛选在「${STATE_FILTERS.find((f) => f.id === filter)?.label}」` : ''
-                  }`}
-                />
-              </div>
-            </Section>
-          ) : (
-            // 两栏时列表最高换成 max-h-routing-pane。
-            <Section flush>
-              <div className="lg:max-h-routing-pane lg:overflow-y-auto">
-                <ChannelList
-                  cards={visible}
-                  selected={drawer && !detailOpen ? undefined : (picked ?? undefined)}
-                  probing={probing}
-                  problems={channelProblems}
-                  now={now}
-                  onPick={pickChannel}
-                />
-              </div>
-            </Section>
-          )}
-          {/* 四段脚注同一个灰、满屏小字：收进 ⓘ，点开才看（#1903） */}
-          <div className="mt-2 flex items-center gap-1 text-meta text-muted-foreground">
-            <Popover>
-              <PopoverTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="怎么看这些状态"
-                  title="怎么看这些状态"
-                  data-status-notes
-                  className="inline-grid size-8 shrink-0 place-items-center rounded-full hover:text-foreground max-md:size-10"
-                >
-                  <Info className="size-4" aria-hidden />
-                </button>
-              </PopoverTrigger>
-              <PopoverContent align="start" className="w-auto max-w-sm text-body text-muted-foreground">
-                <ul className="space-y-1.5">
-                  <li>绿灯只表示本节点最近一轮抽测通过，不保证每次使用都正常。</li>
-                  <li>晚于「下次探测时刻」20 分钟还没探，就显示「检测中断」并标红，不拿旧绿灯掩盖中断。</li>
-                  <li>已关（人关的）、未被用途使用、池暂停、已下架都不是坏了，只有「故障」才要修。</li>
-                  <li>
-                    每个用途排哪些模型、能不能派，看{' '}
-                    <Link to="/routing" className="underline underline-offset-2">
-                      路由
-                    </Link>
-                    。
-                  </li>
-                </ul>
-              </PopoverContent>
-            </Popover>
-            怎么看这些状态
-          </div>
-        </div>
+        ) : null}
+        <ProbeBanner
+          requests={requests}
+          now={now}
+          blocked={blocked}
+          error={probeNow.error}
+          onDismissError={() => probeNow.reset()}
+        />
         {drawer ? (
           // 不到 lg（手机、平板）只画列表：点一行从右侧（手机从底部）滑出详情抽屉，不再上下堆两栏（#1806）
-          <Sheet open={detailOpen && current !== undefined} onOpenChange={setDetailOpen}>
-            <SheetContent
+          <>
+            {list}
+            <Drawer
+              open={detailOpen && current !== undefined}
+              onOpenChange={setDetailOpen}
+              title="渠道详情"
+              description="这个渠道每条路由的状态、探测记录和立即探测"
               side={phone ? 'bottom' : 'right'}
-              data-channel-drawer
-              className={cn('gap-0', phone ? 'max-h-9/10' : 'w-full sm:max-w-xl')}
+              width="lg"
+              data={{ 'data-channel-drawer': '' }}
             >
-              <SheetHeader className="border-b py-3 pr-12">
-                <SheetTitle className="text-body">渠道详情</SheetTitle>
-                <SheetDescription className="sr-only">
-                  这个渠道每条路由的状态、探测记录和立即探测
-                </SheetDescription>
-              </SheetHeader>
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">{detail}</div>
-            </SheetContent>
-          </Sheet>
+              {detail}
+            </Drawer>
+          </>
         ) : (
-          <div className="min-w-0">
+          <Grid preset="split">
+            {list}
             {detail ?? (
               <Section>
                 <div role="status">
-                  <EmptyState icon={SearchX} title="没有可看的渠道，换个搜索词或筛选" />
+                  <EmptyState title="没有可看的渠道，换个搜索词或筛选" />
                 </div>
               </Section>
             )}
-          </div>
+          </Grid>
         )}
-      </div>
+      </Stack>
     </Page>
-  );
-}
-
-/**
- * 页头右上的一句汇总（照路由页样板）：几个在线；故障、待查、已关或未使用是 0 就不写，故障才画红。
- * 原来是一排四个状态胶囊，占一整行。
- */
-function ChannelSummary({
-  ok,
-  down,
-  unknown,
-  quiet,
-}: {
-  ok: number;
-  down: number;
-  unknown: number;
-  quiet: number;
-}) {
-  const worst = down > 0 ? 'fail' : unknown > 0 ? 'stall' : 'done';
-  const segs: { key: string; text: string; className: string }[] = [
-    { key: 'ok', text: `${ok} 个在线`, className: 'text-foreground' },
-    ...(down > 0 ? [{ key: 'down', text: `${down} 个故障`, className: 'font-medium text-ink-fail' }] : []),
-    ...(unknown > 0 ? [{ key: 'unknown', text: `${unknown} 个待查`, className: 'text-ink-stall' }] : []),
-    // 已关、未使用不是坏了：只在宽屏写
-    ...(quiet > 0 ? [{ key: 'quiet', text: `${quiet} 个已关或未使用`, className: 'max-lg:hidden' }] : []),
-  ];
-  // 手机上标题行放不下整句（会把刷新挤到第二行）：只写最要紧的一段，整句在悬停和读屏里
-  const lead = down > 0 ? 'down' : unknown > 0 ? 'unknown' : 'ok';
-  const full = segs.map((s) => s.text).join(' · ');
-  return (
-    <p
-      data-channel-counts
-      title={full}
-      className="flex min-w-0 items-center gap-2 whitespace-nowrap text-body text-muted-foreground"
-    >
-      <StatusDot tone={worst} />
-      {/* 读屏念整句；看得见的几段（手机上只剩一段）不给读屏 */}
-      <span className="sr-only">{full}</span>
-      {segs.map((s, i) => (
-        <span key={s.key} aria-hidden className={cn('num', s.className, s.key !== lead && 'max-md:hidden')}>
-          {i > 0 ? <span className="mr-2 font-normal text-muted-foreground max-md:hidden">·</span> : null}
-          {s.text}
-        </span>
-      ))}
-    </p>
   );
 }
 
@@ -604,28 +563,27 @@ function ProbeBanner({
   }
   if (lines.length === 0) return null;
   return (
-    <ul aria-label="立即探测" className="mb-4 space-y-1.5">
-      {lines.map((l) => (
-        <li key={l.key}>
-          <Notice
-            tone={l.tone}
-            action={
-              l.onClose ? (
-                <button
-                  type="button"
-                  onClick={l.onClose}
-                  className="inline-flex min-h-8 items-center px-1 text-meta underline underline-offset-2 max-md:min-h-10"
-                >
-                  知道了
-                </button>
-              ) : undefined
-            }
-          >
-            <span className="break-words">{l.text}</span>
-          </Notice>
-        </li>
-      ))}
-    </ul>
+    <List divided={false} aria-label="立即探测">
+      <li>
+        <Stack gap="sm">
+          {lines.map((l) => (
+            <Notice
+              key={l.key}
+              tone={l.tone}
+              action={
+                l.onClose ? (
+                  <Button size="xs" variant="secondary" onClick={l.onClose}>
+                    知道了
+                  </Button>
+                ) : undefined
+              }
+            >
+              <span className="break-words">{l.text}</span>
+            </Notice>
+          ))}
+        </Stack>
+      </li>
+    </List>
   );
 }
 
@@ -795,162 +753,152 @@ function ChannelDetail({
   ]
     .filter((x): x is string => x !== null)
     .join(' · ');
+  const probeBlockedReason =
+    blocked ?? (idle.length === 0 ? '这个渠道的路由都在探' : busy ? '正在发出探测请求' : undefined);
   return (
-    <section aria-label={`${card.channel.name} 详情`} data-channel-detail className="min-w-0">
-      {/* 结论块三行（照路由页用途标题块，#1914）：名字、一句结论加状态、灰字细节；每行都不折 */}
-      <header data-channel-hero className="mb-6 flex min-w-0 flex-col pt-2">
-        <div className="mb-3 flex min-w-0 items-center justify-between gap-3 whitespace-nowrap">
-          <h2 className="min-w-0 truncate text-title" title={card.channel.name}>
-            {card.channel.name}
-          </h2>
-          <Button
-            size="sm"
-            variant="outline"
-            className="shrink-0"
-            disabled={blocked !== undefined || idle.length === 0 || busy}
-            title={
-              blocked ?? (idle.length === 0 ? '这个渠道的路由都在探' : '让引擎现在就探这个渠道的每条路由')
-            }
-            onClick={() => onProbe(idle)}
-          >
-            <Radar aria-hidden />
-            探这个渠道
-          </Button>
-        </div>
-        <p
-          data-hero-line
-          title={heroLine}
-          className="flex min-w-0 items-center gap-2.5 whitespace-nowrap text-heading font-normal"
-        >
-          <span data-hero-text className="min-w-0 truncate">
-            {heroLine}
-          </span>
-          <span className="shrink-0">
-            <StatusBadge tone={card.tone} label={card.label} />
-          </span>
-        </p>
-        <p data-hero-notes title={heroNotes} className="num mt-1.5 truncate text-meta text-muted-foreground">
-          {heroNotes}
-        </p>
-      </header>
-      {card.interrupted ? (
-        <Notice tone="fail" className="mb-3">
-          检测中断：晚于下次探测时刻 20 分钟还没探这个渠道，上次的结论不再当现状
-          {card.probedAt ? `（${formatAgo(card.probedAt, now)}）` : null}
-        </Notice>
-      ) : null}
-      {card.reason && !card.failover ? (
-        // 探针写的原文常常是英文、很长：头部只留上面那句中文结论，原文收在这条可展开的提醒里（#1903）
-        <div data-raw-reason className="mb-3">
-          <Notice tone={card.tone === 'fail' ? 'fail' : 'stall'}>
-            <details>
-              <summary className="cursor-pointer font-medium max-md:min-h-10">探针报的原文，点开看</summary>
-              <p className="mt-1 break-words">{card.reason}</p>
-            </details>
-          </Notice>
-        </div>
-      ) : null}
-      {card.fallback ? <p className="mb-3 text-body text-ink-fail">{card.fallback}</p> : null}
-      {card.failover ? <FailoverNote failover={card.failover} now={now} /> : null}
-      {channelPools.length > 0 ? (
-        <div data-pool-problems className="mb-3">
-          <Notice tone="stall">
-            <div className="space-y-1">
-              {channelPools.map((p) => (
-                <PoolProblemLine key={p.poolId} problem={{ ...p }} now={now} />
-              ))}
-            </div>
-          </Notice>
-        </div>
-      ) : problemsError ? (
-        <p data-pool-problems="unreadable" className="mb-3 text-meta text-ink-stall">
-          账号池的毛病（额度读不到、凭据过期）没读成：{errorText(problemsError)}。这里没写不代表没有。
-        </p>
-      ) : null}
-      {/* 路由在前（要人看的那几条），探测记录在后：原来探测记录夹在中间，要滚过 10 行记录才看到路由 */}
-      <div className="flex flex-col gap-6">
-        <Section flush title="路由" description="该修的在前；已关、未使用的折在最后">
-          {sorted.length === 0 ? (
-            <p className="p-4 text-body text-muted-foreground">这个渠道下一条路由都没有。</p>
-          ) : (
-            <>
-              {attention.length > 0 ? (
-                <ol aria-label={`${card.channel.name} 的路由`} className="divide-y divide-border">
-                  {attention.map(renderRow)}
-                </ol>
-              ) : null}
-              {quiet.length > 0 ? (
-                <div data-route-fold="quiet" className={cn('px-2 py-1', attention.length > 0 && 'border-t')}>
-                  <button
-                    type="button"
-                    aria-expanded={quietOpen}
-                    aria-controls="route-fold-quiet"
-                    onClick={() => setQuietShown(!quietOpen)}
-                    className="inline-flex min-h-8 items-center gap-1 rounded-md px-2 max-md:min-h-10 text-meta text-muted-foreground hover:bg-muted hover:text-foreground"
-                  >
-                    <ChevronDown
-                      className={cn('size-3.5 transition-transform', quietOpen && 'rotate-180')}
-                      aria-hidden
-                    />
-                    {quietParts.join(' · ')}，{quietOpen ? '收起' : '点开看'}
-                  </button>
-                  {quietOpen ? (
-                    <div id="route-fold-quiet" className="-mx-2">
-                      <ol
-                        aria-label={`${card.channel.name} 已关和未使用的路由`}
-                        className="mt-1 divide-y divide-border border-t"
-                      >
-                        {quiet.slice(0, quietCount).map(renderRow)}
-                      </ol>
-                      {quiet.length > quietCount ? (
-                        <button
-                          type="button"
-                          data-route-fold="more"
-                          onClick={() => setQuietExtra(quietCount - ROUTE_QUIET_FIRST + ROUTE_QUIET_STEP)}
-                          className="mx-2 mt-1 inline-flex min-h-10 items-center gap-1 rounded-md px-2 text-meta text-muted-foreground hover:bg-muted hover:text-foreground"
-                        >
-                          再看 {Math.min(ROUTE_QUIET_STEP, quiet.length - quietCount)} 条（还有{' '}
-                          {quiet.length - quietCount} 条没显示）
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-            </>
-          )}
-        </Section>
+    <section aria-label={`${card.channel.name} 详情`} data-channel-detail>
+      <Stack>
+        {/* 头部：名字、一句结论加状态、灰字细节；「探这个渠道」在头部右边 */}
         <Section
-          title="探测记录"
+          data-channel-hero
+          title={card.channel.name}
           description={
-            // 卡头说明一行不折：手机换短说法
+            <span data-hero-line title={heroLine}>
+              <span data-hero-text>{heroLine}</span> <StatusBadge status={channelStatusKey(card)} />
+            </span>
+          }
+          actions={
+            <Button
+              size="sm"
+              variant="outline"
+              disabledReason={probeBlockedReason}
+              title="让引擎现在就探这个渠道的每条路由"
+              onClick={() => onProbe(idle)}
+            >
+              探这个渠道
+            </Button>
+          }
+        >
+          <Stack gap="md">
+            <div data-hero-notes title={heroNotes}>
+              <Text size="meta" tone="muted" truncate>
+                {heroNotes}
+              </Text>
+            </div>
+            {card.interrupted ? (
+              <Notice tone="fail" role="status">
+                检测中断：晚于下次探测时刻 20 分钟还没探这个渠道，上次的结论不再当现状
+                {card.probedAt ? `（${formatAgo(card.probedAt, now)}）` : null}
+              </Notice>
+            ) : null}
+            {card.reason && !card.failover ? (
+              // 探针写的原文常常是英文、很长：头部只留上面那句中文结论，原文收在这条可展开的提醒里（#1903）
+              <div data-raw-reason>
+                <Notice tone={card.tone === 'fail' ? 'fail' : 'stall'} role="status">
+                  <details>
+                    <summary>探针报的原文，点开看</summary>
+                    <p className="break-words">{card.reason}</p>
+                  </details>
+                </Notice>
+              </div>
+            ) : null}
+            {card.fallback ? (
+              <Text size="meta" tone="danger">
+                {card.fallback}
+              </Text>
+            ) : null}
+            {card.failover ? <FailoverNote failover={card.failover} now={now} /> : null}
+            {channelPools.length > 0 ? (
+              <div data-pool-problems>
+                <Notice tone="stall" role="status">
+                  <Stack gap="sm">
+                    {channelPools.map((p) => (
+                      <PoolProblemLine key={p.poolId} problem={{ ...p }} now={now} />
+                    ))}
+                  </Stack>
+                </Notice>
+              </div>
+            ) : problemsError ? (
+              <div data-pool-problems="unreadable">
+                <Text size="meta" tone="warning">
+                  账号池的毛病（额度读不到、凭据过期）没读成：{errorText(problemsError)}。这里没写不代表没有。
+                </Text>
+              </div>
+            ) : null}
+          </Stack>
+        </Section>
+        {/* 路由在前（要人看的那几条），探测记录在后：原来探测记录夹在中间，要滚过 10 行记录才看到路由 */}
+        <Section
+          flush
+          title={
             <>
-              <span className="max-md:hidden">
-                近 60 次真探加每条路由的最近一次，新的在上；点格子或一行看原文
-              </span>
-              <span className="md:hidden">新的在上，点一行看原文</span>
+              路由 <Tag>{sorted.length}</Tag>
             </>
           }
         >
-          <HistoryStrip
-            channelId={card.channel.id}
-            history={history}
-            activeCellId={focus?.cell?.id}
-            onPickCell={(channelId, cellId) => {
-              if (channelId === card.channel.id) pickCell(cellId);
-            }}
-          />
-          <ProbeLog
-            history={history}
-            channelId={card.channel.id}
-            routes={routes}
-            models={models}
-            openId={openId}
-            routeMissing={focus?.routeMissing ?? false}
-            onToggle={toggleCell}
-          />
+          {sorted.length === 0 ? (
+            <EmptyState size="inline" title="这个渠道下一条路由都没有。" />
+          ) : (
+            <List aria-label={`${card.channel.name} 的路由`}>
+              {attention.map(renderRow)}
+              {quiet.length > 0 ? (
+                <ListRow
+                  data-route-fold="quiet"
+                  expandable
+                  open={quietOpen}
+                  onOpenChange={() => setQuietShown(!quietOpen)}
+                  title={
+                    <Text size="meta" tone="secondary">
+                      {quietParts.join(' · ')}，{quietOpen ? '收起' : '点开看'}
+                    </Text>
+                  }
+                  details={
+                    <Stack gap="sm">
+                      <List aria-label={`${card.channel.name} 已关和未使用的路由`}>
+                        {quiet.slice(0, quietCount).map(renderRow)}
+                      </List>
+                      {quiet.length > quietCount ? (
+                        <div>
+                          <Button
+                            variant="text"
+                            size="xs"
+                            data-route-fold="more"
+                            onClick={() => setQuietExtra(quietCount - ROUTE_QUIET_FIRST + ROUTE_QUIET_STEP)}
+                          >
+                            再看 {Math.min(ROUTE_QUIET_STEP, quiet.length - quietCount)} 条（还有{' '}
+                            {quiet.length - quietCount} 条没显示）
+                          </Button>
+                        </div>
+                      ) : null}
+                    </Stack>
+                  }
+                />
+              ) : null}
+            </List>
+          )}
         </Section>
-      </div>
+        <Section title="探测记录">
+          <Stack>
+            <HistoryStrip
+              channelId={card.channel.id}
+              history={history}
+              activeCellId={focus?.cell?.id}
+              onPickCell={(channelId, cellId) => {
+                if (channelId === card.channel.id) pickCell(cellId);
+              }}
+            />
+            <ProbeLog
+              history={history}
+              channelId={card.channel.id}
+              routes={routes}
+              models={models}
+              openId={openId}
+              routeMissing={focus?.routeMissing ?? false}
+              onToggle={toggleCell}
+            />
+          </Stack>
+        </Section>
+      </Stack>
     </section>
   );
 }
@@ -991,9 +939,6 @@ function RouteRow({
   const active = activeFor(requests, r.id);
   const failure = lastFailureFor(requests, r);
   const probe = r.probe;
-  const word = probe
-    ? (STATE_WORD[probe.state] ?? OLD_STATE_WORD)
-    : { label: '还没探到', tone: 'stop' as Tone };
   // 上次那一句：触发者、种类优先读路由目录的 probeTrigger、probeKind；目录没给（老后端）才用探测记录里同一次的（相差不到 1 分钟）
   const sameProbe = isCurrentProbe(lastCell, probe);
   // 连通但额度耗尽（#2939）：只认和当前探针同一次的那条记录，探针已经更新过的旧额度记录不作数
@@ -1018,7 +963,6 @@ function RouteRow({
   const next: NextProbeLine | null = nextProbeLine(r, now);
   const seconds = probeSeconds(r, requests);
   const name = model?.displayName ?? r.modelId;
-  const bodyId = `route-body-${r.id}`;
   // 同一次探针写明额度耗尽时，不再用「在线」那句里的「额度够」。分类仍是在线，这句话只改说法。
   const why = quotaCell && kind === 'live' ? quotaProbeWhy(quotaCell) : routeStateWhy[kind];
   const spoken = active
@@ -1031,7 +975,6 @@ function RouteRow({
         ? `${routeStateLabel[kind]}，${PROBE_KIND_WORD.quota.label}（${quotaResetText(quotaCell.resetsAt)}）`
         : routeStateLabel[kind];
   const failed = kind === 'fault';
-  const alarm = kind === 'fault' || kind === 'interrupted';
   const quietKind = kind === 'off' || kind === 'unused' || kind === 'retired';
   const probedUnused = kind === 'unused' && !active && (probe?.state === 'ok' || probe?.state === 'failed');
   const metaTitle = [
@@ -1042,240 +985,191 @@ function RouteRow({
   ]
     .filter(Boolean)
     .join(' · ');
+  const probeReason = blocked ?? (active ? '已经在探了' : busy ? '正在发出探测请求' : undefined);
+  const facts: DescriptionsItem[] = [
+    {
+      label: '探针结论',
+      value: quotaCell ? (
+        <StatusBadge status="route:probe:quota" />
+      ) : probe ? (
+        <StatusBadge status={probeStateStatus(probe.state)} />
+      ) : (
+        '还没探到'
+      ),
+    },
+    ...(quotaCell
+      ? [
+          {
+            label: '真实原因',
+            value: <span data-field="quota-detail">{quotaCell.detail ?? '（上游没写具体原因）'}</span>,
+          },
+          {
+            label: '额度重置',
+            value: <span data-field="quota-resets">{quotaResetText(quotaCell.resetsAt)}</span>,
+          },
+        ]
+      : []),
+    {
+      label: '最近一次',
+      value: probe ? (
+        <span className="num">
+          {formatClock(probe.at)}（{formatAgo(probe.at, now)}）
+        </span>
+      ) : (
+        '探针还没看过'
+      ),
+    },
+    {
+      label: '耗时',
+      value:
+        seconds !== undefined ? (
+          <span className="num">{seconds.toFixed(seconds < 10 ? 1 : 0)} 秒</span>
+        ) : (
+          <Text tone="muted">
+            {probe && probe.state !== 'ok' && probe.state !== 'failed' ? '没真探' : '没量到'}
+          </Text>
+        ),
+    },
+    { label: '执行方式', value: r.hostId },
+    {
+      label: '节奏档',
+      value: r.probeTier ? (
+        `${PROBE_TIER_WORD[r.probeTier].label}${PROBE_TIER_WORD[r.probeTier].every ? `，${PROBE_TIER_WORD[r.probeTier].every}` : ''}`
+      ) : (
+        <Text tone="muted">库里还没写</Text>
+      ),
+    },
+  ];
   return (
-    <li
+    <ListRow
       data-route={r.id}
       data-probe={active ? active.state : (probe?.state ?? 'none')}
       data-kind={kind}
-      className={cn(
-        // 行间只有一根细线（列表的 divide-y），不再一行一个圆角框；该修的行左边一道红线，选中的铺选中底（样板 #1914）
-        'relative min-w-0',
-        alarm && !active && 'border-l-2 border-st-fail',
-        picked && 'bg-selected',
-      )}
-    >
-      <RowFrame tall className="items-start">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          aria-controls={bodyId}
-          aria-label={`${name} ${r.id}：${spoken}`}
-          className="flex min-w-0 flex-1 items-start gap-2 rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring"
-        >
-          <ChevronRight
-            className={cn(
-              'mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-200',
-              open && 'rotate-90',
-            )}
-            aria-hidden
-          />
-          {/* 和路由页的路由行同一个骨架：序号位留着（这里不分先后、不写数），下面的明细按它缩进、和名字对齐 */}
-          <span aria-hidden className="w-4 shrink-0" />
-          {/* 关着、没用的只把名字那块降对比度，不整行换灰底 */}
-          <span className={cn('min-w-0 flex-1', quietKind && 'opacity-60')}>
-            {/* 名字后面紧跟一个状态（点加字）；名字是认路的那一样，不截断 */}
-            <span className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
-              <span className="text-body font-medium break-words">{name}</span>
-              {active ? (
-                <StatusBadge
-                  tone="run"
-                  label={active.state === 'running' ? '探测中' : '排队中'}
-                  variant="dot"
-                />
-              ) : quotaCell && kind === 'live' ? null : (
-                <KindChip kind={kind} variant="dot" />
-              )}
-              {quotaCell && !active ? (
-                <span data-route-quota title={quotaProbeWhy(quotaCell)}>
-                  <StatusBadge
-                    tone={PROBE_KIND_WORD.quota.tone}
-                    label={PROBE_KIND_WORD.quota.label}
-                    variant="dot"
-                  />
-                </span>
-              ) : null}
+      tall
+      expandable
+      open={open}
+      onOpenChange={onToggle}
+      selected={picked}
+      rowLabel={`${name} ${r.id}：${spoken}`}
+      title={
+        // 名字后面紧跟一个状态；名字是认路的那一样，不截断。出问题的行只留状态标签，不画红边线、红框
+        <Stack direction="horizontal" gap="sm" align="center" wrap>
+          <Text strong tone={quietKind ? 'muted' : 'default'}>
+            {name}
+          </Text>
+          {active ? (
+            <StatusBadge status={active.state === 'running' ? 'route:probe:running' : 'task:queued'} />
+          ) : quotaCell && kind === 'live' ? null : (
+            <StatusBadge status={kindStatus(kind)} title={routeStateWhy[kind]} />
+          )}
+          {quotaCell && kind === 'live' && !active ? (
+            <span data-route-quota title={quotaProbeWhy(quotaCell)}>
+              <StatusBadge status="route:probe:quota" />
             </span>
-            {/* 小字一行不折：路由号、上次、下次（正常的）、没用途在用的探过结论；放不下截断，整句在悬停里 */}
-            <span
-              data-route-meta
-              title={metaTitle}
-              className="num mt-0.5 block truncate whitespace-nowrap text-meta text-muted-foreground"
-            >
-              {r.id}
-              {lastLine ? (
-                <>
-                  {' · '}
-                  <span data-probe-last>{lastLine}</span>
-                </>
-              ) : null}
-              {next && next.tone === 'normal' ? (
-                <>
-                  {' · '}
-                  <span data-probe-next={next.tone}>{next.text}</span>
-                </>
-              ) : null}
-              {probedUnused ? (
-                // 没用途在用的路由点立即探测（#1630）：灰的「未被用途使用」不变，结论写在小字里，不画红
-                <span data-probed-unused={probe?.state}>
-                  {' · '}
-                  {probe?.state === 'ok' ? '探过：通' : '探过：不通'}
-                </span>
-              ) : null}
-            </span>
-          </span>
-        </button>
-        <RowMenu label={`更多操作：${name} ${r.id}`} title="立即探测、看最近一次">
-          <RowMenuItem disabled={blocked !== undefined || active !== undefined || busy} onSelect={onProbe}>
-            <Radar aria-hidden />
-            {blocked ? `立即探测（${blocked}）` : active ? '立即探测（已经在探了）' : '立即探测'}
-          </RowMenuItem>
-          <RowMenuItem onSelect={onPick}>看最近一次</RowMenuItem>
-        </RowMenu>
-      </RowFrame>
-      {/* 行下面要人注意的：退避、检测中断（不截断）、账号池毛病、不通或疑似换模型的原文（截断，整句悬停） */}
-      {(next && next.tone !== 'normal') ||
-      problem ||
-      (!open && probe?.detail && (failed || kind === 'degraded')) ? (
-        <RowDetail className="-mt-1 space-y-1 pb-2">
+          ) : null}
+        </Stack>
+      }
+      meta={
+        <Stack gap="sm">
+          {/* 小字一行不折：路由号、上次、下次（正常的）、没用途在用的探过结论；放不下截断，整句在悬停里 */}
+          <div data-route-meta title={metaTitle}>
+            <Text size="meta" tone="muted" truncate>
+              <span className="num">
+                {r.id}
+                {lastLine ? (
+                  <>
+                    {' · '}
+                    <span data-probe-last>{lastLine}</span>
+                  </>
+                ) : null}
+                {next && next.tone === 'normal' ? (
+                  <>
+                    {' · '}
+                    <span data-probe-next={next.tone}>{next.text}</span>
+                  </>
+                ) : null}
+                {probedUnused ? (
+                  // 没用途在用的路由点立即探测（#1630）：灰的「未被用途使用」不变，结论写在小字里，不画红
+                  <span data-probed-unused={probe?.state}>
+                    {' · '}
+                    {probe?.state === 'ok' ? '探过：通' : '探过：不通'}
+                  </span>
+                ) : null}
+              </span>
+            </Text>
+          </div>
+          {/* 要人注意的：退避、检测中断（不截断）、疑似换模型、账号池毛病、不通的原文（截断，整句悬停） */}
           {next && next.tone !== 'normal' ? (
-            <p
-              data-probe-next={next.tone}
-              className={cn(
-                'num text-meta',
-                next.tone === 'fail' ? 'font-medium text-ink-fail' : 'text-ink-stall',
-              )}
-            >
-              {next.text}
-            </p>
+            <div data-probe-next={next.tone}>
+              <Text
+                size="meta"
+                tone={next.tone === 'fail' ? 'danger' : 'warning'}
+                strong={next.tone === 'fail'}
+              >
+                {next.text}
+              </Text>
+            </div>
+          ) : null}
+          {kind === 'degraded' ? (
+            <Text size="meta" tone="warning">
+              {routeStateLabel.degraded}
+            </Text>
           ) : null}
           {problem ? <PoolProblemLine problem={problem} /> : null}
-          {kind === 'degraded' && probe?.detail && !open ? (
-            <p className="truncate text-meta text-ink-doubt" title={probe.detail}>
+          {!open && probe?.detail && (failed || kind === 'degraded') ? (
+            <Text size="meta" tone={failed ? 'danger' : 'warning'} truncate title={probe.detail}>
               {probe.detail}
-            </p>
+            </Text>
           ) : null}
-          {failed && probe?.detail && !open ? (
-            <p className="truncate text-meta text-ink-fail" title={probe.detail}>
-              {probe.detail}
-            </p>
-          ) : null}
-        </RowDetail>
-      ) : null}
-      {open ? (
-        <RowDetail id={bodyId} className="pb-3">
-          <div className="rounded-lg bg-muted p-3">
-            <p data-route-why title={why} className="mb-2 text-meta text-muted-foreground">
+        </Stack>
+      }
+      details={
+        <Stack gap="md">
+          <div data-route-why title={why}>
+            <Text size="meta" tone="muted">
               {why}
-            </p>
-            {active ? (
-              <p className={cn('mb-2 text-meta', active.why ? 'text-ink-stall' : 'text-ink-run')}>
-                {activityText(active, now)}
-              </p>
-            ) : null}
-            {failure ? (
-              <p role="alert" className="mb-2 text-meta text-ink-fail">
-                {formatClock(failure.requestedAt)} {sourceText(failure) ?? '点的立即探测'}没成：
-                {failure.why ?? '没写原因'}
-              </p>
-            ) : null}
-            <KeyValue
-              layout="grid"
-              cols={4}
-              items={[
-                { label: '探针结论', value: quotaCell ? PROBE_KIND_WORD.quota.label : word.label },
-                ...(quotaCell
-                  ? [
-                      {
-                        label: '真实原因',
-                        value: (
-                          <span data-field="quota-detail">{quotaCell.detail ?? '（上游没写具体原因）'}</span>
-                        ),
-                      },
-                      {
-                        label: '额度重置',
-                        value: <span data-field="quota-resets">{quotaResetText(quotaCell.resetsAt)}</span>,
-                      },
-                    ]
-                  : []),
-                {
-                  label: '最近一次',
-                  value: probe ? (
-                    <span className="num">
-                      {formatClock(probe.at)}（{formatAgo(probe.at, now)}）
-                    </span>
-                  ) : (
-                    '探针还没看过'
-                  ),
-                },
-                {
-                  label: '耗时',
-                  value:
-                    seconds !== undefined ? (
-                      <span className="num">{seconds.toFixed(seconds < 10 ? 1 : 0)} 秒</span>
-                    ) : (
-                      <span className="text-muted-foreground">
-                        {probe && probe.state !== 'ok' && probe.state !== 'failed' ? '没真探' : '没量到'}
-                      </span>
-                    ),
-                },
-                { label: '执行方式', value: r.hostId },
-                {
-                  label: '节奏档',
-                  value: r.probeTier ? (
-                    `${PROBE_TIER_WORD[r.probeTier].label}${PROBE_TIER_WORD[r.probeTier].every ? `，${PROBE_TIER_WORD[r.probeTier].every}` : ''}`
-                  ) : (
-                    <span className="text-muted-foreground">库里还没写</span>
-                  ),
-                },
-              ]}
-            />
-            <div className="mt-2.5">
-              <div className="mb-1 text-meta text-muted-foreground">
-                {probe?.state === 'failed' ? '失败原因（原文）' : '原文'}
-              </div>
-              <pre
-                className={cn(
-                  'max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-background px-2.5 py-2 font-mono text-meta',
-                  failed ? 'text-ink-fail' : 'text-muted-foreground',
-                )}
-              >
-                {probe ? (probe.detail ?? '（探针没写原文）') : '（还没有结论）'}
-              </pre>
-            </div>
-            {quotaCell ? (
-              <div className="mt-2.5">
-                <div className="mb-1 text-meta text-muted-foreground">响应原文（RESPONSE）</div>
-                <pre
-                  data-field="quota-response"
-                  className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-background px-2.5 py-2 font-mono text-meta text-muted-foreground"
-                >
-                  {quotaCell.responseText ?? '（没拿到）'}
-                </pre>
-              </div>
-            ) : null}
-            <div className="mt-2.5 flex flex-wrap items-center gap-2">
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={blocked !== undefined || active !== undefined || busy}
-                title={blocked ?? (active ? '已经在探了' : '让引擎现在就探这一条')}
-                onClick={onProbe}
-              >
-                {active ? <LoaderCircle className="animate-spin" aria-hidden /> : <Radar aria-hidden />}
-                立即探测
-              </Button>
-              <button
-                type="button"
-                onClick={onPick}
-                className="text-meta text-muted-foreground underline underline-offset-2 hover:text-foreground"
-              >
-                看最近一次
-              </button>
-            </div>
+            </Text>
           </div>
-        </RowDetail>
-      ) : null}
-    </li>
+          {active ? <Notice tone={active.why ? 'stall' : 'info'}>{activityText(active, now)}</Notice> : null}
+          {failure ? (
+            <Notice tone="fail">
+              {formatClock(failure.requestedAt)} {sourceText(failure) ?? '点的立即探测'}没成：
+              {failure.why ?? '没写原因'}
+            </Notice>
+          ) : null}
+          <Descriptions columns={2} items={facts} />
+          <Stack gap="sm">
+            <Text size="meta" tone="muted">
+              {probe?.state === 'failed' ? '失败原因（原文）' : '原文'}
+            </Text>
+            <Code block>{probe ? (probe.detail ?? '（探针没写原文）') : '（还没有结论）'}</Code>
+          </Stack>
+          {quotaCell ? (
+            <Stack gap="sm">
+              <Text size="meta" tone="muted">
+                响应原文
+              </Text>
+              <div data-field="quota-response">
+                <Code block>{quotaCell.responseText ?? '（没拿到）'}</Code>
+              </div>
+            </Stack>
+          ) : null}
+          <Stack direction="horizontal" gap="md" align="center" wrap>
+            <Button
+              size="xs"
+              variant="outline"
+              disabledReason={probeReason}
+              title="让引擎现在就探这一条"
+              onClick={onProbe}
+            >
+              立即探测
+            </Button>
+            <Button size="xs" variant="text" onClick={onPick}>
+              看最近一次
+            </Button>
+          </Stack>
+        </Stack>
+      }
+    />
   );
 }

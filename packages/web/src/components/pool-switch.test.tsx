@@ -17,10 +17,10 @@ describe('额度页停用开关', () => {
     const api = createMockApi({ live: false });
     const { pools } = await api.pools();
     renderApp(<QuotaPage />, { api });
-    await screen.findByRole('columnheader', { name: '周期美元' });
+    await screen.findByRole('columnheader', { name: '启用' });
     await waitFor(() => expect(switchOf('claude-a').getAttribute('aria-checked')).toBe('true'));
     for (const p of pools) {
-      const row = document.querySelector(`tr[data-pool="${p.id}"]`) as HTMLElement;
+      const row = document.querySelector(`tr[data-row-key="${p.id}"]`) as HTMLElement;
       expect(within(row).getByRole('switch', { name: `${p.id} 的开关` })).toBeTruthy();
     }
   });
@@ -33,7 +33,7 @@ describe('额度页停用开关', () => {
     await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('true'));
     fireEvent.click(sw);
     const confirm = await screen.findByRole('button', { name: '确认停用' });
-    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+    expect(confirm.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(confirm);
     expect(spy).not.toHaveBeenCalled();
     expect(sw.getAttribute('aria-checked')).toBe('true');
@@ -142,7 +142,7 @@ describe('额度页停用开关', () => {
     };
     const { pools } = await api.pools();
     renderApp(<QuotaPage />, { api });
-    await screen.findByRole('columnheader', { name: '周期美元' });
+    await screen.findByRole('columnheader', { name: '启用' });
     await waitFor(() =>
       expect(document.querySelectorAll('[data-pool-flag="没查成"]').length).toBe(pools.length),
     );

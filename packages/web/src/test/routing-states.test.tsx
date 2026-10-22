@@ -26,7 +26,7 @@ const routeItem = (routeId: string) => {
 
 /** 一条路由行上的状态芯片（第一个有字的圆角底色；开关的滑块也是圆的，但没有字）。 */
 const chipOf = (routeId: string) => {
-  const chip = [...routeItem(routeId).querySelectorAll('span[data-variant]')].find((el) =>
+  const chip = [...routeItem(routeId).querySelectorAll('span[data-status]')].find((el) =>
     el.textContent?.trim(),
   );
   if (!(chip instanceof HTMLElement)) throw new Error(`路由 ${routeId} 上没有状态芯片`);
@@ -42,13 +42,13 @@ describe('路由页的状态词：后端的「死」拆开，用路由八态，�
     expect(chipOf('r-ca-opus').textContent).toContain('在线');
     fireEvent.click(await screen.findByRole('button', { name: '显示全部' }));
     expect(chipOf('r-rl-opus').textContent).toContain('已关');
-    expect(chipOf('r-rl-opus').getAttribute('data-tone')).not.toBe('fail');
+    expect(chipOf('r-rl-opus').getAttribute('data-level')).not.toBe('error');
     await pickModel('Cursor Auto');
     expect(chipOf('r-cursor').textContent).toContain('故障');
-    expect(chipOf('r-cursor').getAttribute('data-tone')).toBe('fail');
+    expect(chipOf('r-cursor').getAttribute('data-level')).toBe('error');
     await pickModel('Opus 5');
     expect(chipOf('r-ca-opus5').textContent).toContain('已下架');
-    expect(chipOf('r-ca-opus5').getAttribute('data-tone')).not.toBe('fail');
+    expect(chipOf('r-ca-opus5').getAttribute('data-level')).not.toBe('error');
     for (const span of Array.from(document.querySelectorAll('span'))) {
       expect(['死', '活']).not.toContain(span.textContent);
     }
@@ -59,10 +59,10 @@ describe('路由页的状态词：后端的「死」拆开，用路由八态，�
     await opened();
     expect(modelRow('opus-5.5').textContent).toContain('：在线');
     expect(modelRow('cursor-auto').textContent).toContain('：故障');
-    expect(modelRow('cursor-auto').querySelector('.bg-st-fail')).not.toBeNull();
-    expect(modelRow('opus-5.5').querySelector('.bg-st-fail')).toBeNull();
+    expect(modelRow('cursor-auto').querySelector('[data-level="error"]')).not.toBeNull();
+    expect(modelRow('opus-5.5').querySelector('[data-level="error"]')).toBeNull();
     expect(modelRow('opus-5').textContent).toContain('：已下架');
-    expect(modelRow('opus-5').querySelector('.bg-st-fail')).toBeNull();
+    expect(modelRow('opus-5').querySelector('[data-level="error"]')).toBeNull();
   });
 
   test('额度用满是「暂时挡着」，不画红；「接得上」「额度够」那几件事也不再叫「死」', async () => {
@@ -110,8 +110,8 @@ describe('路由页的状态词：后端的「死」拆开，用路由八态，�
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api });
     await opened();
     expect(chipOf('rt-q').textContent).toContain('暂时挡着');
-    expect(chipOf('rt-q').getAttribute('data-tone')).not.toBe('fail');
-    expect(routeItem('rt-q').querySelector('.text-ink-fail')).toBeNull();
+    expect(chipOf('rt-q').getAttribute('data-level')).not.toBe('error');
+    expect(routeItem('rt-q').querySelector('.text-fail-ink')).toBeNull();
     expect(routeItem('rt-q').textContent).toContain('没过：适用的额度窗用满了');
     expect(modelRow('opus-5.5').textContent).toContain('：暂时挡着');
   });
@@ -125,6 +125,6 @@ describe('路由页的状态词：后端的「死」拆开，用路由八态，�
       return el as HTMLElement;
     });
     expect(fable.textContent).toContain('：没配进用途，没算过');
-    expect(fable.querySelector('.bg-st-fail, .bg-st-done, .bg-st-stall, .bg-st-stop')).toBeNull();
+    expect(fable.querySelector('[data-level]')).toBeNull();
   });
 });

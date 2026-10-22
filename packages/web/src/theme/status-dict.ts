@@ -137,8 +137,14 @@ export const STATUS_DICT = {
     'probe:doubt': { label: '疑似换模型', level: 'warning' },
     'probe:quota': { label: '连通但额度耗尽', level: 'warning' },
     'probe:not_probed': { label: '没探', level: 'default' },
+    // 渠道状态页（#3533）：立即探测在探
+    'probe:running': { label: '探测中', level: 'processing' },
+    'probe:not_wired': { label: '插头没接', level: 'warning' },
     'pool:ban': { label: '封号', level: 'error' },
     'pool:hold-unread': { label: '没读到', level: 'warning' },
+    // 路由页的用途：先后排下来此刻派不派得出去（不知道用 route:unknown）
+    'purpose:live': { label: '派得出去', level: 'success' },
+    'purpose:dead': { label: '派不出去', level: 'error' },
   },
   request: {
     'request:discussing': { label: '讨论中', level: 'processing' },
@@ -230,6 +236,13 @@ export const STATUS_DICT = {
     'quota:health-ok': { label: '正常', level: 'success' },
     'quota:health-tight': { label: '紧', level: 'warning' },
     'quota:health-unread': { label: '没读到', level: 'warning' },
+    // 额度页的行状态（#3533）：一行一个状态
+    'quota:near-used': { label: '快用完', level: 'error' },
+    'quota:unreported': { label: '上游这次没报', level: 'warning' },
+    'quota:fetch-failed': { label: '没查成', level: 'warning' },
+    'quota:unreadable': { label: '额度读不到', level: 'warning' },
+    'quota:hold-review': { label: '该复查', level: 'warning' },
+    'quota:hold-other': { label: '要人看', level: 'warning' },
   },
 } as const satisfies Record<string, Record<string, StatusEntry>>;
 

@@ -56,7 +56,7 @@ test.describe('手机宽度：三页不横滚', () => {
           };
           const line = el.querySelector('[data-hero-line]');
           const text = line?.querySelector('[data-hero-text]')?.getBoundingClientRect();
-          const badge = line?.querySelector('[data-variant]')?.getBoundingClientRect();
+          const badge = line?.querySelector('[data-status]')?.getBoundingClientRect();
           const sameRow =
             !text || !badge
               ? true

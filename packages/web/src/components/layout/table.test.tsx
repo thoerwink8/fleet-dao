@@ -126,3 +126,44 @@ describe('Table', () => {
     expect((container.firstElementChild as HTMLElement).className).toContain('overflow-x-auto');
   });
 });
+
+describe('Table 分组行和附加行', () => {
+  test('groupRow 在该行上面通栏画一行、subRow 在下面；返回 null 不画', () => {
+    const { container } = render(
+      <Table
+        columns={columns}
+        rows={rows}
+        rowKey="id"
+        groupRow={(r) => (r.id === 'a' ? '渠道一' : null)}
+        subRow={(r) => (r.id === 'b' ? <span>就地表单</span> : null)}
+      />,
+    );
+    const trs = [...container.querySelectorAll('tbody tr')];
+    expect(
+      trs.map(
+        (t) =>
+          t.getAttribute('data-group-for') ??
+          t.getAttribute('data-sub-for') ??
+          t.getAttribute('data-row-key'),
+      ),
+    ).toEqual(['a', 'a', 'b', 'b']);
+    expect(trs[0]?.querySelector('td')?.getAttribute('colspan')).toBe('2');
+    expect(screen.getByText('渠道一')).toBeTruthy();
+    expect(screen.getByText('就地表单')).toBeTruthy();
+    expect(container.querySelectorAll('[data-group-for]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-sub-for]')).toHaveLength(1);
+  });
+
+  test('fill 列吃剩下的宽、字可以折行，其余列默认不折', () => {
+    const cols: TableColumn<Row>[] = [
+      { key: 'name', title: '名字', fill: true },
+      { key: 'cost', title: '耗时' },
+    ];
+    const { container } = render(<Table columns={cols} rows={rows} rowKey="id" />);
+    const tds = container.querySelectorAll('tbody tr:first-child td');
+    expect(tds[0]?.className).toContain('whitespace-normal');
+    expect(tds[0]?.className).toContain('max-w-0');
+    expect(tds[0]?.className).not.toContain('whitespace-nowrap');
+    expect(tds[1]?.className).toContain('whitespace-nowrap');
+  });
+});
