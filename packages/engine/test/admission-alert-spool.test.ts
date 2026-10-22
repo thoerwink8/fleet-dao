@@ -91,8 +91,9 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
     const insert = filler.prepare('INSERT INTO pending(key,payload,record_hash) VALUES(?,?,?)');
     for (let n = 1; n < 254; n++) {
       const o = observation();
-      keys.push(admissionAlertKey(o.identity));
-      insert.run(keys[n], admissionAlertJson(o), admissionAlertRecordHash(o));
+      const key = admissionAlertKey(o.identity);
+      keys.push(key);
+      insert.run(key, admissionAlertJson(o), admissionAlertRecordHash(o));
     }
     filler.exec('COMMIT');
     filler.close();
@@ -106,7 +107,10 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
     expect(recordAdmissionAlert(path, first).kind).toBe('spooled');
     const d = database();
     expect(d.prepare('SELECT count(*) n FROM pending').get()?.n).toBe(256);
-    const stored = d.prepare('SELECT key FROM pending').all().map((r) => r.key);
+    const stored = d
+      .prepare('SELECT key FROM pending')
+      .all()
+      .map((r) => r.key);
     d.close();
     expect(stored.sort()).toEqual([...keys].sort());
     expect(stored).not.toContain(admissionAlertKey(overflow.identity));
