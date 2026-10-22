@@ -22,7 +22,7 @@
 // - 执行的操作都记在 engine:commander 名下（操作记录 target=commander），诊断文字（理由、白名单核对结果、空转判断）带进发出的提醒。
 
 import { createHash } from 'node:crypto';
-import { LOCAL_LABEL, type OffDiffHold } from '@fleet-dao/conventions';
+import { LOCAL_LABEL, type OffDiffHold, type TotalRoundsHold } from '@fleet-dao/conventions';
 import type { AcceptanceDutyRow, CommanderAcceptanceTask, ScheduleResult } from '@fleet-dao/db';
 import {
   type AcceptanceCoverage,
@@ -59,7 +59,7 @@ import {
   trustedFounderFact,
 } from '../decisions/park-triage.ts';
 import { judgeSpin, type SpinJudgement, type SpinRound } from '../decisions/spin.ts';
-import type { ContinueCommand, TaskParkInfo } from '../task-contract.ts';
+import { type ContinueCommand, PARK_CODE_TOTAL_ROUNDS, type TaskParkInfo } from '../task-contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import type { GroomSessionInput, GroomSessionOutcome } from './groom.ts';
 import { extractJson, renderNewIssueBody } from './groom-plan.ts';
@@ -376,6 +376,14 @@ export interface ParkTriageDeps {
   offDiffHold?: {
     check(row: ParkedRetryRow): Promise<OffDiffHold | null>;
     handBack(repo: IntakeRepo, issueNumber: number, hold: OffDiffHold): Promise<void>;
+  };
+  /**
+   * 重做另起新一代之前先数这张单历代累计的动手轮数（#3625）：到了 MAX_TOTAL_ROUNDS 就回判决，不起新一代（另起一代会把 #3603 的
+   * 总轮数清零，等于绕过上限），交回本机（handBack：留言 + 贴「本机做」）。读不到照抛：这一张记没执行成功。不给就不判。
+   */
+  totalRoundsHold?: {
+    check(row: ParkedRetryRow): Promise<TotalRoundsHold | null>;
+    handBack(repo: IntakeRepo, issueNumber: number, hold: TotalRoundsHold): Promise<void>;
   };
   /** 记一条执行（commander.act，actor = engine:commander）。执行之前写；写不进照抛，这一张不执行。 */
   audit(entry: CommanderActEntry): Promise<void>;
@@ -895,6 +903,18 @@ async function execute(
           text: text([`没有重做：${hold.why}。已留言并给 ${ref} 贴了「${LOCAL_WORK_LABEL}」，任务没动。`]),
           level: 'daily',
           title: `指挥官把 ${ref} 交本机：诊断型验收条，不重做`,
+        };
+      }
+      // 历代累计动手轮数到了上限的单不另起新一代（#3625）：交回本机，任务没动
+      const capped = deps.totalRoundsHold ? await deps.totalRoundsHold.check(item.row) : null;
+      if (capped && deps.totalRoundsHold) {
+        await deps.totalRoundsHold.handBack(repo, item.row.issueNumber, capped);
+        return {
+          acted: null,
+          left: `交回本机·${capped.why}`,
+          text: text([`没有重做：${capped.why}。已留言并给 ${ref} 贴了「${LOCAL_WORK_LABEL}」，任务没动。`]),
+          level: 'daily',
+          title: `指挥官把 ${ref} 交本机：历代累计动手 ${capped.rounds} 轮，不再另起新一代`,
         };
       }
       const journal: RedoJournal = (rec) =>
@@ -1950,6 +1970,9 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
         };
         detail = open.body;
       }
+      // 总轮数到顶、已贴「本机做」交回本机的单（#3603）：机器自己处理完了，不再交指挥官，更不出「只有人能做」的拍板卡（#3625，
+      // docs/goals.md 第五节第 2 条）。不认领、不起会话、不写通知；留在停着的那一代里等本机领走或带原因的「继续」。
+      if (park.code === PARK_CODE_TOTAL_ROUNDS) continue;
       const key = claimKey(row.workflowId, park.seq);
       if (book.handled.has(key)) continue;
       const at = Date.parse(park.at);

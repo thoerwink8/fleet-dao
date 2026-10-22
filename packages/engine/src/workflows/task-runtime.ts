@@ -1140,7 +1140,7 @@ export class TaskRuntime {
       return 'auto';
     }
     // 累计动手到了总轮数上限（#3603）：交还本机、等带原因的「继续」，不走下面的普通停下；带原因的继续照样算进 MAX_ROUND_RESETS
-    const capped = reset && (await this.holdAtTotalRounds(title, detail, level));
+    const capped = reset && (await this.holdAtTotalRounds(title, detail));
     if (!capped) {
       await this.park(title, reset ? detail : legacyDetail, level, 'rounds');
     }
@@ -1164,9 +1164,10 @@ export class TaskRuntime {
    * 调用方照原来停下。到了：先交还本机（handBackLocal：留言、贴「本机做」；没成照旧停下，正文写明没贴上），再停下等人；
    * 不带原因的「继续」不放行（记一行、原样再停），带了原因才回 true，并把上限再放 MAX_IMPLEMENT_ROUNDS 轮。累计不清：下一次到顶照样要原因。
    * 调用方拿到 true 照「继续」后的做法清零。标记只在到顶那一刻问：老历史在这一刻没有标记，重放为假，照原来停下。
-   * 停法记 other（码 total_rounds）：指挥官不对它重做（重做另起一代就把累计清了），只留给人。
+   * 停法记 other（码 total_rounds）：指挥官不接这种停下（jobs/park-triage.ts 直接跳过，不出给创始人的拍板卡）；
+   * 重做另起新一代也按历代累计数上限（conventions 的 totalRoundsHoldOf，#3625），不会靠新一代把累计清零。
    */
-  async holdAtTotalRounds(title: string, detail: string, level: 'stuck' | 'decision'): Promise<boolean> {
+  async holdAtTotalRounds(title: string, detail: string): Promise<boolean> {
     const limit = MAX_TOTAL_ROUNDS + this.totalRoundGrants;
     if (this.totalRounds < limit || !patched('task-total-rounds')) return false;
     const capTitle = `${title}；${totalRoundsTitle(limit)}`;
@@ -1198,7 +1199,10 @@ export class TaskRuntime {
     }
     for (;;) {
       this.takeContinueNote();
-      await this.park(capTitle, `${handed}${detail} ${how}`, level, 'other', undefined, {
+      // 到顶交还本机的停下一律只出提醒（stuck），不出「要你拍」的 decision 卡（#3625，docs/goals.md 第五节第 2 条）：
+      // 这类停下机器自己能处理（本机领走或带原因的「继续」），不该打扰创始人。入参 level 只管没到顶的普通停下。
+      // 只换报警的级别入参，不动命令序，所以不需要 patched；老历史重放不看活动入参。
+      await this.park(capTitle, `${handed}${detail} ${how}`, 'stuck', 'other', undefined, {
         code: PARK_CODE_TOTAL_ROUNDS,
       });
       const why = this.takeContinueNote();

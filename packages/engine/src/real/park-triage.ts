@@ -9,7 +9,7 @@
 // - 提醒（诊断文字）经 upsertAlert 推：执行了的、贴「本机做」交本机指挥官的是 daily；留给人（要掏新钱、删了找不回、只有人能做）
 //   是 decision（带选项和原因）；没成、会话没起成的是 alert。改标准的停下经 addIssueLabel 贴「本机做」（#3423）。
 
-import { LOCAL_LABEL, offDiffHoldOf } from '@fleet-dao/conventions';
+import { implementRoundsDone, LOCAL_LABEL, offDiffHoldOf, totalRoundsHoldOf } from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
 import {
   COMMANDER_AUDIT_TARGET,
@@ -27,6 +27,7 @@ import {
   readTaskRoundsForSpin,
   recordEngineAudit,
   resolveAlertWithReason,
+  runsOfTask,
   settleAcceptanceDuty,
   startScheduleRun,
   supersedeAcceptanceDuty,
@@ -65,6 +66,7 @@ import {
 } from '../jobs/park-triage.ts';
 import type { ParkedRetryRow } from '../jobs/parked-retry.ts';
 import {
+  MAX_TOTAL_ROUNDS,
   taskAbandonSignal,
   taskContinueSignal,
   taskSettleMergedUpdate,
@@ -883,6 +885,24 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         if (ctx === null) throw new Error(`库里没有任务 ${row.taskId}，判不了验收条`);
         const criteria = criteriaOf(ctx.rawRequest);
         return offDiffHoldOf('ok' in criteria ? criteria.ok : ctx.acceptance, 'commander.redo');
+      },
+      async handBack(repo, issueNumber, hold) {
+        const ref = { owner: repo.owner, name: repo.name };
+        await w.gh.commentIssue({ repo: ref, issueNumber, key: hold.key, body: hold.comment });
+        await w.gh.addIssueLabel({ repo: ref, issueNumber, label: LOCAL_LABEL });
+      },
+    },
+    // 重做另起新一代之前数历代累计动手轮数（#3625）：runsOfTask 跨代（含 laterGenerationPattern），读不到照抛
+    totalRoundsHold: {
+      async check(row) {
+        const ctx = await taskContext(w.db, row.taskId);
+        if (ctx === null) throw new Error(`库里没有任务 ${row.taskId}，数不了历代动手轮数`);
+        const rows = await runsOfTask(w.db, {
+          id: ctx.taskId,
+          issueNumber: ctx.issueNumber,
+          workflowId: taskWorkflowId(ctx.repo, ctx.issueNumber),
+        });
+        return totalRoundsHoldOf(implementRoundsDone(rows), 'commander.redo', MAX_TOTAL_ROUNDS);
       },
       async handBack(repo, issueNumber, hold) {
         const ref = { owner: repo.owner, name: repo.name };
