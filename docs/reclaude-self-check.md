@@ -3,7 +3,7 @@
 > 给谁看：拿到这份文档的人（包括之后每一台机器上的 AI）。装了 reclaude 的机器，上机前 / 换机后 / 觉得「怎么老被踢」时照这份做。入口和「某号被封了」的提示词在 [reclaude.md](reclaude.md)。
 > 配套：装法与原理在 `docs/reclaude-in-mirasim.md`。本文讲两件事：先清掉 reclaude 使用前那个 Claude 账号留在本机的 id，再查有没有在产生上报。
 >
-> **脚本在哪**：`deploy/reclaude-old-account-clean.mjs`（本仓）。旧 `machine-check.mjs` 仍在已退役的 ai-gateway-stack。Mirasim 启动器及迁移由本仓 `packages/mirasim-reclaude` 维护，检查用 `pnpm mirasim:migrate --check`；来源验证见配套指南。清账号或删痕迹仍须先获删数据授权，不由迁移器执行。
+> **脚本在哪**：`deploy/reclaude-old-account-clean.mjs`（本仓）。旧 `machine-check.mjs` 仍在已退役的 ai-gateway-stack。Mirasim 的 claude 启动命令直接填 reclaude 的绝对路径，来源验证见配套指南。清账号或删痕迹仍须先获删数据授权，不由脚本自动执行。
 
 ## 0. 立场
 
@@ -84,16 +84,15 @@ node deploy/reclaude-old-account-clean.mjs --org <编号> --apply    # 当前用
 ## 2. 四步自检（全绿才算接上）
 
 ```bash
-# ① 启动命令指谁（只读）
-pnpm mirasim:migrate --check
-#   退出 0：当前新版已核文件和目标；75：仍待迁移；1：没查成
-#   红：✗ … = reclaude（裸 reclaude = 自有流量会被 Mirasim 网关转出去，正是上报的来源）
+# ① 启动命令指谁（只读，看 Mirasim 设置 → Agents → Claude 的启动命令）
+#   绿：reclaude 的绝对路径（reclaude --version 第一行带 (Claude Code)）
+#   红：裸 claude、空（不经 reclaude，自有流量会被 Mirasim 网关转出去，正是上报的来源）
 
 # ② 旧账号残留（只读，不带 --apply）
 node deploy/reclaude-old-account-clean.mjs
 #   绿：status=clean；skipped（没装 reclaude）不算绿也不算红
 #   红：status=dirty（第 1 节还没清）；退出码 2 或 unscanned = 没查成
-#   裸 reclaude 和启动器缺失由 ① 的 pnpm mirasim:migrate --check 报
+#   启动命令不是 reclaude 由 ① 看
 
 # ③ reclaude 自己记的上报状态
 python3 -c "import json;print(json.load(open('$HOME/.reclaude/state.json'))['daemon'].get('leak_report'))"
@@ -108,9 +107,9 @@ grep -rl "non_cc_client" ~/.mirasim/traffic/ | head
 判定口径（别搞反）：**账本里这些会话的用量显示「未知」是预期的**（接对之后请求不再经过 Mirasim 网关），
 不能用「用量有没有涨」当判据；判据是 ①② 两步 + ③④ 有没有**新的**上报。
 
-## 3. 绿了之后仍然会红的两件事（不是启动器的问题）
+## 3. 绿了之后仍然会红的两件事
 
-- **会话中途在界面上切「自有 / 平台」**：启动器下一条消息发出前重读路由，下一回合起生效（不用重起整个 Mirasim），详见 `reclaude-in-mirasim.md` 第 0 节。两个例外要认得：① 进程是以自有额度起的、Mirasim 没把平台网关交给启动器时，当场切平台做不到，启动器会把这条消息退回并报错（「当场切不到平台额度…办法…」），会话和自有额度原样保留，照提示在 Mirasim 里确认选了「平台」后重发，或新开会话；launch.log 里是 `event=refuse-switch`。② 路由索引（`~/.mirasim/plugin-index/*.json` 的 `routes`）里这个会话没有记录，启动器只会按 `route=default` 起，这是 Mirasim 没把选择记下来，不是启动器的事。
+- **会话中途在界面上切「自有 / 平台」**：Mirasim 自己重起该会话的进程，下一回合起生效（不用重起整个 Mirasim，实测见决定 0112）。路由由 Mirasim 记在 `~/.mirasim/plugin-index/*.json` 的 `routes`，这个会话没有记录就是跟随全局。
 - **服务器（Linux）上装完没重启 Mirasim**：`apply` 改的是 Mirasim 的配置，生效范围是**新起的** claude 进程。
 
 ## 4. 环境纪律

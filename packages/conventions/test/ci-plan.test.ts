@@ -350,16 +350,7 @@ describe('按改动算要跑什么', () => {
 
   it('改了 adapters 的源码：依赖它的跟着测；db 的测试读它的夹具，也测，不往下传到依赖 db 的（#984）', () => {
     // store 依赖 db，但不读 adapters 的夹具：db→adapters 停在 db，不把 store 拉上来
-    expect(units(pr('packages/adapters/src/x.ts'))).toEqual([
-      'adapters',
-      'agents',
-      'agents-sync',
-      'api',
-      'db',
-      'engine',
-      'jev',
-      'mirasim-reclaude',
-    ]);
+    expect(units(pr('packages/adapters/src/x.ts'))).toEqual(['adapters', 'api', 'db', 'engine', 'jev']);
   });
 
   it('改了 agents-sync：deploy/test 跑同步脚本，要跑 deploy', () => {
