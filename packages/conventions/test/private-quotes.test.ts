@@ -190,7 +190,7 @@ describe('真实progress入口', { timeout: 0 }, () => {
     cpSync('packages/shared/src/ci-policy-bridge.ts', join(h, 'packages/shared/src/ci-policy-bridge.ts'));
     cpSync('agents/hooks', join(h, 'agents/hooks'), { recursive: true });
     writeFileSync(join(h, 'package.json'), JSON.stringify({ type: 'module' }));
-    const env = { ...process.env, USERPROFILE: h, HOME: h, INIT_CWD: h, NODE_PATH: '' };
+    const env: NodeJS.ProcessEnv = { ...process.env, USERPROFILE: h, HOME: h, INIT_CWD: h, NODE_PATH: '' };
     // 两个颜色变量同时在时，node 自己往 stderr 打一行警告，不是这个入口写的。
     if (env.FORCE_COLOR && env.NO_COLOR) delete env.NO_COLOR;
     const result = runChild(
