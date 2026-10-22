@@ -2,11 +2,12 @@
 
 - 索引状态：生效
 - CHANGELOG 部分见决定 0107 第 6 条：版本内容只记在 CHANGELOG，里程碑收口段只链接对应版本节；每日补齐由引擎执行（#3110）。
+- 被取代：0114（第 6 条「对账红了开单」；对账兜底的检查规则不变）
 - 日期：2026-10-16（北京时间）
 - 谁拍的：创始人提出（原话见下，引导 20261016140500），交互会话据他「接下来都你拍板」的授权（引导 20261015054500）按决定 0097 自己拍、事后报。单 #2683。改了工作流和决定记录，PR 带创始人原话。
 - 状态：采纳。
 - 替代：0032 第 3 条「里程碑＝版本仍用来……决定引擎拉哪些单」那半句（0031 改写后拉单早已不看版本，这里落成文字）；0020 第 2 条「关前搬单」的做法（从靠 `release.yml` 的 `milestone-close` 改成每天的收口任务）。
-- 关联：0015（PR 不挂里程碑）、0020、0031、0032、0097；`packages/conventions/src/version-cut.ts`、`packages/conventions/src/audit-alarm.ts`、`.github/workflows/github-audit.yml`；排查记录 `_tmp/audit-1016/27-milestone-plan.md`（本机）。
+- 关联：0015（PR 不挂里程碑）、0020、0031、0032、0097；`packages/conventions/src/version-cut.ts`、`.github/workflows/github-audit.yml`；排查记录 `_tmp/audit-1016/27-milestone-plan.md`（本机）。
 
 ## 原话
 
