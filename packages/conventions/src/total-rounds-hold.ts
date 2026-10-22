@@ -2,7 +2,7 @@
 // 等于绕过上限。起新一代之前先数这张单历代已经做完的动手轮数（库里 runs 表 segment=manual、outcome=done 的笔数，跨代，
 // 不数被杀、起不来、没派出去这类没做成一轮的），累计到了上限就不再起新一代，改贴「本机做」交回本机并留言。
 // 判据只有这一份，api（驾驶舱 / 命令行 task.redo）和引擎（指挥官 commander.redo）共用。
-import { MAX_TOTAL_ROUNDS } from '@fleet-dao/shared/continue-exhausted';
+// conventions 是零安装区，不引包名：上限（shared 的 MAX_TOTAL_ROUNDS）由调用方传进来。
 import { LOCAL_LABEL } from './labels.ts';
 
 /** 起新一代的两个入口。 */
@@ -38,12 +38,12 @@ export interface TotalRoundsHold {
 
 /**
  * 累计动手轮数没到上限回 null（照常起新一代）；到了回判决：不起新一代，调用方留言并贴「本机做」。
- * limit 默认 MAX_TOTAL_ROUNDS（#3603 那个数）；带原因的「继续」放宽过的上限不在这里数，重做按基础上限一刀切。
+ * limit 传 MAX_TOTAL_ROUNDS（#3603 那个数）；带原因的「继续」放宽过的上限不在这里数，重做按基础上限一刀切。
  */
 export function totalRoundsHoldOf(
   rounds: number,
   action: TotalRoundsHoldAction,
-  limit: number = MAX_TOTAL_ROUNDS,
+  limit: number,
 ): TotalRoundsHold | null {
   if (rounds < limit) return null;
   const word = ACTION_WORDS[action];

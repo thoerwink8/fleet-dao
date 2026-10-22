@@ -1416,6 +1416,7 @@ describe('裁决：引擎白名单核过才执行', () => {
           totalRoundsHoldOf(
             implementRoundsDone(Array.from({ length: done }, () => ({ segment: 'manual', outcome: 'done' }))),
             'commander.redo',
+            MAX_TOTAL_ROUNDS,
           ),
         handBack: async (_repo: IntakeRepo, issue: number, hold: { key: string; comment: string }) => {
           handed.push({ issue, key: hold.key, comment: hold.comment });
@@ -1427,7 +1428,9 @@ describe('裁决：引擎白名单核过才执行', () => {
     expect(full.redone).toEqual([]);
     expect(full.sent).toHaveLength(0);
     expect(out.acted).toEqual([]);
-    expect(out.left).toEqual([expect.objectContaining({ why: expect.stringContaining('历代累计动手 6 轮') })]);
+    expect(out.left).toEqual([
+      expect.objectContaining({ why: expect.stringContaining('历代累计动手 6 轮') }),
+    ]);
     expect(handed).toHaveLength(1);
     expect(handed[0]?.issue).toBe(ROW.issueNumber);
     expect(handed[0]?.comment).toContain('另起一代会把轮数清零');

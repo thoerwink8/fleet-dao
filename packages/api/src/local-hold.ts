@@ -12,6 +12,7 @@ import {
   totalRoundsHoldOf,
 } from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
+import { MAX_TOTAL_ROUNDS } from '@fleet-dao/shared/continue-exhausted';
 import { errMessage } from '@fleet-dao/shared/util';
 
 export interface LocalHoldInput {
@@ -77,7 +78,7 @@ export async function holdTotalRounds(
   action: TotalRoundsHoldAction,
   port: LocalHoldPort | undefined,
 ): Promise<TotalRoundsRefusal | null> {
-  const hold = totalRoundsHoldOf(implementRoundsDone(runs), action);
+  const hold = totalRoundsHoldOf(implementRoundsDone(runs), action, MAX_TOTAL_ROUNDS);
   if (hold === null) return null;
   if (port === undefined) {
     return {

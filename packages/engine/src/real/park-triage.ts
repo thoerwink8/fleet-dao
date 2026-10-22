@@ -9,12 +9,7 @@
 // - 提醒（诊断文字）经 upsertAlert 推：执行了的、贴「本机做」交本机指挥官的是 daily；留给人（要掏新钱、删了找不回、只有人能做）
 //   是 decision（带选项和原因）；没成、会话没起成的是 alert。改标准的停下经 addIssueLabel 贴「本机做」（#3423）。
 
-import {
-  implementRoundsDone,
-  LOCAL_LABEL,
-  offDiffHoldOf,
-  totalRoundsHoldOf,
-} from '@fleet-dao/conventions';
+import { implementRoundsDone, LOCAL_LABEL, offDiffHoldOf, totalRoundsHoldOf } from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
 import {
   COMMANDER_AUDIT_TARGET,
@@ -71,6 +66,7 @@ import {
 } from '../jobs/park-triage.ts';
 import type { ParkedRetryRow } from '../jobs/parked-retry.ts';
 import {
+  MAX_TOTAL_ROUNDS,
   taskAbandonSignal,
   taskContinueSignal,
   taskSettleMergedUpdate,
@@ -906,7 +902,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           issueNumber: ctx.issueNumber,
           workflowId: taskWorkflowId(ctx.repo, ctx.issueNumber),
         });
-        return totalRoundsHoldOf(implementRoundsDone(rows), 'commander.redo');
+        return totalRoundsHoldOf(implementRoundsDone(rows), 'commander.redo', MAX_TOTAL_ROUNDS);
       },
       async handBack(repo, issueNumber, hold) {
         const ref = { owner: repo.owner, name: repo.name };

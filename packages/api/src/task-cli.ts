@@ -179,7 +179,12 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
 export interface TaskRunDeps {
   store: Pick<
     Store,
-    'findRepoByName' | 'findTaskByIssue' | 'appendAudit' | 'readMergedCorrection' | 'correctMergedAbandoned'
+    | 'findRepoByName'
+    | 'findTaskByIssue'
+    | 'appendAudit'
+    | 'readMergedCorrection'
+    | 'correctMergedAbandoned'
+    | 'listSegmentRuns'
   >;
   workflows: WorkflowControl;
   /** correct-merged 现读 GitHub PR 用（只 GET，和 historical-audit 同一份引擎安装凭据）。没给就拒绝纠正。 */

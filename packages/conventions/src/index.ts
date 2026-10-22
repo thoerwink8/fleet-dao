@@ -181,13 +181,6 @@ export {
   offDiffWords,
   splitAcceptanceItems,
 } from './off-diff-acceptance.ts';
-export {
-  implementRoundsDone,
-  type RoundRunFact,
-  type TotalRoundsHold,
-  type TotalRoundsHoldAction,
-  totalRoundsHoldOf,
-} from './total-rounds-hold.ts';
 // ops 表格由 deploy/ 生成（#140 第一片）：端口表纯函数 + 命令行（bin/ops-tables.ts）。
 // 第十一片：五个区块一起认的口子（checkOpsBlocks、writeOpsBlocks、opsDocPaths）。
 export {
@@ -280,4 +273,11 @@ export {
   TIMINGS_RUN_EVENT,
   timingsSource,
 } from './test-timings.ts';
+export {
+  implementRoundsDone,
+  type RoundRunFact,
+  type TotalRoundsHold,
+  type TotalRoundsHoldAction,
+  totalRoundsHoldOf,
+} from './total-rounds-hold.ts';
 export { addDays } from './version-cut.ts';
