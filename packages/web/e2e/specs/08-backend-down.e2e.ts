@@ -69,10 +69,11 @@ test.describe('后端不可用', () => {
     await page.goto('/france');
     const all = page.getByRole('link', { name: /^定时任务/ });
     await expect(all).toBeVisible();
-    await request.post(`${stack.controlOrigin}/mode/error`);
     await all.click();
-    // 定时任务数据在法国页已读过、进页不会自己重读：点页头刷新才读到这次的 500
     await expect(page.getByRole('heading', { level: 1, name: '定时任务' })).toBeVisible();
+    await expect(page.locator('[data-row-key]').first()).toBeVisible();
+    // 定时任务数据在法国页已读过、进页不会自己重读：后端回 500 以后点页头刷新才读到这次的错
+    await request.post(`${stack.controlOrigin}/mode/error`);
     await page.getByRole('button', { name: /刷新/ }).first().click();
     const alert = page
       .getByRole('alert')
