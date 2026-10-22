@@ -23,6 +23,7 @@ import {
   writeIntakeBreaker,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { type GitHubClient, readIssuePlan } from '@fleet-dao/github';
 import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../../src/jobs/dispatch-standing.ts';
@@ -1297,31 +1298,162 @@ describe('settleLocalKept · 留给本机的提醒跟着单子走', () => {
   const key = (n: number, repoName = 'demo') =>
     `local-kept:acme/${repoName}#${n}:intake-returned-blocked:2026-10-20T16:38:03.775Z`;
 
-  it('单号不在 keep（单关了或标签摘了）的撤掉，在 keep 里的、别的仓的、别的前缀的不动', async () => {
-    for (const dedupeKey of [key(12), key(13), key(12, 'other'), 'intake-profile:acme/demo']) {
+  it('37352事故回归：列表缺席但单仍open/本机做（含needs_human）时保留原卡，整轮partial', async () => {
+    await seedWorld(t.db);
+    const humanKey = 'local-kept:acme/demo#3247:local-lease-kept:2026-10-22T14:18:00.000Z';
+    for (const dedupeKey of [key(3343), humanKey])
+      await upsertAlert(t.db, {
+        dedupeKey,
+        level: 'alert',
+        taskId: null,
+        title: '有效本机卡',
+        body: 'needs_human：仍要人在场验收',
+      });
+    const before = await t.db.select().from(notifications);
+    const { gh, calls } = fakeGh({ issues: [] });
+    const read = gh.readIssuePlan;
+    gh.readIssuePlan = async (input) => ({ ...(await read(input)), labels: ['本机做', '要人拍'] });
+    const client = fakeClient();
+    const result = await runIntakeJob(wire(gh)(client.client, 'fleet'));
+    expect(await t.db.select().from(notifications)).toEqual(before);
+    expect((await t.db.select().from(auditLog)).filter((a) => a.action === 'notification.resolve')).toEqual(
+      [],
+    );
+    expect(result.outcome).toBe('partial');
+    expect(result.why).toContain('#3343');
+    expect(result.why).toContain('#3247');
+    expect(calls.planned.sort()).toEqual([3247, 3343]);
+    expect(client.starts).toEqual([]);
+  });
+
+  it('keep外逐单确认摘标才撤；keep内、别仓、别前缀和无效key不读不动', async () => {
+    const invalidKey = 'local-kept:acme/demo#12garbled';
+    for (const dedupeKey of [key(12), key(13), key(12, 'other'), 'intake-profile:acme/demo', invalidKey]) {
       await upsertAlert(t.db, { dedupeKey, level: 'alert', taskId: null, title: 'x', body: 'y' });
     }
-    await settleLocalKept(t.db, repo, new Set([13]));
+    const { gh, calls } = fakeGh();
+    await settleLocalKept(t.db, repo, new Set([13]), gh);
     expect((await alertByKey(t.db, key(12)))?.resolvedAt).not.toBeNull();
     expect((await alertByKey(t.db, key(12)))?.body).toContain('已撤：#12');
     expect((await alertByKey(t.db, key(13)))?.resolvedAt).toBeNull();
     expect((await alertByKey(t.db, key(12, 'other')))?.resolvedAt).toBeNull();
     expect((await alertByKey(t.db, 'intake-profile:acme/demo'))?.resolvedAt).toBeNull();
+    expect((await alertByKey(t.db, invalidKey))?.resolvedAt).toBeNull();
+    expect(calls.planned).toEqual([12]);
+    expect(
+      (await t.db.select().from(auditLog)).filter((a) => a.action === 'notification.resolve'),
+    ).toMatchObject([{ reason: '#12 「本机做」已摘掉，不再留给本机', actorId: 'engine:intake' }]);
   });
+
+  it('一张单读不到不挡其它合法关闭/摘标；同单多卡只读一次，审计分别写真实原因', async () => {
+    const second12 = 'local-kept:acme/demo#12:local-lease-kept:another-generation';
+    for (const dedupeKey of [key(11), key(12), second12, key(13)])
+      await upsertAlert(t.db, { dedupeKey, level: 'alert', taskId: null, title: 'x', body: '原现场' });
+    const { gh, calls } = fakeGh();
+    const base = gh.readIssuePlan;
+    gh.readIssuePlan = async (input) => {
+      const plan = await base(input);
+      if (input.issueNumber === 11) throw new Error('GraphQL 502');
+      return input.issueNumber === 12 ? { ...plan, state: 'closed', labels: ['本机做'] } : plan;
+    };
+    await expect(settleLocalKept(t.db, repo, new Set(), gh)).rejects.toThrow('#11：GraphQL 502');
+    expect(calls.planned.sort()).toEqual([11, 12, 13]);
+    expect((await alertByKey(t.db, key(11)))?.resolvedAt).toBeNull();
+    for (const dedupeKey of [key(12), second12, key(13)])
+      expect((await alertByKey(t.db, dedupeKey))?.resolvedAt).not.toBeNull();
+    const audit = (await t.db.select().from(auditLog)).filter((a) => a.action === 'notification.resolve');
+    expect(audit.map((a) => a.reason).sort()).toEqual([
+      '#12 已关闭，不再留给本机',
+      '#12 已关闭，不再留给本机',
+      '#13 「本机做」已摘掉，不再留给本机',
+    ]);
+    expect(audit.every((a) => a.actorId === 'engine:intake' && a.ok)).toBe(true);
+  });
+
+  it.each(['404', 'pull-request', 'labels-missing', 'labels-incomplete'])(
+    '真装配复用严格readIssuePlan：%s 时留卡、无撤卡审计并记partial',
+    async (failure) => {
+      await seedWorld(t.db);
+      await upsertAlert(t.db, {
+        dedupeKey: key(12),
+        level: 'alert',
+        taskId: null,
+        title: '有效卡',
+        body: '原证据',
+      });
+      const before = await t.db.select().from(notifications);
+      const { gh, calls } = fakeGh({ issues: [] });
+      gh.readIssuePlan = async (input) => {
+        calls.planned.push(input.issueNumber);
+        return readIssuePlan(
+          {
+            graphql: async () => {
+              if (failure === '404') throw new Error('HTTP 404 NOT_FOUND');
+              return {
+                repository: {
+                  milestones: { totalCount: 0, nodes: [] },
+                  issueOrPullRequest:
+                    failure === 'pull-request'
+                      ? { __typename: 'PullRequest', prState: 'CLOSED' }
+                      : {
+                          __typename: 'Issue',
+                          state: 'OPEN',
+                          stateReason: null,
+                          author: null,
+                          milestone: null,
+                          labels:
+                            failure === 'labels-missing'
+                              ? undefined
+                              : { totalCount: 2, nodes: [{ name: '需求' }] },
+                          parent: null,
+                          subIssuesSummary: { total: 0 },
+                        },
+                },
+              };
+            },
+          } as unknown as GitHubClient,
+          input,
+        );
+      };
+      const result = await runIntakeJob(wire(gh)(fakeClient().client, 'fleet'));
+      expect(result.outcome).toBe('partial');
+      expect(result.why).toContain('#12');
+      expect(result.why).toContain(
+        failure === '404'
+          ? 'HTTP 404'
+          : failure === 'pull-request'
+            ? 'PR'
+            : failure === 'labels-incomplete'
+              ? '标签有 2 个'
+              : '读 #12',
+      );
+      expect(await t.db.select().from(notifications)).toEqual(before);
+      expect((await t.db.select().from(auditLog)).filter((a) => a.action === 'notification.resolve')).toEqual(
+        [],
+      );
+      expect(calls.planned).toEqual([12]);
+    },
+  );
 
   it('keptReturnedIssues 只认还开着、本仓、退回单挡住的那一类提醒', async () => {
     const lease = 'local-kept:acme/demo#14:local-lease-kept:2026-10-20T16:38:03.775Z';
     for (const dedupeKey of [key(12), key(13), key(12, 'other'), lease]) {
       await upsertAlert(t.db, { dedupeKey, level: 'alert', taskId: null, title: 'x', body: 'y' });
     }
-    await settleLocalKept(t.db, repo, new Set([12]));
+    await settleLocalKept(t.db, repo, new Set([12]), fakeGh().gh);
     expect(await keptReturnedIssues(t.db, repo)).toEqual([12]);
   });
 
   it('撤过的再跑一遍不报错', async () => {
     await upsertAlert(t.db, { dedupeKey: key(12), level: 'alert', taskId: null, title: 'x', body: 'y' });
-    await settleLocalKept(t.db, repo, new Set());
-    await expect(settleLocalKept(t.db, repo, new Set())).resolves.toBeUndefined();
+    const { gh, calls } = fakeGh();
+    await settleLocalKept(t.db, repo, new Set(), gh);
+    const after = await t.db.select().from(notifications);
+    const audit = await t.db.select().from(auditLog);
+    await expect(settleLocalKept(t.db, repo, new Set(), gh)).resolves.toBeUndefined();
+    expect(await t.db.select().from(notifications)).toEqual(after);
+    expect(await t.db.select().from(auditLog)).toEqual(audit);
+    expect(calls.planned).toEqual([12]);
   });
 });
 

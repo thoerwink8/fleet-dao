@@ -151,24 +151,45 @@ export async function reportIntakeProfile(
 }
 
 /**
- * 撤掉「留给本机」的提醒（local-kept:<仓>#<单号>:<key>）：单号不在 keep（开着且贴着「本机做」的单）里，
- * 说明单关了或「本机做」摘了，提醒的条件不成立。处理人记引擎，操作记录写为什么。
+ * keep 外的提醒不能凭列表缺席就撤（#3637）：逐单现读完整状态/标签，确认关闭或摘标才撤。
+ * 同单多卡只读一次；读不到、是 PR、仍开着且留本机都保留，汇总抛给现有 unchecked，不挡其它确定可撤的单。
  */
 export async function settleLocalKept(
   db: Db,
   repo: { owner: string; name: string },
   keep: ReadonlySet<number>,
+  gh: Pick<IntakeGitHub, 'readIssuePlan'>,
 ): Promise<void> {
   const prefix = `local-kept:${repo.owner}/${repo.name}#`;
-  for (const alert of await openAlertsByPrefix(db, prefix)) {
-    const issueNumber = Number(/^\d+/.exec(alert.dedupeKey.slice(prefix.length))?.[0]);
-    if (!Number.isInteger(issueNumber) || keep.has(issueNumber)) continue;
-    await resolveAlertWithReason(db, {
-      dedupeKey: alert.dedupeKey,
-      by: BREAKER_ACTOR,
-      why: `#${issueNumber} 已关闭或「${LOCAL_LABEL}」已摘掉，不再留给本机`,
-    });
+  const alerts = await openAlertsByPrefix(db, prefix);
+  const candidates = new Map<number, typeof alerts>();
+  for (const alert of alerts) {
+    const issueNumber = Number(/^([1-9]\d*):.+$/.exec(alert.dedupeKey.slice(prefix.length))?.[1]);
+    if (!Number.isSafeInteger(issueNumber) || keep.has(issueNumber)) continue;
+    const sameIssue = candidates.get(issueNumber) ?? [];
+    sameIssue.push(alert);
+    candidates.set(issueNumber, sameIssue);
   }
+  const unchecked: string[] = [];
+  for (const [issueNumber, sameIssue] of candidates) {
+    try {
+      const plan = await gh.readIssuePlan({ repo, issueNumber });
+      if (plan.pullRequest) throw new Error('这个号是 PR，不能确认原单已关闭或摘标');
+      if (plan.state === 'open' && plan.labels.includes(LOCAL_LABEL))
+        throw new Error(`仍开着且带「${LOCAL_LABEL}」，与本轮 keep 不符，保留提醒`);
+      const why = plan.state === 'closed' ? '已关闭' : `「${LOCAL_LABEL}」已摘掉`;
+      for (const alert of sameIssue) {
+        await resolveAlertWithReason(db, {
+          dedupeKey: alert.dedupeKey,
+          by: BREAKER_ACTOR,
+          why: `#${issueNumber} ${why}，不再留给本机`,
+        });
+      }
+    } catch (error) {
+      unchecked.push(`#${issueNumber}：${errMessage(error)}`);
+    }
+  }
+  if (unchecked.length > 0) throw new Error(unchecked.join('；'));
 }
 
 /** 还开着的「本机退回的单、引擎接不了」提醒（local-kept:<仓>#<单号>:intake-returned-blocked:…）对应的单号。 */
@@ -239,7 +260,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           body,
         });
       },
-      settleLocalKept: ({ repo, keep }) => settleLocalKept(w.db, repo, keep),
+      settleLocalKept: ({ repo, keep }) => settleLocalKept(w.db, repo, keep, w.gh),
       keptReturned: (repo) => keptReturnedIssues(w.db, repo),
       async unmarkLocal({ repo, issueNumber }) {
         await w.gh.removeIssueLabel({
