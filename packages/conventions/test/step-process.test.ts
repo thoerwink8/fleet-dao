@@ -20,6 +20,18 @@ import { runChild } from './child.ts';
 const superviseBin = fileURLToPath(new URL('../src/bin/step-supervise.ts', import.meta.url));
 const linux = process.platform === 'linux';
 
+/**
+ * pnpm test:changed 经检查入口起 vitest，外层已经写上 FLEET_CHECK_SUPERVISED。
+ * 这个变量的意思是「本进程已经在看守里，不要再 setsid」。测试进程继承到它之后，
+ * runCheckedChild 会改走直跑：孙进程不收，SIGINT 打到 vitest worker 自己。
+ * 这里要测的是 pnpm check 顶层那一跳（biome、tsc、test:changed 本身），所以剥掉再进入口。
+ */
+function entryEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...extra };
+  delete env[SUPERVISED_ENV];
+  return env;
+}
+
 function procState(pid: number): string | undefined {
   try {
     return /^State:\s+(\S+)/m.exec(readFileSync(`/proc/${pid}/status`, 'utf8'))?.[1];
@@ -200,6 +212,7 @@ const timer = setInterval(() => {
     const newPid = join(dir, 'new.pid');
     const result = runCheckedChild(process.execPath, [join(dir, 'partial.mjs'), newPid, sleeper], {
       stdio: 'ignore',
+      env: entryEnv(),
     });
     const grand = remember(newPid);
     expect(result.status).toBeNull();
@@ -219,6 +232,7 @@ const timer = setInterval(() => {
     const newPid = join(dir, 'new.pid');
     const result = runCheckedChild(process.execPath, [join(dir, 'leave.mjs'), newPid, sleeper], {
       stdio: 'ignore',
+      env: entryEnv(),
     });
     const grand = remember(newPid);
     expect(result.status).toBe(0);
@@ -228,7 +242,7 @@ const timer = setInterval(() => {
 
   it('命令不存在：带回 ENOENT，不抛', () => {
     scripts();
-    const result = runCheckedChild(join(dir, 'missing-bin'), [], { stdio: 'ignore' });
+    const result = runCheckedChild(join(dir, 'missing-bin'), [], { stdio: 'ignore', env: entryEnv() });
     expect(result.status).toBeNull();
     expect((result.error as NodeJS.ErrnoException | undefined)?.code).toBe('ENOENT');
   });
@@ -266,7 +280,7 @@ const timer = setInterval(() => {
     const result = runCheckedChild(
       process.execPath,
       [join(dir, 'hang.mjs'), pidFile, join(dir, 'sleep.mjs'), 'sigint'],
-      { stdio: 'ignore' },
+      { stdio: 'ignore', env: entryEnv() },
     );
     const grand = remember(pidFile);
     expect(result.status).toBeNull();
@@ -298,12 +312,10 @@ const timer = setInterval(() => {
     scripts();
     const pidFile = join(dir, 'grand.pid');
     const seen = join(dir, 'seen-pid-env');
-    const env = { ...process.env };
-    delete env[SUPERVISED_ENV];
     const result = runCheckedChild(
       process.execPath,
       [join(dir, 'killsup.mjs'), pidFile, join(dir, 'sleep.mjs'), seen],
-      { stdio: 'ignore', env },
+      { stdio: 'ignore', env: entryEnv() },
     );
     const grand = remember(pidFile);
     expect(readFileSync(seen, 'utf8')).toBe('');
@@ -343,7 +355,10 @@ const timer = setInterval(() => {
   });
 
   it('退出码原样交回', () => {
-    const result = runCheckedChild(process.execPath, ['-e', 'process.exitCode = 3'], { stdio: 'ignore' });
+    const result = runCheckedChild(process.execPath, ['-e', 'process.exitCode = 3'], {
+      stdio: 'ignore',
+      env: entryEnv(),
+    });
     expect(result.status).toBe(3);
     expect(result.error).toBeUndefined();
   });
