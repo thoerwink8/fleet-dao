@@ -4,7 +4,7 @@
 // 2. 工作流里不许碰活动、worker、客户端、Node 自带模块：它们不确定，或者根本进不了工作流沙箱。
 // 3. 工作流里不生成编号（uuid4、Math.random）：库主键经 decide('newIds') 记进历史，多调少调都不会错位。
 // 4. decide 只在 kit.ts 里直接调，别处经 judge：判断本身出错按兜底梯走（重试 → 挂起报警），不把任务判死。
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -120,5 +120,49 @@ describe('工作流文件的规矩', () => {
       'fake.ts',
     );
     expect([mixed?.typeOnly, typeOnly?.typeOnly, allTypes?.typeOnly]).toEqual([false, true, true]);
+  });
+});
+
+// 受管 start 的可信边界：仓内真正对 Temporal 起工作流的位置只有这三处，且都不带 managed 保留字段 execution。
+// 之后新增 start 点（或给 Start 参数加 execution）必须先改本清单并走准入；这是防意外绕过的结构检查，不是恶意代码沙箱。
+const PACKAGES = fileURLToPath(new URL('../../', import.meta.url));
+const START_CALL = /\bworkflow\s*\.\s*(?:start|signalWithStart|execute)\s*\(/g;
+const EXECUTION_KEY = /\bexecution\s*:/;
+const START_SITES = ['api/src/temporal.ts', 'engine/src/real/intake.ts', 'engine/src/real/park-triage.ts'];
+
+function startSites(): { file: string; text: string }[] {
+  // 只读各包的 src，不递归进 node_modules。
+  return readdirSync(PACKAGES, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(`${PACKAGES}${d.name}/src`))
+    .flatMap((d) =>
+      readdirSync(`${PACKAGES}${d.name}/src`, { recursive: true, encoding: 'utf8' }).map(
+        (f) => `${d.name}/src/${f}`,
+      ),
+    )
+    .filter((f) => /\.(ts|mts|mjs)$/.test(f) && !f.includes('node_modules'))
+    .flatMap((file) => {
+      const code = codeOnly(readFileSync(`${PACKAGES}${file}`, 'utf8'));
+      return [...code.matchAll(START_CALL)].map((m) => ({ file, text: code.slice(m.index, m.index + 1500) }));
+    });
+}
+
+describe('Start 入口的结构检查', () => {
+  it('只有已登记的三处对 Temporal 起工作流', () => {
+    expect([...new Set(startSites().map((s) => s.file))].sort()).toEqual(START_SITES);
+  });
+
+  it('登记的 Start 参数里不带 managed 保留字段 execution', () => {
+    expect(
+      startSites()
+        .filter((s) => EXECUTION_KEY.test(s.text))
+        .map((s) => s.file),
+    ).toEqual([]);
+  });
+
+  it('这两道检查真能红：代码里的 start 与 execution 键算，注释里的不算', () => {
+    const sample = codeOnly("await c.workflow.start('x', { args: [{ execution: { a: 1 } }] });");
+    expect([...sample.matchAll(START_CALL)]).toHaveLength(1);
+    expect(EXECUTION_KEY.test(sample)).toBe(true);
+    expect([...codeOnly("// c.workflow.start('x')").matchAll(START_CALL)]).toHaveLength(0);
   });
 });

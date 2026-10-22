@@ -13,6 +13,7 @@ import {
 } from '@temporalio/worker';
 import { createActivities, type EngineJobs, type EngineTasks } from './activities.ts';
 import type { EngineActivities } from './activity-options.ts';
+import { type AdmittingDecideDeps, createAdmittingDecide } from './decisions/admitting-decide.ts';
 import { createDecide, type Decide, type FailureTriage } from './decisions/index.ts';
 import {
   createEngineDrain,
@@ -95,6 +96,8 @@ export interface CreateEngineWorkerOptions {
   triage?: FailureTriage;
   /** 整个换掉判断入口（演练「判断出错」用）；不给就是 createDecide({ triage })。 */
   decide?: Decide;
+  /** 执行资格兼容准入（未接生产：默认不传＝不准入，行为与旧版完全一致）。传了就在 decide('limits') 前核 Start 来源。 */
+  admission?: Pick<AdmittingDecideDeps, 'admit' | 'alert'>;
   /** 包一层活动（演练用：让某个活动卡在半路，看叫停、换工人时的先后）；不给就是原样。 */
   wrapActivities?: (activities: EngineActivities) => EngineActivities;
   /** 缓存几条工作流；0 = 不缓存、每个工作流任务都从历史重放（换工人、换代码演练用）。 */
@@ -104,6 +107,16 @@ export interface CreateEngineWorkerOptions {
 
 /** 在途活动过了宽限还不交回，再等多久就强停工人（秒）。 */
 export const SHUTDOWN_FORCE_EXTRA_SECONDS = 30;
+
+function admittingDecide(options: CreateEngineWorkerOptions): Decide {
+  const decide = options.decide ?? createDecide(options.triage ? { triage: options.triage } : {});
+  if (!options.admission) return decide;
+  return createAdmittingDecide({
+    decide,
+    ...options.admission,
+    ...(options.log ? { log: options.log } : {}),
+  });
+}
 
 export async function createEngineWorker(options: CreateEngineWorkerOptions): Promise<Worker> {
   const { config } = options;
@@ -120,7 +133,7 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
     workflowBundle: options.workflowBundle ?? (await bundleEngineWorkflows()),
     activities: {
       ...(options.wrapActivities ? options.wrapActivities(activities) : activities),
-      decide: options.decide ?? createDecide(options.triage ? { triage: options.triage } : {}),
+      decide: admittingDecide(options),
     },
     shutdownGraceTime: `${config.shutdownGraceSeconds} seconds`,
     // 兜底（#2238）：在途活动过了宽限、被取消了还不交回，最多再等 SHUTDOWN_FORCE_EXTRA_SECONDS 就不等了，进程照常收尾退出——

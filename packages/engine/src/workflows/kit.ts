@@ -27,6 +27,7 @@ import {
 } from '../activity-options.ts';
 import type { FailureInfo } from '../decisions/failure.ts';
 import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
+import { deniedFailureOf } from '../execution-admission-failure.ts';
 import type { Limits } from '../limits.ts';
 import { SELF_CHECK_ACTIVITY_MS } from '../self-check-budget.ts';
 
@@ -58,6 +59,10 @@ export async function judgeRetrying<K extends DecisionKind>(
       return await decide(kind, input);
     } catch (error) {
       if (isCancellation(error)) throw error;
+      // 执行资格准入的确证拒绝（固定 type + nonRetryable，不看 message）：不退避，原样终结工作流。
+      // 只在失败路径多一个判型；不增删命令，已录历史重放不受影响。
+      const denied = deniedFailureOf(error);
+      if (denied) throw denied;
       const message = failureOf(error, `decide:${kind}`).message;
       log.error('判断出错，退避后重试', { kind, failures: failures + 1, error: message });
       if (stuck && failures + 1 === stuck.alertAfter) await stuck.alert(message);
