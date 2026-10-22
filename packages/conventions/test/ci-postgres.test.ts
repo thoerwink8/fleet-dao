@@ -1,12 +1,13 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startCiPostgres } from '../src/ci-postgres.ts';
 import { runChild } from './child.ts';
 
 const roots: string[] = [];
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -23,6 +24,9 @@ function fixture(settings: Record<string, string> = {}) {
 const fs=require('node:fs');
 const [tool,...args]=process.argv.slice(2);
 const env=process.env;
+if(Object.hasOwn(env,'PGSERVICE')||Object.hasOwn(env,'PGSERVICEFILE')) {
+ console.error('libpq service environment must be absent, not empty');process.exit(87);
+}
 fs.appendFileSync(env.CALLS,JSON.stringify({tool,args})+'\\n');
 const arg=k=>args[args.indexOf(k)+1];
 if(env.FAIL===tool && (args[0]!=='--version'||env.FAIL_VERSION==='yes')) {
@@ -93,6 +97,12 @@ describe('CI PostgreSQL cluster bootstrap', () => {
     const f = fixture({ TOOL_VERSION: '17.1' });
     expect(() => f.start()).toThrow(/expected PostgreSQL 16/);
     expect(f.calls()).toHaveLength(1);
+  });
+  it('unsets inherited libpq service configuration instead of passing empty file paths', () => {
+    vi.stubEnv('PGSERVICE', 'another-cluster');
+    vi.stubEnv('PGSERVICEFILE', '/must-not-read');
+    expect(fixture().start()).toContain('fleet-ci-pg-');
+    expect(process.env.PGSERVICEFILE).toBe('/must-not-read');
   });
   it.each(['initdb', 'pg_ctl', 'psql'])('propagates %s failure and retains diagnostic logs', (tool) => {
     const f = fixture({ FAIL: tool });

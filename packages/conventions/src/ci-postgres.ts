@@ -23,13 +23,14 @@ export function startCiPostgres(options: PostgresOptions): string {
   const log = options.log ?? console.log;
   log(`CI PostgreSQL cluster: ${cluster}`);
   mkdirSync(socket);
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     PGCONNECT_TIMEOUT: '10',
     PGPASSWORD: options.mode === 'test' ? 'fleet_test' : '',
-    PGSERVICE: '',
-    PGSERVICEFILE: '',
   };
+  // libpq treats even an empty PGSERVICEFILE as a file path; unset inherited services.
+  delete env.PGSERVICE;
+  delete env.PGSERVICEFILE;
   const run =
     options.run ??
     ((command, args, childEnv) => {
