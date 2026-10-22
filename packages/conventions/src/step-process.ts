@@ -1,9 +1,11 @@
 // pnpm check / test:changed 起的那一层子进程：直接子进程被信号杀掉或自己退出时，孙进程会过继走、仍留在同一个 scope 里占内存。
-// 这里让真正的命令自成一组，结束时（拒绝、抛异常、部分退出、父进程先死）把整组收掉。看守自己被 SIGKILL 时收组代码跑不到，
-// 父进程再按记下的 pid 和启动时刻收一次（对不上就不杀，避免 pid 被复用）。已经在看守里的调用不再套第二层，
-// 免得内层再 setsid，外层收不到 vitest 的工人。Windows 没有这套进程组，保持原来的 spawnSync。
+// 这里让真正的命令自成一组，结束时（拒绝、抛异常、部分退出、父进程先死）把整组收掉。孙进程一旦 setsid（spawn detached），
+// 就不在这组里，组信号收不到；看守隔 DESCENDANT_TRACK_MS 记下它的 pid 和启动时刻，收场时对得上才杀。比这个间隔更短、
+// 祖先进程就全退了的脱离进程可能来不及记下。看守自己被 SIGKILL 时收组代码跑不到，父进程再按记下的 pid 和启动时刻收一次
+// （对不上就不杀，避免 pid 被复用）。已经在看守里的调用不再套第二层，免得内层再 setsid，外层收不到 vitest 的工人。
+// Windows 没有这套进程组，保持原来的 spawnSync。
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +30,18 @@ export interface SuperviseHooks extends StepSpawnOptions {
   watchParent?: boolean;
   /** 看守进程自己收到 SIGINT/SIGTERM 时先收组。进进程内测这条时关掉，免得换掉测试进程的信号行为。 */
   trapSignals?: boolean;
+  /** 记下命令的子孙（含已经 setsid 的）。看守被杀后，父进程靠这份记录收。 */
+  onTrack?: (leader: number, tracked: ReadonlyMap<number, TrackedProc>) => void;
 }
+
+/** 已经脱离进程组的子孙：pid、启动时刻、当时是不是组长。 */
+export interface TrackedProc {
+  start: string;
+  groupLeader: boolean;
+}
+
+/** 隔这么久把命令的子孙记一笔。比这更短就退出的脱离进程，可能来不及记。 */
+export const DESCENDANT_TRACK_MS = 200;
 
 interface StatusFile {
   status?: number | null;
@@ -37,10 +50,13 @@ interface StatusFile {
   code?: string;
 }
 
-/** 杀掉 pid 带领的进程组。pid 不是正整数、组已经空了、没有权限，都不报。 */
+/**
+ * 杀掉 pid 带领的进程组。pid 不是大于 1 的整数、组已经空了、没有权限，都不报。
+ * pid 1 不发：`kill(-1)` 会打到本进程能打的所有进程，不是 init 那一组。
+ */
 export function killProcessGroup(pid: number | undefined): void {
   if (process.platform === 'win32') return;
-  if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return;
+  if (pid === undefined || !Number.isInteger(pid) || pid <= 1) return;
   try {
     process.kill(-pid, 'SIGKILL');
   } catch (err) {
@@ -49,32 +65,89 @@ export function killProcessGroup(pid: number | undefined): void {
   }
 }
 
-/**
- * `/proc/<pid>/stat` 第 22 段：进程启动时刻（时钟滴答）。
- * comm 可以含空格和括号，从最后一个 `)` 后面切。读不到就是 undefined，调用方据此不杀。
- */
-export function procStartTicks(pid: number): string | undefined {
-  if (process.platform !== 'linux') return undefined;
+/** `/proc/<pid>/stat` 里父进程号、进程组、启动时刻。comm 可以含空格和括号，从最后一个 `)` 后面切。 */
+function procIdentity(pid: number): { ppid: number; pgrp: number; start: string } | undefined {
   if (!Number.isInteger(pid) || pid <= 0) return undefined;
   try {
     const text = readFileSync(`/proc/${pid}/stat`, 'utf8');
     const close = text.lastIndexOf(')');
     if (close < 0) return undefined;
-    const start = text
+    const parts = text
       .slice(close + 1)
       .trim()
-      .split(/\s+/)[19];
-    return start !== undefined && /^\d+$/.test(start) ? start : undefined;
+      .split(/\s+/);
+    const ppid = Number(parts[1]);
+    const pgrp = Number(parts[2]);
+    const start = parts[19];
+    if (!Number.isInteger(ppid) || !Number.isInteger(pgrp) || start === undefined || !/^\d+$/.test(start)) {
+      return undefined;
+    }
+    return { ppid, pgrp, start };
   } catch {
     return undefined;
   }
 }
 
-/** 启动时刻还对得上才收组。对不上（已经退出，或这个 pid 被别人复用）不杀。 */
-export function reapIfSameStart(pid: number, start: string | undefined): void {
+/**
+ * `/proc/<pid>/stat` 第 22 段：进程启动时刻（时钟滴答）。
+ * 读不到就是 undefined，调用方据此不杀。
+ */
+export function procStartTicks(pid: number): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  return procIdentity(pid)?.start;
+}
+
+/** 命令还活着时，顺着父进程号找出全部子孙（含已经 setsid、不在本组的）。 */
+export function descendantProcs(root: number): Map<number, TrackedProc> {
+  const out = new Map<number, TrackedProc>();
+  if (process.platform !== 'linux' || !Number.isInteger(root) || root <= 1) return out;
+  let names: string[];
+  try {
+    names = readdirSync('/proc');
+  } catch {
+    return out;
+  }
+  const children = new Map<number, number[]>();
+  const ident = new Map<number, { pgrp: number; start: string }>();
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    const info = procIdentity(pid);
+    if (!info) continue;
+    ident.set(pid, { pgrp: info.pgrp, start: info.start });
+    const list = children.get(info.ppid);
+    if (list) list.push(pid);
+    else children.set(info.ppid, [pid]);
+  }
+  const stack = [...(children.get(root) ?? [])];
+  const seen = new Set<number>();
+  while (stack.length > 0) {
+    const pid = stack.pop() as number;
+    if (pid <= 1 || pid === root || seen.has(pid)) continue;
+    seen.add(pid);
+    const info = ident.get(pid);
+    if (!info) continue;
+    out.set(pid, { start: info.start, groupLeader: info.pgrp === pid });
+    stack.push(...(children.get(pid) ?? []));
+  }
+  return out;
+}
+
+/** 启动时刻还对得上才收。组长收整组；不是组长只收这一个。对不上（已经退出，或 pid 被别人复用）不杀。pid 1 不收。 */
+export function reapIfSameStart(pid: number, start: string | undefined, groupLeader = true): void {
+  if (!Number.isInteger(pid) || pid <= 1) return;
   if (start === undefined || !/^\d+$/.test(start)) return;
   if (procStartTicks(pid) !== start) return;
-  killProcessGroup(pid);
+  if (groupLeader) {
+    killProcessGroup(pid);
+    return;
+  }
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ESRCH' && code !== 'EPERM') throw err;
+  }
 }
 
 /**
@@ -96,6 +169,7 @@ export function runSupervised(
     let settled = false;
     let timer: ReturnType<typeof setInterval> | undefined;
     let childPid: number | undefined;
+    const tracked = new Map<number, TrackedProc>();
     const onSigint = () => finish({ status: null, signal: 'SIGINT' });
     const onSigterm = () => finish({ status: null, signal: 'SIGTERM' });
     const stopTraps = () => {
@@ -103,12 +177,24 @@ export function runSupervised(
       process.off('SIGINT', onSigint);
       process.off('SIGTERM', onSigterm);
     };
+    // 记账失败也要收组：读不了 /proc 不能把这一步拖成没跑成。
+    function trackNow() {
+      if (childPid === undefined) return;
+      try {
+        for (const [pid, info] of descendantProcs(childPid)) tracked.set(pid, info);
+        hooks.onTrack?.(childPid, tracked);
+      } catch {
+        // 上面已经把读失败当成「这次没记下」。
+      }
+    }
     function finish(result: StepRun, thrown?: unknown) {
       if (settled) return;
       settled = true;
       if (timer) clearInterval(timer);
       stopTraps();
+      trackNow();
       killProcessGroup(childPid);
+      for (const [pid, info] of tracked) reapIfSameStart(pid, info.start, info.groupLeader);
       if (thrown !== undefined) reject(thrown);
       else resolve(result);
     }
@@ -140,8 +226,9 @@ export function runSupervised(
     child.on('close', (status, signal) => finish({ status, signal }));
     if (hooks.watchParent !== false) {
       timer = setInterval(() => {
+        trackNow();
         if (process.ppid !== parent) finish({ status: null, signal: 'SIGKILL' });
-      }, 200);
+      }, DESCENDANT_TRACK_MS);
       timer.unref();
       if (process.ppid !== parent) {
         finish({ status: null, signal: 'SIGKILL' });
@@ -162,15 +249,29 @@ function writeStatus(file: string | undefined, body: StatusFile): void {
   writeFileSync(file, JSON.stringify(body));
 }
 
-/** 命令一起来就把 pid 和启动时刻写上。写在子进程跑 JS 之前，看守随后被杀掉也还有据可收。 */
-function writeGroupPid(file: string | undefined, pid: number): void {
+/**
+ * 命令的 pid、启动时刻，以及已经记下的子孙。第一行是组长；没有第三段的旧行也按组长收。
+ * 写到临时文件再换名，父进程不会读到半行。读不到启动时刻就不写，免得父进程误杀。
+ */
+function writeTracked(
+  file: string | undefined,
+  leader: number,
+  tracked: ReadonlyMap<number, TrackedProc>,
+): void {
   if (!file) return;
-  const start = procStartTicks(pid);
+  const start = procStartTicks(leader);
   if (start === undefined) return;
-  writeFileSync(file, `${pid} ${start}\n`);
+  const lines = [`${leader} ${start} ${leader}`];
+  for (const [pid, info] of tracked) {
+    if (pid === leader || !/^\d+$/.test(info.start)) continue;
+    lines.push(`${pid} ${info.start} ${info.groupLeader ? pid : 0}`);
+  }
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${lines.join('\n')}\n`);
+  renameSync(tmp, file);
 }
 
-/** 看守没来得及收组时用。文件没有、写坏了、进程已退出、启动时刻变了，都不杀。 */
+/** 看守没来得及收时用。文件没有、写坏了、进程已退出、启动时刻变了，都不杀。 */
 function reapRecordedGroup(file: string): void {
   let text: string;
   try {
@@ -178,11 +279,16 @@ function reapRecordedGroup(file: string): void {
   } catch {
     return;
   }
-  const [pidText, start] = text.trim().split(/\s+/);
-  if (pidText === undefined || !/^\d+$/.test(pidText)) return;
-  const pid = Number(pidText);
-  if (!Number.isInteger(pid) || pid <= 0) return;
-  reapIfSameStart(pid, start);
+  for (const line of text.split('\n')) {
+    const [pidText, start, groupText] = line.trim().split(/\s+/);
+    if (pidText === undefined || !/^\d+$/.test(pidText) || start === undefined || !/^\d+$/.test(start))
+      continue;
+    const pid = Number(pidText);
+    if (!Number.isInteger(pid) || pid <= 1) continue;
+    // 第三段缺省或等于自己，是组长；0 表示当时不是组长，只杀这一个。
+    const groupLeader = groupText === undefined || groupText === pidText;
+    reapIfSameStart(pid, start, groupLeader);
+  }
 }
 
 /** 看守进程的入口（bin/step-supervise.ts）。结果写进 FLEET_CHECK_STATUS，自己以 0 退出，让父进程读文件而不是把看守的退出码当成命令的。 */
@@ -200,6 +306,13 @@ export async function superviseCli(argv: readonly string[]): Promise<void> {
   const pidFile = process.env[PID_ENV];
   let groupPid: number | undefined;
   let crashing = false;
+  const persist = (leader: number, tracked: ReadonlyMap<number, TrackedProc>) => {
+    try {
+      writeTracked(pidFile, leader, tracked);
+    } catch {
+      // 记录写不了时，收场仍收得到当时还在本组里的进程。
+    }
+  };
   const crash = (err: unknown) => {
     if (crashing) return;
     crashing = true;
@@ -223,9 +336,10 @@ export async function superviseCli(argv: readonly string[]): Promise<void> {
       env,
       stdio: 'inherit',
       trapSignals: true,
+      onTrack: persist,
       afterSpawn: (pid) => {
         groupPid = pid;
-        writeGroupPid(pidFile, pid);
+        persist(pid, new Map());
       },
     });
     const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
