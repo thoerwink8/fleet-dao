@@ -4,7 +4,12 @@ import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { SessionEffort } from '../src/effort.ts';
-import { buildGrokArgs, grokModelMatches } from '../src/grok/args.ts';
+import {
+  buildGrokArgs,
+  GROK_DISALLOWED_TOOLS,
+  grokModelMatches,
+  grokSupportsDisallowedTools,
+} from '../src/grok/args.ts';
 import { type GrokRunSpec, grokRunSummary, runGrok } from '../src/grok/run.ts';
 import { GrokStreamReader } from '../src/grok/stream.ts';
 import { judgeRun } from '../src/judge.ts';
@@ -43,6 +48,8 @@ describe('grok 参数', () => {
       'streaming-json',
       '--always-approve',
       '--no-plan',
+      '--disallowed-tools',
+      GROK_DISALLOWED_TOOLS.join(','),
       '-m',
       'grok-4.7',
       '--cwd',
@@ -52,6 +59,69 @@ describe('grok 参数', () => {
     ]);
     // GK-03：不用子命令，旗标放在子命令后面会报 unexpected argument
     expect(args[0]?.startsWith('-')).toBe(true);
+  });
+
+  it('关掉图像、视频、反馈、工作流、调度类工具，读写文件、执行命令、搜索不在名单里', () => {
+    const args = buildGrokArgs({
+      model: 'grok-4.7',
+      session: { mode: 'new', id: SESSION },
+      cwd: '/w',
+      alwaysApprove: true,
+    });
+    const denied = (args[args.indexOf('--disallowed-tools') + 1] ?? '').split(',');
+    expect(denied).toEqual([...GROK_DISALLOWED_TOOLS]);
+    for (const tool of [
+      'image_gen',
+      'image_edit',
+      'image_to_video',
+      'reference_to_video',
+      'send_feedback',
+      'workflow',
+      'scheduler_create',
+      'scheduler_list',
+      'scheduler_delete',
+    ]) {
+      expect(denied).toContain(tool);
+    }
+    // 写码要用的：读、写、改、命令、搜索（工具内部名见 grok 的 14-headless-mode.md）
+    for (const tool of [
+      'read_file',
+      'write',
+      'search_replace',
+      'hashline_read',
+      'hashline_edit',
+      'run_terminal_cmd',
+      'grep',
+      'hashline_grep',
+      'list_dir',
+      'web_search',
+      'web_fetch',
+    ]) {
+      expect(denied).not.toContain(tool);
+    }
+  });
+
+  it('disallowTools: false 不带这个旗标', () => {
+    const args = buildGrokArgs({
+      model: 'grok-4.7',
+      session: { mode: 'new', id: SESSION },
+      cwd: '/w',
+      alwaysApprove: true,
+      disallowTools: false,
+    });
+    expect(args).not.toContain('--disallowed-tools');
+    expect(args).not.toContain(GROK_DISALLOWED_TOOLS.join(','));
+  });
+
+  it('版本判断：1.0.41 起认，更老的、读不出来的按不支持', () => {
+    expect(grokSupportsDisallowedTools('1.0.41')).toBe(true);
+    expect(grokSupportsDisallowedTools('1.0.50')).toBe(true);
+    expect(grokSupportsDisallowedTools('1.1.0')).toBe(true);
+    expect(grokSupportsDisallowedTools('1.0.40')).toBe(false);
+    expect(grokSupportsDisallowedTools('0.9.99')).toBe(false);
+    expect(grokSupportsDisallowedTools('nonsense')).toBe(false);
+    expect(grokSupportsDisallowedTools(null)).toBe(false);
+    expect(grokSupportsDisallowedTools(undefined)).toBe(false);
   });
 
   it('续会话用 -r；effort、轮数上限、提示词文件可选', () => {
@@ -278,7 +348,50 @@ describe('grok 起停', () => {
       fleetToken: 't',
     },
     testCommands: ['git commit'],
+    // 假执行体答不出 --version；已知版本就不问
+    grokVersion: '1.0.41',
     ...extra,
+  });
+
+  it('命令行版本不认 --disallowed-tools：不带这个参数照旧起会话，记一条日志', async () => {
+    const out = tempDir();
+    const logs: string[] = [];
+    const report = await runGrok(spec(tempDir(), { grokVersion: '1.0.40', log: (m) => void logs.push(m) }), {
+      command: fakeAgent({ replay: fixturePath('grok', 'grok-resume'), argvTo: join(out, 'argv') }),
+    });
+    const argv = JSON.parse(readFileSync(join(out, 'argv'), 'utf8')) as string[];
+    expect(argv).not.toContain('--disallowed-tools');
+    expect(argv).toContain('--no-plan');
+    expect(report.stream.end).toBeDefined();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('没关成');
+    expect(logs[0]).toContain('1.0.40');
+  });
+
+  it('版本问不出来（--version 没给出版本）：同样不带参数、记日志，会话照常起', async () => {
+    const out = tempDir();
+    const logs: string[] = [];
+    const { grokVersion: _skip, ...noVersion } = spec(tempDir());
+    const report = await runGrok(
+      { ...noVersion, log: (m) => void logs.push(m) },
+      { command: fakeAgent({ replay: fixturePath('grok', 'grok-resume'), argvTo: join(out, 'argv') }) },
+    );
+    const argv = JSON.parse(readFileSync(join(out, 'argv'), 'utf8')) as string[];
+    expect(argv).not.toContain('--disallowed-tools');
+    expect(report.stream.end).toBeDefined();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('读不出来');
+  });
+
+  it('版本够新：带上名单，不记日志', async () => {
+    const out = tempDir();
+    const logs: string[] = [];
+    await runGrok(spec(tempDir(), { log: (m) => void logs.push(m) }), {
+      command: fakeAgent({ replay: fixturePath('grok', 'grok-resume'), argvTo: join(out, 'argv') }),
+    });
+    const argv = JSON.parse(readFileSync(join(out, 'argv'), 'utf8')) as string[];
+    expect(argv[argv.indexOf('--disallowed-tools') + 1]).toBe(GROK_DISALLOWED_TOOLS.join(','));
+    expect(logs).toEqual([]);
   });
 
   it('回放真跑记录：参数、stdin、关自动更新、摘要', async () => {

@@ -5,10 +5,39 @@
 // - 免确认用 --always-approve：--permission-mode auto 每条外部命令还要确认（GK-04）；
 // - 新会话用我们起的 UUID（-s），续跑 -r 同一个号，终帧 end.sessionId 回的就是它；
 // - 总带 --no-plan：--always-approve 管不到计划模式（进计划模式要人批，计划里除计划文件外的编辑一律拒，
-//   ~/.grok/docs/user-guide/19-plan-mode.md），无人值守会卡着等人点头。目录信任、反问选择题两张卡走环境变量，见 run.ts。
+//   ~/.grok/docs/user-guide/19-plan-mode.md），无人值守会卡着等人点头。目录信任、反问选择题两张卡走环境变量，见 run.ts；
+// - 默认带 --disallowed-tools 关掉写码用不上的工具（名单见 GROK_DISALLOWED_TOOLS）：工具定义每次调用都重带一遍（#3588 审计）。
+//   1.0.41 的 --help 里有这个旗标；认不得它的老版本会报 unexpected argument 退出 2，所以 run.ts 先看版本，不支持就不带。
+import { compareVersions, parseVersion } from '@fleet-dao/shared';
 import { assertSessionEffort, GROK_EFFORTS, type SessionEffort } from '../effort.ts';
 
 export type GrokSession = { mode: 'new'; id: string } | { mode: 'resume'; id: string };
+
+/**
+ * 会话里关掉的 grok 内置工具（--disallowed-tools，工具内部名，~/.grok/docs/user-guide/14-headless-mode.md）：
+ * 图像、视频、反馈、工作流、定时调度，写码用不上。读写文件、执行命令、搜索那几类不许进这份名单。名单只在这里写一处。
+ */
+export const GROK_DISALLOWED_TOOLS: readonly string[] = [
+  'image_gen',
+  'image_edit',
+  'image_to_video',
+  'reference_to_video',
+  'send_feedback',
+  'workflow',
+  'scheduler_create',
+  'scheduler_list',
+  'scheduler_delete',
+];
+
+/** 认得 --disallowed-tools 的最低版本：1.0.41 的 --help 里有（更老的没验过，按不支持算）。 */
+export const GROK_DISALLOWED_TOOLS_MIN_VERSION = '1.0.41';
+
+/** 版本读不出来（null）按不支持算：宁可多花 token，也不让会话因为不认旗标起不来。 */
+export function grokSupportsDisallowedTools(version: string | null | undefined): boolean {
+  const have = version ? parseVersion(version) : null;
+  const min = parseVersion(GROK_DISALLOWED_TOOLS_MIN_VERSION);
+  return have !== null && min !== null && compareVersions(have, min) >= 0;
+}
 
 export interface GrokArgsSpec {
   /** 模型 id，来自路由表（GK-05：别依赖 CLI 默认值，它会换代）。终帧里回的是 grok-4.7-build 这种带后缀的名字。 */
@@ -23,6 +52,8 @@ export interface GrokArgsSpec {
   maxTurns?: number;
   /** 提示词文件，默认 /dev/stdin（提示词走 stdin）。 */
   promptFile?: string;
+  /** 带 --disallowed-tools 关掉 GROK_DISALLOWED_TOOLS；默认带。命令行版本不认这个旗标时 run.ts 传 false。 */
+  disallowTools?: boolean;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -45,6 +76,7 @@ export function buildGrokArgs(spec: GrokArgsSpec): string[] {
     'streaming-json',
     ...(spec.alwaysApprove ? ['--always-approve'] : []),
     '--no-plan',
+    ...(spec.disallowTools === false ? [] : ['--disallowed-tools', GROK_DISALLOWED_TOOLS.join(',')]),
     '-m',
     spec.model,
     '--cwd',
