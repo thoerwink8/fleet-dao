@@ -2517,6 +2517,16 @@ describe('本机退回法国队列的单（#3461）：重新派、法国接不�
     expect(run.why).toContain('temporal-down');
   });
 
+  it('【故意造出的失败】开单时间认不出：试判没查成，不摘、不把这一轮记成 ok', async () => {
+    const k = keptReturned(BODY, {}, { issue: { createdAt: '昨天' } });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+    expect(k.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+  });
+
   it('摘标签写不成：这一轮记没查成，标签和提醒都留着', async () => {
     const k = keptReturned(BODY, {
       async unmarkLocal() {
@@ -2587,7 +2597,11 @@ describe('本机租约到期、退回之前先判法国接不接得了（#3461�
   function withLease(
     body: string,
     over: Partial<IntakeDeps> = {},
-    data: { prereqStates?: Record<number, 'open' | 'closed'>; labels?: string[] } = {},
+    data: {
+      prereqStates?: Record<number, 'open' | 'closed'>;
+      labels?: string[];
+      createdAt?: string;
+    } = {},
   ) {
     const steps: string[] = [];
     const notices: { key: string; body: string }[] = [];
@@ -2621,7 +2635,13 @@ describe('本机租约到期、退回之前先判法国接不接得了（#3461�
         ...over,
       },
       {
-        issues: [issue({ body, labels: data.labels ?? ['需求', '本机做'] })],
+        issues: [
+          issue({
+            body,
+            labels: data.labels ?? ['需求', '本机做'],
+            ...(data.createdAt === undefined ? {} : { createdAt: data.createdAt }),
+          }),
+        ],
         ...(data.prereqStates ? { prereqStates: data.prereqStates } : {}),
       },
     );
@@ -2710,6 +2730,16 @@ describe('本机租约到期、退回之前先判法国接不接得了（#3461�
         return new Map(numbers.filter((n) => n === 40).map((n) => [n, 'open' as const]));
       },
     });
+    const run = await runIntakeJob(w.h.deps);
+    expect(w.steps).toEqual([]);
+    expect(w.notices).toEqual([]);
+    expect(w.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+  });
+
+  it('【故意造出的失败】开单时间认不出：不摘、不退回、不报接不了，结局不是 ok', async () => {
+    const w = withLease(BODY, {}, { createdAt: '昨天' });
     const run = await runIntakeJob(w.h.deps);
     expect(w.steps).toEqual([]);
     expect(w.notices).toEqual([]);

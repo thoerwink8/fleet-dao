@@ -741,8 +741,9 @@ async function holdReturned(
  * 法国接不接得了这张单（本机租约到期、退回之前先判一次，#3461）：把「本机做」标签拿掉之后，照拉单的准入关卡试判一遍，不留言、不贴标签、不看「派出过没有」
  * （这张单的任务行此刻正是本机在做）。过了，或只是前置确知没等完（日期没到、前置单确知还开着，等完照拉）→ 接得了；别的关卡挡着 → 接不了，带原因。
  * 前置开没开着没查成也是 waiting_prerequisite，但不能当成接得了：那会摘「本机做」。也不是确知接不了。
- * 试判自己的 tally 出了这个函数就没了，所以这里照「读不到照抛」把没查成交回去。退回单（releaseReturned）和到期租约（sweepLocalLeases）都接这个抛错，
- * 记进外层 unchecked、不摘标签。不看错误原文决定抛不抛。
+ * 试判 tally 里只要有没查成（前置读失败，或开单时间认不出），出了这个函数那份 tally 就没了，所以这里照「读不到照抛」交回去。
+ * 退回单（releaseReturned）和到期租约（sweepLocalLeases）都接这个抛错，记进外层 unchecked、不摘标签、不报成「法国接不了」。
+ * 抛不抛只看有没有没查成的结构化记录，不看错误原文。已知在等（日期没到、前置确知还开着）没有这种记录，仍回可交还。
  */
 async function franceVerdict(
   deps: IntakeDeps,
@@ -764,13 +765,9 @@ async function franceVerdict(
     trial: true,
   });
   const blocked = trial.lastSkip;
-  // 已知在等：reason 是 waiting_prerequisite，且这一轮没有没查成。缺项、查询抛错会置 prerequisiteUnread，并记进 trial.unchecked。
-  if (
-    blocked &&
-    (blocked.prerequisiteUnread === true ||
-      (blocked.reason === 'waiting_prerequisite' && trial.unchecked.length > 0))
-  ) {
-    throw new Error(trial.unchecked.join('；') || blocked.why);
+  // 已知在等不会进 unchecked。前置缺项/抛错会置 prerequisiteUnread；开单时间认不出只进 unchecked。两种都不是可交还，也不是确知接不了。
+  if (trial.unchecked.length > 0 || blocked?.prerequisiteUnread === true) {
+    throw new Error(trial.unchecked.join('；') || blocked?.why || '试判有没查成的读取');
   }
   if (admitted) return { ok: true };
   if (!blocked) throw new Error('试判没挡住也没放行，没给出原因');
