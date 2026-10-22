@@ -1124,7 +1124,8 @@ describe('耗尽后接纳正式合同修订（#3216）', { timeout: 60_000 }, ()
           '全程耗尽停下',
         );
         current = next.brief;
-        await h.signal(taskContinueSignal, { by: 'frank' });
+        // 全程推送 6 次也是累计 6 轮，到了总轮数上限（#3603）：「继续」要带原因才放行
+        await h.signal(taskContinueSignal, { by: 'frank', note: '正文改过了，接着修' });
         return h.result() as Promise<TaskRun>;
       },
       { tasks },

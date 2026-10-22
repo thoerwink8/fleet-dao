@@ -112,7 +112,8 @@ describe('fleet-api task', () => {
     expect(h.out).toEqual(['已继续：example/canary#12（信号 taskContinue、taskRouteWake）']);
     expect(h.lookups()).toBe(1);
     expect(h.sent).toEqual([
-      { workflowId: 'task:example/canary#12:r3', name: 'taskContinue', arg: { by: 'root' } },
+      // --note 随「继续」交给工作流（#3603：总轮数到顶的停下只认带原因的继续）
+      { workflowId: 'task:example/canary#12:r3', name: 'taskContinue', arg: { by: 'root', note: NOTE } },
       {
         workflowId: 'task:example/canary#12:r3',
         name: 'taskRouteWake',

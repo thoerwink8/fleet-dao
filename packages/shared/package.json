@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./checks-red": "./src/checks-red.ts",
+    "./continue-exhausted": "./src/continue-exhausted.ts",
     "./flow-purposes": "./src/flow-purposes.ts",
     "./run-cause": "./src/run-cause.ts",
     "./task-redo": "./src/task-redo.ts",

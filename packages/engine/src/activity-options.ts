@@ -18,6 +18,8 @@ import {
   type DeliveryRead,
   type EngineStartedAt,
   type GuardedPaths,
+  type HandBackLocalInput,
+  type HandBackLocalResult,
   MERGE_POLL_MINUTES,
   type MergedTaskReceipt,
   type MergeNowInput,
@@ -103,6 +105,8 @@ export type EngineActivities = PortActivities & {
   noteBare401(input: NoteBare401Input): Promise<NoteBare401Result>;
   /** 定这张单走三段还是全程（#2826）：第一次选路之后、第一段动手之前问一次。读不到抛，工作流按三段走。 */
   decideFlowMode(input: DecideFlowModeInput): Promise<DecideFlowModeResult>;
+  /** 总轮数到顶交还本机（#3603）：先留言（幂等键）再贴「本机做」。哪步没成都抛，工作流照旧停下、写明没贴上。 */
+  handBackLocal(input: HandBackLocalInput): Promise<HandBackLocalResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
   probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
   /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
@@ -177,6 +181,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   taskSpend: 'quick',
   noteBare401: 'quick',
   decideFlowMode: 'git',
+  handBackLocal: 'git',
 };
 
 /** quick 一档一次尝试的限时。 */
