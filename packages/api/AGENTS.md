@@ -26,7 +26,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - 看门狗提醒的受控修复（`src/alert-repair.ts`）：动作读时现算，不存；点的时候只收服务端动作编号 + incident + `requestId`，条件变了、已撤、incident 对不上、过期、上一次在途或未知一律 409 不发副作用；`accepted` 与 `verified`（要重读原条件）分开，读不到保持未修好；同一 incident 在执行、未知、待核验时其它动作也被挡；不替看门狗撤原通知；开修复单固定调 `engine/src/bin/dispatch-issue.ts`，不拼 shell。
 - 看门狗改了提醒键、标题、撤卡口径，`alert-repair.ts` 的 `IDLE_PREFIX`、`RELEASE_KEY` 要一起改；其测试跑引擎真看门狗，所以 api 的 `devDependencies` 有 engine（只有测试用，`src` 不许引 engine；`tsconfig.json` include 带 `../engine/src`）。
 - 关联已有单（`POST /api/notifications/:id/repair/link`）：只收受管仓 + 单号 + 关联版本 + incident + `requestId`，多一个字段 400；服务端现读必须是开着的 issue，读不到、错仓、已关闭一律拒绝，不回退成开单。线上契约不加枚举，关联存成设置表内部记录，通知卡按旧枚举取 `PHASE_META[state]`，新枚举会让它崩溃（`alert-repair.test.ts` 有照抄旧消费者的检查）。
-- 私有 ops 写入（`task correct-merged`、`checkout-history --archive`、`quote put`）：不挂普通 HTTP，没经 `bin/fleet-api`（无 `FLEET_OPS_OPERATOR`）不许执行；验收责任的管理命令已删（#3630），旧开着的行只由 `fleet-api acceptance-handback-once` 转给引擎包一次性交回；`correct-merged` 默认只读预检，执行必须带预检打印的 `--task`/`--seen`；错误不回显 payload 或数据库明细。
+- 私有 ops 写入（`task correct-merged`、`checkout-history --archive`、`quote put`）：不挂普通 HTTP，没经 `bin/fleet-api`（无 `FLEET_OPS_OPERATOR`）不许执行；验收责任的管理命令已删（#3630），旧开着的行只由 `fleet-api acceptance-handback-once` 转给引擎包一次性交回；`correct-merged` 默认只读预检，执行带预检打印的 `--execute --task --seen`，或带 `--workflow` 回 JSON 回执、同一命令末尾加 `--apply`（自己重读事实并事务 CAS，不用 `--task`/`--seen`）；错误不回显 payload 或数据库明细。
 - 历史/检出归档证据只认服务端鲜读的完整有界 Temporal 历史（`acceptance-execution-reader.ts`、`checkout-execution-reader.ts`），不追 latest，不接上传 history/proof，不用旧 runs 的 NULL 列或会话号授权；`conclusion` 只许 `historical_unproven`，不能当正常队列账或创始人批准。
 
 ## 测试
