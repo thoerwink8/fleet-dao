@@ -265,6 +265,93 @@ describe('进程内定时器（startTimers）', () => {
     expect(calls).toBe(1);
   });
 
+  it('停机与总开关异步读取交错：尚未进入任务 body 的轮次不再启动', async () => {
+    const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+    let release!: (on: boolean) => void;
+    let calls = 0;
+    const t = startTimers([job({ needsMaster: true, run: async () => void calls++ })], {
+      ...f.host,
+      master: {
+        refresh: () => new Promise<boolean>((resolve) => (release = resolve)),
+        state: () => ({ on: true, why: 'on' }) as const,
+      },
+    });
+    await f.advanceTo(T0 + 3 * MIN);
+    expect(t.running()).toEqual(['j']);
+    const stopping = t.stop(1_000);
+    release(true);
+    expect(await stopping).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
+  it('同步停接可重复调用，不提前记未完成；在途只在 stop 的原宽限到期时记一次', async () => {
+    const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+    const recorded: number[] = [];
+    let calls = 0;
+    const t = startTimers(
+      [
+        job({
+          run: () => {
+            calls++;
+            return new Promise<void>(() => {});
+          },
+        }),
+      ],
+      {
+        ...f.host,
+        recordUnfinished: async () => void recorded.push(f.clock()),
+      },
+    );
+    await f.advanceTo(T0 + 4 * MIN);
+    t.stopAccepting();
+    t.stopAccepting();
+    await f.advanceTo(T0 + 9 * MIN);
+    expect(calls).toBe(1);
+    expect(recorded).toEqual([]);
+    const stopping = t.stop(1_000);
+    await f.advanceTo(T0 + 9 * MIN + 999);
+    expect(recorded).toEqual([]);
+    await f.advanceTo(T0 + 9 * MIN + 1_000);
+    expect(await stopping).toEqual(['j']);
+    expect(recorded).toEqual([T0 + 9 * MIN + 1_000]);
+  });
+
+  it('同步停接后已进入 body 的轮次仍可交回，收尾不记未完成', async () => {
+    const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+    let release!: () => void;
+    let recorded = 0;
+    const t = startTimers([job({ run: () => new Promise<void>((resolve) => (release = resolve)) })], {
+      ...f.host,
+      recordUnfinished: async () => void recorded++,
+    });
+    await f.advanceTo(T0 + 4 * MIN);
+    t.stopAccepting();
+    release();
+    await f.flush();
+    expect(await t.stop(1_000)).toEqual([]);
+    expect(recorded).toBe(0);
+  });
+
+  it('停机与前一实例补记交错：补记交回后不再进入任务 body', async () => {
+    const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
+    let release!: (ids: number[]) => void;
+    let calls = 0;
+    let sweeps = 0;
+    const t = startTimers([job({ overdueMinutes: 1, run: async () => void calls++ })], f.host, {
+      since: new Date(T0 + 1 * MIN),
+      close: () => {
+        if (++sweeps === 1) return Promise.reject(new Error('第一次补记没写成'));
+        return new Promise<number[]>((resolve) => (release = resolve));
+      },
+    });
+    await f.advanceTo(T0 + 3 * MIN);
+    expect(t.running()).toEqual(['j']);
+    const stopping = t.stop(1_000);
+    release([]);
+    expect(await stopping).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
   it('stop：宽限到了没回的一轮，把编号、本进程起定时器的时刻和停机时刻交给 recordUnfinished；记不上不挡停机', async () => {
     const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
     const recorded: { ids: readonly string[]; since: number; at: number }[] = [];

@@ -75,6 +75,8 @@ export const realTimerHost = (
 });
 
 export interface EngineTimers {
+  /** 同步停止接新轮次，不等待或提前记在途结果；停机信号一来就调用。 */
+  stopAccepting(): void;
   /** 不再起新的一轮，等在跑的最多 graceMs；返回超时还没回的任务编号。 */
   stop(graceMs: number): Promise<string[]>;
   /** 现在在跑的任务编号。 */
@@ -226,19 +228,24 @@ export function startTimers(
       );
       try {
         await sweepPrevious(job);
+        if (stopped) return;
         // 引擎总开关（#1086）：拉单这类要总开关开着才跑；关着（含读不到、认不出）这一轮不跑，记一笔 partial 说明原因
-        if (job.needsMaster && host.master && !(await host.master.refresh())) {
-          const why = `${MASTER_OFF_SKIP_WHY}${masterOffNote(host.master.state())}`;
-          host.log('info', `定时任务 ${job.id}：${why}`);
-          try {
-            await host.recordSkipped?.(job.id, why);
-          } catch (error) {
-            host.log(
-              'error',
-              `定时任务 ${job.id}：总开关关着跳过这一轮，但没记进 schedule_runs：${error instanceof Error ? error.message : String(error)}`,
-            );
+        if (job.needsMaster && host.master) {
+          const on = await host.master.refresh();
+          if (stopped) return;
+          if (!on) {
+            const why = `${MASTER_OFF_SKIP_WHY}${masterOffNote(host.master.state())}`;
+            host.log('info', `定时任务 ${job.id}：${why}`);
+            try {
+              await host.recordSkipped?.(job.id, why);
+            } catch (error) {
+              host.log(
+                'error',
+                `定时任务 ${job.id}：总开关关着跳过这一轮，但没记进 schedule_runs：${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            return;
           }
-          return;
         }
         await job.run();
       } catch (error) {
@@ -296,14 +303,19 @@ export function startTimers(
     })();
   }
 
+  const stopAccepting = (): void => {
+    stopped = true;
+    for (const handle of handles.values()) host.clearTimeout(handle);
+    handles.clear();
+    for (const handle of sweepHandles.values()) host.clearTimeout(handle);
+    sweepHandles.clear();
+  };
+
   return {
+    stopAccepting,
     running: () => [...inFlight.keys()],
     async stop(graceMs) {
-      stopped = true;
-      for (const handle of handles.values()) host.clearTimeout(handle);
-      handles.clear();
-      for (const handle of sweepHandles.values()) host.clearTimeout(handle);
-      sweepHandles.clear();
+      stopAccepting();
       if (inFlight.size === 0) return [];
       let graceTimer: unknown;
       await Promise.race([
