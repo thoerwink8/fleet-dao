@@ -328,6 +328,7 @@ describe('环境类、能力标记', () => {
     expect(callers.length, '没有测试调 createRealEnv 了：这条查的东西不存在，测试该删').toBeGreaterThan(0);
     expect(callers).toEqual([
       'packages/engine/test/arm-deadline-real.test.ts',
+      'packages/engine/test/execution-compat-admission-real.test.ts',
       'packages/engine/test/execution-legacy-admission-real.test.ts',
       'packages/engine/test/execution-start-reader-real.test.ts',
       'packages/engine/test/github-reconcile.test.ts',
