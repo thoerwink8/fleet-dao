@@ -30,7 +30,6 @@ reclaude 的文档、清理脚本、给另一台机器的提示词，都从这�
 | 这一页（入口和提示词） | `docs/reclaude.md` |
 | 被封号怎么摘、上机前自检 | [docs/reclaude-self-check.md](reclaude-self-check.md) |
 | 接到 Mirasim、换机怎么装 | [docs/reclaude-in-mirasim.md](reclaude-in-mirasim.md) |
-| Mirasim 额度走错了怎么查、怎么修（提示词「Mirasim 额度可能走错了，根据文档排查」） | [docs/reclaude-in-mirasim.md](reclaude-in-mirasim.md) 3.2 节 |
+| Mirasim 额度走错了怎么看 | [docs/reclaude-in-mirasim.md](reclaude-in-mirasim.md)「自有 / 平台怎么分」「0092 那条坑」 |
 | 清理脚本 | `deploy/reclaude-old-account-clean.mjs` |
 | 脚本的测试 | `deploy/test/reclaude-old-account-clean.test.mjs` |
-| 桌面启动器代码 | `packages/mirasim-reclaude`（装机用，不清账号） |
