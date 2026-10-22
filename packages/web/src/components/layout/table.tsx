@@ -62,7 +62,10 @@ export function Table<T extends object>({
   caption,
   groupRow,
   subRow,
+  rowData,
 }: {
+  /** 给每一行的 tr 加 data-* 属性（测试和 e2e 按它找行）。 */
+  rowData?: (row: T) => Record<`data-${string}`, string>;
   /** 这一行上面的分组行（整行通栏、fill-1 底，如渠道名和它的批量操作）：返回 null 不画。 */
   groupRow?: (row: T, index: number) => ReactNode;
   /** 这一行下面的附加行（整行通栏，如就地展开的表单）：返回 null 不画。 */
@@ -180,6 +183,7 @@ export function Table<T extends object>({
               const main = (
                 <tr
                   key={key}
+                  {...(rowData ? rowData(row) : {})}
                   data-row-key={key}
                   data-selected={selected || undefined}
                   {...(selected ? { 'aria-current': true as const } : {})}

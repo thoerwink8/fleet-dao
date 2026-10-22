@@ -91,7 +91,6 @@ export default function Home() {
     <Page
       title={nodeId === null ? '工作台' : `工作台 · ${machine}`}
       refresh={{
-        variant: 'dot',
         onRefresh: () => void main.refetch(),
         isFetching: main.isFetching,
         dataUpdatedAt: main.dataUpdatedAt,

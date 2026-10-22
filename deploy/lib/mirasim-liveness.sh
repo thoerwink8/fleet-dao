@@ -32,7 +32,7 @@ TAG=fleet-mirasim-liveness
 
 note() { logger -t "$TAG" -- "$*"; }
 
-# 有没有在跑的会话。判法和 packages/mirasim-reclaude 数在途回合同一份：runState 为 running 或 queued。
+# 有没有在跑的会话。判法：会话记录 record.json 的 runState 为 running 或 queued 就算在跑。
 # 目录不在、读不了、状态不认识：当没有，超时仍按失败计，看门狗不因此停摆。
 has_live_session() {
   [[ -d "$SESSIONS_DIR" ]] || return 1

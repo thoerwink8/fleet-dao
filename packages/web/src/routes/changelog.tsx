@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import { brand } from '#brand';
 import { useFranceReleasedCommits } from '../api/client';
 import type { ReleasedCommits } from '../api/types';
+import { Breadcrumb } from '../components/layout/breadcrumb';
 import { Button } from '../components/layout/button';
 import { EmptyState } from '../components/layout/empty-state';
 import { LoadError, LoadingRows, LoadPartial, LoadStale } from '../components/layout/load-state';
@@ -116,14 +117,7 @@ export default function Changelog() {
   return (
     <Page
       title="发布记录"
-      breadcrumb={
-        <>
-          <Button variant="text" size="xs" href="/france">
-            法国
-          </Button>
-          <span aria-hidden>/</span>
-        </>
-      }
+      breadcrumb={<Breadcrumb items={[{ label: '法国', href: '/france' }, { label: '发布记录' }]} />}
       description="法国已发布的提交，新的在前。"
       detail="每 5 分钟自己重读一次法国的发布历史。悬停「发于」看具体时间；行尾「⋯」复制完整的提交号。读不到写没查成和原因，不当成没发过。要发新的，到法国页点「发布到法国」。"
       refresh={{

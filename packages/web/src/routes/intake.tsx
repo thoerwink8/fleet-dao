@@ -1,5 +1,5 @@
 // 提需求（母单 #2047，D 片 #2062；方案 specs/2047-提需求/方案.md 第三、四、七节）：和指挥官聊清楚一件事，确定后开成单。
-// 样稿 Intake.dc.html：电脑是左边需求列表一张卡（≥1536 展开，更窄收成窄条，人选的记在本机）、右边对话一张卡，
+// 样稿 Intake.dc.html：电脑是左边需求列表一张卡（≥1024 展开，更窄收成窄条，人选的记在本机）、右边对话一张卡，
 // 对话卡顶上两个页签「对话 / 单子」（单子页签开着记在本机）；手机（<768）：列表 → 对话两个画面，同一个路由。
 // 地址：?r=<需求号> 打开一条，?r=new 提新的（&from=<号> 接着那条提）；?view=archived|deleted、?filter=todo|all|mine、?q= 搜。
 // 接的是 A 片（#2049）的列表、详情、动作接口，B 片（#2060）的开单回显、进度卡、引擎提问回答，
@@ -39,7 +39,8 @@ function seqOf(v: string | null): number | 'new' | null {
 export default function Intake() {
   const [params, setParams] = useSearchParams();
   const phone = usePhone();
-  const wide = useMediaQuery('(min-width: 1536px)');
+  // 默认展开的门槛是 lg（1024）：1440 的笔记本也要看见标题；更窄才默认收成窄条。之前写成 1536，1440 默认只剩一排头像。
+  const wide = useMediaQuery('(min-width: 1024px)');
   const { data: me } = useMe();
   const meId = me?.user.id;
   const [pickedCollapse, setPickedCollapse] = useLocalState<boolean | null>(

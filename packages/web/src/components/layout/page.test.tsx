@@ -72,7 +72,9 @@ describe('Page', () => {
       </Page>,
     );
     const slot = document.querySelector('[data-page-actions]') as HTMLElement;
-    const names = [...slot.querySelectorAll('button')].map((b) => b.textContent);
+    const names = [...slot.querySelectorAll('button')].map(
+      (b) => b.textContent || b.getAttribute('aria-label'),
+    );
     expect(names).toEqual(['新建', '刷新']);
     fireEvent.click(screen.getByRole('button', { name: '刷新' }));
     expect(refresh.onRefresh).toHaveBeenCalledTimes(1);

@@ -113,6 +113,7 @@ export function FilterTabs<Id extends string = string>({
   mode = 'tabs',
   variant = 'primary',
   idPrefix,
+  wrap,
   className,
   ...aria
 }: {
@@ -124,6 +125,8 @@ export function FilterTabs<Id extends string = string>({
   variant?: 'primary' | 'secondary' | 'segmented';
   /** 给页签一个 id（`前缀-选项id`），页签对应的面板用 aria-labelledby 指它。 */
   idPrefix?: string;
+  /** 窄栏里放不下就折行，不出横向滚动条（只对 segmented 生效）：占满一行、每项平分，放不下的项换到下一行。 */
+  wrap?: boolean;
   className?: string;
   'aria-label': string;
 }) {
@@ -170,6 +173,7 @@ export function FilterTabs<Id extends string = string>({
       role={mode === 'tabs' ? 'tablist' : 'group'}
       onScroll={measure}
       data-variant={variant}
+      data-wrap={(variant === 'segmented' && wrap) || undefined}
       data-fade-start={edges.start || undefined}
       data-fade-end={edges.end || undefined}
       style={
@@ -184,7 +188,10 @@ export function FilterTabs<Id extends string = string>({
         variant === 'primary' && 'gap-8 shadow-[inset_0_-1px_0_var(--line)]',
         variant === 'secondary' && 'gap-1',
         // 分段控件（fd3 `.seg`）：灰底槽，选中的是白底品牌色字；平的，不浮起、不带阴影
-        variant === 'segmented' && 'w-fit gap-1 rounded-sm bg-fill-2 p-0.5',
+        variant === 'segmented' && !wrap && 'w-fit gap-1 rounded-sm bg-fill-2 p-0.5',
+        variant === 'segmented' &&
+          wrap &&
+          'w-full flex-wrap gap-1 overflow-x-visible rounded-sm bg-fill-2 p-0.5',
         className,
       )}
       {...aria}
@@ -222,7 +229,8 @@ export function FilterTabs<Id extends string = string>({
               'inline-flex shrink-0 cursor-pointer items-center gap-1.5 text-body whitespace-nowrap transition-colors duration-100 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-hover max-md:min-h-10 max-md:min-w-10 max-md:justify-center',
               variant === 'segmented'
                 ? cn(
-                    'h-7 rounded-sm px-3',
+                    'h-7 rounded-sm',
+                    wrap ? 'flex-1 justify-center px-2' : 'px-3',
                     selected ? 'bg-card font-medium text-brand-ink' : 'text-ink-2 hover:text-ink',
                   )
                 : variant === 'primary'

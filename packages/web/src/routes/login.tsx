@@ -92,8 +92,13 @@ export default function LoginPage() {
     });
   });
 
+  // 只有 mock 下有的预览：/login?preview（账密 + 飞书）、?preview=password、?preview=feishu。
+  // mock 里 /api/me 永远读得到、会自动登录跳走，截不到真页面；带 preview 就不跳、不显示「假数据模式」那句，摆出真登录表单。
+  // 真后端下 api.source 不是 mock，这个参数完全无效。
+  const preview = api.source === 'mock' ? params.get('preview') : null;
+  const previewing = preview !== null;
   // 只有后端明说开着才显示账密表单（passwordLogin 没给 = 不认这一项的旧后端，当没开）。
-  const passwordReady = config.data?.passwordLogin === true;
+  const passwordReady = previewing ? preview !== 'feishu' : config.data?.passwordLogin === true;
   // 表单一出来光标就在用户名栏（只做一次，之后别抢走用户手里的焦点）。
   useEffect(() => {
     if (!passwordReady || focused.current || me.data) return;
@@ -101,9 +106,9 @@ export default function LoginPage() {
     usernameRef.current?.focus();
   }, [passwordReady, me.data]);
 
-  if (me.data) return <Navigate to={next} replace />;
+  if (me.data && !previewing) return <Navigate to={next} replace />;
 
-  const feishuReady = Boolean(appId);
+  const feishuReady = previewing ? preview !== 'password' : Boolean(appId);
   const devReady = config.data?.devLogin === true;
   // 配置读到了、一个登录入口都没开：明说，不留一个灰按钮让人猜。
   const nothingReady = Boolean(config.data) && !passwordReady && !feishuReady && !devReady;
@@ -176,7 +181,7 @@ export default function LoginPage() {
       }
     >
       <Stack>
-        {api.source === 'mock' ? (
+        {api.source === 'mock' && !previewing ? (
           <Stack align="center">
             <Text tone="secondary">现在是假数据模式，不用登录。</Text>
             <Button block onClick={() => navigate(next, { replace: true })}>
@@ -257,7 +262,8 @@ export default function LoginPage() {
                 正在用飞书身份登录…
               </Button>
             ) : feishuReady ? (
-              <Button block href={loginHref} native>
+              // 样稿：只有飞书这一条路时它是蓝的主按钮；旁边已经有账密表单的「登录」主按钮时，它退成描边按钮（一块一个主按钮）
+              <Button block variant={passwordReady ? 'outline' : 'primary'} href={loginHref} native>
                 <LogIn />
                 用飞书登录
               </Button>

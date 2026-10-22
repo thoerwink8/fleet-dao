@@ -166,4 +166,12 @@ describe('Table 分组行和附加行', () => {
     expect(tds[0]?.className).not.toContain('whitespace-nowrap');
     expect(tds[1]?.className).toContain('whitespace-nowrap');
   });
+
+  test('rowData 给每行 tr 加 data-* 属性', () => {
+    const cols: TableColumn<Row>[] = [{ key: 'name', title: '名字' }];
+    const { container } = render(
+      <Table columns={cols} rows={rows} rowKey="id" rowData={(r) => ({ 'data-x': r.id })} />,
+    );
+    expect(container.querySelector('tbody tr')?.getAttribute('data-x')).toBe(rows[0]?.id);
+  });
 });

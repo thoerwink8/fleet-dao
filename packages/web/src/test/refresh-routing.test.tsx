@@ -17,13 +17,13 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
   await screen.findByRole('button', { name: '刷新' });
   // 加载骨架页和读好的页里刷新条不是同一个节点，等读完再取按钮，别拿着旧节点点。
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-disabled')).toBe('false'),
+    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-disabled')).toBeNull(),
   );
   const button = screen.getByRole('button', { name: '刷新' });
   // 页头只留图标刷新（#1914），最后更新时间在悬停和读屏里
-  const fresh = document.querySelector('[data-refresh-bar="dot"] [role="status"]');
+  const fresh = document.querySelector('[data-refresh-bar] [data-freshness]');
   expect(fresh?.getAttribute('title')).toMatch(/最后更新/);
-  expect(fresh?.getAttribute('aria-label')).toMatch(/最后更新/);
+  expect(fresh?.textContent).toMatch(/最后更新/);
   expect(screen.queryByText('数据已过期')).toBeNull();
 
   const before = routingLayers.mock.calls.length;
@@ -39,7 +39,7 @@ test('【故意造出的失败】读成过、刷新时失败：照旧画上一�
   await screen.findByRole('list', { name: '模型' });
   api.routingLayers = () => Promise.reject(new ApiError(503, 'routing_layers_unreadable', '库连不上'));
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-disabled')).toBe('false'),
+    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-disabled')).toBeNull(),
   );
   fireEvent.click(screen.getByRole('button', { name: '刷新' }));
   const alert = await screen.findByRole('alert', {}, { timeout: 4000 });

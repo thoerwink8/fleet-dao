@@ -329,7 +329,6 @@ export default function TasksPage() {
         isFetching: list.isFetching,
         dataUpdatedAt: list.dataUpdatedAt > now ? now : list.dataUpdatedAt,
         staleAfterMs: TASKS_STALE_AFTER_MS,
-        variant: 'dot',
       }}
     >
       <div className="max-w-task-table" data-task-table>

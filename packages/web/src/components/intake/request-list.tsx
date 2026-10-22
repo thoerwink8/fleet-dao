@@ -202,6 +202,7 @@ export function RequestList(p: ListProps) {
               aria-label="需求筛选"
               mode="toggle"
               variant="segmented"
+              wrap
               value={p.filter}
               onChange={p.onFilter}
               items={[

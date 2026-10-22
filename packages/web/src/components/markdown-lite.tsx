@@ -2,6 +2,12 @@
 // 不引第三方 Markdown 库：CHANGELOG 只用这几样，多出来的写法原样当文字显示（看得见、不丢字），不当 HTML 解释（不开注入口子）。
 // 起因：更新日志页原来把 Markdown 原文塞进 <pre>，「### 新的能做的事」「- 」这些记号照原样露在页面上。
 import type { ReactNode } from 'react';
+import { BulletList } from './layout/bullet-list';
+import { Code } from './layout/code';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
+import { TextLink } from './layout/text-link';
+import { Title } from './layout/title';
 
 type Block =
   | { kind: 'heading'; level: 3 | 4; text: string }
@@ -53,22 +59,18 @@ export function inline(text: string): ReactNode[] {
     const at = m.index ?? 0;
     if (at > last) out.push(text.slice(last, at));
     if (m[1] !== undefined) {
-      out.push(
-        <code key={at} className="rounded-sm bg-muted px-1 py-0.5 font-mono text-meta">
-          {m[1]}
-        </code>,
-      );
+      out.push(<Code key={at}>{m[1]}</Code>);
     } else if (m[2] !== undefined) {
       out.push(
-        <strong key={at} className="font-semibold">
+        <Text key={at} as="strong" strong>
           {m[2]}
-        </strong>,
+        </Text>,
       );
     } else {
       out.push(
-        <a key={at} href={m[4]} target="_blank" rel="noreferrer" className="underline underline-offset-2">
+        <TextLink key={at} href={m[4] as string} external>
           {m[3]}
-        </a>,
+        </TextLink>,
       );
     }
     last = at + m[0].length;
@@ -79,39 +81,29 @@ export function inline(text: string): ReactNode[] {
 
 export function MarkdownLite({ source }: { source: string }) {
   return (
-    <div className="space-y-3 text-body leading-relaxed">
+    <Stack gap="md">
       {parseBlocks(source).map((b, i) => {
         const key = i;
         if (b.kind === 'heading') {
           return b.level === 3 ? (
-            <h3 key={key} className="pt-2 text-heading first:pt-0">
+            <Title key={key} level={3} look={2}>
               {inline(b.text)}
-            </h3>
+            </Title>
           ) : (
-            <h4 key={key} className="pt-1 text-body font-semibold">
+            <Title key={key} level={4}>
               {inline(b.text)}
-            </h4>
+            </Title>
           );
         }
         if (b.kind === 'list') {
-          return (
-            <ul key={key} className="space-y-2">
-              {b.items.map((it, j) => (
-                // biome-ignore lint/suspicious/noArrayIndexKey: 列表项按文档先后排。
-                <li key={j} className="flex gap-2.5">
-                  <span className="mt-2 size-1.5 shrink-0 rounded-full bg-muted-foreground" aria-hidden />
-                  <span className="min-w-0">{inline(it)}</span>
-                </li>
-              ))}
-            </ul>
-          );
+          return <BulletList key={key} items={b.items.map((it) => inline(it))} />;
         }
         return (
-          <p key={key} className="text-muted-foreground">
+          <Text key={key} as="p" tone="secondary">
             {inline(b.text)}
-          </p>
+          </Text>
         );
       })}
-    </div>
+    </Stack>
   );
 }
