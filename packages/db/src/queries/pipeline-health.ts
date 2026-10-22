@@ -86,6 +86,11 @@ export interface PipelineHealth {
   verifyRejectShare: number | null;
   /** 近 7 天有明确续会话判定的动手段里，实际用上上一段会话的比例。 */
   resume: { decisions: number; resumed: number; rate: number | null };
+  /**
+   * 冷验收按验收模型的族分的通过率（#3604）：窗口里收场、带结论的验收段（runs.segment = 'verify' 且 verdict 非空），
+   * 每族「过 / 有结论」。没有结论的族不列；没有结论就是空数组，不写 0。族按 models.family 对 runs.model，对不上的归「（未知）」。
+   */
+  verifyByFamily: { family: string; passed: number; decided: number }[];
 }
 
 const rowsOf = (res: unknown) =>
@@ -160,6 +165,23 @@ export async function pipelineHealth(db: Db, to: Date): Promise<PipelineHealth> 
   );
   const resumeDecisions = Number(resumeRows[0]?.decisions ?? 0);
   const resumed = Number(resumeRows[0]?.resumed ?? 0);
+  const familyRows = rowsOf(
+    await db.execute(sql`
+      select coalesce(m.family, '（未知）') as family,
+             count(*)::int as decided,
+             (count(*) filter (where (r.verdict->>'pass')::boolean))::int as passed
+      from runs r
+      left join models m on m.id = r.model
+      where r.segment = 'verify' and r.verdict is not null
+        and r.ended_at >= ${from.toISOString()}::timestamptz and r.ended_at < ${to.toISOString()}::timestamptz
+      group by 1
+      order by 1`),
+  );
+  const verifyByFamily = familyRows.map((r) => ({
+    family: String(r.family),
+    passed: Number(r.passed),
+    decided: Number(r.decided),
+  }));
 
   return {
     from,
@@ -174,6 +196,7 @@ export async function pipelineHealth(db: Db, to: Date): Promise<PipelineHealth> 
       resumed,
       rate: resumeDecisions === 0 ? null : resumed / resumeDecisions,
     },
+    verifyByFamily,
   };
 }
 
