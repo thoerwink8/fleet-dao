@@ -14,6 +14,7 @@
 | 改标准的路径清单 | `standard-paths.json`（改它本身就是改标准） |
 | 测试分台耗时表 | `test-timings.json`，用 `pnpm ci:timings` 刷新，别手改 |
 | 方案索引 | `specs-index.ts`：`specs/README.md` 由各方案主文件头的 `- 状态：` / `- 被取代：` 生成，规则写在文件开头 |
+| 护栏库存（只报不挡） | `guard-inventory.ts`、`guards.json`；`bin/guard-inventory.ts` 由现有 audit 非阻断步骤写摘要，周一进 #1055。口径及限制见 `specs/3587-建议筛子/第一片落地.md`，细节看文件头 |
 | 其它入口（`machine.ts`、`issue-batch.ts`、`work*.ts`、`temporal-test-server.ts`、`test:isolated` 等） | 各自文件头注释 |
 
 ## 必须守的不变量
