@@ -762,6 +762,60 @@ describe('invokeVerifier：结论不自相矛盾、不含糊（拿不准的一�
     expect(out.outOfScope).toEqual(['第 2 条：要线上卡住的现场数据，diff 里看不出']);
   });
 
+  it('收尾条（检查全绿、PR 合进主线）写进「不归我验」：去掉、不转人；其余条照常转人（#3629）', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: [
+        '## 问题',
+        '',
+        '## 不归我验',
+        '- 第 3 条：需要完整 CI 全绿及 PR 已合入主线的 CI/平台现场证据，diff 里看不出',
+        '- 第 2 条：要线上数据，diff 里看不出',
+        '',
+        'verdict: fail',
+      ].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, howToFinish: ['1. 代码里有 A', '2. 线上数据对', '3. 检查全绿，PR 合进主线。'] },
+      DEPS(oneShot),
+    );
+    expect(out.pass).toBe(true);
+    expect(out.outOfScope).toEqual(['第 2 条：要线上数据，diff 里看不出']);
+    expect(out.notes).toContain('收尾条');
+  });
+
+  it('只有收尾条的「不归我验」却写 fail：按过算，outOfScope 为空（#3629）', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', '', '## 不归我验', '- 第 3 条：要 CI 全绿的现场证据', '', 'verdict: fail'].join(
+        '\n',
+      ),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, howToFinish: ['1. 代码里有 A', '2. 还把 B 留着', '3. 检查全绿，PR 合进主线。'] },
+      DEPS(oneShot),
+    );
+    expect(out.pass).toBe(true);
+    expect(out.outOfScope).toBeUndefined();
+  });
+
+  it('提示词写明收尾条交合并闸、不要平台现场证据（#3629）', async () => {
+    const { oneShot, commands } = fakeOneShot({
+      exitCode: 0,
+      stdout: 'verdict: pass',
+      stderr: '',
+      killed: false,
+    });
+    await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    const prompt = commands[0]?.stdin ?? '';
+    expect(prompt).toContain('由合并闸满足');
+    expect(prompt).toContain('不要求 CI 或平台现场证据');
+  });
+
   it('写 fail 且「## 问题」整段都没写 → 同样是冷调用没跑成，写明它一条都没写', async () => {
     const { oneShot } = fakeOneShot({ exitCode: 0, stdout: 'verdict: fail', stderr: '', killed: false });
     const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));

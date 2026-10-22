@@ -171,6 +171,7 @@ export {
 export {
   describeOffDiff,
   isDiagnosticTitle,
+  isMergeGateItem,
   OFF_DIFF_REWRITE,
   type OffDiffHold,
   type OffDiffHoldAction,
