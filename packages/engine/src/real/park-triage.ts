@@ -9,7 +9,7 @@
 // - 提醒（诊断文字）经 upsertAlert 推：执行了的、贴「本机做」交本机指挥官的是 daily；留给人（要掏新钱、删了找不回、只有人能做）
 //   是 decision（带选项和原因）；没成、会话没起成的是 alert。改标准的停下经 addIssueLabel 贴「本机做」（#3423）。
 
-import { LOCAL_LABEL, offDiffHoldOf } from '@fleet-dao/conventions';
+import { implementRoundsDone, LOCAL_LABEL, offDiffHoldOf, totalRoundsHoldOf } from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
 import {
   COMMANDER_AUDIT_TARGET,
@@ -17,19 +17,16 @@ import {
   countPurposeModels,
   finishScheduleRun,
   intakeTaskRow,
-  listCommanderAcceptanceTasks,
   listIntakeRepos,
   listStalledEngineTasks,
-  maintainAcceptanceCandidates,
   readOpenParkAlert,
   readParkAlertBody,
   readSettingValue,
   readTaskRoundsForSpin,
   recordEngineAudit,
   resolveAlertWithReason,
-  settleAcceptanceDuty,
+  runsOfTask,
   startScheduleRun,
-  supersedeAcceptanceDuty,
   taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -65,9 +62,9 @@ import {
 } from '../jobs/park-triage.ts';
 import type { ParkedRetryRow } from '../jobs/parked-retry.ts';
 import {
+  MAX_TOTAL_ROUNDS,
   taskAbandonSignal,
   taskContinueSignal,
-  taskSettleMergedUpdate,
   taskStatusQuery,
 } from '../task-contract.ts';
 import { type GroomWiring, toRepo } from './groom.ts';
@@ -696,19 +693,6 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
       });
     },
     tasks: () => listStalledEngineTasks(w.db),
-    async acceptanceTasks() {
-      await maintainAcceptanceCandidates(w.db);
-      const candidates = await listCommanderAcceptanceTasks(w.db, new Date(now().getTime() - 30 * 60_000));
-      const open: typeof candidates = [];
-      for (const candidate of candidates) {
-        const state = await w.gh.readIssueState({
-          repo: { owner: candidate.owner, name: candidate.name },
-          issueNumber: candidate.issueNumber,
-        });
-        if (state.state === 'open') open.push(candidate);
-      }
-      return open;
-    },
     async status(workflowId) {
       try {
         const s = await withDeadline((client) =>
@@ -751,57 +735,6 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         },
         reason: `交指挥官会话看：停法 ${triage}，停下「${park.title}」`,
         ok: true,
-        at: now(),
-      });
-    },
-    async claimAcceptance({ task, requestId, attempt }) {
-      const workflowId = `acceptance:${task.taskId}:${task.prNumber}:${task.head}`;
-      await recordEngineAudit(w.db, {
-        action: COMMANDER_AUDIT_CLAIM,
-        target: COMMANDER_AUDIT_TARGET,
-        actorId: COMMANDER_ACTOR,
-        after: {
-          taskId: task.taskId,
-          ref: `${task.owner}/${task.name}#${task.issueNumber}`,
-          workflowId,
-          parkSeq: 0,
-          kind: 'acceptance',
-          prNumber: task.prNumber,
-          head: task.head,
-          ...(attempt ? { attempt } : {}),
-          requestId,
-        },
-        reason: `交指挥官会话看验收责任：PR #${task.prNumber}，合并于 ${task.mergedAt.toISOString()}`,
-        ok: true,
-        at: now(),
-      });
-    },
-    async acceptanceRetry({ task, attempt, why, cause }) {
-      const workflowId = `acceptance:${task.taskId}:${task.prNumber}:${task.head}`;
-      const unverified = cause === 'unverified';
-      await recordEngineAudit(w.db, {
-        action: COMMANDER_AUDIT_RETRY,
-        target: COMMANDER_AUDIT_TARGET,
-        actorId: COMMANDER_ACTOR,
-        after: {
-          taskId: task.taskId,
-          ref: `${task.owner}/${task.name}#${task.issueNumber}`,
-          workflowId,
-          parkSeq: 0,
-          kind: 'acceptance',
-          prNumber: task.prNumber,
-          head: task.head,
-          attempt,
-          // unverified：会话回了但裁决读不懂/核不过/没执行成；session：主线头读不到/会话没起成/回答认不出。
-          // 两种合用 jobs 里 24 小时 PARK_TRIAGE_SESSION_TRIES 次预算；why（限长）供用满后每轮报告原因，不另建账。
-          cause: unverified ? 'unverified' : 'session',
-          why: why.slice(0, 500),
-        },
-        reason: unverified
-          ? `验收责任没核完（第 ${attempt} 次，机读或执行失败，不是创始人证据），责任仍 open，下一轮再核`
-          : `验收责任会话没起成（第 ${attempt} 次），下一轮再看`,
-        ok: false,
-        error: why.slice(0, 1000),
         at: now(),
       });
     },
@@ -890,6 +823,24 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         await w.gh.addIssueLabel({ repo: ref, issueNumber, label: LOCAL_LABEL });
       },
     },
+    // 重做另起新一代之前数历代累计动手轮数（#3625）：runsOfTask 跨代（含 laterGenerationPattern），读不到照抛
+    totalRoundsHold: {
+      async check(row) {
+        const ctx = await taskContext(w.db, row.taskId);
+        if (ctx === null) throw new Error(`库里没有任务 ${row.taskId}，数不了历代动手轮数`);
+        const rows = await runsOfTask(w.db, {
+          id: ctx.taskId,
+          issueNumber: ctx.issueNumber,
+          workflowId: taskWorkflowId(ctx.repo, ctx.issueNumber),
+        });
+        return totalRoundsHoldOf(implementRoundsDone(rows), 'commander.redo', MAX_TOTAL_ROUNDS);
+      },
+      async handBack(repo, issueNumber, hold) {
+        const ref = { owner: repo.owner, name: repo.name };
+        await w.gh.commentIssue({ repo: ref, issueNumber, key: hold.key, body: hold.comment });
+        await w.gh.addIssueLabel({ repo: ref, issueNumber, label: LOCAL_LABEL });
+      },
+    },
     async audit({ item, action, reason, ok, error, source }) {
       await recordEngineAudit(w.db, {
         action: COMMANDER_AUDIT_ACT,
@@ -910,127 +861,6 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         ...(ok ? {} : { error: error ?? '没成' }),
         at: now(),
       });
-    },
-    async acceptanceAudit({ task, duty, action, reason, ok, error }) {
-      await recordEngineAudit(w.db, {
-        action: COMMANDER_AUDIT_ACT,
-        target: COMMANDER_AUDIT_TARGET,
-        actorId: COMMANDER_ACTOR,
-        after: {
-          taskId: task.taskId,
-          ref: `${task.owner}/${task.name}#${task.issueNumber}`,
-          // workflowId + parkSeq 0 是验收候选的认领键：jobs 凭它认出「已转人」（action=leave）的那条记录。
-          workflowId: `acceptance:${task.taskId}:${task.prNumber}:${task.head}`,
-          parkSeq: 0,
-          kind: 'acceptance',
-          dutyId: duty.id,
-          generation: duty.generation,
-          repo: duty.repo,
-          issue: duty.issueNumber,
-          prNumber: duty.prNumber,
-          head: duty.head,
-          action,
-        },
-        reason,
-        ok,
-        ...(ok ? {} : { error: error ?? '没成' }),
-        at: now(),
-      });
-    },
-    /**
-     * settle 的可信读证（#3579）：「实际已合的 head」现读 GitHub 的 PR（号、已合、headSha），不用责任行 mergeCommit，更不用模型文本。
-     * 每条原文义务的来源类别（platform / run-history）目前没有结构化分类，也没有运行记录（真实树、会话）的只读来源，
-     * 不靠关键词猜：一律 need/got 都是 unknown，核对函数因此不放行 settle（责任保留走有界重试，旧头走 supersede）。
-     * 等有结构化义务分类和运行记录读方，只改这里。
-     */
-    async acceptanceTrustedRead(task, duty) {
-      const pull = await mapped(() =>
-        w.gh.claims.readPull({ owner: task.owner, name: task.name }, duty.prNumber),
-      );
-      return {
-        dutyId: duty.id,
-        generation: duty.generation,
-        prNumber: duty.prNumber,
-        head: duty.head,
-        mergedHead: pull.number === duty.prNumber && pull.merged ? pull.headSha : null,
-        items: duty.items.map((item) => ({ item, need: 'unknown' as const, got: 'unknown' as const })),
-      };
-    },
-    async settleAcceptance({ duty, evidence }) {
-      await settleAcceptanceDuty(
-        w.db,
-        {
-          id: duty.id,
-          generation: duty.generation,
-          repo: duty.repo,
-          issueNumber: duty.issueNumber,
-          prNumber: duty.prNumber,
-          head: duty.head,
-          by: COMMANDER_ACTOR,
-          evidence,
-        },
-        now(),
-      );
-    },
-    async supersedeAcceptance({ source, target, evidence, coverage }) {
-      await supersedeAcceptanceDuty(
-        w.db,
-        {
-          source: {
-            id: source.id,
-            generation: source.generation,
-            repo: source.repo,
-            issueNumber: source.issueNumber,
-            prNumber: source.prNumber,
-            head: source.head,
-          },
-          target: {
-            id: target.id,
-            generation: target.generation,
-            repo: target.repo,
-            issueNumber: target.issueNumber,
-            prNumber: target.prNumber,
-            head: target.head,
-          },
-          by: COMMANDER_ACTOR,
-          evidence,
-          coverage,
-        },
-        now(),
-      );
-    },
-    async closeAcceptanceTask(task, mergeCommit) {
-      if (!task.workflowId) throw new Error('验收责任候选没有工作流编号，不能精确收尾');
-      const status = await withDeadline((client) =>
-        client.workflow.getHandle(task.workflowId as string).query(taskStatusQuery),
-      );
-      const close = status.mergedTaskClose;
-      const token = close?.token;
-      if (
-        !close ||
-        token === null ||
-        token === undefined ||
-        close.repo.owner.toLowerCase() !== task.owner.toLowerCase() ||
-        close.repo.name.toLowerCase() !== task.name.toLowerCase() ||
-        close.prNumber !== task.prNumber ||
-        close.head !== task.head
-      )
-        throw new Error('工作流的合并收尾凭据与验收候选不符，不能关单');
-      const receipt = {
-        repo: { owner: task.owner, name: task.name },
-        prNumber: task.prNumber,
-        head: task.head,
-        mergeCommit,
-      };
-      const outcome = await withDeadline((client) =>
-        client.workflow
-          .getHandle(task.workflowId as string, token.runId)
-          .executeUpdate(taskSettleMergedUpdate, {
-            args: [{ token, receipt }],
-            updateId: `merged-task:${token.runId}:${token.generation}:${token.continued}:${task.prNumber}:${task.head}:${mergeCommit}`,
-          }),
-      );
-      if (outcome !== 'accepted') throw new Error(`精确合并收尾没有受理：${outcome}`);
     },
     async notify(n) {
       await upsertAlert(w.db, {

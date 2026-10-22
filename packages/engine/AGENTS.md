@@ -48,13 +48,15 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 ## 派工与停下
 
 - 「派出过没有」只有 `jobs/dispatch-standing.ts` 一份（拉单、点名派单共用）。本机退回法国队列的单要靠退回时刻晚于最后一代 `closeTime` 认成「重新派」，时刻读不到不判、不猜。
-- 法国接不了的单（验收要 diff 外证据、交代不全、改标准）不能退回，贴回「本机做」；通知键只报一次，用 `insertAlertOnce`，不能改成 `upsertAlert`（会把人处理掉的重开；代码注释在 `real/intake.ts` 的 `notifyLocal`）。`local-kept:` 提醒跟着单子走，单关了或「本机做」摘了就撤。
+- 法国接不了的单（验收要 diff 外证据、交代不全、改标准）不能退回，贴回「本机做」；通知键只报一次，用 `insertAlertOnce`，不能改成 `upsertAlert`（会把人处理掉的重开；代码注释在 `real/intake.ts` 的 `notifyLocal`）。`local-kept:` 提醒只在逐单现读确认关闭或摘掉「本机做」后撤，列表缺席、读不全仍保留并报没查成。
 - 引擎自己挑单，进队条件见 design 第九节：四节齐、范围写死、验收条在 diff 里看得见、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。
 - 无 PR 的 `pushBranch/WORKFLOWS_PERMISSION` 首次自然停点只走 `taskHandbackPermissionPush` Update（`push-handback.ts`，同 run、generation=1、continued=0）；合同修订原位交还用显式 v2 同时绑 H0/H1，v1 不自动放宽；`handed_back` 才证明控制消费，`accepted` 或人工报告不替代。
-- 指挥官（`jobs/park-triage.ts`、`real/park-triage.ts`）：会话只交裁决，动手经白名单；重做的多步先写接续账 `commander.redo`，账写不进不动手，每次动手前现读归属，转本机/对不上记 `given-up`，读不到记 `unverified` 继续保留责任。验收责任巡检里，模型 `leave` 不是转人依据，只有引擎可信来源 `acceptanceFounderFacts` 给出精确绑定的创始人事实才发「要你拍」；自动 settle 须过 `acceptanceTrustedRead`，PR 实际已合的 head 须等于责任 head。当前真装配没有这两种来源，生产上一律保留责任（#3497、#3579 的欠项）。
+- 指挥官（`jobs/park-triage.ts`、`real/park-triage.ts`）：会话只交裁决，动手经白名单；重做的多步先写接续账 `commander.redo`，账写不进不动手，每次动手前现读归属，转本机/对不上记 `given-up`，读不到记 `unverified` 继续保留责任。总轮数到顶（码 `total_rounds`）已交回本机的停下指挥官整个跳过、不出拍板卡；`commander.redo` 和 `task.redo` 起新一代前按历代累计动手轮数封顶（`totalRoundsHoldOf`，#3625），到了交回本机、读不到不重做。指挥官不再读 `acceptance_duties`：没有验收候选、核验会话、结清/替代和拍板卡（#3630，决定 0113 第二片）；旧开着的行由一次性命令 `jobs/acceptance-handback-once.ts`（`fleet-api acceptance-handback-once`）交回原单。
 - 看门狗只报和撤卡，修复在 api（`packages/api/src/alert-repair.ts`）。改 `jobs/watchdog.ts`、`jobs/idle-running.ts`、`real/watchdog.ts` 的提醒键（`watchdog:idle-running:<任务>`、`watchdog:release:train:<提交>:running|failed`）、阈值、撤卡条件，必须同步 api 的 `IDLE_PREFIX`、`RELEASE_KEY` 和 core 的 idle 判据（`packages/api/test/alert-repair.test.ts` 会红）。
 - 定时任务 `schedule_runs.why` 在一轮没收尾期只放诊断见证，只证明「最后记到的位置」，不证明为什么中断；`ended_at`、scanned、found 仍未知，由下次启动补记 failed。
+- 起来时不满一轮工作上限的前一实例遗留行（#3585）：启动补记的年轻保护不变；`startEngineTimers` 另给 `startTimers` 一个二次补记，边界是本进程起点（单实例、先停旧再起新：起点之前开始又没结束的行只可能是已停掉的前一实例的，等于起点的不动、更晚的是本进程的），每个任务本进程起满自己的一轮工作上限后补一次（一次性定时器，另在该任务下一轮开头兜底，不另起监视、不扫全表）。写库失败记 error、不当已补，隔一轮上限重试；起点或上限认不出时不补、留着。结束时刻、阶段 why 沿用 `closeInterruptedScheduleRuns`；只证明「属于已停掉的前一实例」，不证明原步骤为何中断。
 - 其它定时任务：changelog（`jobs/changelog.ts`）任何一版没查成不开部分 PR；没有已关闭里程碑记 unscanned，不用零扫描冒充成功。固定版本宿主工具（Go，`cli-upgrade-go.ts`）只在发布/空闲排空窗口运行，入口被遮住明确失败、保留现有安装。
+- CLI 版本：reclaude 不执行本体，帮手以用户身份读二进制摘要，与同轮复用一次的官方 stable.json 对应平台 artifact 匹配后才认自身版本；不匹配仍来源不明，不据此判断登录恢复。
 
 ## 真装配里容易误改的几处
 

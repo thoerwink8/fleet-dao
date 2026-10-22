@@ -3,11 +3,6 @@
   "bare": [],
   "cross": [
     {
-      "file": "packages/conventions/src/acceptance-gate.ts",
-      "spec": "../../shared/src/ci-policy-bridge.ts",
-      "why": "Actions 关单零安装入口复用 shared 零依赖协议核对可信 PR/head 来源；package.json 保留 shared 依赖作为变更边"
-    },
-    {
       "file": "packages/conventions/src/ci-policy-bridge.ts",
       "spec": "../../shared/src/ci-policy-bridge.ts",
       "why": "Actions reader 在 pnpm install 前零安装运行，只借 shared 零依赖纯策略协议；package.json 保留 shared 依赖作为变更边"

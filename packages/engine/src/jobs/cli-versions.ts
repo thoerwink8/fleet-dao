@@ -50,7 +50,7 @@ export interface CliLatestOk {
 
 export interface CliVersionsJobDeps {
   /** 以这个用户跑写死的版本探测。失败回 error，不许回空串冒充成功。 */
-  probeUser(user: string, tool: string): Promise<{ stdout: string } | { error: string }>;
+  probeUser(user: string, tool: string): Promise<CliUserProbe>;
   /** 全局 npm 清单（npm ls -g）。一次一个写死的包名，清单可以是整份。 */
   probeNpm(tool: string): Promise<{ stdout: string } | { error: string }>;
   /** 这个工具的官方最新。两个用户共用一次结果。失败回 error。 */
@@ -60,6 +60,9 @@ export interface CliVersionsJobDeps {
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
+
+/** version 仅由真接线把受管安装摘要与官方 artifact 核对后返回，不是 CLI stdout。 */
+export type CliUserProbe = { stdout: string } | { error: string } | { version: string };
 
 export class CliVersionsFailedError extends Error {
   readonly runId: number;
@@ -77,16 +80,20 @@ function clip(text: string): string {
 
 function installedFrom(
   tool: string,
-  probe: { stdout: string } | { error: string },
+  probe: CliUserProbe,
 ): {
   installedVersion: string | null;
   installedError: string | null;
 } {
   if ('error' in probe) return { installedVersion: null, installedError: probe.error || '探测没有给出原因' };
+  if ('version' in probe)
+    return probe.version
+      ? { installedVersion: probe.version, installedError: null }
+      : { installedVersion: null, installedError: '安装摘要核对没有给出版本' };
   const version = parseInstalledOutput(tool, probe.stdout);
   if (version) return { installedVersion: version, installedError: null };
   const shown = clip(probe.stdout);
-  // reclaude 没有经证实的自身版本输出：帮手现在不执行它、直接报来源不明；万一仍有 stdout，也不拿里面的数当它的版本
+  // reclaude 自身版本只认安装摘要核对；万一仍有旧帮手 stdout，不拿里面的数当版本。
   if (tool === 'reclaude')
     return {
       installedVersion: null,

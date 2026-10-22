@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acceptanceGate } from './acceptance-gate.ts';
 import { closingIssues } from './closing-issues.ts';
 import type { GhApi } from './gh-api.ts';
 import { issueOfBranch } from './issue-branch.ts';
@@ -84,18 +83,6 @@ export async function managedPr(gh: Gh, branch: string) {
   };
 }
 const SHA = /^[a-f0-9]{40}$/;
-type AcceptanceState = 'open' | 'settled' | 'unknown';
-type AcceptanceRead = (gh: Gh, repo: string, issue: number) => Promise<AcceptanceState>;
-
-async function defaultAcceptance(gh: Gh, repo: string, issue: number): Promise<AcceptanceState> {
-  try {
-    const pending = await acceptanceGate(gh, `https://api.github.com/repos/${repo}`, issue);
-    return pending ? 'open' : 'settled';
-  } catch {
-    // 验收账没读成不能当成已结清，也不能因此去重开工人。
-    return 'unknown';
-  }
-}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
@@ -179,22 +166,12 @@ function verifiedFact(value: unknown, spec: RunSpec, number: number): ExternalDe
   return { repo: spec.repo, pr: number, head: headSha, mergeCommit: merge, mergedAt };
 }
 
-function acceptanceWord(state: AcceptanceState): string {
-  if (state === 'open') return '验收责任仍未结清，保留';
-  if (state === 'settled') return '验收责任已结清';
-  return '验收责任没读成，保留未知责任，不当已交付';
-}
-
 /**
  * 本分支没有唯一真实 PR。只在同仓、需求关联、head、mergeCommit 都核到时才报外部交付；
  * issue 已关闭、别的仓、对不上的提交都不算。始终抛错：这里不能把本运行记完成。
+ * 验收责任账不再参与判断（#3630，决定 0113 第二片：旧行已一次性交回原单）。
  */
-async function refuseMissingBranchDelivery(
-  gh: Gh,
-  spec: RunSpec,
-  acceptance: AcceptanceRead,
-  retainIntent: boolean,
-): Promise<never> {
+async function refuseMissingBranchDelivery(gh: Gh, spec: RunSpec, retainIntent: boolean): Promise<never> {
   const found = await ghValue(gh, [
     'pr',
     'list',
@@ -247,13 +224,11 @@ async function refuseMissingBranchDelivery(
       : '本分支没有唯一真实PR，也没核到同仓已合并、关联本单、head和mergeCommit都真实的PR。issue是否关闭不能当作交付，不记完成、不续工人';
     throw new DeliveryCheckError(retainIntent ? 'review' : 'blocked', why);
   }
-  const settled = await acceptance(gh, spec.repo, spec.issue);
   const why =
     `需求已由同仓其他真实PR #${fact.pr} 交付（head ${fact.head}，merge ${fact.mergeCommit}，${fact.mergedAt}）。` +
-    `本分支没有PR，不伪造、不记完成。${acceptanceWord(settled)}。停止重复写码，工作树和会话保留。` +
+    '本分支没有PR，不伪造、不记完成。停止重复写码，工作树和会话保留。' +
     (retainIntent ? '本机退回意图仍保留，不能终结。' : '');
   throw new DeliveryCheckError('external', why, {
-    acceptance: settled,
     external: fact,
     ...(retainIntent ? { retain: true } : {}),
   });
@@ -264,7 +239,6 @@ export async function validateManagedDelivery(
   spec: RunSpec,
   requireMerged = true,
   root = runsRoot(),
-  acceptance: AcceptanceRead = defaultAcceptance,
 ): Promise<void> {
   const intent = readJson<FeedbackEvent>(join(runDir(root, spec.repo, spec.issue), 'feedback-intent.json'));
   const listed = await ghValue(gh, [
@@ -299,7 +273,7 @@ export async function validateManagedDelivery(
       if (intent) throw new DeliveryCheckError('review', '没有PR但保留退回意图，不能清运行');
       return;
     }
-    await refuseMissingBranchDelivery(gh, spec, acceptance, intent !== null);
+    await refuseMissingBranchDelivery(gh, spec, intent !== null);
   }
   if (prs.length !== 1) {
     throw new DeliveryCheckError('blocked', '受管分支必须对应唯一真实PR，这是确定条件，不续工人');

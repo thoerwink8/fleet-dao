@@ -16,6 +16,12 @@ export function continueExhausted(why: string | null | undefined): string | null
   return `继续次数已用满（${n} 次），继续无效；要重开用 redo`;
 }
 
+/**
+ * 一张单动手最多累计几轮（#3603）：跨「继续」累计，继续不清零。到了交还本机。
+ * 重做另起新一代也按历代累计数这个上限（#3625，conventions 的 totalRoundsHoldOf）：引擎和入口共用这一个数。
+ */
+export const MAX_TOTAL_ROUNDS = 6;
+
 /** 总轮数到顶的停下标题（#3603）：n 是这次停下时的上限（累计动手轮数）。 */
 export function totalRoundsTitle(n: number): string {
   return `动手累计 ${n} 轮仍没合，交还本机`;

@@ -152,6 +152,24 @@ describe('该放：目标在 _tmp/、仓外、/dev/null', () => {
     expect(verdict(command), command).toBeNull();
   });
 
+  it('子目录里的 _tmp/ 也放行：.gitignore 的 _tmp/ 任何一层都忽略，在 packages/x 里写 _tmp/a.md 不算改仓里的文件', () => {
+    // 红：2026-10-22 之前只认仓根的 _tmp/，cd 进子目录后写 _tmp/ 被拦（#3631）
+    expect(verdict('echo hi > _tmp/a.md', sub)).toBeNull();
+    expect(verdict(`echo hi > ${repo}/packages/x/_tmp/a.md`)).toBeNull();
+    expect(verdict("cat > _tmp/a.md <<'EOF'\nx\nEOF", sub)).toBeNull();
+    expect(verdict(`node -e "fs.writeFileSync('_tmp/a.json','{}')"`, sub)).toBeNull();
+  });
+
+  it('写临时目录（系统 TEMP、会话 scratchpad 形式的路径）：放行', () => {
+    expect(verdict(`echo hi > ${fwd(tmpdir())}/shell-edit-scratch.md`, sub)).toBeNull();
+    expect(verdict(`sed -i 's/a/b/' ${fwd(tmpdir())}/a.md`, sub)).toBeNull();
+  });
+
+  it('_tmp 只认目录名正好是 _tmp：_tmp_x、借 _tmp 跳出去的仍拦', () => {
+    expect(verdict('echo hi > packages/_tmp_x/a.md', repo)?.code).toBe(2);
+    expect(verdict('echo hi > _tmp/../src/a.ts', repo)?.code).toBe(2);
+  });
+
   it('在仓外跑、也没有 .git 往上：整条放行', () => {
     expect(verdict("sed -i 's/a/b/' a.txt", outside)).toBeNull();
     expect(verdict('echo hi > a.txt', outside)).toBeNull();

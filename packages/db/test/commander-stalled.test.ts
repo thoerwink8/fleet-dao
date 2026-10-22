@@ -1,17 +1,14 @@
 // 法国指挥官看门狗和 attention / 每日简报共用的停下任务清单（queries/commander.ts）：
 // 指挥官自己留给人的提醒（commander:<工作流>:park:<第几次>）不是停点来源，已认领的停点照样算「指挥官处理」。
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { maintainAcceptanceCandidates } from '../src/queries/acceptance-candidates.ts';
 import {
   commanderStalledSummary,
   commanderSummaryLine,
-  listCommanderAcceptanceTasks,
   listCommanderStalledTasks,
   readOpenParkAlert,
 } from '../src/queries/commander.ts';
 import { resolveAlertByKey, upsertAlert } from '../src/queries/engine-alerts.ts';
 import { recordEngineAudit } from '../src/queries/session-org.ts';
-import { acceptanceDuties, pullRequests } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask } from './helpers.ts';
 
@@ -109,74 +106,5 @@ describe('readOpenParkAlert', () => {
     expect(got?.at).toBeInstanceOf(Date);
     await resolveAlertByKey(t.db, { dedupeKey: 'wf-a:park:2', by: 'test' });
     expect((await readOpenParkAlert(t.db, 'wf-a'))?.seq).toBe(1);
-  });
-});
-
-describe('listCommanderAcceptanceTasks', () => {
-  it('只列出合并超过 30 分钟且仍有 open 验收责任的 PR', async () => {
-    const repo = await addRepo(t.db, 'acceptance');
-    const task = await addTask(t.db, repo.id, { issueNumber: 3483 });
-    const oldMergedAt = new Date('2026-10-21T10:00:00Z');
-    const recentMergedAt = new Date('2026-10-21T10:40:00Z');
-    await t.db.insert(pullRequests).values([
-      {
-        repoId: repo.id,
-        number: 100,
-        state: 'merged',
-        headRef: 'fleet/3483',
-        headSha: 'a'.repeat(40),
-        mergeSha: 'b'.repeat(40),
-        mergedAt: oldMergedAt,
-        updatedAt: oldMergedAt,
-      },
-      {
-        repoId: repo.id,
-        number: 101,
-        state: 'merged',
-        headRef: 'fleet/3483-new',
-        headSha: 'c'.repeat(40),
-        mergeSha: 'd'.repeat(40),
-        mergedAt: recentMergedAt,
-        updatedAt: recentMergedAt,
-      },
-    ]);
-    await t.db.insert(acceptanceDuties).values([
-      {
-        taskId: task.id,
-        repo: 'acme/acceptance',
-        issueNumber: 3483,
-        prNumber: 100,
-        head: 'a'.repeat(40),
-        items: ['现场审计'],
-        source: 'cold_verify',
-        mergeCommit: 'b'.repeat(40),
-        mergedAt: oldMergedAt,
-      },
-      {
-        taskId: task.id,
-        repo: 'acme/acceptance',
-        issueNumber: 3483,
-        prNumber: 101,
-        head: 'c'.repeat(40),
-        items: ['刚合并的责任'],
-        source: 'cold_verify',
-        mergeCommit: 'd'.repeat(40),
-        mergedAt: recentMergedAt,
-        settledAt: oldMergedAt,
-        settledBy: 'test',
-        settleEvidence: '已验',
-      },
-    ]);
-
-    await maintainAcceptanceCandidates(t.db);
-    const got = await listCommanderAcceptanceTasks(t.db, new Date('2026-10-21T10:30:00Z'));
-    expect(got).toHaveLength(1);
-    expect(got[0]).toMatchObject({
-      taskId: task.id,
-      prNumber: 100,
-      head: 'a'.repeat(40),
-      mergeCommit: 'b'.repeat(40),
-    });
-    expect(got[0]?.duties).toHaveLength(1);
   });
 });

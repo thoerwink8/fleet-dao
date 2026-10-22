@@ -147,6 +147,8 @@ describe('每张单总轮数上限（#3603）', { timeout: 120_000 }, () => {
         const alert = world.alerts.find((a) => a.title.includes(totalRoundsTitle(MAX_TOTAL_ROUNDS)));
         expect(alert?.detail).toContain('「本机做」没贴上');
         expect(alert?.detail).not.toContain('已贴「本机做」交还本机');
+        // 到顶的停下只出提醒，不出「要你拍」的 decision 卡（#3625）
+        expect(alert?.level).toBe('stuck');
         await h.terminate('测完了');
       },
       { tasks },

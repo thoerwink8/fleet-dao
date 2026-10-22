@@ -31,7 +31,7 @@
 #   sudo -n fleet-agent-scope probe --npm -- <kimi-code|dsh|pi>
 #                                    只读版本（#1969）。工具名写死：claude、codex、grok、cursor-agent、reclaude、mirasim-server，
 #                                    或全局 npm 的 kimi-code、dsh、pi。只跑 --version（reclaude 除外：它的 --version 会同步配置、检查登录，
-#                                    打的又是被包装的 Claude Code 版本，所以不执行，只核二进制在不在，装了就报来源不明；
+#                                    打的又是被包装的 Claude Code 版本，所以不执行，只读平台/二进制摘要，经同轮官方 artifact 匹配才认自身版本；
 #                                    Mirasim 读 current 指向的 servers/<版本> 目录名；
 #                                    npm 跑 npm ls -g --depth=0 --json）。不装、不升级。pilot 只在这条白名单里，run / adopt / org-use 仍不认它。
 #                                    读不到非 0，原因在标准错误。退出码：0 读到了；64 校验不过；124/137 超时；其余是命令自己的。
@@ -487,11 +487,9 @@ probe_mirasim() { # 用户 家目录
   printf '%s\n' "$base"
 }
 
-# reclaude 没有可信的只读版本来源，所以这里不执行它：`reclaude --version` 会先同步配置、检查登录，再打出被包装的 Claude Code
-# 版本（「2.1.308 (Claude Code)」，决定 0112），不是 reclaude 自己的版本；二进制是单文件，旁边没有版本元数据（装机只钉
-# 下载地址和 sha256，之后由用户自己 reclaude update，文件一变就对不上钉死的那份）。读版本不该启动 Claude、碰登录同步，
-# 也不能拿裸 semver、官方 latest 或旧读数去猜，所以只核二进制在不在、这个用户执行得了：没装 127，装了就如实报来源不明。
-# 不跑会话、不 logout/login、不 org use、不改 device/config。登录是否有效、设备是否被解绑是它自己的真实状态，这里不代报。
+# reclaude --version 会同步配置、查登录，打的是 Claude Code 的版本，所以不执行它。
+# 只以目标用户读取平台和安装二进制 SHA256；引擎与同轮官方 stable.json artifact 核对后才认自身版本。
+# 不出网、不写 sidecar、不碰 device/config；摘要匹配不代表登录状态。
 probe_reclaude() { # 用户 家目录
   local user=$1 home=$2 bin rc=0
   bin=${RECLAUDE_TEST_BIN:-$home/.local/bin/reclaude}
@@ -500,8 +498,17 @@ probe_reclaude() { # 用户 家目录
     printf 'fleet-agent-scope：%s 家里没有执行得了的 reclaude：%s\n' "$user" "$bin" >&2
     exit 127
   fi
-  printf 'fleet-agent-scope：reclaude 的在用版本来源不明：它没有只读的自身版本入口（--version 会先同步配置、检查登录，打出的又是被包装的 Claude Code 版本），安装文件旁也没有版本元数据；没有执行它，不报版本，也不代表登录状态\n' >&2
-  exit 1
+  # shellcheck disable=SC2016 # 固定脚本中的变量由降权后的 sh 展开，不由 root 展开。
+  probe_as "$user" "$home" /bin/sh -c '
+    set -eu
+    case $(/usr/bin/uname -m) in
+      x86_64) platform=linux-amd64 ;;
+      aarch64) platform=linux-arm64 ;;
+      *) echo "fleet-agent-scope：reclaude 安装摘要来源不明：不认识的平台" >&2; exit 1 ;;
+    esac
+    digest=$(/usr/bin/sha256sum -- "$1")
+    printf "{\"source\":\"reclaude-binary-sha256\",\"platform\":\"%s\",\"sha256\":\"%s\"}\n" "$platform" "${digest%% *}"
+  ' sh "$bin"
 }
 
 probe_one() { # 用户 工具

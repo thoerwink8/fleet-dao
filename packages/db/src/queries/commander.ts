@@ -1,25 +1,16 @@
 // 法国指挥官会话（engine/src/jobs/park-triage.ts，#3294 第 2 片）读库的那几样。写操作记录经 recordEngineAudit（queries/session-org.ts）。
 // 都是只读；读不到原样抛，调用方记没查成，不当成空。
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
-  acceptanceCandidateGroups,
   auditLog,
   notifications,
-  pullRequests,
   repos,
   routingPurposeModels,
-  runs,
   settings,
   taskRounds,
   tasks,
 } from '../schema/index.ts';
-import {
-  acceptanceCandidatesUnknown,
-  acceptanceGroupDutiesQuery,
-  assertAcceptanceCandidatesReady,
-} from './acceptance-candidates.ts';
-import type { AcceptanceDutyRow } from './acceptance-duties.ts';
 import { allSettledOrThrow } from './all-settled.ts';
 
 /** 指挥官会话的操作记录都记在这个 target 下（和 groom 一样一个 target 一类事）。 */
@@ -275,89 +266,4 @@ export async function commanderStalledSummary(db: Db): Promise<CommanderStalledS
 /** 「停下 N 张，指挥官处理 M 张，留给人 K 张」：attention 和每日简报打同一句。 */
 export function commanderSummaryLine(s: CommanderStalledSummary): string {
   return `停下 ${s.stalled} 张，指挥官处理 ${s.handled} 张，留给人 ${s.forHuman} 张`;
-}
-
-export interface CommanderAcceptanceTask {
-  taskId: string;
-  owner: string;
-  name: string;
-  issueNumber: number;
-  title: string;
-  workflowId: string | null;
-  prNumber: number;
-  head: string;
-  mergedAt: Date;
-  mergeCommit: string | null;
-  duties: AcceptanceDutyRow[];
-}
-
-/**
- * PR 镜像已经合并超过 30 分钟、同单仍有 open 验收责任的候选。
- * 责任状态必须用 shared 的统一判法；任务是否仍开着由 GitHub 真装配再核一次。
- */
-export function commanderAcceptanceCandidatesQuery(db: Db, mergedBefore: Date) {
-  const workflowId = sql<string | null>`(
-    select ${runs.workflowId} from ${runs}
-    where ${runs.taskId} = ${tasks.id} and ${runs.workflowId} is not null
-    order by ${runs.startedAt} desc nulls last, ${runs.createdAt} desc nulls last
-    limit 1
-  )`;
-  return db
-    .select({
-      taskId: tasks.id,
-      owner: repos.owner,
-      name: repos.name,
-      issueNumber: tasks.issueNumber,
-      title: tasks.title,
-      workflowId,
-      prNumber: pullRequests.number,
-      head: pullRequests.headSha,
-      mergedAt: pullRequests.mergedAt,
-      mergeCommit: pullRequests.mergeSha,
-    })
-    .from(acceptanceCandidateGroups)
-    .innerJoin(tasks, eq(tasks.id, acceptanceCandidateGroups.taskId))
-    .innerJoin(repos, eq(repos.id, tasks.repoId))
-    .innerJoin(
-      pullRequests,
-      and(eq(pullRequests.repoId, tasks.repoId), eq(pullRequests.number, acceptanceCandidateGroups.prNumber)),
-    )
-    .where(
-      and(
-        sql`${acceptanceCandidateGroups.hasOpen}`,
-        eq(pullRequests.state, 'merged'),
-        isNotNull(pullRequests.mergedAt),
-        lte(pullRequests.mergedAt, mergedBefore),
-      ),
-    )
-    .orderBy(asc(repos.owner), asc(repos.name), asc(tasks.issueNumber), asc(pullRequests.number))
-    .limit(4097);
-}
-
-/**
- * 纯读：维护由消费者显式调用。readiness、候选、完整上下文在同一只读快照里，
- * 避免检查后 writer 置 dirty 把候选变成假空。4096组/65536责任超限整轮报未读全。
- */
-export async function listCommanderAcceptanceTasks(
-  db: Db,
-  mergedBefore: Date,
-): Promise<CommanderAcceptanceTask[]> {
-  return db.transaction(
-    async (tx) => {
-      await assertAcceptanceCandidatesReady(tx);
-      const merged = await commanderAcceptanceCandidatesQuery(tx, mergedBefore);
-      if (merged.length > 4096) throw acceptanceCandidatesUnknown('候选组超过读取预算');
-      const out: CommanderAcceptanceTask[] = [];
-      let remaining = 65536;
-      for (const row of merged) {
-        if (row.mergedAt === null) continue;
-        const duties = await acceptanceGroupDutiesQuery(tx, row, remaining + 1);
-        if (duties.length > remaining) throw acceptanceCandidatesUnknown('候选完整责任超过读取预算');
-        remaining -= duties.length;
-        out.push({ ...row, mergedAt: row.mergedAt, duties });
-      }
-      return out;
-    },
-    { isolationLevel: 'repeatable read', accessMode: 'read only' },
-  );
 }

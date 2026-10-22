@@ -1,8 +1,3 @@
-import { ACCEPTANCE_USAGE, parseAcceptanceArgs, runAcceptance } from './acceptance-cli.ts';
-import {
-  type AcceptanceExecutionReader,
-  openAcceptanceExecutionReader,
-} from './acceptance-execution-reader.ts';
 import { type CheckoutExecutionReader, openCheckoutExecutionReader } from './checkout-execution-reader.ts';
 import {
   CHECKOUT_HISTORY_USAGE,
@@ -151,6 +146,9 @@ const GROOM_POINTER =
 /** usage-backfill-once（#1948，一次性回填没有会话号的老用量）同样：本体在引擎包，由 bin/fleet-api 转过去。 */
 const USAGE_BACKFILL_ONCE_POINTER =
   '用法：fleet-api usage-backfill-once [--apply]（#1946 之前没有会话号的老 run，按分支名和起止对上 Mirasim 用量账本，只补空字段；默认只读，--apply 才写。本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api usage-backfill-once --help）';
+/** acceptance-handback-once（#3630，一次性把还开着的旧验收责任交回原单）同样：本体在引擎包，由 bin/fleet-api 转过去。 */
+const ACCEPTANCE_HANDBACK_ONCE_POINTER =
+  '用法：fleet-api acceptance-handback-once [--apply]（一次性把还开着的旧验收责任交回原单：留言、贴「本机做」、行标成已交回，不删行；默认只读，--apply 才写，可重复跑。本体在引擎包，经 packages/api/bin/fleet-api 转过去）';
 /** daily-brief（决定 0096，手动跑一次每日简报）同样：本体在引擎包（packages/engine/src/bin/daily-brief.ts），由 bin/fleet-api 转过去。 */
 const DAILY_BRIEF_POINTER =
   '用法：fleet-api daily-brief [--as-today]（手动跑一次每日简报：推飞书团队群、在 #1055 发评论；默认标成手动触发，不顶替今天 08:30 那一条，--as-today 补发今天定时那一条。本体在引擎包，经 packages/api/bin/fleet-api 转过去）';
@@ -1069,7 +1067,6 @@ export type CliEnv = Readonly<Record<string, string | undefined>>;
 
 /** 命令行碰外面的几样：环境变量、输出、连库、读 GitHub、连 Temporal、钟。测试换成内存库和假的，收下输出。 */
 export interface CliDeps {
-  acceptanceExecutionReader?: AcceptanceExecutionReader;
   checkoutExecutionReader?: CheckoutExecutionReader;
   openHistoricalAuditSource?: (
     url: string,
@@ -1326,6 +1323,7 @@ const USAGES: Record<string, string> = {
   'dispatch-issue': DISPATCH_ISSUE_POINTER,
   groom: GROOM_POINTER,
   'usage-backfill-once': USAGE_BACKFILL_ONCE_POINTER,
+  'acceptance-handback-once': ACCEPTANCE_HANDBACK_ONCE_POINTER,
   'daily-brief': DAILY_BRIEF_POINTER,
   engine: ENGINE_USAGE,
   'flow-mode': FLOW_MODE_USAGE,
@@ -1340,7 +1338,6 @@ const USAGES: Record<string, string> = {
   'emergency-issue': EMERGENCY_ISSUE_USAGE,
   notify: NOTIFY_USAGE,
   quote: QUOTE_USAGE,
-  acceptance: ACCEPTANCE_USAGE,
   'checkout-history': CHECKOUT_HISTORY_USAGE,
   'historical-audit': HISTORICAL_AUDIT_USAGE,
 };
@@ -1375,22 +1372,6 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     } catch {
       deps.err('私有原话操作失败，内容不回显；请核对输入、编号或数据库。');
       return 1;
-    }
-  }
-  if (command === 'acceptance') {
-    const acceptanceInput = parseAcceptanceArgs(rest);
-    const reader =
-      acceptanceInput.action === 'merge-plan' || acceptanceInput.action === 'merge'
-        ? (deps.acceptanceExecutionReader ?? openAcceptanceExecutionReader(deps.env))
-        : undefined;
-    const opened = deps.openDb
-      ? await deps.openDb(databaseUrl(deps.env))
-      : await import('@fleet-dao/db').then(({ createDb }) => createDb({ url: databaseUrl(deps.env) }));
-    try {
-      deps.out(JSON.stringify(await runAcceptance(rest, opened.db, deps.now(), reader)));
-      return 0;
-    } finally {
-      await opened.close();
     }
   }
   if (command === 'set-password') {
@@ -1500,6 +1481,12 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'groom') {
     throw new CliError(
       'groom 要经 packages/api/bin/fleet-api 跑（它转给引擎包的 packages/engine/src/bin/groom.ts）',
+      2,
+    );
+  }
+  if (command === 'acceptance-handback-once') {
+    throw new CliError(
+      'acceptance-handback-once 要经 packages/api/bin/fleet-api 跑（它转给引擎包的 packages/engine/src/bin/acceptance-handback-once.ts）',
       2,
     );
   }

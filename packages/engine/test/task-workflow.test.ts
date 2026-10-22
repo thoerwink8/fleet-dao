@@ -660,7 +660,7 @@ describe('任务工作流 · 停下等人', { timeout: 180_000 }, () => {
     expect(calls.merged).toBe(4);
   });
 
-  it('等合并时检查连着红、返工 3 轮用完：头一回自动续一次，再用完停下，报警进要你拍的，不再等（#1983）', async () => {
+  it('等合并时检查连着红、返工 3 轮用完：头一回自动续一次，再用完停下（同时到总轮数上限：交回本机，只出提醒、不进要你拍的），不再等（#1983、#3625）', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       merged: () => checksRed,
@@ -680,8 +680,9 @@ describe('任务工作流 · 停下等人', { timeout: 180_000 }, () => {
         expect(s.doing).toContain('检查红了');
         expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 2);
         expect(calls.merged).toBe(MAX_IMPLEMENT_ROUNDS * 2 * 2);
+        // 这一停同时到了总轮数上限（3 + 3 = 6，#3603）：已交回本机，只出提醒、不出「要你拍」的 decision 卡（#3625）
         expect(world.alerts[0]).toMatchObject({
-          level: 'decision',
+          level: 'stuck',
           title: expect.stringMatching(/^检查红了/),
         });
         expect(world.alerts[0]?.detail).toContain('merge-gate');

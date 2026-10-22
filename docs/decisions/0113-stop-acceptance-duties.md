@@ -3,7 +3,7 @@
 - 索引状态：生效
 - 日期：2026-10-22（北京时间）
 - 谁拍的：创始人 2026-10-22 授权当晚全程自主拍板、做减法优先（原话见下）；指挥官据自身诊断（#3582）拍，本机落地（#3591）。改了决定 0093 的修订段，按改标准走，PR 带创始人原话。
-- 状态：采纳，分片落地：这是第一片（停写、诊断型验收条挡在派单前）；旧行结清、拍板卡、管理入口和 CLI 留给后面的片。
+- 状态：采纳，分片落地：第一片（#3591，停写、诊断型验收条挡在派单前）；第二片（#3630，旧行一次性交回原单，删结清、拍板卡、管理入口和 CLI、关单闸，见文末「补充：第二片」）。
 - 取代：0093「修订（2026-10-18，#3037）」里的持久验收责任账（转人时写 `acceptance_duties`、引擎收尾和合并收口以这份账为准）。0093 第 5 条本身不变。
 - 关联：#3582（诊断报告 `specs/3582-自身诊断/诊断.md`）、#3591、#3037。
 
@@ -51,7 +51,28 @@
 
 - 漏网的「不归我验」条不再有持久账：工作流结束后，它们只在单上的转人留言、PR 正文的「还欠什么」和单子开着这件事里。引擎重做同一张单时不会再从库里读回上一代转人的条——要靠派单前就挡下（第 3 条）和单子开着来兜。
 - 诊断型判据按词判，会漏写法不同的诊断单；宁可漏、不往错里拦（和原判据同一取向）。
-</content>
-</invoke>
-<invoke name="Bash">
-<parameter name="command">cd D:/frank/fleet-dao/.claude/worktrees/silly-bhabha-4bda9f && pnpm decisions:index 2>&1 | tail -3; git diff --stat docs/decisions/README.md
+
+## 补充：第二片（#3630，2026-10-22）
+
+第一片之后这张表已没有新行，但读它的链还在：park-triage 每 10 分钟为旧行出核验会话和「要你拍」卡，看门狗为它报带 PR 后缀的 `watchdog:commander:` 卡，关单闸（`issue:close`、`close-on-merge`、受管外部交付）因旧行开着拒关，私有 ops 还有 `acceptance status|settle|supersede|merge-plan|merge`。这一片把这些都删了，旧行一次性交回原单。（顺手删掉第一片落盘时误留在本文件末尾的几行工具调用残片，条文没改。）
+
+做了什么：
+
+1. **一次性交回**：`fleet-api acceptance-handback-once`（逻辑 `packages/engine/src/jobs/acceptance-handback-once.ts`，装配 `src/bin/acceptance-handback-once.ts`）。读出所有还开着的旧行（`acceptanceDutyState` 判 open，按仓 + 单分组），每条依次：在原单留言（哪个 PR、头、代次、哪条验收项；幂等键 `acceptance-handback:3630:<行 id>`）→ 贴「本机做」→ 把行的 `settled_at/settled_by/settled_evidence` 写成交回（`settled_by = 'handback:#3630'`）。只改状态，不删行；更新带 id + 代次 + 未结清条件，已交回的回 `already`、不重复写。前一步失败不做后一步，下次重跑从失败那步接着做；留言按键幂等，重跑不会重复留言。默认只读列出，`--apply` 才写；有失败退出 1，参数不对退出 2。
+2. **park-triage** 不再读 `acceptance_duties`：没有验收候选、核验会话、结清/替代、拍板卡；`parseCommanderAnswer` 不再收 `acceptanceVerdicts`。
+3. **看门狗** 只盯停下的任务；以前带 PR 后缀的验收卡下一轮自动撤。
+4. **管理入口和 CLI**：删 `packages/api/src/acceptance-cli.ts`、db 的 `acceptance-candidates.ts`（验收候选索引）、`acceptance-merge.ts`（历史归并）、`docs/acceptance-candidates.md`。
+5. **关单闸**：删 `packages/conventions/src/acceptance-gate.ts`；`issue:close`、`close-on-merge`、受管外部交付、`work run` 的交付判定都不再因验收责任挡。
+6. **保留**：表、旧行、迁移（含维护 `acceptance_candidate_groups` 的触发器）；工作流的 `acceptanceDuties` 活动和 `openAcceptanceDuties`（只读，在途任务重放和本机租约要用）；公开只读读口。
+
+法国怎么跑（留给发版或指挥官，本片不连生产库跑）：本 PR 发版上线后，在法国以 root 跑
+
+```
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api acceptance-handback-once
+```
+
+先看只读列出的条数和单号，再加 `--apply` 跑一次；退出码非 0 就看报错、修好再跑，可重复跑。跑完再跑一次不带 `--apply` 的，应报「没有还开着的验收责任」；原单上各有一条交回留言并贴了「本机做」。
+
+怎么验：park-triage 和看门狗不再出验收类提醒和卡（`packages/engine/test/park-triage.test.ts`、`test/real/park-triage.test.ts`、`test/watchdog-commander.test.ts` 断言了）；关单不再被验收责任挡（conventions 的 `issue-close`、`close-on-merge`、`work-run`、`managed-feedback` 测试）；交回的幂等和失败续跑见 `packages/engine/test/acceptance-handback-once.test.ts`、`packages/db/test/acceptance-handback.test.ts`。
+
+回退：回滚本 PR 即恢复上面那些读口、卡和闸；表没动，交回过的行按 `settled_by = 'handback:#3630'` 认得出，要恢复成开着就把这些行的 `settled_*` 三列一起置空。单上的留言和「本机做」标签不随回滚撤，要撤得手动。

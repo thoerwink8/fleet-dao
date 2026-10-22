@@ -50,7 +50,6 @@ import {
   saveTaskSnapshot,
   setChannelFallback,
   type TaskRoutePin,
-  upsertAcceptanceDuty,
   upsertAlert,
 } from '@fleet-dao/db';
 import { acceptanceDutyState, type HostId, type OrgKind, type StageKind } from '@fleet-dao/shared';
@@ -67,7 +66,6 @@ import {
 } from '../park-alerts.ts';
 import {
   type AcceptanceDuty,
-  type AcceptanceDutyRecord,
   type EnginePorts,
   type PickRouteResult,
   PortError,
@@ -1132,7 +1130,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
 // —— 验收责任（#3037，db 的 acceptance_duties）：冷验收转人的验收条，代码合了也留着原单，直到最终验收完成 ——
 // #3591（决定 0113）起引擎不再写新行，只读已有的旧行（工作流收尾的 acceptanceDuties 端口、本机租约收回）；
-// recordAcceptanceDuties 只剩测试拿来造旧行，下一片连同结清一起删。读不成一律抛
+// #3630 起写口全删（还开着的旧行由 jobs/acceptance-handback-once.ts 一次性交回原单）。读不成一律抛
 // ACCEPTANCE_DUTY_UNCHECKED（可重试）：调用方记「没查成」，不回空数组冒充「没有待验的」；读到空就是没有待验的。
 
 const dutyUnchecked = (what: string, error: unknown): PortError =>
@@ -1168,24 +1166,6 @@ function dutyOf(row: DutyRow): AcceptanceDuty {
   };
 }
 
-/** 一条要记的责任先核对形状：没有验收项、有 PR 却没有头的不记（记了也说不清是哪个头上转的）。 */
-function checkDutyRecord(r: AcceptanceDutyRecord): AcceptanceDutyRecord {
-  const items = [...new Set(r.items.map((i) => i.trim()).filter((i) => i !== ''))];
-  if (
-    items.length === 0 ||
-    !Number.isInteger(r.prNumber) ||
-    r.prNumber < 0 ||
-    r.prNumber > 0 !== (r.head !== '')
-  ) {
-    throw new PortError(
-      'ACCEPTANCE_DUTY_INVALID',
-      `验收责任记不了：要有验收项，PR 号和头要么都有、要么都没有（PR #${r.prNumber}、头「${r.head.slice(0, 12)}」、${items.length} 条）`,
-      { retryable: false },
-    );
-  }
-  return { ...r, items };
-}
-
 /**
  * 这张单还开着的验收责任（按记下的先后）。开不开照 shared 的 acceptanceDutyState（和受管 status、公开读口同一判法）：
  * 被已合已验的后续交付替代收口、且替代没过期的不算开着。读不成抛 ACCEPTANCE_DUTY_UNCHECKED。
@@ -1200,40 +1180,4 @@ export async function openAcceptanceDuties(db: Db, taskId: string): Promise<Acce
   } catch (error) {
     throw dutyUnchecked('读', error);
   }
-}
-
-/**
- * 记下几条验收责任，再读回这张单还开着的全部。按「单 + PR + 头」幂等：已有的那一行原验收项只并不删，合并回执只补不改
- * （已经记了合并提交的不覆盖），初建来源也不改——管理归并的目标不会被这次冷验收重放写成冷验收转的。
- * 没有新验收项时，最终验收完成过的那一行不会因为重来又开回去；有新项才换代并撤掉旧终态。
- */
-export async function recordAcceptanceDuties(
-  db: Db,
-  input: {
-    taskId: string;
-    repo: { owner: string; name: string };
-    issueNumber: number;
-    record: AcceptanceDutyRecord[];
-  },
-  now: Date,
-): Promise<AcceptanceDuty[]> {
-  const records = input.record.map(checkDutyRecord);
-  try {
-    for (const r of records) {
-      const values = {
-        taskId: input.taskId,
-        repo: `${input.repo.owner}/${input.repo.name}`,
-        issueNumber: input.issueNumber,
-        prNumber: r.prNumber,
-        head: r.head,
-        items: r.items,
-        source: r.prNumber === 0 ? 'coordination' : 'cold_verify',
-        ...(r.mergeCommit ? { mergeCommit: r.mergeCommit, mergedAt: now } : {}),
-      };
-      await upsertAcceptanceDuty(db, values);
-    }
-  } catch (error) {
-    throw dutyUnchecked('写', error);
-  }
-  return openAcceptanceDuties(db, input.taskId);
 }

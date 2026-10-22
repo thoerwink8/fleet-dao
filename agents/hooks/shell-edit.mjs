@@ -2,7 +2,7 @@
 // 为什么：派工交代里每次写「改代码只用 Edit/Write」，工人还是用 sed -i、node -e、cat >> 改文件；Bash 会吞反斜杠和 ${}，
 // 一次 sed 改坏过一行注释。交代拦不住，要在工具调用前当场拦（pretool.mjs 的 decide 只在 Bash 工具调用时接上这里）。
 // 判法：只看命令文字和文件系统，不跑 git，不联网（钩子每次调用都跑，要快）。
-// 「仓里」：从 cwd 往上找 .git（目录或文件都算）定仓根；目标在仓根下、又不在仓根的 _tmp/ 下，才算改仓里的文件。
+// 「仓里」：从 cwd 往上找 .git（目录或文件都算）定仓根；目标在仓根下、又不在任何一层 _tmp/ 下，才算改仓里的文件。
 // 宁可漏拦，不许误拦：路径是变量拼的、命令替换、cd 到看不清的地方之后的相对路径、仓根找不到、命令切不清，一律放行。
 // 只放行不拦的写法：目标在 _tmp/、仓外（含系统临时目录）、/dev/*；只读命令；heredoc 喂给 git、gh 这类不落盘的命令（正文不看）。
 import { existsSync } from 'node:fs';
@@ -342,7 +342,8 @@ function place(w, vcwd, root) {
   const under = (r) => {
     const rel = relative(r, abs).replace(/\\/g, '/');
     if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return null;
-    return rel === '_tmp' || rel.startsWith('_tmp/') ? 'tmp' : 'repo';
+    // .gitignore 的 `_tmp/` 没写前导斜杠，任何一层的 _tmp 目录都是忽略的临时目录，不算仓里的文件（#3631：cd 进子目录写 _tmp/ 被误拦）
+    return rel.split('/').includes('_tmp') ? 'tmp' : 'repo';
   };
   const mine = root === null ? null : under(root);
   if (mine !== null) return mine;

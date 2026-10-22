@@ -3,6 +3,8 @@
 //
 // claim：先查这张单有没有开着的 PR（「需求」栏挂着、或分支是 fleet/<单号>-、local/<单号>-）→ 有就停下不领；再经 /api/nodes/claims 登记
 //        （引擎停下等人的 stalled / parked 后端一步接手，叫停它再登记；引擎还在跑、排队的回 409，停下不领）→ 贴「本机做」→ 打出要用的分支名 local/<单号>-<短名>。
+//        claim <单号> --takeover-pr <PR> --head <完整40位>：引擎已停下、已有受管原 PR 的单走受管接手（后端现核唯一 PR/head/run、无活工人，叫停原 run 并登记 local），
+//        再反复确认原工作流终态、租约、PR/head 才报告可继续编码；没确认完不宣称交接，整条命令可重跑复核。普通 claim 有开着的 PR 仍拒。
 // renew：续租（会话在 local/<单号>- 分支上动着、或开着 PR 挂着这张单，法国自己会顺延，不用手动续；跑超过 2 小时的长测试前续一下）。
 // done：无 PR 的运维成功，凭真实验证先 issue:close --note 再记 done；有 PR 合并且单已关会自动收账。
 // 未完成的验收责任仍保留，done 不等于结清验收；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
@@ -27,7 +29,7 @@ import { localBranchPrefix } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { LOCAL_LABEL } from './labels.ts';
 import { managedWork, planManagedRework, validateManagedDelivery } from './managed-work.ts';
-import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
+import { type OpenPullRef, otherPrOnIssue, pullsOnIssue } from './pr-claims.ts';
 import { buildQueue, type LeaseRecord, type QueueDeps, readCurrentRepo, renderQueue } from './work-queue.ts';
 import {
   claimRunLock,
@@ -59,7 +61,14 @@ export const CLAIMS_URL_PATH = '/api/nodes/claims';
 
 /** 发给法国的那一条：形状和 shared 的 LocalClaimRequestSchema 一致（法国按它 strict 收，多一个字段 400）。 */
 export type LocalClaimRequest =
-  | { action: 'claim'; repo: string; issue: number; title: string }
+  | {
+      action: 'claim';
+      repo: string;
+      issue: number;
+      title: string;
+      takeoverPr?: { pr: number; head: string };
+    }
+  | { action: 'takeover_confirm'; repo: string; issue: number; takeoverPr: { pr: number; head: string } }
   | { action: 'renew'; repo: string; issue: number }
   | {
       action: 'finish';
@@ -70,7 +79,7 @@ export type LocalClaimRequest =
     };
 
 export const WORK_USAGE =
-  '用法：pnpm work claim <单号> | pnpm work renew <单号> | pnpm work done <单号> [--failed "原因" | --release "原因"] | pnpm work queue [--json]' +
+  '用法：pnpm work claim <单号> [--takeover-pr <PR号> --head <完整40位head>] | pnpm work renew <单号> | pnpm work done <单号> [--failed "原因" | --release "原因"] | pnpm work queue [--json]' +
   ' | pnpm work run <单号> [--brief <交代文件>] [--worktree <工作树>] [--again] | pnpm work rework <单号> | pnpm work runs';
 
 export interface ClaimsEndpoint {
@@ -132,6 +141,8 @@ export interface WorkDeps {
    */
   env?: NodeJS.ProcessEnv;
   root?: string;
+  /** 受管接手等原工作流确认终态：每轮之间等多久、最多问几轮。不给用默认（2 秒、30 轮）；测试注入假的。 */
+  takeoverWait?: { sleep: (ms: number) => Promise<void>; intervalMs: number; attempts: number };
   /** pnpm work run / runs 要的（work-run.ts）：容量、起脱离的进程、git、环境。不给就报没接上 */
   run?: {
     /** agents/hooks/capacity.mjs 的读数和判法：enough 是 null 表示没查成 */
@@ -199,6 +210,7 @@ interface Parsed {
   issue: number;
   failed?: string;
   release?: string;
+  takeover?: { pr: number; head: string };
 }
 
 function parse(argv: readonly string[]): Parsed {
@@ -208,9 +220,23 @@ function parse(argv: readonly string[]): Parsed {
   if (!Number.isSafeInteger(issue) || issue <= 0)
     throw new Error(`单号要是正整数：${n ?? '（没给）'}。${WORK_USAGE}`);
   const out: Parsed = { action, issue };
+  let takeoverPr: number | undefined;
+  let takeoverHead: string | undefined;
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i];
     const value = rest[i + 1];
+    if ((flag === '--takeover-pr' || flag === '--head') && action === 'claim' && value) {
+      if (flag === '--takeover-pr') {
+        const pr = Number(value);
+        if (!Number.isSafeInteger(pr) || pr <= 0) throw new Error(`--takeover-pr 要是正整数：${value}`);
+        takeoverPr = pr;
+      } else {
+        if (!/^[0-9a-f]{40}$/i.test(value)) throw new Error(`--head 要是完整 40 位 head：${value}`);
+        takeoverHead = value.toLowerCase();
+      }
+      i += 1;
+      continue;
+    }
     if (
       (flag === '--failed' || flag === '--release') &&
       action === 'done' &&
@@ -226,6 +252,10 @@ function parse(argv: readonly string[]): Parsed {
   }
   if (out.failed !== undefined && out.release !== undefined)
     throw new Error('--failed 和 --release 只能给一个');
+  if ((takeoverPr === undefined) !== (takeoverHead === undefined))
+    throw new Error(`--takeover-pr 和 --head 要一起给（精确 PR 号 + 完整 head）。${WORK_USAGE}`);
+  if (takeoverPr !== undefined && takeoverHead !== undefined)
+    out.takeover = { pr: takeoverPr, head: takeoverHead };
   return out;
 }
 
@@ -301,13 +331,25 @@ async function send(
     return { ok: true, leaseUntil: r.leaseUntil };
   }
   const why = (json as { error?: { message?: unknown } })?.error?.message;
+  const code = (json as { error?: { code?: unknown } })?.error?.code;
+  const takeover = body.action === 'takeover_confirm' || (body.action === 'claim' && body.takeoverPr);
   const hint =
-    res.status === 409 && body.action === 'claim'
+    res.status === 409 && body.action === 'claim' && !takeover
       ? '\n（引擎已经停下等人的单 claim 会自己接手；这张是引擎还在跑或排着的，等它停下再领，或在驾驶舱叫停它；不要不登记就开 PR）'
       : '';
-  throw new Error(
+  throw new ClaimsRefusal(
     `没登记上：法国回 ${res.status}：${typeof why === 'string' ? why : res.text.slice(0, 200)}${hint}`,
+    typeof code === 'string' ? code : '',
   );
+}
+
+/** 法国明确回了拒绝（带 error.code）；和「没回、认不出」区分开，接手要靠 code 认 takeover_pending。 */
+export class ClaimsRefusal extends Error {
+  readonly code: string;
+  constructor(message: string, code: string) {
+    super(message);
+    this.code = code;
+  }
 }
 
 /** 单的标题：认不出就用 #单号；不是开着的单抛 */
@@ -337,6 +379,113 @@ async function claimIssue(
     );
   }
   return got;
+}
+
+/**
+ * 受管接手前后的本机侧现核（后端另有独立现核，这里只是不白发请求）：这张单开着的 PR（Closes / 固定前缀分支）正好一个且就是 --takeover-pr，
+ * 同仓（非 fork）、OPEN、分支是本单引擎分支 fleet/<单号>-、head 完整对上。读不到、缺字段一律抛，不当成对得上。回原分支名。
+ */
+async function checkTakeoverPr(
+  deps: WorkDeps,
+  issue: number,
+  want: { pr: number; head: string },
+): Promise<string> {
+  const on = pullsOnIssue(await openPulls(deps.gh), issue, null);
+  if (on.length !== 1 || on[0]?.number !== want.pr) {
+    throw new Error(
+      `#${issue} 开着的 PR 是 ${on.length === 0 ? '无' : on.map((p) => `#${p.number}`).join('、')}，接手要求唯一且就是 #${want.pr}：不接手、不关别的 PR`,
+    );
+  }
+  const v = (await ghJson(
+    deps.gh,
+    ['pr', 'view', String(want.pr), '--json', 'number,state,headRefOid,headRefName,isCrossRepository'],
+    `PR #${want.pr}`,
+  )) as {
+    number?: unknown;
+    state?: unknown;
+    headRefOid?: unknown;
+    headRefName?: unknown;
+    isCrossRepository?: unknown;
+  };
+  if (v.number !== want.pr || v.state !== 'OPEN')
+    throw new Error(`PR #${want.pr} 不是开着的（${String(v.state)}），不接手`);
+  if (v.isCrossRepository !== false) throw new Error(`PR #${want.pr} 不是同仓分支（或没读到），不接手`);
+  if (typeof v.headRefName !== 'string' || !v.headRefName.startsWith(`fleet/${issue}-`)) {
+    throw new Error(
+      `PR #${want.pr} 的分支 ${String(v.headRefName)} 不是本单的引擎受管分支 fleet/${issue}-，不接手`,
+    );
+  }
+  if (typeof v.headRefOid !== 'string' || v.headRefOid.toLowerCase() !== want.head) {
+    throw new Error(
+      `PR #${want.pr} 现在的 head ${String(v.headRefOid)} 和 --head ${want.head} 对不上，不接手`,
+    );
+  }
+  return v.headRefName;
+}
+
+const UNKNOWN_HINT =
+  '（结果未知：法国可能已经收到信号或登记，责任保留；重跑同一条命令会复核恢复，不会新起工人或 PR）';
+
+/**
+ * pnpm work claim <单号> --takeover-pr <PR> --head <40 位>：受管接手引擎已停下、已有原 PR 的单。
+ * 登记（法国现核 PR/head/run/无活工人后叫停原 run 并登记 local 租约）≠ 交接完成：之后反复向法国确认「原工作流已结束、租约在、PR/head 仍对」，
+ * 确认到了才贴「本机做」并说可以继续编码；超时、断线、结果未知都带着可恢复的话退出 1。整条命令可重跑（重入只复核、续租）。
+ */
+async function takeoverClaim(
+  deps: WorkDeps,
+  repo: string,
+  issue: number,
+  title: string,
+  want: { pr: number; head: string },
+): Promise<void> {
+  await checkTakeoverPr(deps, issue, want);
+  let got: { leaseUntil: string | null };
+  try {
+    got = await send(deps, { action: 'claim', repo, issue, title: title.slice(0, 300), takeoverPr: want });
+  } catch (e) {
+    if (e instanceof ClaimsRefusal) throw e;
+    throw new Error(`${e instanceof Error ? e.message : String(e)}${UNKNOWN_HINT}`);
+  }
+  const until = got.leaseUntil;
+  if (until !== null) noteLease(deps, (l) => l.write({ repo, issue, leaseUntil: until }));
+  const wait = deps.takeoverWait ?? {
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    intervalMs: 2000,
+    attempts: 30,
+  };
+  let confirmed: { leaseUntil: string | null } | null = null;
+  let last = '';
+  for (let i = 0; i < wait.attempts && confirmed === null; i += 1) {
+    if (i > 0) await wait.sleep(wait.intervalMs);
+    try {
+      confirmed = await send(deps, { action: 'takeover_confirm', repo, issue, takeoverPr: want });
+    } catch (e) {
+      if (e instanceof ClaimsRefusal && e.code === 'takeover_pending') {
+        last = e.message;
+        continue;
+      }
+      if (e instanceof ClaimsRefusal) throw e;
+      last = `${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+  if (confirmed === null) {
+    throw new Error(
+      `#${issue} 已登记接手，但原工作流终态没确认，交接未完成，不要开始编码：${last}。责任保留在本机，稍后重跑同一条命令复核恢复。`,
+    );
+  }
+  const branch = await checkTakeoverPr(deps, issue, want);
+  const label = await deps.gh(['issue', 'edit', String(issue), '--add-label', LOCAL_LABEL]);
+  if (label.code !== 0) {
+    throw new Error(
+      `#${issue} 交接已确认，但「${LOCAL_LABEL}」没贴上（${(label.stderr || label.stdout).trim()}），不报完成：重跑同一条命令补贴`,
+    );
+  }
+  deps.out(
+    `接手了 #${issue}（租约到 ${confirmed.leaseUntil ?? '？'}）：原工作流已结束，沿用原 PR #${want.pr}（head ${want.head}）。`,
+  );
+  deps.out(
+    `继续在原分支 ${branch} 上改、推到原 PR，不要另开 PR 或新分支；放手 pnpm work done ${issue} --release "原因"`,
+  );
 }
 
 interface RunArgs {
@@ -653,6 +802,10 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
         state?: unknown;
       };
       const title = issueTitle(p.issue, issue);
+      if (p.takeover) {
+        await takeoverClaim(deps, repo, p.issue, title, p.takeover);
+        return 0;
+      }
       const got = await claimIssue(deps, repo, p.issue, title);
       deps.out(
         `领了 #${p.issue}（租约到 ${got.leaseUntil ?? '？'}）。分支用：${localBranchPrefix(p.issue)}${branchSlug(title)}`,

@@ -677,7 +677,7 @@ describe('【故意造出的失败】做不出来：回 unavailable（工作流�
     const got = await r.run(r.input(), ctx());
     expect(got.pass).toBe(false);
     expect(got.problems).toEqual([]);
-    expect(got.unavailable).toContain('没有一条以');
+    expect(got.unavailable).toContain('没有一条能挡');
   });
 
   it('路由在库里查不到（配置问题）：unavailable 写明库里没有这条路由；不起会话', async () => {

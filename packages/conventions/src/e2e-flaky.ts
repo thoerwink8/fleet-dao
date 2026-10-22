@@ -239,12 +239,16 @@ export const FLAKY_SUMMARY_TITLE = 'e2e 偶发：多条用例达阈值（汇总�
 export const ISSUE_KIND = '缺陷';
 const ISSUE_LABELS = [ISSUE_KIND, domainLabel('engine'), natureLabel('bug')];
 
-/** 正文的四节（场景、原话、已知的模块、怎么算做完）和 pnpm issue:new 开的单一样，不然引擎不拉、对账报缺。 */
-function issueSections(s: { scene: string[]; modules: string[]; done: string[] }): string {
+/** 正文的四节（场景、原话、已知的模块、怎么算做完）加缺陷类必填的「影响」，和 pnpm issue:new 开的单一样，不然引擎不拉、对账报缺。 */
+function issueSections(s: { scene: string[]; impact: string; modules: string[]; done: string[] }): string {
   return [
     '## 场景',
     '',
     ...s.scene,
+    '',
+    '## 影响',
+    '',
+    s.impact,
     '',
     '## 原话',
     '',
@@ -270,6 +274,7 @@ export function brokenRoundBody(urls: readonly string[]): string {
       '先看这几轮的日志找整轮的根子（备库、起服务、全局准备）：',
       ...urls.map((u) => `- ${u}`),
     ],
+    impact: '主线 CI 红：整轮 e2e 坏着，发版前的 e2e 把关形同虚设，每轮红都会打扰创始人。',
     modules: [
       '`packages/web/e2e/`（全局准备、备库、起服务）',
       '`packages/store/src/testing/pg-fixtures.ts`（样例库）',
@@ -291,6 +296,7 @@ export function flakySummaryBody(findings: readonly FlakyFinding[], until: strin
         (f) => `- \`${keyText(f.key)}\`：${f.bad}/${f.ran}，最近一次 ${f.urls[0] ?? '（没有链接）'}`,
       ),
     ],
+    impact: `主线 CI 红：${findings.length} 条用例偶发，主线 e2e 时红时绿，一轮做成率被拖低、冷验收可能被误拒。`,
     modules: ['`packages/web/e2e/`', '`packages/web/e2e/quarantine.json`'],
     done: [
       '找到这批用例共同的偶发根子并修掉（改用例、夹具或页面，不为凑绿放宽断言）；修不完的放进隔离集并各自开单限期',
@@ -449,6 +455,7 @@ export function issueBody(f: FlakyFinding, until: string, quarantined: boolean):
       '最近偶发的几轮：',
       ...f.urls.map((u) => `- ${u}`),
     ],
+    impact: `主线 CI 红：\`${keyText(f.key)}\` 近 ${FLAKY_WINDOW} 轮偶发 ${f.bad} 次，主线 e2e 时红时绿，一轮做成率被拖低、冷验收可能被误拒。`,
     modules: [`\`packages/web/e2e/specs/${f.key.file}\``, '`packages/web/e2e/quarantine.json`'],
     done: [
       `找到 \`${keyText(f.key)}\` 首跑红的时序或隔离上的根子并修掉（改用例或改页面，不为凑绿放宽断言）`,

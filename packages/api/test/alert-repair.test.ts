@@ -1096,8 +1096,8 @@ describe('发版卡住（真看门狗）：没有直接恢复入口时只能交�
     expect(opened.key).toBe(`alert-repair:${view?.incident}`);
     expect(opened.labels).toContain('缺陷');
     // 合规四节单，正文带着真看门狗写的键
-    expect(checkIssueBody(opened.body).ok).toBe(true);
-    for (const sec of ['## 场景', '## 原话', '## 已知的模块', '## 怎么算做完']) {
+    expect(checkIssueBody(opened.body, { kind: '缺陷' }).ok).toBe(true);
+    for (const sec of ['## 场景', '## 影响', '## 原话', '## 已知的模块', '## 怎么算做完']) {
       expect(opened.body).toContain(sec);
     }
     expect(opened.body).toContain(alert.dedupeKey ?? '');

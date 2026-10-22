@@ -347,124 +347,14 @@ describe('real/park-triage', () => {
     expect(judgeSpin(rounds ?? []).spinning).toBe(true);
   });
 
-  it('验收结清和 supersede 复用受管 store 的精确身份与代次核验', async () => {
-    const task = await seedTask();
-    const sourceHead = 'a'.repeat(40);
-    const finalHead = 'b'.repeat(40);
-    const [source] = await t.db
-      .insert(acceptanceDuties)
-      .values({
-        taskId: task.id,
-        repo: 'acme/app',
-        issueNumber: 7,
-        prNumber: 8,
-        head: sourceHead,
-        items: ['现场审计'],
-        source: 'cold_verify',
-        mergeCommit: null,
-      })
-      .returning();
-    const [target] = await t.db
-      .insert(acceptanceDuties)
-      .values({
-        taskId: task.id,
-        repo: 'acme/app',
-        issueNumber: 7,
-        prNumber: 8,
-        head: finalHead,
-        items: ['现场审计'],
-        source: 'cold_verify',
-        mergeCommit: 'c'.repeat(40),
-        settledAt: new Date(NOW.getTime() - 1_000),
-        settledBy: 'cold-verify',
-        settleEvidence: '最终头已验收',
-      })
-      .returning();
-    if (!source || !target) throw new Error('验收责任没写进去');
-    const d = deps();
-    await expect(
-      d.settleAcceptance?.({ task: {} as never, duty: source, evidence: '未合并' }),
-    ).rejects.toThrow();
-    await d.supersedeAcceptance?.({
-      task: {} as never,
-      source,
-      target,
-      evidence: '最终头覆盖旧头',
-      coverage: [{ source: '现场审计', target: '现场审计', basis: '同一条责任' }],
-    });
-    const rows = await t.db.select().from(acceptanceDuties);
-    expect(rows.find((row) => row.id === source.id)).toMatchObject({
-      supersededBy: COMMANDER_ACTOR,
-      successorId: target.id,
-    });
-  });
-
-  // —— #3497：验收机读/执行失败走真装配（候选查询、认领/重试记账、提醒、结清口子），不变成人工批准 ——
-  describe('验收责任：机读或执行失败不变成人工批准（#3497）', () => {
-    const OLD_HEAD = 'c'.repeat(40);
+  // —— #3630（决定 0113 第二片）：库里还开着的旧验收责任不再进指挥官 ——
+  describe('旧验收责任不再交指挥官（#3630）', () => {
     const HEAD = 'a'.repeat(40);
     const MERGE = 'b'.repeat(40);
-    const fence = (verdicts: unknown[]) =>
-      `\`\`\`json\n${JSON.stringify({ summary: '核过', acceptanceVerdicts: verdicts })}\n\`\`\``;
-    const verdictOf = (duty: { id: number; head: string }, extra: Record<string, unknown>) => ({
-      issue: 7,
-      dutyId: duty.id,
-      generation: 1,
-      prNumber: 8,
-      head: duty.head,
-      reason: '逐条核对后的结论',
-      ...extra,
-    });
-
-    /** 复现 #3438：当前头责任已结清，旧头责任没有合并回执仍 open。 */
-    async function seedOldHeadOpen(opts: { alsoOpenCurrent?: boolean } = {}) {
-      const task = await seedTask();
-      await t.db.insert(pullRequests).values({
-        repoId: task.repoId,
-        number: 8,
-        state: 'merged',
-        headRef: 'feat',
-        headSha: HEAD,
-        updatedAt: NOW,
-        mergedAt: new Date(NOW.getTime() - 60 * 60_000),
-        mergeSha: MERGE,
-      });
-      const base = { taskId: task.id, repo: 'acme/app', issueNumber: 7, prNumber: 8, source: 'cold_verify' };
-      const [oldDuty] = await t.db
-        .insert(acceptanceDuties)
-        .values({ ...base, head: OLD_HEAD, items: ['现场审计'], mergeCommit: null })
-        .returning();
-      const [currentDuty] = await t.db
-        .insert(acceptanceDuties)
-        .values({
-          ...base,
-          head: HEAD,
-          items: ['现场审计'],
-          mergeCommit: MERGE,
-          ...(opts.alsoOpenCurrent
-            ? {}
-            : {
-                settledAt: new Date(NOW.getTime() - 5 * 60_000),
-                settledBy: 'commander',
-                settleEvidence: '已验',
-              }),
-        })
-        .returning();
-      if (!oldDuty || !currentDuty) throw new Error('验收责任没写进去');
-      return { task, oldDuty, currentDuty };
-    }
-
-    const liveAcceptance = (
-      answer: string,
-      sessions: { n: number },
-      pull?: { number: number; merged: boolean; headSha: string },
-    ) => {
+    const live = (sessions: { n: number }) => {
       const base = parkTriageJob({
         db: t.db,
-        gh: {
-          readIssueState: async () => ({ state: 'open' }),
-          claims: { readPull: async () => pull ?? Promise.reject(new Error('测试里没读到 PR')) },
-        } as never,
+        gh: { readIssueState: async () => ({ state: 'open' }) } as never,
         trees: {} as never,
         exec: {} as never,
         tmpDir: '/tmp/none',
@@ -483,65 +373,12 @@ describe('real/park-triage', () => {
         tasks: async () => [],
         runSession: async () => {
           sessions.n += 1;
-          return { ok: true as const, answer, model: 'test-model' };
+          return { ok: true as const, answer: '```json\n{"verdicts":[]}\n```', model: 'test-model' };
         },
       };
     };
-    const noticeOf = async (taskId: string) =>
-      (await t.db.select().from(notifications)).find(
-        (n) => n.dedupeKey === `commander:${taskId}:acceptance:8`,
-      );
-    const retryRows = async () =>
-      (await t.db.select().from(auditLog)).filter((a) => a.action === COMMANDER_AUDIT_RETRY);
-    const dutyOf = async (id: number) =>
-      (await t.db.select().from(acceptanceDuties)).find((d) => d.id === id);
 
-    it('旧头没有合并回执、模型要 settle：不是「要你拍」，责任保持 open，记核验没成的重试，下一轮同一 head 再处理', async () => {
-      const { task, oldDuty } = await seedOldHeadOpen();
-      const sessions = { n: 0 };
-      const d = liveAcceptance(
-        fence([verdictOf(oldDuty, { action: 'settle', evidence: '最终头已验收' })]),
-        sessions,
-      );
-      const first = await triageParkedTasks(d);
-      expect(first).toMatchObject({ claimed: 1, left: [] });
-      expect(first.retrying).toEqual([
-        { ref: 'acme/app#7', why: expect.stringContaining('PR 没有合并回执') },
-      ]);
-      const notice = await noticeOf(task.id);
-      expect(notice).toMatchObject({ level: 'alert', decisionReason: null, decisionOptions: null });
-      expect(notice?.title).not.toContain('要你拍');
-      expect(notice?.body).not.toContain('仍留给创始人的证据');
-      expect(notice?.body).toContain('PR 没有合并回执');
-      expect((await dutyOf(oldDuty.id))?.settledAt).toBeNull();
-      const retries = await retryRows();
-      expect(retries).toHaveLength(1);
-      expect(retries[0]).toMatchObject({ ok: false, actorId: COMMANDER_ACTOR });
-      expect(retries[0]?.error).toContain('PR 没有合并回执');
-      expect(retries[0]?.after).toMatchObject({ kind: 'acceptance', cause: 'unverified', attempt: 1 });
-      // 下一轮：同一 head 又进候选、又起一次会话（重试抵销了认领）
-      const second = await triageParkedTasks(d);
-      expect(second.candidates).toBe(1);
-      expect(sessions.n).toBe(2);
-      // 第 3 次（预算用满）：仍记账，提醒如实写已试满
-      await triageParkedTasks(d);
-      expect(sessions.n).toBe(3);
-      expect(await retryRows()).toHaveLength(3);
-      expect((await noticeOf(task.id))?.body).toContain('已试满');
-      // 之后每一轮：不再起会话，但未核实责任带着真实原因（来自持久审计账）仍每轮报出来
-      for (let i = 0; i < 2; i++) {
-        const after = await triageParkedTasks(d);
-        expect(after.candidates).toBe(0);
-        expect(sessions.n).toBe(3);
-        expect(after.problems).toEqual([expect.stringContaining('PR 没有合并回执')]);
-        expect(after.problems[0]).toContain('验收责任仍未核实');
-      }
-      expect(await retryRows()).toHaveLength(3);
-      expect((await dutyOf(oldDuty.id))?.settledAt).toBeNull();
-      expect((await noticeOf(task.id))?.level).toBe('alert');
-    });
-
-    it('停写之后（#3591）：合并收尾、在途重试照样交来转人验收条，库里不落新行，指挥官没有候选、不起会话、不出「要你拍」；旧行照旧进候选', async () => {
+    it('合并超过 30 分钟、旧责任还开着：不认领、不起会话、不写任何提醒（没有「要你拍」、没有「没核完」「已试满」）', async () => {
       const task = await seedTask();
       await t.db.insert(pullRequests).values({
         repoId: task.repoId,
@@ -553,7 +390,17 @@ describe('real/park-triage', () => {
         mergedAt: new Date(NOW.getTime() - 60 * 60_000),
         mergeSha: MERGE,
       });
-      // 真端口：工作流收尾（和老历史在途重试带着 record）调的就是它
+      await t.db.insert(acceptanceDuties).values({
+        taskId: task.id,
+        repo: 'acme/app',
+        issueNumber: 7,
+        prNumber: 8,
+        source: 'cold_verify',
+        head: HEAD,
+        items: ['现场审计'],
+        mergeCommit: MERGE,
+      });
+      // 真端口：工作流收尾（和老历史在途重试带着 record）调的就是它，照旧只读、不落新行
       const store = createStorePorts({
         db: t.db,
         now: () => NOW,
@@ -572,176 +419,27 @@ describe('real/park-triage', () => {
             testCommand: 'pnpm check',
           },
           issueNumber: 7,
-          record: [{ prNumber: 8, head: HEAD, items: ['现场审计'], mergeCommit: MERGE }],
+          record: [{ prNumber: 8, head: 'c'.repeat(40), items: ['新的转人条'], mergeCommit: MERGE }],
         },
         { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1, lastHeartbeat: undefined },
       );
-      expect(read.open).toEqual([]);
-      expect(await t.db.select().from(acceptanceDuties)).toEqual([]);
+      expect(read.open).toHaveLength(1);
+      expect(await t.db.select().from(acceptanceDuties)).toHaveLength(1);
+
       const sessions = { n: 0 };
-      const d = liveAcceptance(fence([]), sessions);
-      const none = await triageParkedTasks(d);
-      expect(none.candidates).toBe(0);
-      expect(none.claimed).toBe(0);
+      const d = live(sessions);
+      for (const k of Object.keys(d)) expect(k).not.toMatch(/acceptance/i);
+      for (let i = 0; i < 4; i++) {
+        const out = await triageParkedTasks(d);
+        expect(out).toMatchObject({ candidates: 0, claimed: 0, left: [], retrying: [], problems: [] });
+      }
       expect(sessions.n).toBe(0);
-      expect((await t.db.select().from(notifications)).filter((n) => n.level === 'decision')).toEqual([]);
-      expect(await noticeOf(task.id)).toBeUndefined();
-      // 对照：#3037 时期留下的旧行（不动它们）照旧进候选——上面的 0 不是读法坏了
-      await t.db.insert(acceptanceDuties).values({
-        taskId: task.id,
-        repo: 'acme/app',
-        issueNumber: 7,
-        prNumber: 8,
-        source: 'cold_verify',
-        head: HEAD,
-        items: ['现场审计'],
-        mergeCommit: MERGE,
-      });
-      const old = await triageParkedTasks(d);
-      expect(old.candidates).toBe(1);
-    });
-
-    it('只有引擎可信来源证明的创始人证据才发「要你拍」，不记重试、不重复起会话', async () => {
-      const { task, oldDuty } = await seedOldHeadOpen();
-      const sessions = { n: 0 };
-      const d = {
-        ...liveAcceptance(
-          fence([verdictOf(oldDuty, { action: 'leave', humanOnly: '模型自述的缺口' })]),
-          sessions,
-        ),
-        acceptanceFounderFacts: async () => [
-          {
-            dutyId: oldDuty.id,
-            generation: oldDuty.generation,
-            prNumber: oldDuty.prNumber,
-            head: oldDuty.head,
-            kind: 'founder-decision' as const,
-            what: '线下合同签章确认',
-          },
-        ],
-      };
-      const out = await triageParkedTasks(d);
-      expect(out.left).toHaveLength(1);
-      expect(await noticeOf(task.id)).toMatchObject({ level: 'decision', decisionReason: 'human-only' });
-      expect((await noticeOf(task.id))?.body).toContain('线下合同签章确认');
-      expect((await noticeOf(task.id))?.body).not.toContain('模型自述的缺口');
-      expect(await retryRows()).toHaveLength(0);
-      // 真实操作记录里有这条转人的 commander.act（workflowId 是认领键）：之后每轮是「有结论」，不重复起会话也不重复报
-      const leaveActs = (await t.db.select().from(auditLog)).filter(
-        (a) => a.action === COMMANDER_AUDIT_ACT && (a.after as { action?: string }).action === 'leave',
-      );
-      expect(leaveActs).toHaveLength(1);
-      expect(leaveActs[0]?.after).toMatchObject({
-        workflowId: `acceptance:${task.id}:8:${HEAD}`,
-        parkSeq: 0,
-        dutyId: oldDuty.id,
-      });
-      const again = await triageParkedTasks(d);
-      expect(again.candidates).toBe(0);
-      expect(again.problems).toEqual([]);
-      expect(sessions.n).toBe(1);
-      expect((await dutyOf(oldDuty.id))?.settledAt).toBeNull();
-    });
-
-    it('真装配没有创始人证据来源：模型自称受限读不到证据、甚至自加 founder-only，都只留机读缺口并重试，不转人', async () => {
-      const { task, oldDuty } = await seedOldHeadOpen();
-      expect(deps().acceptanceFounderFacts).toBeUndefined();
-      const d = liveAcceptance(
-        fence([
-          verdictOf(oldDuty, {
-            action: 'leave',
-            leaveKind: 'founder-only',
-            humanOnly: '受限会话不能访问 Temporal/journal，请人帮忙',
-          }),
-        ]),
-        { n: 0 },
-      );
-      const out = await triageParkedTasks(d);
-      expect(out.left).toEqual([]);
-      expect(out.retrying).toHaveLength(1);
-      const notice = await noticeOf(task.id);
-      expect(notice).toMatchObject({ level: 'alert', decisionReason: null, decisionOptions: null });
-      expect(notice?.body).toContain('没有可信事实证明只有创始人能提供');
-      expect(notice?.body).toContain('模型自述（引擎未证实）');
-      expect(await retryRows()).toHaveLength(1);
-    });
-
-    it('部分结清、部分核验没成：只结清已核的那条（真实 CAS），失败那条保持 open 重试，不关单也不要你拍', async () => {
-      const { task, oldDuty, currentDuty } = await seedOldHeadOpen({ alsoOpenCurrent: true });
-      const d = liveAcceptance(
-        fence([
-          verdictOf(currentDuty, { action: 'settle', evidence: '现场日志与合并回执相符' }),
-          verdictOf(oldDuty, { action: 'settle', evidence: '同上' }),
-        ]),
-        { n: 0 },
-      );
-      // 真装配的读方暂时分不出义务来源（见下一条）；这里换成确定的可信读证，只测真实 CAS 结清
-      d.acceptanceTrustedRead = async (_task, duty) => ({
-        dutyId: duty.id,
-        generation: duty.generation,
-        prNumber: duty.prNumber,
-        head: duty.head,
-        mergedHead: duty.head,
-        items: duty.items.map((item) => ({ item, need: 'platform' as const, got: 'platform' as const })),
-      });
-      const out = await triageParkedTasks(d);
-      expect(out.acted).toEqual([
-        { ref: `acme/app#7/duty-${currentDuty.id}`, action: 'continue', source: 'verdict' },
-      ]);
-      expect(out.left).toEqual([]);
-      expect(out.retrying).toEqual([
-        { ref: 'acme/app#7', why: expect.stringContaining(`duty ${oldDuty.id}`) },
-      ]);
-      expect(await dutyOf(currentDuty.id)).toMatchObject({ settledBy: COMMANDER_ACTOR });
-      expect((await dutyOf(oldDuty.id))?.settledAt).toBeNull();
-      const notice = await noticeOf(task.id);
-      expect(notice).toMatchObject({ level: 'alert', decisionReason: null });
-      expect(notice?.body).toMatch(new RegExp(`duty ${currentDuty.id}[^\\n]*已按裁决收口`));
-      expect(notice?.body).toMatch(new RegExp(`duty ${oldDuty.id}[^\\n]*仍未收口`));
-      expect(out.problems).toEqual([]);
-    });
-
-    it('真装配的读证：现读 GitHub 得到实际已合的头，但义务来源分不出，所以不结清（#3579）', async () => {
-      const { task, currentDuty } = await seedOldHeadOpen({ alsoOpenCurrent: true });
-      const answer = fence([
-        verdictOf(currentDuty, { action: 'settle', evidence: '责任行 mergeCommit 与 CI 全绿' }),
-      ]);
-      const d = liveAcceptance(answer, { n: 0 }, { number: 8, merged: true, headSha: HEAD });
-      const read = await d.acceptanceTrustedRead?.(
-        { owner: 'acme', name: 'app' } as never,
-        currentDuty as never,
-      );
-      expect(read).toMatchObject({ dutyId: currentDuty.id, head: HEAD, mergedHead: HEAD });
-      expect(read?.items).toEqual([{ item: '现场审计', need: 'unknown', got: 'unknown' }]);
-      // PR 没合：mergedHead 为 null
-      const open = liveAcceptance(answer, { n: 0 }, { number: 8, merged: false, headSha: HEAD });
+      expect(await t.db.select().from(notifications)).toEqual([]);
       expect(
-        (await open.acceptanceTrustedRead?.({ owner: 'acme', name: 'app' } as never, currentDuty as never))
-          ?.mergedHead,
-      ).toBeNull();
-      const out = await triageParkedTasks(d);
-      expect(out.acted).toEqual([]);
-      expect((await dutyOf(currentDuty.id))?.settledAt).toBeNull();
-      expect(out.retrying).toEqual([{ ref: 'acme/app#7', why: expect.stringContaining('读方分不出') }]);
-      expect((await noticeOf(task.id))?.level).toBe('alert');
-      // GitHub 读不到：同样不结清
-      const broken = liveAcceptance(answer, { n: 0 });
-      expect((await triageParkedTasks(broken)).retrying).toEqual([
-        { ref: 'acme/app#7', why: expect.stringContaining('可信读证读取失败') },
-      ]);
-    });
-
-    it('主线头读不到：认领被抵销、下一轮再看，不静默吞掉', async () => {
-      const { oldDuty } = await seedOldHeadOpen();
-      const d = liveAcceptance(fence([verdictOf(oldDuty, { action: 'settle', evidence: 'x' })]), { n: 0 });
-      d.mainHead = async () => {
-        throw new Error('GitHub 暂时不可用');
-      };
-      const first = await triageParkedTasks(d);
-      expect(first.retrying).toHaveLength(1);
-      expect((await retryRows())[0]?.after).toMatchObject({ cause: 'session' });
-      d.mainHead = async () => 'f'.repeat(40);
-      expect((await triageParkedTasks(d)).candidates).toBe(1);
+        (await t.db.select().from(auditLog)).filter((a) =>
+          [COMMANDER_AUDIT_CLAIM, COMMANDER_AUDIT_RETRY, COMMANDER_AUDIT_ACT].includes(a.action),
+        ),
+      ).toEqual([]);
     });
   });
 

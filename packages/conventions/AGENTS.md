@@ -29,12 +29,13 @@
 - 只改一个包「对外面」以外的文件只测这个包自己（`package-surface.ts`）；认不出面就当整个包都是面。
 - 文档指针检查误报了就收窄 `doc-pointers.ts` 的规则，不往文档里加豁免；章节别光写「第 X 节」，写明是 design 还是 ops 的。
 - 合并闸：策略 reader 只在核准仓身份、PR 号和精确 head 后返回结构化 closed，不覆写已合旧头；`runMergeGate` 写模式退出码只表达是否算成并发表（0/2），不重复 required status 的裁决；`merge-gate.yml` 与 `managed-feedback.yml` 的写者必须共用 `merge-gate-${{ github.repository }}-pr-${{ matrix.pr }}` concurrency group，保持 `queue: max`、`cancel-in-progress: false`（`test/ci-plan.test.ts` 钉着）；批量入口只由 plan 列 PR、matrix 逐 PR 写。
-- `issue:close` 和 `close-on-merge` 收尾都现读数据库最终验收责任；`--note`、Bot 评论不能替代结清，没读成明确退出 2、不关单。`close-on-merge-gh.ts` 对写请求不重放，限流重试有 30 秒整轮预算。
+- `issue:close` 和 `close-on-merge` 不再读验收责任（#3630，决定 0113 第二片），只看受管工作的关单检查。`close-on-merge-gh.ts` 对写请求不重放，限流重试有 30 秒整轮预算。
 - 新 PR 的需求行完成用 `Closes #号`，分片用 `Refs #号（分片、关不了它）`；手写正文的裸 Refs 在任何推送或 GitHub 写入前拒绝。`pr-open` 同步 GitHub 运输用 `pr-arm.ts` 的 `livePrGh`，显式传 canonical repo。
 - 查询轴：`issue:new`、`pr:open` 显式带 `--domain engine|api|mirasim --nature bug|perf|process`；`issue:batch` 母单必须提供两轴，子单可逐轴继承，整批写入前检查；`query-metadata.yml` 不猜、不改排期。
 - 母子单：`mother-manifest.ts` 严格读写正文 JSON 清单，批量写失败整批补偿；`issue:new --parent` 清单失败须明说子单已开已挂，不能建议重开。空母单只对批量创建标记报错。
 - 通行证只在内存和子进程环境变量，所有输出先 `redact`（`machine.ts`）；对外仓引导里原话只进私有待传目录，公开文件和单只用 meaning。
 - `pnpm project check|add`：装没装只信 `fleet-api project installations`（逐字段严格认，「没查成」退出码 2，不当没装）；冒烟单有没有只信列表直接列全和回执单号直读，搜索索引的空不算没有，回执对不上不补开第二张。`ci-policy-bridge.ts` 不得加 caller mode、策略快照或旧 off fallback，没收到响应头的网络失败重读一次，收到响应的不重读。
+- 本机接手已有 PR 的停下任务（`work.ts`）：只有显式 `work claim <单号> --takeover-pr <PR> --head <完整40位>` 保留匹配的原 PR，普通 claim 的开放 PR 拒绝不变。本机先核唯一原 PR/同仓/OPEN/fleet/<单号>- 分支/完整 head，再发 claim（带 `takeoverPr`，后端用自己的 PR 镜像、run、受管执行操作和 Temporal 精确 run 独立现核），然后轮询 `takeover_confirm`；`takeover_pending` 是原工作流终态晚到，只重试不宣称完成。信号受理≠交接完成：确认过、PR/head 再核过、贴标成功才输出可继续编码。结果未知/断线/贴标失败都退出 1，重跑同一命令复核恢复。
 - 本机显式退回协议（`managed-feedback*.ts`、`managed-work.ts`）：只接受可信 Actions Bot 的 COMMENTED 明确协议；工人退出码成功但交付没核上时只退避复核不再起 CLI；issue 已关闭、伪造本分支 PR、待审查都不算交付；返工用 `pnpm work rework <单号>`，同一代次只起一个工人；不手写 state/result，不杀进程。
 
 ## 测试

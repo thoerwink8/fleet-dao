@@ -203,8 +203,7 @@ export function parseInstalledOutput(tool: string, stdout: string): string | nul
   }
   if (tool === 'reclaude') {
     // reclaude --version 打的是被包装的 Claude Code 版本（「2.1.308 (Claude Code)」），不是它自己的；目前没有任何经证实的
-    // reclaude 自身版本输出格式，所以这里什么都不认：裸 semver、「reclaude x.y.z」之类没证实的写法一律当来源不明，
-    // 等有了可信的只读来源（见 deploy/france/fleet-agent-scope.sh 的 probe_reclaude）再按证实的格式加。
+    // reclaude 自身版本输出格式，所以这里什么都不认。受管帮手只读平台和二进制摘要，另经 matchReclaudeArtifact 对官方清单。
     return null;
   }
   const m = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(text);
@@ -263,6 +262,40 @@ export function parseReclaudeStable(body: string): { latest: string; versions: n
   const cleaned = version.trim().replace(/^v/, '');
   if (!parseVersion(cleaned)) return { error: `reclaude 的版本认不出：${version}` };
   return { latest: cleaned, versions: null };
+}
+
+/** 帮手的只读摘要必须与这一轮官方 stable.json 的对应平台逐字节相符，不能只借 latest 猜在用版本。 */
+export function matchReclaudeArtifact(
+  stdout: string,
+  stableBody: string,
+): { version: string } | { error: string } {
+  const stable = parseReclaudeStable(stableBody);
+  if ('error' in stable) return stable;
+  let probe: unknown;
+  try {
+    probe = JSON.parse(stdout);
+  } catch {
+    return { error: '来源不明：reclaude 安装摘要不是 JSON' };
+  }
+  if (!probe || typeof probe !== 'object') return { error: '来源不明：reclaude 安装摘要认不出' };
+  const { source, platform, sha256 } = probe as Record<string, unknown>;
+  if (
+    source !== 'reclaude-binary-sha256' ||
+    (platform !== 'linux-amd64' && platform !== 'linux-arm64') ||
+    typeof sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(sha256)
+  )
+    return { error: '来源不明：reclaude 安装摘要缺少可信来源、平台或 SHA256' };
+  const binaries = (JSON.parse(stableBody) as { binaries?: Record<string, unknown> }).binaries;
+  const artifact = binaries?.[platform];
+  if (!artifact || typeof artifact !== 'object')
+    return { error: `来源不明：reclaude 官方清单没有 ${platform} artifact` };
+  const expected = (artifact as { sha256?: unknown }).sha256;
+  if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected))
+    return { error: `来源不明：reclaude 官方 ${platform} artifact 缺少有效 SHA256` };
+  if (sha256 !== expected)
+    return { error: `来源不明：reclaude 在用二进制与官方 ${platform} artifact 摘要不符` };
+  return { version: stable.latest };
 }
 
 export function parseCursorChangelog(md: string): { latest: string; versions: string[] } | { error: string } {

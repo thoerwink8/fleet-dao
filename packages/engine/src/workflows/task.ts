@@ -392,7 +392,7 @@ class TaskFlow {
       : `全程：推送 ${MAX_FULL_PUSHES} 次还没合`;
     const detail = `最近的意见：${problems}。点「继续」两样都从 0 再计、重读单子，接着续同一个会话修；或「放弃」。`;
     // 累计动手到了总轮数上限（#3603）：交还本机，等带原因的「继续」，不走下面的普通停下
-    if (!(await rt.holdAtTotalRounds(title, detail, 'stuck'))) {
+    if (!(await rt.holdAtTotalRounds(title, detail))) {
       await rt.park(title, detail, 'stuck', 'rounds');
     }
     rt.fullPushes = 0;
