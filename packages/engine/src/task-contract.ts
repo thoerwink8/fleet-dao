@@ -606,7 +606,7 @@ export interface ColdVerifyResult {
   contractChanged?: true;
   /** 验收有结论且通过。 */
   pass: boolean;
-  /** 只有三种能挡：没做到验收条、弄坏了原有功能、安全或丢数据。 */
+  /** 只有三类能挡（决定 0115）：没做到验收条；有具体证据弄坏了原有功能；有具体位置的安全或丢数据。推测和验收条以外的意见进建议、不在这里。 */
   problems: string[];
   notes?: string;
   round: 1 | 2;
