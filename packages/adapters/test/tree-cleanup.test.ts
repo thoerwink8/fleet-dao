@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CLEANUP_PAGE_LIMITS,
   cleanupStatus,
+  invokeTreeHelper,
   readCleanupNamespace,
   readTreeUsage,
   readTreeUsageDetail,
@@ -356,6 +357,35 @@ describe('tree-usage 读不出 idle/busy 时带有界的原因类别（#3557）'
     });
     expect(reading.reason).toBe('call-failed');
     bounded(reading);
+  });
+
+  it('帮手错误对象也不带 stderr、stdout、命令行或取消原文', async () => {
+    const secret = 'TOKEN=ghp_secret sudo -n /usr/local/sbin/fleet-agent-scope ps aux';
+    process.env.FLEET_FAKE_SCOPE_USAGE_EXIT = '3';
+    process.env.FLEET_FAKE_SCOPE_USAGE_STDOUT = secret;
+    process.env.FLEET_FAKE_SCOPE_USAGE_STDERR = secret;
+    const failed = await invokeTreeHelper(options, ['tree-usage', place.lex]).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failed).toBeInstanceOf(Error);
+    const failedText = String((failed as Error).message);
+    expect(failedText).not.toContain('ghp_secret');
+    expect(failedText).not.toContain('fleet-agent-scope');
+    expect(Buffer.byteLength(failedText)).toBeLessThanOrEqual(160);
+    const controller = new AbortController();
+    controller.abort(secret);
+    const aborted = await invokeTreeHelper({ ...options, signal: controller.signal }, [
+      'tree-usage',
+      place.lex,
+    ]).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(aborted).toBeInstanceOf(Error);
+    const abortedText = String((aborted as Error).message);
+    expect(abortedText).not.toContain('ghp_secret');
+    expect(abortedText).not.toContain('fleet-agent-scope');
   });
 
   it('本端期限到了杀掉帮手才算超时', async () => {

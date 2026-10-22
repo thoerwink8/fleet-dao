@@ -69,8 +69,7 @@ function fault<E extends object>(error: E, reason: TreeUsageReason, exitCode?: n
 
 async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> {
   if (options.signal?.aborted) {
-    const why: unknown = options.signal.reason;
-    throw fault(why && typeof why === 'object' ? why : new Error('受管帮手调用已取消'), 'aborted');
+    throw fault(new Error('受管帮手调用已取消'), 'aborted');
   }
   const [bin, ...rest] = [
     ...(options.sudo ?? ['/usr/bin/sudo', '-n']),
@@ -87,7 +86,7 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
         maxBuffer: 128 * 1024,
         ...(options.signal ? { signal: options.signal } : {}),
       },
-      (error, stdout, stderr) => {
+      (error, stdout) => {
         if (error) {
           const exitCode = typeof error.code === 'number' ? error.code : null;
           // 取消先认（取消也会杀帮手）；回执超出缓冲是协议坏；剩下只有本端期限到了才会自己杀帮手。
@@ -99,16 +98,7 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
                 : error.killed && error.signal === 'SIGTERM'
                   ? 'timeout'
                   : 'call-failed';
-          return reject(
-            fault(
-              new TreeHelperError(
-                `受管删树未完成：${stderr.slice(0, 1000)} ${stdout.slice(0, 2000)} ${error.message}`,
-                exitCode,
-              ),
-              reason,
-              exitCode,
-            ),
-          );
+          return reject(fault(new TreeHelperError(`受管删树未完成：${reason}`, exitCode), reason, exitCode));
         }
         let unknownReply: Reply | undefined;
         try {
