@@ -15,7 +15,7 @@
 //   直连 GitHub 又在 3 秒内没回，而本机 Clash 口 127.0.0.1:7890 是通的（手动 git -c http.proxy=… fetch 立刻成功），
 //   钩子只会「环境代理 → 直连」，子代理一个都派不出去。所以每台机器可以在 ~/.fleet-dao/fallback-proxy（不进仓、不是密钥）
 //   第一行写一个 http:// 或 socks5:// 地址，前两条路都没成才经它取一次（via 为 'fallback'）。读法见 git-run.mjs 的 readFallbackProxy。
-//   三条路的预算见下面 SUBAGENT_* 的注释：环境 6 秒 / 直连 3 秒 / 备用 3 秒，靠总预算 6 秒压住，不会撑破钩子的 10 秒。
+//   三条路的预算见下面 SUBAGENT_* 的注释：环境 6 秒 / 直连 3 秒 / 备用 3 秒，靠总预算 9 秒压住，不会撑破钩子的 10 秒。
 //   只有建工作树（isolation 是 worktree）的派工才取远端，其余一条 git 都不跑（单 #3588：124 次里大半白付了 p50 838 毫秒、最长近 10 秒）。
 // - 同一个仓三分钟内刚取成过就不再取（记在 ~/.fleet-dao/fetch-ok/）。开会话钩子取成功也会记一笔，
 //   接着起的子代理不再各付一次 6 秒。取失败不记：要建工作树的子代理仍给提示，下一轮还会再试。
@@ -106,7 +106,7 @@ export function fetchWithFallback(git, cwd, args, h) {
 const MIN_TRY_MS = 1_000;
 
 /**
- * 起子代理前取远端的时间预算：调工具前钩子总共只有 10 秒（targets.ts），三条路加起来要留出余量，总预算 6 秒（加 node 启动和容量读数仍留 1 秒以上余量，测试钉着）。
+ * 起子代理前取远端的时间预算：调工具前钩子总共只有 10 秒（targets.ts），三条路加起来要留出余量，总预算 9 秒（只有建工作树的派工才取，次数已大降；预算太小环境代理一超时，直连和备用两条路都会被跳过）。
  * 首选路（环境里的代理，reclaude 的口）给 6 秒——同时起了十来个子代理，代理瞬时慢过 4 秒，三个带工作树的子代理被误拦；
  * 直连只是兜底给 3 秒（这台机器直连常常要 20 多秒才报超时）；
  * 备用代理（~/.fleet-dao/fallback-proxy，本机的 Clash 口）给 3 秒——第三条路，为什么有它见文件头「第三条路」那段。
@@ -116,7 +116,7 @@ const MIN_TRY_MS = 1_000;
 export const SUBAGENT_FETCH_MS = 6_000;
 export const SUBAGENT_DIRECT_MS = 3_000;
 export const SUBAGENT_FALLBACK_MS = 3_000;
-export const SUBAGENT_BUDGET_MS = 6_000;
+export const SUBAGENT_BUDGET_MS = 9_000;
 /** 这个仓刚取成 origin 的有效期。和开会话钩子的 QUIET_MS 一样是 3 分钟。 */
 export const FETCH_QUIET_MS = 3 * 60_000;
 
