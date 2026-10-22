@@ -47,7 +47,7 @@
 //   可以重试。
 
 import { randomUUID } from 'node:crypto';
-import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
+import { COLD_VERIFY_CONTEXT, LOCAL_LABEL } from '@fleet-dao/conventions';
 import type { ClaimsGitHub, GitHub, RepoRef } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -157,7 +157,12 @@ export interface ColdVerifyActivityDeps {
    * 不给 = 留不了言，只写进结论的 notes。fetchCommitHead：生产在检出前补齐既定头；测试未接仍核原镜像。
    */
   gh: Pick<EngineGitHub, 'pullFiles' | 'claims'> &
-    Partial<Pick<GitHub, 'commentIssue' | 'fetchCommitHead' | 'fetchMainline' | 'readIssue' | 'readSpecDoc'>>;
+    Partial<
+      Pick<
+        GitHub,
+        'commentIssue' | 'addIssueLabel' | 'fetchCommitHead' | 'fetchMainline' | 'readIssue' | 'readSpecDoc'
+      >
+    >;
   /** 选路（store-ports 的 pickRoute）：按族问「这一族此刻有没有能派的路由」。 */
   pickRoute: (input: PickRouteInput, ctx: PortContext) => Promise<PickRouteResult>;
   /** 生产 Spawner 要的东西（路由查询、各家执行方式的驱动、会话临时目录、资源上限）；会话用户的空目录也经它的 trees 备。 */
@@ -1055,24 +1060,46 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     suggestions: readonly string[],
   ): Promise<string> {
     const commentIssue = deps.gh.commentIssue;
-    if (commentIssue === undefined) return `不归我验的 ${items.length} 条没处留言（没接留言口），要人看结论`;
-    const body = handoffBody(input, items, suggestions);
+    let said: string;
+    if (commentIssue === undefined) {
+      said = `不归我验的 ${items.length} 条没处留言（没接留言口），要人看结论`;
+    } else {
+      try {
+        await commentIssue({
+          repo: refOf(input.repo),
+          issueNumber: input.issueNumber,
+          key: `cold-verify-out-of-scope:${input.prNumber}:${input.headSha}`,
+          body: handoffBody(input, items, suggestions),
+        });
+        said = `不归我验的 ${items.length} 条已留言到单 #${input.issueNumber}，转给人验`;
+      } catch (error) {
+        log('验收「不归我验」的条目没留成言（结论不改）', {
+          issueNumber: input.issueNumber,
+          prNumber: input.prNumber,
+          error: errMessage(error),
+        });
+        said = `不归我验的 ${items.length} 条没留成言（${errMessage(error).slice(0, 200)}），要人看结论`;
+      }
+    }
+    // #3601：#3591 起不再记库，单上的「本机做」是转人之后唯一让队列看得到这张单的东西。
+    // 在活动内部、和留言同一次写 GitHub 里贴，工作流步序不变；贴不成照实抛（可重试，留言有幂等键），不吞。
+    const addIssueLabel = deps.gh.addIssueLabel;
+    if (addIssueLabel === undefined) return `${said}；没接贴标签口，单上没贴「${LOCAL_LABEL}」`;
     try {
-      await commentIssue({
-        repo: refOf(input.repo),
-        issueNumber: input.issueNumber,
-        key: `cold-verify-out-of-scope:${input.prNumber}:${input.headSha}`,
-        body,
-      });
-      return `不归我验的 ${items.length} 条已留言到单 #${input.issueNumber}，转给人验`;
+      await addIssueLabel({ repo: refOf(input.repo), issueNumber: input.issueNumber, label: LOCAL_LABEL });
     } catch (error) {
-      log('验收「不归我验」的条目没留成言（结论不改）', {
+      log('验收转人后给单贴「本机做」没贴成', {
         issueNumber: input.issueNumber,
         prNumber: input.prNumber,
         error: errMessage(error),
       });
-      return `不归我验的 ${items.length} 条没留成言（${errMessage(error).slice(0, 200)}），要人看结论`;
+      throw new PortError(
+        'COLD_VERIFY_HANDOFF_LABEL_FAILED',
+        `验收转人后给单 #${input.issueNumber} 贴「${LOCAL_LABEL}」没贴成：${errMessage(error)}`,
+        { retryable: true },
+      );
     }
+    return `${said}；已贴「${LOCAL_LABEL}」`;
   }
 }
 
