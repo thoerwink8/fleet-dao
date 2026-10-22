@@ -7,6 +7,7 @@
 //   发给工作流的信号只记日志，不接 Temporal。
 import {
   claimLocalTask,
+  confirmLocalTakeover,
   createDb,
   feishuPushFacts,
   finishLocalTask,
@@ -263,6 +264,7 @@ async function assemble(): Promise<{
     // 本机领单（决定 0096）：本机会话经通行证写 tasks 那一行（executor = local、带租约），法国拉单按它不接、到期收回
     localClaims: pgLocalClaims({
       claim: (i) => claimLocalTask(db, i),
+      confirmTakeover: (i) => confirmLocalTakeover(db, i),
       renew: (i) => renewLocalTask(db, i),
       finish: (i) => finishLocalTask(db, i),
       list: (now) => listLocalClaims(db, now),
