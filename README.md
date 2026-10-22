@@ -67,7 +67,6 @@
 - 无人值守接续：Claude/Codex 用同步 Stop 把未完成工作送到下一轮，成功 PostToolUse 登记实质进展；后台任务条数不证明完成通知送达。连续三次无进展明确暂停故障；on 只记意图，不代表已安装、信任、执行或通知验证。各入口能力与验法见 [CLI 无人值守接续](docs/design/CLI无人值守接续.md)。
 - `pnpm work run <单号>` 登记真实 Claude session / Codex thread，开启无人值守后由同步 Stop 一次性消费本会话终态；Codex 后台完成不主动开新轮。只有 `CODEX_SESSION_ID` 的 root-session 不代替 thread；缺归属及旧 `dispatcher=null` 记录用 `pnpm work runs` 手工读取，续跑不改原归属。
 
-- 已有受管 PR 的停下任务本机接手：`pnpm work claim <单号> --takeover-pr <PR号> --head <完整40位head>`（两个参数缺一不可；普通 `claim` 遇同单开放 PR 仍拒绝）。后端独立现核唯一同仓原 PR、完整 head、原 workflow/run、无未结束 run、无未结清受管执行操作，只对读到的精确 run 发 taskAbandon 并登记 local 租约；随后反复确认「原工作流已结束、租约在、PR/head 仍对」，确认到才贴「本机做」并报可继续在原分支编码。超时、断线、结果未知、贴标失败都退出 1 并保留本机责任，重跑同一条命令即复核恢复，不新起工人或 PR；不加预算、不关 PR、不放弃活工人。
 - 本机受管工人的审查退回：`pnpm work return <单号> --body-file <完整意见文件>` 交由退回专用工作流与既有合并闸按同一 PR 串行登记；先核实 PR 级 PREPARE，再写当前头阻合状态和正式 review 回执，未结 PREPARE 跨换头/强推继续阻合；只有核实真实状态与正式回执才报 `registered/blocked`，`queued/unconfirmed` 不代表已阻止合并。`pnpm work feedback <单号> [--wait|--retry]` 读取完整意见、等 Actions 结果或按原请求重试，取消、超时和断线保留本机意图。工人用 `pnpm work ack <单号> --return <编号>` 确认收到；审查方用 `pnpm work resolve <单号> --return <编号> --body-file <核验依据>` 对精确候选 head 解除责任；ack、CI 绿和新 head 都不代替 resolve。交付用 `pnpm work deliver <单号>`，不会擅自解除手工草稿。当前显式退回事务只允许个人仓 owner 发起，工人不能替审查方 resolve；普通组织仓和没有退回协议的本机 PR 保留原判法。
 
 ### 真 Temporal 测试准备
