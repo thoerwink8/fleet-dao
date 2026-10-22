@@ -16,7 +16,7 @@ import {
 import { fakeAgent, fixturePath, tempDir } from './helpers.ts';
 
 const onPosix = process.platform !== 'win32';
-const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.ts');
+const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.mjs');
 
 describe('scope 的参数与环境', () => {
   const scope: CgroupScope = {

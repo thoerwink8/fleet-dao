@@ -5,7 +5,7 @@
 //   这几条真正走了 bridge.ts 自己的代码，不是只测连接器这一层。
 //
 // 传参数给假 / 真桥接用 FLEET_ 前缀的环境变量：桥接进程的环境是经（假）帮手脚本重新拼的，只放行 FLEET_* 这几类
-// （procs.ts 的 scopeLaunch、fake-scope-helper.ts 同一条白名单），所以在测试进程自己的 process.env 上设不管用——
+// （procs.ts 的 scopeLaunch、fake-scope-helper.mjs 同一条白名单），所以在测试进程自己的 process.env 上设不管用——
 // 要经 spawn 选项，把变量放进直接起帮手那一层的环境，帮手会把 FLEET_* 的原样递给它起的桥接。
 import { type ChildProcess, spawn as nodeSpawn, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -18,7 +18,7 @@ import { tempDir } from './helpers.ts';
 import { startWsServer } from './ws-server.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const FAKE_SCOPE_HELPER = join(here, 'fake-scope-helper.ts');
+const FAKE_SCOPE_HELPER = join(here, 'fake-scope-helper.mjs');
 const FAKE_BRIDGE = join(here, 'fake-bridge.ts');
 const REAL_BRIDGE = join(here, '..', 'src', 'mirasim', 'bridge.ts');
 const onPosix = process.platform !== 'win32';

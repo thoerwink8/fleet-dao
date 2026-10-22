@@ -1,13 +1,20 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
-import { CLEANUP_PAGE_LIMITS, cleanupStatus, readCleanupNamespace } from '../src/tree-cleanup.ts';
+import { afterEach, describe, expect, it, onTestFailed } from 'vitest';
+import {
+  CLEANUP_PAGE_LIMITS,
+  cleanupStatus,
+  type HelperWaitStage,
+  helperWaitStage,
+  readCleanupNamespace,
+  TreeHelperError,
+} from '../src/tree-cleanup.ts';
 
 const root = '/var/lib/fleet-work';
 const options = {
-  helper: join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.ts'),
+  helper: join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.mjs'),
   sudo: [process.execPath],
 };
 const namespace = {
@@ -17,6 +24,25 @@ const namespace = {
   ino: '2',
   uid: '0',
 };
+function shown(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+  return String(error);
+}
+
+async function failedHelper(): Promise<never> {
+  try {
+    await readCleanupNamespace(root, options);
+  } catch (error) {
+    const message = shown(error);
+    expect(message).not.toContain('fake-scope-helper');
+    expect(message).not.toContain('FLEET_FAKE_SCOPE');
+    expect(message).not.toContain(process.execPath);
+    throw error;
+  }
+  throw new Error('失败被当成完成');
+}
+
 function reply(over: Record<string, unknown> = {}) {
   process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT = JSON.stringify({
     version: 1,
@@ -27,18 +53,53 @@ function reply(over: Record<string, unknown> = {}) {
     ...over,
   });
 }
+function reapHoldChild(): void {
+  const file = process.env.FLEET_FAKE_SCOPE_HOLD_PIDFILE;
+  if (!file) return;
+  try {
+    const pid = Number(readFileSync(file, 'utf8'));
+    if (Number.isInteger(pid) && pid > 1) process.kill(pid, 'SIGKILL');
+  } catch {
+    // 没写出来，或子进程已经退了。
+  }
+}
+
 afterEach(() => {
+  reapHoldChild();
   delete process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT;
   delete process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT;
+  delete process.env.FLEET_FAKE_SCOPE_HOLD;
+  delete process.env.FLEET_FAKE_SCOPE_HOLD_MS;
+  delete process.env.FLEET_FAKE_SCOPE_HOLD_PIDFILE;
 });
 
 describe('cleanup-status 原帮手端口的命名空间事实', () => {
+  // 首红：head fc1c891ef0d595c170e35cab1920bf814fb179aa，
+  // Actions run 39492760116 attempt 1，job test (3/8)，vitest 默认 5000ms。
+  // 那次日志没有启动/协议读取/退出/异步收尾。本用例再通过，也不能把当时卡在哪一段写成已经知道。
   it('正常空/已结记录不进pending；未结记录原样保留', async () => {
+    // 三步各起两次帮手（capabilities + cleanup-status）。超时只报一个阶段分不清是一次卡死还是六次都慢，
+    // 所以连第几步、哪个动作、这一段等了多久、整条用例用了多久一起报。
+    const begun = Date.now();
+    let step = '';
+    onTestFailed(({ task }) => {
+      const now = TreeHelperError.pending;
+      if (!now) return;
+      const timedOut = (task.result?.errors ?? []).some((error) => /timed out|5000/.test(shown(error)));
+      if (!timedOut) return;
+      const at = Date.now();
+      throw new Error(
+        `帮手等待：步骤=${step} 动作=${now.action} 阶段=${now.stage} 已启动=${now.spawned ? '是' : '否'} 已读字节=${now.stdoutBytes} 本段已等${at - now.stageAt}ms 本次调用${at - now.startedAt}ms 用例共${at - begun}ms。原首红 head fc1c891ef0d595c170e35cab1920bf814fb179aa、run 39492760116、attempt 1、test (3/8) 的 5000ms 没有这些，当时卡在哪一段仍未知`,
+      );
+    });
+    step = '1/3 读空';
     reply();
     expect(await readCleanupNamespace(root, options)).toEqual([]);
     const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
     reply({ rows });
+    step = '2/3 读未结';
     expect(await readCleanupNamespace(root, options)).toEqual(rows);
+    step = '3/3 cleanupStatus';
     expect(await cleanupStatus(options)).toEqual(rows);
   });
 
@@ -59,10 +120,285 @@ describe('cleanup-status 原帮手端口的命名空间事实', () => {
   it('帮手因文件/链接/权限/坏记录失败，不当成空；原cleanupStatus截断仍拒绝', async () => {
     reply();
     process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT = '1';
-    await expect(readCleanupNamespace(root, options)).rejects.toThrow();
+    await expect(failedHelper()).rejects.toThrow('退出码 1');
+    // 先过了 capabilities，失败要记在真正退出非 0 的 cleanup-status 上。
+    await expect(failedHelper()).rejects.toThrow(
+      /动作=cleanup-status 等待阶段=\S+ 已启动=是 已读字节=\d+ 本段已等\d+ms 共\d+ms/,
+    );
     delete process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT;
     reply({ truncated: true });
     await expect(cleanupStatus(options)).rejects.toThrow('不完整');
+  });
+});
+
+describe('帮手等待阶段', () => {
+  // silence：子进程已经起来，先不写。这不是启动。启动只发生在父进程还没 exec 之前。
+  const holdOf: Record<Exclude<HelperWaitStage, '启动'>, string> = {
+    协议读取: 'silence',
+    退出: 'exit',
+    异步收尾: 'cleanup',
+  };
+
+  it('四段只看进程出现没有、读没读完、退没退', () => {
+    const none = { spawned: false, stdoutBytes: 0, stdoutEnded: false, exited: false, closed: false };
+    // 还没出现才是启动。已经出现但一个字都没有，是在等协议，不是还在启动。
+    expect(helperWaitStage(none)).toBe('启动');
+    expect(helperWaitStage({ ...none, stdoutBytes: 1 })).toBe('启动');
+    expect(helperWaitStage({ ...none, spawned: true })).toBe('协议读取');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutBytes: 1 })).toBe('协议读取');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutBytes: 1, stdoutEnded: true })).toBe('退出');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutBytes: 1, stdoutEnded: true, exited: true })).toBe(
+      '异步收尾',
+    );
+    expect(helperWaitStage({ ...none, spawned: true, exited: true })).toBe('异步收尾');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutBytes: 1, exited: true })).toBe('异步收尾');
+    expect(helperWaitStage({ ...none, spawned: true, stdoutEnded: true, exited: true, closed: true })).toBe(
+      '异步收尾',
+    );
+  });
+
+  async function expectHold(stage: HelperWaitStage): Promise<void> {
+    let dir = '';
+    let release = () => {};
+    let log = '';
+    if (stage !== '启动') process.env.FLEET_FAKE_SCOPE_HOLD = holdOf[stage];
+    if (stage === '异步收尾' || stage === '启动') {
+      dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-hold-'));
+    }
+    if (stage === '异步收尾') process.env.FLEET_FAKE_SCOPE_HOLD_PIDFILE = join(dir, 'pid');
+    if (stage === '启动') {
+      log = join(dir, 'log');
+      process.env.FLEET_FAKE_SCOPE_LOG = log;
+    }
+    const stop = new AbortController();
+    const pending = readCleanupNamespace(root, {
+      ...options,
+      signal: stop.signal,
+      ...(stage === '启动'
+        ? {
+            beforeSpawn: () =>
+              new Promise<void>((resolve) => {
+                release = resolve;
+              }),
+          }
+        : {}),
+    }).then(
+      () => {
+        throw new Error(`等待阶段=${stage} 被当成完成`);
+      },
+      (error: unknown) => error,
+    );
+    try {
+      let reached: NonNullable<typeof TreeHelperError.pending> | null = null;
+      if (stage === '启动') {
+        const now = TreeHelperError.pending;
+        if (now?.stage !== '启动' || now.spawned !== false || now.stdoutBytes !== 0) {
+          throw new Error(
+            `启动应停在进程出现前：阶段=${now?.stage ?? '无'} 已启动=${String(now?.spawned)} 已读字节=${now?.stdoutBytes ?? '无'}`,
+          );
+        }
+        reached = now;
+      } else {
+        const deadline = Date.now() + 4_000;
+        while (Date.now() < deadline) {
+          const now = TreeHelperError.pending;
+          const silent = stage !== '协议读取' || (now?.spawned === true && now.stdoutBytes === 0);
+          if (now?.stage === stage && now.spawned === true && silent) {
+            reached = now;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 15));
+        }
+      }
+      if (!reached) {
+        const now = TreeHelperError.pending;
+        throw new Error(
+          `4 秒内没有进入等待阶段=${stage}，停在 ${now?.stage ?? '无'} 已启动=${String(now?.spawned)} 已读字节=${now?.stdoutBytes ?? '无'}`,
+        );
+      }
+      // 假帮手对每个动作都停，第一次就是 capabilities；进入这一段的时刻不早于调用开始。
+      expect(reached.action).toBe('capabilities');
+      expect(reached.stageAt).toBeGreaterThanOrEqual(reached.startedAt);
+      if (stage === '协议读取') {
+        expect(reached.spawned).toBe(true);
+        expect(reached.stdoutBytes).toBe(0);
+      }
+      stop.abort();
+      const error = await pending;
+      expect(shown(error)).toMatch(
+        new RegExp(
+          `动作=capabilities 等待阶段=${stage} 已启动=(?:是|否) 已读字节=\\d+ 本段已等\\d+ms 共\\d+ms`,
+        ),
+      );
+      expect(shown(error)).toContain(stage === '启动' ? '已启动=否' : '已启动=是');
+      expect(shown(error)).not.toContain('fake-scope-helper');
+      expect(shown(error)).not.toContain(process.execPath);
+      if (log) expect(existsSync(log)).toBe(false);
+    } finally {
+      release();
+      stop.abort();
+      reapHoldChild();
+      delete process.env.FLEET_FAKE_SCOPE_LOG;
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      await pending.catch(() => undefined);
+    }
+  }
+
+  it.each(['启动', '协议读取', '退出', '异步收尾'] as const)(
+    '真帮手停在%s就拒绝，不交回空列表',
+    async (stage) => {
+      await expectHold(stage);
+    },
+  );
+
+  it('短延迟后仍交回未结记录，不变成空', async () => {
+    const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
+    reply({ rows });
+    // silence 是进程起来之后才睡，睡完仍要把未结记录交回来。
+    process.env.FLEET_FAKE_SCOPE_HOLD = 'silence';
+    process.env.FLEET_FAKE_SCOPE_HOLD_MS = '30';
+    expect(await readCleanupNamespace(root, options)).toEqual(rows);
+    expect(await cleanupStatus(options)).toEqual(rows);
+  });
+
+  it('假帮手不用剥类型也能走完整条调用：首红那条用例的六次启动不再各付一次剥类型', async () => {
+    // 原首红的 5000ms 里分不出段；本机复现时差额全在「已启动、还没读到字节」，即子进程自己剥 .ts 类型那一截。
+    // 关掉剥类型照样起、照样交回原记录：假帮手再写回带类型的 .ts，这里起不来、报启动后的退出失败，不会变成空。
+    const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
+    reply({ rows });
+    const plain = { ...options, sudo: [process.execPath, '--no-experimental-strip-types'] };
+    expect(await readCleanupNamespace(root, plain)).toEqual(rows);
+    expect(await cleanupStatus(plain)).toEqual(rows);
+  });
+
+  it('对照：同一份假帮手存成 .ts 和 .mjs 跑首红那条链，剥类型落在已启动、还没读到字节的协议读取', async ({
+    annotate,
+  }) => {
+    // 只换扩展名，代码一字不差：差出来的只有子进程起来后先剥类型这一步。不断言毫秒（CI 忙闲不定），只把各段实测写进报告；
+    // 断言的是：两种都交回原记录、每次调用的段序不乱，关掉剥类型时 .ts 停在已启动、0 字节之后失败而不是变成空。
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-strip-'));
+    try {
+      writeFileSync(join(dir, 'package.json'), '{"type":"module"}');
+      copyFileSync(options.helper, join(dir, 'fake-scope-helper.mjs'));
+      copyFileSync(options.helper, join(dir, 'fake-scope-helper.ts'));
+      const rows = [{ id: 'a'.repeat(64), pathHash: 'b'.repeat(64), phase: 'DELETING' }];
+      const order = ['启动', '协议读取', '退出', '异步收尾'];
+      const spent: string[] = [];
+      for (const ext of ['.ts', '.mjs']) {
+        const file = `fake-scope-helper${ext}`;
+        const sum: Record<string, number> = {};
+        const calls: string[][] = [];
+        const helper = {
+          ...options,
+          helper: join(dir, file),
+          onWaitStage: (action: string, stage: HelperWaitStage, ms: number) => {
+            if (stage === '启动') calls.push([action]);
+            calls.at(-1)?.push(stage);
+            sum[stage] = (sum[stage] ?? 0) + ms;
+          },
+        };
+        const begun = Date.now();
+        reply();
+        expect(await readCleanupNamespace(root, helper)).toEqual([]);
+        reply({ rows });
+        expect(await readCleanupNamespace(root, helper)).toEqual(rows);
+        expect(await cleanupStatus(helper)).toEqual(rows);
+        // 三步各两次：capabilities + cleanup-status；每次从启动起、按四段顺序走，不跳回。
+        expect(calls.map((call) => call[0])).toEqual(
+          Array(3).fill(['capabilities', 'cleanup-status']).flat(),
+        );
+        for (const [, ...stages] of calls) {
+          expect(stages[0]).toBe('启动');
+          expect(stages.map((stage) => order.indexOf(stage))).toEqual(
+            [...stages.map((stage) => order.indexOf(stage))].sort(),
+          );
+        }
+        spent.push(
+          `${ext} 整链${Date.now() - begun}ms ${order.map((stage) => `${stage}=${sum[stage] ?? 0}ms`).join(' ')}`,
+        );
+      }
+      await annotate(`首红链六次帮手各段合计：${spent.join('；')}`);
+      reply();
+      const strip = ['--no-experimental-strip-types'];
+      const off = { ...options, sudo: [process.execPath, ...strip] };
+      expect(
+        await readCleanupNamespace(root, { ...off, helper: join(dir, 'fake-scope-helper.mjs') }),
+      ).toEqual([]);
+      const error = await readCleanupNamespace(root, {
+        ...off,
+        helper: join(dir, 'fake-scope-helper.ts'),
+      }).then(
+        () => {
+          throw new Error('不剥类型起不来的 .ts 被当成完成');
+        },
+        (caught: unknown) => caught,
+      );
+      expect(shown(error)).toMatch(/动作=capabilities 等待阶段=异步收尾 已启动=是 已读字节=0 .*退出码 1/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('只吐半截时停在协议读取且已有字节，不当成空', async () => {
+    process.env.FLEET_FAKE_SCOPE_HOLD = 'protocol';
+    const stop = new AbortController();
+    const pending = readCleanupNamespace(root, { ...options, signal: stop.signal }).then(
+      () => {
+        throw new Error('半截回执被当成完成');
+      },
+      (error: unknown) => error,
+    );
+    try {
+      const deadline = Date.now() + 4_000;
+      let reached: NonNullable<typeof TreeHelperError.pending> | null = null;
+      while (Date.now() < deadline) {
+        const now = TreeHelperError.pending;
+        if (now?.stage === '协议读取' && now.spawned && now.stdoutBytes > 0) {
+          reached = now;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      if (!reached) {
+        const now = TreeHelperError.pending;
+        throw new Error(
+          `4 秒内没有读到半截，停在 ${now?.stage ?? '无'} 已读字节=${now?.stdoutBytes ?? '无'}`,
+        );
+      }
+      expect(reached.action).toBe('capabilities');
+      stop.abort();
+      const error = await pending;
+      expect(shown(error)).toMatch(/动作=capabilities 等待阶段=协议读取 已启动=是 已读字节=[1-9]\d*/);
+      expect(shown(error)).not.toContain('fake-scope-helper');
+      expect(shown(error)).not.toContain(process.execPath);
+    } finally {
+      stop.abort();
+      await pending.catch(() => undefined);
+    }
+  });
+
+  it('可执行文件不存在就停在启动并拒绝，不当成空', async () => {
+    const error = await readCleanupNamespace(root, { ...options, sudo: ['/no/such/fleet-sudo'] }).then(
+      () => {
+        throw new Error('启动失败被当成完成');
+      },
+      (caught: unknown) => caught,
+    );
+    expect(shown(error)).toMatch(/动作=capabilities 等待阶段=启动 已启动=否 已读字节=0/);
+    expect(shown(error)).not.toContain('/no/such');
+    expect(shown(error)).not.toContain(process.execPath);
+    expect(shown(error)).not.toContain('fake-scope-helper');
+  });
+
+  it('没有输出或不完整回执不当成空', async () => {
+    process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT = '';
+    await expect(readCleanupNamespace(root, options)).rejects.toThrow(
+      /动作=cleanup-status 等待阶段=异步收尾 已启动=是 已读字节=0 .*回执读失败/,
+    );
+    process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT = '{';
+    await expect(readCleanupNamespace(root, options)).rejects.toThrow(
+      /动作=cleanup-status 等待阶段=异步收尾 已启动=是 已读字节=[1-9]\d* .*回执读失败/,
+    );
   });
 });
 
