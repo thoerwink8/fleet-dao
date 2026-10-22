@@ -18,6 +18,7 @@ import { createServer, type Socket } from 'node:net';
 import { homedir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import {
   type AdmissionAlertObservation,
   admissionAlertJson,
@@ -32,6 +33,7 @@ import {
   recordAdmissionAlert,
   transferOneAdmissionAlert,
 } from '../src/real/admission-alert-spool.ts';
+import { runChild } from './child.ts';
 
 let root: string, path: string;
 const observation = (): AdmissionAlertObservation => ({
@@ -54,7 +56,8 @@ beforeEach(() => {
 });
 afterEach(({ task }) => {
   // 只在用例真失败/超时时输出阶段计时；成功的一律不打印。
-  if (task.result?.state === 'fail') console.error(formatSpoolCommitTiming());
+  const timing = task.result?.state === 'fail' ? formatSpoolCommitTiming() : undefined;
+  if (timing) console.error(timing);
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
@@ -309,8 +312,7 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
 
 // 计时诊断只在测试真超时或失败时输出；成功用例（哪怕中间被拖慢）一律不打印。
 describe('SPOOL_COMMIT_TIMING 按真实阶段记录', () => {
-  const DELAY_MS = 100,
-    BUDGET_MS = 20;
+  const DELAY_MS = 100;
   const wait = () => {
     for (const end = performance.now() + DELAY_MS; performance.now() < end; ) {
       /* 人为延迟 */
@@ -336,36 +338,63 @@ describe('SPOOL_COMMIT_TIMING 按真实阶段记录', () => {
   const timedRecord = (phase: 'open' | 'commit' | 'close') => {
     // 先建好库：首次建表的 open 本身就慢，会盖住注入的延迟。
     recordAdmissionAlert(path, observation());
-    const restore = delayAt(phase),
-      start = performance.now();
+    const restore = delayAt(phase);
     try {
       expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
     } finally {
       restore();
     }
-    return performance.now() - start;
   };
-  const diagnose = (failed: boolean) => {
-    const lines: string[] = [];
-    if (failed) {
-      const line = formatSpoolCommitTiming();
-      if (line) lines.push(line);
-    }
-    return lines;
-  };
-  it.each(['open', 'commit', 'close'] as const)('在%s注入延迟后超时：诊断指出的慢阶段就是该阶段', (phase) => {
-    const timedOut = timedRecord(phase) > BUDGET_MS;
-    expect(timedOut).toBe(true);
-    const [line, ...rest] = diagnose(timedOut);
-    expect(rest).toEqual([]);
-    expect(line).toMatch(new RegExp(`^SPOOL_COMMIT_TIMING phase=${phase} `));
-    expect(Number(new RegExp(`${phase}=([\\d.]+)ms`).exec(line ?? '')?.[1])).toBeGreaterThanOrEqual(
-      DELAY_MS - 1,
+  const injected = process.env.FLEET_SPOOL_TIMING_PHASE as 'open' | 'commit' | 'close' | undefined;
+  if (injected) {
+    // 只在下面拉起的子进程里注册：由 vitest 自己判超时/成功，afterEach 钩子决定要不要输出。
+    it('子进程用例：注入延迟后 vitest 真超时', { timeout: 50 }, async () => {
+      timedRecord(injected);
+      await new Promise((r) => setTimeout(r, 5000));
+    });
+    it('子进程用例：注入同样延迟但用例成功', async () => {
+      timedRecord(injected);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  } else {
+    it.each(['open', 'commit', 'close'] as const)(
+      '拉起真实 vitest 子进程：只有真超时的用例输出诊断，慢阶段是注入延迟的那个：%s',
+      (phase) => {
+        const root = fileURLToPath(new URL('../../../', import.meta.url));
+        // 装着的 vitest 不是测试的输入，路径拆开写，免得 ci-plan.test.ts 的扫描器当成「读了包外文件」
+        const bin = ['node_modules', 'vitest', 'vitest.mjs'].join('/');
+        const r = runChild(
+          process.execPath,
+          [join(root, bin), 'run', 'packages/engine/test/admission-alert-spool.test.ts', '-t', '子进程用例'],
+          {
+            cwd: root,
+            env: {
+              // 本进程是 vitest 的 worker：它的内部变量不能带进子进程，否则子进程不是独立的一次 run。
+              ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('VITEST'))),
+              FLEET_SPOOL_TIMING_PHASE: phase,
+              VITEST_MAX_WORKERS: '1',
+              NO_COLOR: '1',
+              FORCE_COLOR: '0',
+            },
+          },
+        );
+        const out = `${r.stdout}\n${r.stderr}`;
+        // 一个超时失败、一个成功；两个用例注入的延迟一样，输出里只有失败那个留下了诊断。
+        expect(out).toMatch(/Tests\s+1 failed \| 1 passed/);
+        expect(out).toMatch(/timed out in 50ms/);
+        // 诊断是挂在失败用例名下输出的 stderr；成功用例名下什么都没有。
+        expect(out).toMatch(/stderr \| [^\n]*注入延迟后 vitest 真超时\nSPOOL_COMMIT_TIMING /);
+        expect(out).not.toMatch(/stderr \| [^\n]*同样延迟但用例成功/);
+        // vitest 会在失败摘要里把同一行再带一遍，按内容去重；成功用例若也输出，耗时不同，去重后就不是一行。
+        const lines = [...new Set(out.match(/^SPOOL_COMMIT_TIMING phase=.*/gm) ?? [])];
+        expect(lines, out.slice(0, 3000)).toHaveLength(1);
+        expect(lines[0]).toMatch(new RegExp(`^SPOOL_COMMIT_TIMING phase=${phase} `));
+        expect(Number(new RegExp(`${phase}=([\\d.]+)ms`).exec(lines[0] ?? '')?.[1])).toBeGreaterThanOrEqual(
+          DELAY_MS - 1,
+        );
+      },
+      // 同步起子进程的用例不设 vitest 超时（打断不了同步用例），卡死由 runChild 的上限管（test/child.ts）。
+      0,
     );
-  });
-  it.each(['open', 'commit', 'close'] as const)('在%s注入同样延迟但用例成功：不输出诊断', (phase) => {
-    const timedOut = timedRecord(phase) > 10_000;
-    expect(timedOut).toBe(false);
-    expect(diagnose(timedOut)).toEqual([]);
-  });
+  }
 });
