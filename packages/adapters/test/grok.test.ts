@@ -1,6 +1,6 @@
 // Grok 命令行插头：参数、过程记录解析（真跑夹具）、起停与判定（假执行体回放夹具）。
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { SessionEffort } from '../src/effort.ts';
@@ -83,7 +83,8 @@ describe('grok 参数', () => {
     ]) {
       expect(denied).toContain(tool);
     }
-    // 写码要用的：读、写、改、命令、搜索（工具内部名见 grok 的 14-headless-mode.md）
+    // 写码要用的：读、写、改、命令、搜索。命令工具两种写法都不能在名单里：run_terminal_cmd 是内部名，
+    // run_terminal_command 是会话记录里模型看到的名字（夹具里 title 就是它），grok 两种写法都认得去关
     for (const tool of [
       'read_file',
       'write',
@@ -91,6 +92,8 @@ describe('grok 参数', () => {
       'hashline_read',
       'hashline_edit',
       'run_terminal_cmd',
+      'run_terminal_command',
+      'todo_write',
       'grep',
       'hashline_grep',
       'list_dir',
@@ -99,6 +102,17 @@ describe('grok 参数', () => {
     ]) {
       expect(denied).not.toContain(tool);
     }
+  });
+
+  it('真跑记录里模型实际调过的工具名，一个都不在名单里', () => {
+    const dir = dirname(fixturePath('grok', 'grok-read'));
+    const used = new Set<string>();
+    for (const file of readdirSync(dir).filter((f) => f.endsWith('.ndjson'))) {
+      for (const m of readFileSync(join(dir, file), 'utf8').matchAll(/"title":"([a-z_]+)"/g))
+        used.add(m[1] ?? '');
+    }
+    expect(used).toContain('run_terminal_command');
+    for (const tool of used) expect(GROK_DISALLOWED_TOOLS).not.toContain(tool);
   });
 
   it('disallowTools: false 不带这个旗标', () => {
