@@ -112,6 +112,8 @@ export const STATUS_DICT = {
     overdue: { label: '过期', level: 'warning' },
     never: { label: '从没跑成', level: 'warning' },
     failed: { label: '失败', level: 'error' },
+    'failed-overdue': { label: '失败，已过期', level: 'error' },
+    'partial-overdue': { label: '没查全，已过期', level: 'warning' },
     'hero:fail': { label: '要处理', level: 'error' },
     'hero:stall': { label: '要留意', level: 'warning' },
     'hero:ok': { label: '都正常', level: 'success' },

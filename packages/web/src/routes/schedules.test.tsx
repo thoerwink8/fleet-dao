@@ -59,22 +59,22 @@ describe('定时任务表', () => {
     expect(document.querySelector('[data-job-detail]')).toBeNull();
   });
 
-  test('失败的那一行 data-outcome 是 failed，状态标红「失败」', async () => {
+  test('失败的那一行 data-outcome 是 failed，状态标红「失败，已过期」', async () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
     await screen.findByText('夜间备份');
     const row = rowOf('夜间备份');
     expect(row.querySelector('[data-job]')?.getAttribute('data-outcome')).toBe('failed');
-    const badge = row.querySelector('[data-status="job:failed"]');
-    expect(badge?.textContent).toBe('失败');
+    const badge = row.querySelector('[data-status="job:failed-overdue"]');
+    expect(badge?.textContent).toBe('失败，已过期');
     expect(badge?.getAttribute('data-level')).toBe('error');
   });
 
-  test('一行只放一个状态：失败又过期的只写「失败」，不拼「失败，已过期」；过期在展开的过期线里', async () => {
+  test('一行只放一个状态：过期叠在失败、没查全后面（「失败，已过期」），不另贴「过期」标签；过期线在展开里', async () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
     await screen.findByText('夜间备份');
     const backup = rowOf('夜间备份');
     expect(backup.querySelectorAll('[data-level]')).toHaveLength(1);
-    expect(backup.textContent).not.toContain('已过期');
+    expect(backup.textContent).toContain('失败，已过期');
     fireEvent.click(within(backup).getByRole('button'));
     expect(document.querySelector('[data-job-detail]')?.textContent).toContain('现在已超过，算过期');
     const quota = rowOf('额度读取');
@@ -96,8 +96,8 @@ describe('定时任务表', () => {
       status,
       lastRun: { ...base.lastRun, ...over } as NonNullable<typeof base.lastRun>,
     });
-    expect(jobStatusKey(withRun({ outcome: 'failed' }, 'overdue'))).toBe('job:failed');
-    expect(jobStatusKey(withRun({ outcome: 'partial' }, 'overdue'))).toBe('job:partial');
+    expect(jobStatusKey(withRun({ outcome: 'failed' }, 'overdue'))).toBe('job:failed-overdue');
+    expect(jobStatusKey(withRun({ outcome: 'partial' }, 'overdue'))).toBe('job:partial-overdue');
     expect(jobStatusKey(withRun({ outcome: 'unscanned' }))).toBe('job:partial');
     expect(jobStatusKey(withRun({ outcome: 'ok' }, 'overdue'))).toBe('job:overdue');
     expect(jobStatusKey({ ...base, status: 'never', lastRun: undefined })).toBe('job:never');

@@ -25,9 +25,12 @@ export function rowTone(j: JobView): 'fail' | 'stall' | null {
 /** 一行只放一个状态：失败、没查全、过期、从没跑成、在跑、按期。 */
 export function jobStatusKey(j: JobView): StatusKey {
   const r = j.lastRun;
-  if (r?.outcome === 'failed') return 'job:failed';
-  if (r?.outcome === 'unscanned' || r?.outcome === 'partial') return 'job:partial';
-  if (j.status === 'overdue') return 'job:overdue';
+  const overdue = j.status === 'overdue';
+  // 过期叠在失败、没查全后面（「没查全，已过期」），不另贴标签
+  if (r?.outcome === 'failed') return overdue ? 'job:failed-overdue' : 'job:failed';
+  if (r?.outcome === 'unscanned' || r?.outcome === 'partial')
+    return overdue ? 'job:partial-overdue' : 'job:partial';
+  if (overdue) return 'job:overdue';
   if (j.status === 'never') return 'job:never';
   if (r && !r.endedAt) return 'job:running';
   return 'job:fresh';

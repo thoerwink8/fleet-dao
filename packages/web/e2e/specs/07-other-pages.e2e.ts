@@ -193,7 +193,7 @@ test.describe('其余页面', () => {
     await expect(page.getByText('这一页还没做')).toHaveCount(0);
     // 账单页没了：地址落到「找不到」页，不再有「还没做」的占位
     await page.goto('/billing');
-    await expect(page.getByRole('link', { name: /主页/ }).first()).toBeVisible();
+    await expect(page.getByRole('link', { name: '回工作台' })).toBeVisible();
     await expect(page.getByText('这一页还没做')).toHaveCount(0);
   });
 
