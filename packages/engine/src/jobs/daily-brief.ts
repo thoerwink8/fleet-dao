@@ -439,6 +439,15 @@ function numVs(now: number | null, before: number | null | undefined, unit = '')
   return `${now}${unit}（7 天前 ${before}${unit}，${d === 0 ? '持平' : d > 0 ? `涨 ${d}` : `跌 ${-d}`}）`;
 }
 
+/** 冷验收按验收族分的通过率（#3604）：每族「过 / 有结论」，没有结论的族不列；一条结论都没有写「没有」，不写 0%。 */
+export function verifyFamilyLine(h: Pick<PipelineHealth, 'verifyByFamily'>): string {
+  if (h.verifyByFamily.length === 0) return '冷验收通过率（按验收族）：这周没有带结论的验收';
+  const parts = h.verifyByFamily.map(
+    (f) => `${f.family} ${f.passed}/${f.decided}（${Math.round((f.passed / f.decided) * 100)}%）`,
+  );
+  return `冷验收通过率（按验收族，过/有结论）：${parts.join('，')}`;
+}
+
 /**
  * 五、流程健康（#2762）：近 7 天每轮怎么收场的（task_rounds），和再往前 7 天比。
  * 这周读不到整节写「没查成」；上周读不到只写这周、注明对比没查成。窗口里一轮都没有写「没有」，不写 0%。
@@ -491,6 +500,7 @@ export function healthSection(
     );
   }
   lines.push(`冷验收拒绝占比：${shareVs(now.verifyRejectShare, prev ? prev.verifyRejectShare : undefined)}`);
+  lines.push(verifyFamilyLine(now));
   lines.push(resumeLine(now, prev));
   for (const t of now.byTier) {
     const p = prev?.byTier.find((x) => x.tier === t.tier);
