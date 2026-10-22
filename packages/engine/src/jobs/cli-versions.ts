@@ -86,6 +86,12 @@ function installedFrom(
   const version = parseInstalledOutput(tool, probe.stdout);
   if (version) return { installedVersion: version, installedError: null };
   const shown = clip(probe.stdout);
+  // reclaude 没有经证实的自身版本输出：帮手现在不执行它、直接报来源不明；万一仍有 stdout，也不拿里面的数当它的版本
+  if (tool === 'reclaude')
+    return {
+      installedVersion: null,
+      installedError: `来源不明：reclaude 没有经证实的自身版本输出${shown ? `（输出：${shown}）` : ''}`,
+    };
   return {
     installedVersion: null,
     installedError: shown ? `认不出版本：${shown}` : '认不出版本：输出是空的',

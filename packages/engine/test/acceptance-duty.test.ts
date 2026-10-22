@@ -114,8 +114,9 @@ describe('验收责任（#3037）：租约过期 → 法国接管 → 代码过�
       NOW,
     );
     expect(handed).toHaveLength(1);
-    // 合并收口认的那一句（conventions 的 ACCEPTANCE_OPEN_MARK，两边一字不差）
-    expect(handoffBody({ prNumber: 3031, headSha: HEAD }, FIELD)).toContain('验收责任已记下');
+    // #3591 起冷验收不再记库，留言也不再说「验收责任已记下」：只写转人、代码照合、单子留着等人贴证据
+    expect(handoffBody({ prNumber: 3031, headSha: HEAD }, FIELD)).not.toContain('验收责任已记下');
+    expect(handoffBody({ prNumber: 3031, headSha: HEAD }, FIELD)).toContain('这张单留着不关');
     expect(handoffBody({ prNumber: 3031, headSha: HEAD }, FIELD)).toContain(HEAD);
 
     // 3. 同一个头重复转交（验收重来）：只一行，原验收项并起来不丢

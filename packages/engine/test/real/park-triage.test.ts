@@ -32,6 +32,7 @@ import {
   triageParkedTasks,
 } from '../../src/jobs/park-triage.ts';
 import { COMMANDER_SETTING, parkTriageJob } from '../../src/real/park-triage.ts';
+import { createStorePorts } from '../../src/real/store-ports.ts';
 import type { TaskParkInfo } from '../../src/task-contract.ts';
 
 const NOW = new Date('2026-10-19T12:00:00Z');
@@ -403,10 +404,17 @@ describe('real/park-triage', () => {
       return { task, oldDuty, currentDuty };
     }
 
-    const liveAcceptance = (answer: string, sessions: { n: number }) => {
+    const liveAcceptance = (
+      answer: string,
+      sessions: { n: number },
+      pull?: { number: number; merged: boolean; headSha: string },
+    ) => {
       const base = parkTriageJob({
         db: t.db,
-        gh: { readIssueState: async () => ({ state: 'open' }) } as never,
+        gh: {
+          readIssueState: async () => ({ state: 'open' }),
+          claims: { readPull: async () => pull ?? Promise.reject(new Error('测试里没读到 PR')) },
+        } as never,
         trees: {} as never,
         exec: {} as never,
         tmpDir: '/tmp/none',
@@ -483,6 +491,66 @@ describe('real/park-triage', () => {
       expect((await noticeOf(task.id))?.level).toBe('alert');
     });
 
+    it('停写之后（#3591）：合并收尾、在途重试照样交来转人验收条，库里不落新行，指挥官没有候选、不起会话、不出「要你拍」；旧行照旧进候选', async () => {
+      const task = await seedTask();
+      await t.db.insert(pullRequests).values({
+        repoId: task.repoId,
+        number: 8,
+        state: 'merged',
+        headRef: 'feat',
+        headSha: HEAD,
+        updatedAt: NOW,
+        mergedAt: new Date(NOW.getTime() - 60 * 60_000),
+        mergeSha: MERGE,
+      });
+      // 真端口：工作流收尾（和老历史在途重试带着 record）调的就是它
+      const store = createStorePorts({
+        db: t.db,
+        now: () => NOW,
+        draw: () => 0.5,
+        log: () => {},
+        sessionOrg: async () => ({ ok: true, org: 'carpool' }),
+      });
+      const read = await store.acceptanceDuties(
+        {
+          taskId: task.id,
+          repo: {
+            id: task.repoId,
+            owner: 'acme',
+            name: 'app',
+            defaultBranch: 'main',
+            testCommand: 'pnpm check',
+          },
+          issueNumber: 7,
+          record: [{ prNumber: 8, head: HEAD, items: ['现场审计'], mergeCommit: MERGE }],
+        },
+        { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1, lastHeartbeat: undefined },
+      );
+      expect(read.open).toEqual([]);
+      expect(await t.db.select().from(acceptanceDuties)).toEqual([]);
+      const sessions = { n: 0 };
+      const d = liveAcceptance(fence([]), sessions);
+      const none = await triageParkedTasks(d);
+      expect(none.candidates).toBe(0);
+      expect(none.claimed).toBe(0);
+      expect(sessions.n).toBe(0);
+      expect((await t.db.select().from(notifications)).filter((n) => n.level === 'decision')).toEqual([]);
+      expect(await noticeOf(task.id)).toBeUndefined();
+      // 对照：#3037 时期留下的旧行（不动它们）照旧进候选——上面的 0 不是读法坏了
+      await t.db.insert(acceptanceDuties).values({
+        taskId: task.id,
+        repo: 'acme/app',
+        issueNumber: 7,
+        prNumber: 8,
+        source: 'cold_verify',
+        head: HEAD,
+        items: ['现场审计'],
+        mergeCommit: MERGE,
+      });
+      const old = await triageParkedTasks(d);
+      expect(old.candidates).toBe(1);
+    });
+
     it('只有引擎可信来源证明的创始人证据才发「要你拍」，不记重试、不重复起会话', async () => {
       const { task, oldDuty } = await seedOldHeadOpen();
       const sessions = { n: 0 };
@@ -557,6 +625,15 @@ describe('real/park-triage', () => {
         ]),
         { n: 0 },
       );
+      // 真装配的读方暂时分不出义务来源（见下一条）；这里换成确定的可信读证，只测真实 CAS 结清
+      d.acceptanceTrustedRead = async (_task, duty) => ({
+        dutyId: duty.id,
+        generation: duty.generation,
+        prNumber: duty.prNumber,
+        head: duty.head,
+        mergedHead: duty.head,
+        items: duty.items.map((item) => ({ item, need: 'platform' as const, got: 'platform' as const })),
+      });
       const out = await triageParkedTasks(d);
       expect(out.acted).toEqual([
         { ref: `acme/app#7/duty-${currentDuty.id}`, action: 'continue', source: 'verdict' },
@@ -572,6 +649,36 @@ describe('real/park-triage', () => {
       expect(notice?.body).toMatch(new RegExp(`duty ${currentDuty.id}[^\\n]*已按裁决收口`));
       expect(notice?.body).toMatch(new RegExp(`duty ${oldDuty.id}[^\\n]*仍未收口`));
       expect(out.problems).toEqual([]);
+    });
+
+    it('真装配的读证：现读 GitHub 得到实际已合的头，但义务来源分不出，所以不结清（#3579）', async () => {
+      const { task, currentDuty } = await seedOldHeadOpen({ alsoOpenCurrent: true });
+      const answer = fence([
+        verdictOf(currentDuty, { action: 'settle', evidence: '责任行 mergeCommit 与 CI 全绿' }),
+      ]);
+      const d = liveAcceptance(answer, { n: 0 }, { number: 8, merged: true, headSha: HEAD });
+      const read = await d.acceptanceTrustedRead?.(
+        { owner: 'acme', name: 'app' } as never,
+        currentDuty as never,
+      );
+      expect(read).toMatchObject({ dutyId: currentDuty.id, head: HEAD, mergedHead: HEAD });
+      expect(read?.items).toEqual([{ item: '现场审计', need: 'unknown', got: 'unknown' }]);
+      // PR 没合：mergedHead 为 null
+      const open = liveAcceptance(answer, { n: 0 }, { number: 8, merged: false, headSha: HEAD });
+      expect(
+        (await open.acceptanceTrustedRead?.({ owner: 'acme', name: 'app' } as never, currentDuty as never))
+          ?.mergedHead,
+      ).toBeNull();
+      const out = await triageParkedTasks(d);
+      expect(out.acted).toEqual([]);
+      expect((await dutyOf(currentDuty.id))?.settledAt).toBeNull();
+      expect(out.retrying).toEqual([{ ref: 'acme/app#7', why: expect.stringContaining('读方分不出') }]);
+      expect((await noticeOf(task.id))?.level).toBe('alert');
+      // GitHub 读不到：同样不结清
+      const broken = liveAcceptance(answer, { n: 0 });
+      expect((await triageParkedTasks(broken)).retrying).toEqual([
+        { ref: 'acme/app#7', why: expect.stringContaining('可信读证读取失败') },
+      ]);
     });
 
     it('主线头读不到：认领被抵销、下一轮再看，不静默吞掉', async () => {

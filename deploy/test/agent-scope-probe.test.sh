@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fleet-agent-scope 的 probe 子命令（#1969：只读命令行工具版本）。不要 root、不要真的会话用户：
 # AGENT_SCOPE_TEST_AS_USER=direct 不降权，AGENT_SCOPE_TEST_HOME 给一个临时家目录。
-# 钉住：拒任意命令、拒白名单外的用户、run --user pilot 仍拒、pilot 的 probe 允许、假二进制只收到 --version、
+# 钉住：拒任意命令、拒白名单外的用户、run --user pilot 仍拒、pilot 的 probe 允许、假二进制只收到 --version（reclaude 不执行）、
 # Mirasim 读目录名、缺命令非 0 且不把输出当成成功。npm 这台有就跑只读的 npm ls -g，没有就断言「找不到 npm」。
 # 用法：bash deploy/test/agent-scope-probe.test.sh。退出码：0 通过，1 不通过。
 set -uo pipefail
@@ -82,16 +82,35 @@ out=$(run_scope probe --user fleet-agent-carpool -- grok 2>&1) && rc=0 || rc=$?
 args=$(cat "$HOME_DIR/grok-args" 2>/dev/null || true)
 if [[ $rc -eq 0 && "$out" == *"1.0.41"* && "$args" == "--version" ]]; then pass "fleet-agent-carpool 的 grok 读到 1.0.41"; else flunk "grok 得到 $rc args=[$args] out=[$out]"; fi
 
-out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
-args=$(cat "$HOME_DIR/reclaude-args" 2>/dev/null || true)
-if [[ $rc -eq 0 && "$out" == *"1.3.0"* && "$args" == "--version" ]]; then pass "reclaude 只跑 --version"; else flunk "reclaude 得到 $rc args=[$args] out=[$out]"; fi
-
 out=$(run_scope probe --user pilot -- cursor-agent 2>&1) && rc=0 || rc=$?
 args=$(cat "$HOME_DIR/cursor-args" 2>/dev/null || true)
 if [[ $rc -eq 0 && "$out" == *"2026.09.23-86fc751"* && "$args" == "--version" ]]; then pass "cursor-agent 读到目录版本"; else flunk "cursor 得到 $rc args=[$args] out=[$out]"; fi
 
 out=$(run_scope probe --user pilot -- mirasim-server 2>&1) && rc=0 || rc=$?
 if [[ $rc -eq 0 && "$out" == "0.0.355" ]]; then pass "Mirasim 读目录名 0.0.355"; else flunk "mirasim 得到 $rc [$out]"; fi
+
+echo "reclaude：不执行二进制（--version 会同步配置、查登录），没有可信来源就如实报来源不明"
+# shellcheck disable=SC2016 # $* 和 $HOME 要由假 reclaude 自己展开
+write_reclaude() { printf '#!/bin/sh\nprintf "%%s\\n" "$*" >"$HOME/reclaude-args"\n%s\n' "$1" >"$HOME_DIR/.local/bin/reclaude"; chmod +x "$HOME_DIR/.local/bin/reclaude"; }
+reclaude_case() { # 说明 假 reclaude 的脚本体：不管它会打什么，探测都不该执行它
+  rm -f "$HOME_DIR/reclaude-args"
+  write_reclaude "$2"
+  out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
+  if [[ $rc -eq 1 && "$out" == *来源不明* && "$out" != *"2.1.308"* && "$out" != *"1.5.0"* && ! -e "$HOME_DIR/reclaude-args" ]]; then
+    pass "$1：没执行它、来源不明、非 0、输出里没有版本数"
+  else
+    flunk "$1 该来源不明且不执行，得到 $rc args=[$(cat "$HOME_DIR/reclaude-args" 2>/dev/null || true)] [$out]"
+  fi
+}
+reclaude_case "Claude Code 版本" 'printf "2.1.308 (Claude Code)\n"'
+reclaude_case "混合 Syncing 输出" 'printf "Syncing config...\nreclaude 1.5.0\n2.1.308 (Claude Code)\n"'
+reclaude_case "无版本" 'printf "Syncing config...\n"'
+reclaude_case "非零退出（设备解绑）" 'printf "Syncing config...\nlogin no longer valid: 此设备已被解绑\n" >&2; exit 3'
+if [[ "$out" != *此设备已被解绑* && "$out" != *"账号已恢复"* ]]; then pass "不代报登录状态：不复述解绑原话，也不说账号已恢复"; else flunk "不该代报登录状态：[$out]"; fi
+rm -f "$HOME_DIR/.local/bin/reclaude"
+out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
+if [[ $rc -eq 127 && "$out" != *来源不明* ]]; then pass "没装 reclaude：127，不报来源不明"; else flunk "没装该 127，得到 $rc [$out]"; fi
+write_reclaude 'echo "reclaude 1.3.0"'
 
 echo "缺命令、指错目录：非 0，不写成成功"
 rm -f "$HOME_DIR/.local/bin/codex"

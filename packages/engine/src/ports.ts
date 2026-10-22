@@ -463,8 +463,8 @@ export interface AcceptanceDuty {
 }
 
 /**
- * 记验收责任并读回这张单还开着的全部（#3037）。record 里的按「单 + PR + 头」幂等：重复转交、合并回执重来都落在同一行，
- * 原验收项只并不删，合并回执只补不改。record 可以是空的（只读）。读不成、写不成照抛：不回空数组冒充「没有待验的」。
+ * 读回这张单还开着的验收责任（#3037 时期记下的旧行）。#3591（决定 0113）起只读：新工作流 record 恒为空，
+ * 老历史、在途重试带来的 record 也不落库。读到空就是没有待验的；读不成照抛，不回空数组冒充「没有待验的」。
  */
 export interface AcceptanceDutiesInput extends Scope {
   repo: Repo;

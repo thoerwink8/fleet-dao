@@ -49,7 +49,7 @@ export type GroomGitHub = Pick<
   | 'fetchMainline'
   | 'bundleCommits'
 > & {
-  claims: Pick<GitHub['claims'], 'openPulls' | 'listMergedPulls'>;
+  claims: Pick<GitHub['claims'], 'openPulls' | 'listMergedPulls' | 'readPull'>;
   commitIdentity(repo: { owner: string; name: string }): Promise<Identity>;
 };
 

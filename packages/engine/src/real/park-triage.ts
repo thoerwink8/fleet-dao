@@ -920,6 +920,25 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         at: now(),
       });
     },
+    /**
+     * settle 的可信读证（#3579）：「实际已合的 head」现读 GitHub 的 PR（号、已合、headSha），不用责任行 mergeCommit，更不用模型文本。
+     * 每条原文义务的来源类别（platform / run-history）目前没有结构化分类，也没有运行记录（真实树、会话）的只读来源，
+     * 不靠关键词猜：一律 need/got 都是 unknown，核对函数因此不放行 settle（责任保留走有界重试，旧头走 supersede）。
+     * 等有结构化义务分类和运行记录读方，只改这里。
+     */
+    async acceptanceTrustedRead(task, duty) {
+      const pull = await mapped(() =>
+        w.gh.claims.readPull({ owner: task.owner, name: task.name }, duty.prNumber),
+      );
+      return {
+        dutyId: duty.id,
+        generation: duty.generation,
+        prNumber: duty.prNumber,
+        head: duty.head,
+        mergedHead: pull.number === duty.prNumber && pull.merged ? pull.headSha : null,
+        items: duty.items.map((item) => ({ item, need: 'unknown' as const, got: 'unknown' as const })),
+      };
+    },
     async settleAcceptance({ duty, evidence }) {
       await settleAcceptanceDuty(
         w.db,
