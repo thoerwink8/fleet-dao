@@ -421,6 +421,73 @@ export function checkAcceptanceVerdict(
   return { ok: true, action: 'supersede', coverage };
 }
 
+/**
+ * 自动 settle 的可信读证（#3579）。由装配侧只读给出，模型的裁决、evidence、PR 自述、责任行 mergeCommit 都不在这里：
+ * - mergedHead：引擎现读 GitHub 得到的「这个 PR 实际已合的 head」；null＝PR 没合；
+ * - items：对责任每一条原文义务（整串相等）各一项：need＝这条义务要哪一类来源才算数（由读方定，unknown＝读方分不出），
+ *   got＝读方实际拿到的来源（unknown＝读取失败或没有）。run-history（真实现场/运行记录）必须带时间范围 range。
+ */
+export const ACCEPTANCE_EVIDENCE_SOURCES = ['platform', 'run-history'] as const;
+export type AcceptanceEvidenceSource = (typeof ACCEPTANCE_EVIDENCE_SOURCES)[number];
+export interface AcceptanceTrustedItem {
+  item: string;
+  need: AcceptanceEvidenceSource | 'unknown';
+  got: AcceptanceEvidenceSource | 'unknown';
+  /** 读到的范围（ISO 时间，from < to）；run-history 必须有。 */
+  range?: { from: string; to: string } | undefined;
+}
+export interface AcceptanceTrustedRead {
+  dutyId: number;
+  generation: number;
+  prNumber: number;
+  head: string;
+  mergedHead: string | null;
+  items: readonly AcceptanceTrustedItem[];
+}
+
+const validRange = (range: AcceptanceTrustedItem['range']) => {
+  if (!range) return false;
+  const from = Date.parse(range.from);
+  const to = Date.parse(range.to);
+  return Number.isFinite(from) && Number.isFinite(to) && from < to;
+};
+
+/**
+ * settle 前的读证核对（纯函数）：可信读方必须绑定这条责任精确的 id/代次/PR/head，且实际已合的 head 就是责任 head
+ * （责任行 mergeCommit 非空、最终头 CI 齐绿都不证明旧头已合）；责任的每一条原文义务都要有一项读证，来源类别与义务一致、
+ * 不是 unknown，run-history 还要有时间范围。只给一项事实盖不住两项义务。返回 undefined＝可以结清，否则回原因（机读缺口）。
+ */
+export function acceptanceSettleTrustProblem(
+  duty: AcceptanceDutyIdentityView,
+  read: AcceptanceTrustedRead | undefined,
+): string | undefined {
+  if (!read) return '没有可信读证（读方没装配或没给），不能结清';
+  if (
+    read.dutyId !== duty.id ||
+    read.generation !== duty.generation ||
+    read.prNumber !== duty.prNumber ||
+    read.head !== duty.head
+  )
+    return '可信读证绑定的 duty、代次、PR 或 head 与现读不符';
+  if (read.mergedHead === null) return '可信读方没读到该 PR 已合并的 head，不能结清';
+  if (read.mergedHead !== duty.head)
+    return `该 PR 实际已合的 head 是 ${read.mergedHead}，不是这条责任的 ${duty.head}：旧头不能套最终头证据，须走同单同 PR 的 supersede`;
+  if (duty.items.length === 0) return '责任没有验收项，没有可对应的读证';
+  const problems: string[] = [];
+  for (const item of duty.items) {
+    const mine = read.items.filter((e) => e.item === item);
+    const only = mine.length === 1 ? mine[0] : undefined;
+    if (!only) problems.push(`义务「${item}」没有唯一的可信读证（有 ${mine.length} 项）`);
+    else if (only.need === 'unknown') problems.push(`义务「${item}」读方分不出需要哪类来源`);
+    else if (only.got === 'unknown') problems.push(`义务「${item}」需要 ${only.need} 来源，读取失败或没有`);
+    else if (only.got !== only.need)
+      problems.push(`义务「${item}」需要 ${only.need} 来源，读证只有 ${only.got}（不能互相顶替）`);
+    else if (only.need === 'run-history' && !validRange(only.range))
+      problems.push(`义务「${item}」的运行记录读证缺有效的时间范围`);
+  }
+  return problems.length > 0 ? problems.join('；') : undefined;
+}
+
 function defaultByKind(
   park: ParkFacts & { continuedBefore: boolean },
   spin: SpinJudgement | null,

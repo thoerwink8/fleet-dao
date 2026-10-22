@@ -71,6 +71,7 @@
 // - 返工续会话（决定 0093，patched('rework-resume')）：CI 红、验收没过、冲突、没提交……下一轮动手续上一轮跑成的那个会话
 //   （同一棵树；同一路由的执行方式、池、会话用户由 planSegmentResume 判），提示词只补返工意见。连着 RESUME_STREAK_LIMIT 轮续着改
 //   还没过，下一轮开新会话，返工意见精炼过（freshSessionFeedback）。轮数用尽点「继续」重读单子后也开新会话。
+//   CI 红返工不受 RESUME_STREAK_LIMIT 限制（#3603，patched('ci-rework-keep-resume')），选路点名上一段的路由（task-session.ts）。
 // - 冲突引擎先自己并（决定 0093，patched('conflict-self-sync')）：上一轮因「和主线有冲突」返工、树里没留冲突标记时，
 //   动手前并最新主线并干净了（git 自动合并）就直接推上去重跑 CI，不派模型、不算一轮；并不干净才交给会话解。
 // - 自测（决定 0093，patched('self-check')）：会话交活、交付核对过了，推之前引擎在会话的树里跑仓的测试命令和 tsc（selfCheck）。
@@ -97,9 +98,10 @@
 //   三段的单（和老历史 rt.flowMode 为 null）走原来的路，一步不差。
 // - 收树先核对界面截图（#2983，patched('shots-delivery')，cleanup 给 removeWorktree 带 shots）：远端 shots/<单号> 读不到就存进受限归档，
 //   存不成不删树。合并后 PR 说明代码、图片分开写（shotsPrLines，多一次 updatePrBody），有欠项进「还欠什么」。老历史不带 shots，不多调。
-// - 合并不等于关单（#3037，patched('acceptance-duty')，finish）：冷验收转给人的验收条（outOfScope）不挡合并，可收尾先记、读验收责任
-//   （acceptanceDuties 活动，库里 acceptance_duties），还有开着的就不 closeIssue：单子留着，PR 说明「需求」改 Refs 标分片、原验收项进
-//   「还欠什么」。读不成按失败分流重试或停下，不当成没有。没有 outOfScope 的单照旧关。老历史没有这个标记，照旧直接关单。
+// - 合并不等于关单（#3037，patched('acceptance-duty')，finish）：冷验收转给人的验收条（outOfScope）不挡合并，收尾读库里旧的验收责任
+//   （acceptanceDuties 活动，只读）并上这条工作流记着的转人验收条，还有就不 closeIssue：单子留着，PR 说明「需求」改 Refs 标分片、原验收项进
+//   「还欠什么」。#3591（决定 0113）起不再写 acceptance_duties（活动只读、record 恒空），步序不变。读不成按失败分流重试或停下，
+//   不当成没有。没有 outOfScope 的单照旧关。老历史没有 acceptance-duty 标记，照旧直接关单。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { clipCauseSummary } from '@fleet-dao/shared/run-cause';
@@ -172,6 +174,7 @@ import {
   reworkCauseOf,
   roundOutcomeOf,
   SELF_CHECK_RED_LINE,
+  type SegmentCauseNote,
   SKIP_CI_PR_VERIFIED,
   SKIP_CI_SELF_VERIFY,
   selfCheckText,
@@ -766,7 +769,7 @@ class TaskFlow {
     }
     // 这一轮第一笔动手为什么起（#3140）：上一轮留下了问题就是返工，按问题认哪一类；方案那几笔另记「出方案」
     const startCause = reworkCauseOf(rt.status.lastProblem, rt.feedback);
-    this.planReworkResume();
+    this.planReworkResume(startCause);
     // 重活第一轮先出方案（#2755）。老历史没有这个标记，照旧直接动手
     if (tier.tier === 'heavyweight' && rt.round === 1 && !this.planTried && patched('plan-first-heavy')) {
       await this.planFirst(brief, tier, wt);
@@ -1173,13 +1176,20 @@ class TaskFlow {
   /**
    * 返工轮续上一轮跑成的会话（决定 0093）：只定续谁，能不能续由 writeSession 问 planSegmentResume。
    * 连着 RESUME_STREAK_LIMIT 轮续着改还没过：这一轮开新会话，返工意见精炼过。上一段被暂停、已经记了要续的，不覆盖。
+   * CI 红返工（cause=rework_ci）不受这个上限限制（#3603）。
    */
-  private planReworkResume(): void {
+  private planReworkResume(cause: SegmentCauseNote): void {
     const rt = this.rt;
     const last = rt.lastSession;
     if (!last || rt.resumeFrom !== null || !patched('rework-resume')) return;
     // 全程的单（#2826）一直续同一个会话：不按「连着续两轮开新会话」清空；续不上由 writeSession 开新会话、带同样的意见
-    if (rt.resumeStreak >= RESUME_STREAK_LIMIT && rt.flowMode !== 'full') {
+    // CI 红返工（#3603，patched('ci-rework-keep-resume')）也不清：修的是同一处失败，原会话读过的代码和上下文最有用。
+    // 标记只在「到了上限、又是 CI 红」这一刻才问：老历史在这一刻没有标记，重放为假，照旧清空开新会话。
+    if (
+      rt.resumeStreak >= RESUME_STREAK_LIMIT &&
+      rt.flowMode !== 'full' &&
+      !(cause.cause === 'rework_ci' && patched('ci-rework-keep-resume'))
+    ) {
       rt.resumeStreak = 0;
       rt.feedback = freshSessionFeedback(rt.feedback);
       return;
@@ -1234,8 +1244,8 @@ class TaskFlow {
 
   /**
    * 收尾：关单、收工作树、写库。
-   * 验收责任还开着（#3037，patched('acceptance-duty')）：代码已合（决定 0093：不归我验不挡合并），可单子不关——先把这条工作流
-   * 见过的转人验收条连合并回执记进库（按「单 + PR + 头」幂等，冷验收活动记过的不重复），再读回这张单还开着的全部；
+   * 验收还欠着（#3037，patched('acceptance-duty')）：代码已合（决定 0093：不归我验不挡合并），可单子不关——读库里旧的验收责任
+   * （只读，#3591 起不再写），并上这条工作流见过的转人验收条（openDuties）；
    * 有就留着原单，PR 说明「需求」栏改成 Refs 标分片，原验收项写进「还欠什么」。读不成按失败分流重试或停下，不当成没有、不关单。
    * 老历史没有这个标记，照旧直接关单。
    */
@@ -1312,25 +1322,36 @@ class TaskFlow {
   }
 
   /**
-   * 记下这条工作流见过的转人验收条（合进主线的那个 PR 带上合并回执），读回这张单还开着的验收责任（#3037）。
-   * 读不成、写不成由 step 按失败分流重试或停下等人：不回空数组冒充「没有待验的」。
+   * 这张单还欠着的转人验收条：库里旧的验收责任（#3037 时期记下的，只读）并上这条工作流自己见过的「不归我验」。
+   * #3591（决定 0113）起不再写库：record 恒为空，活动只读；转人验收条只活在工作流状态里，靠留着原单、PR 说明写 Refs 交给人。
+   * 步序没变（照旧一次 acceptanceDuties），不用新标记。读不成由 step 按失败分流重试或停下等人：不回空数组冒充「没有待验的」。
    */
   private async openDuties(commit?: string): Promise<AcceptanceDuty[]> {
     const rt = this.rt;
-    const record = rt.handedOver.map((d) => ({
-      ...d,
-      items: [...d.items],
-      ...(commit && d.prNumber === rt.prNumber ? { mergeCommit: commit } : {}),
-    }));
     const read = await rt.step('acceptanceDuties', () =>
       rt.acts.acceptanceDuties({
         taskId: rt.input.taskId,
         repo: rt.input.repo,
         issueNumber: rt.input.issueNumber,
-        record,
+        record: [],
       }),
     );
-    return read.open;
+    const repo = `${rt.input.repo.owner}/${rt.input.repo.name}`;
+    const open = [...read.open];
+    for (const d of rt.handedOver) {
+      // 老历史写过库：读回来的已经带着这一条（同 PR 同头），不重复算
+      if (open.some((o) => o.prNumber === d.prNumber && o.head === d.head)) continue;
+      open.push({
+        repo,
+        issueNumber: rt.input.issueNumber,
+        prNumber: d.prNumber,
+        head: d.head,
+        items: [...d.items],
+        source: d.prNumber === 0 ? 'coordination' : 'cold_verify',
+        mergeCommit: commit && d.prNumber === rt.prNumber ? commit : null,
+      });
+    }
+    return open;
   }
 
   /**

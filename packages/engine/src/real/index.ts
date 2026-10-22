@@ -1306,8 +1306,6 @@ export function realPortsFromEnv(
       fileDiff: mirrorFileDiff(gh),
       // 验收有结论时现读 PR 上还没解决的正式「要求改」（#2991），工作流交给下一轮动手会话
       reviewChanges,
-      // 「不归我验」转给人时记下验收责任（#3037）：代码照合，单子留着等最终验收完成
-      recordDuty: real.ports.acceptanceDuties,
       pickRoute: real.ports.pickRoute,
       spawner: segmentSpawner,
       runs: taskRuns,

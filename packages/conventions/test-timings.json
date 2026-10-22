@@ -257,7 +257,6 @@
     "packages/api/test/web-routes-contract.test.ts": 45,
     "packages/api/test/worktree-routes.test.ts": 112,
     "packages/conventions/test/acceptance-gate.test.ts": 64,
-    "packages/conventions/test/audit-alarm.test.ts": 7,
     "packages/conventions/test/audit-client.test.ts": 55,
     "packages/conventions/test/bin-git-runner.test.ts": 86,
     "packages/conventions/test/branch-git.test.ts": 376,
