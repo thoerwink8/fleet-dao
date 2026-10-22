@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ALARM_TITLE, followAlarm } from '../src/audit-alarm.ts';
 import { auditClient, auditGhFetch } from '../src/audit-client.ts';
 import { auditGitHub } from '../src/github-audit.ts';
 import type { GhReadResult, RunGhRead } from '../src/plan-reader.ts';
@@ -107,7 +106,7 @@ describe('audit 显式 gh socket 读取，沿用完整对账判据', () => {
   });
 });
 
-describe('alarm 写入是真实 gh 写请求且核回执', () => {
+describe('gh 写入是真实 gh 写请求且核回执（开单、改正文、关单）', () => {
   it.each(['opened', 'updated', 'closed'] as const)(
     '%s 经 stdin 写 JSON，成功回执才报告成功',
     async (action) => {
@@ -127,15 +126,13 @@ describe('alarm 写入是真实 gh 写请求且核回执', () => {
         );
       };
       const gh = await auditClient('o/r', {}, { runGh: run });
-      const result = await followAlarm(gh, {
-        red: action !== 'closed',
-        lines: ['真实问题'],
-        open: action === 'opened' ? [] : [issue(900, { title: ALARM_TITLE, body: '原正文' })],
-        milestone: 8,
-        runUrl: undefined,
-        at,
-      });
-      expect(result).toEqual({ action, issue: 900 });
+      const result =
+        action === 'opened'
+          ? await gh.createIssue('题', '真实问题', ['缺陷'])
+          : action === 'updated'
+            ? await gh.updateIssueBody(900, '真实问题')
+            : await gh.closeIssueCompleted(900, '真实问题');
+      expect(result).toBe(action === 'opened' ? 900 : undefined);
       expect(
         calls.every(
           ({ args, input }) =>
@@ -159,15 +156,13 @@ describe('alarm 写入是真实 gh 写请求且核回执', () => {
       ]) {
         const run = runner({ [action === 'opened' ? `${API}/issues` : `${API}/issues/900`]: failure });
         const gh = await auditClient('o/r', {}, { runGh: run });
-        const result = await followAlarm(gh, {
-          red: action !== 'closed',
-          lines: ['真实问题'],
-          open: action === 'opened' ? [] : [issue(900, { title: ALARM_TITLE })],
-          milestone: undefined,
-          runUrl: undefined,
-          at,
-        });
-        expect(result.action).toBe('failed');
+        const write =
+          action === 'opened'
+            ? gh.createIssue('题', '真实问题', ['缺陷'])
+            : action === 'updated'
+              ? gh.updateIssueBody(900, '真实问题')
+              : gh.closeIssueCompleted(900, '真实问题');
+        await expect(write).rejects.toThrow();
       }
     },
   );

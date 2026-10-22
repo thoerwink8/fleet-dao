@@ -133,10 +133,10 @@ export function leaseAcceptanceComment(
   duties: readonly LeaseDuty[],
 ): string {
   return [
-    `本机领这张单的租约到期了，可${merged !== null ? `代码已经合了（PR #${merged}）` : '这张单只剩协调验收责任（没有代码要写）'}，验收责任还开着：不退回法国重做，单子留着等人验。`,
+    `本机领这张单的租约到期了，可${merged !== null ? `代码已经合了（PR #${merged}）` : '这张单只剩协调验收责任（没有代码要写）'}，${duties.length > 0 ? '验收责任还开着' : '单子还开着'}：不退回法国重做，单子留着等人验。`,
     '',
     ...duties.flatMap((d) => [leaseDutyHeading(d), ...d.items.map((i) => `- ${i}`)]),
-    '',
+    ...(duties.length > 0 ? [''] : []),
     `验完记下最终验收完成以后才关 #${issueNumber}。`,
   ].join('\n');
 }
@@ -268,6 +268,23 @@ export async function sweepLocalLeases(
             body: leaseAcceptanceComment(lease.issueNumber, merged, duties),
           });
           const why = `本机租约 ${lease.leaseUntil.toISOString()} 到期：${merged !== null ? `PR #${merged} 已合` : '只剩协调验收责任'}，验收责任 ${duties.length} 条还开着，不退回法国，单子留着等人验`;
+          if ((await deps.settle({ taskId: lease.taskId, how: 'done', why, now: ctx.now })) > 0) {
+            out.awaitingAcceptance += 1;
+          }
+          continue;
+        }
+      }
+      // #3601：#3591 起不再写验收责任账，上面读到的责任恒为空。代码已合、单子还开着，说明还有没验完的东西
+      // （冷验收转人时给单贴了「本机做」）：退回法国只会重做一遍。不摘标签、不退回，记做完，单子留着等人验。
+      if (duties.length === 0) {
+        const merged = await deps.mergedPr(repo, lease.issueNumber);
+        if (merged !== null) {
+          await ctx.comment({
+            issueNumber: lease.issueNumber,
+            key: `local-lease-acceptance:${lease.leaseUntil.toISOString()}`,
+            body: leaseAcceptanceComment(lease.issueNumber, merged, []),
+          });
+          const why = `本机租约 ${lease.leaseUntil.toISOString()} 到期：PR #${merged} 已合、单还开着，不退回法国重做，不摘「${LOCAL_LABEL}」，单子留着等人验`;
           if ((await deps.settle({ taskId: lease.taskId, how: 'done', why, now: ctx.now })) > 0) {
             out.awaitingAcceptance += 1;
           }
