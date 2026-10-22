@@ -199,6 +199,39 @@ describe('真实 quota-read 接线：Grok 账单结构 unknown 不冒充额度',
     expect(allRuns.rows.map((r) => r.outcome)).toEqual(['ok', 'failed', 'ok']);
   });
 
+  it('库里停用标记（channels.enabled、channel_states disabled）：这个池不读、不写库，整轮记 unscanned', async () => {
+    const guarded = () => {
+      const deps = quotaReadJob({ db: t.db, now: () => now, loadConfig: async () => config })();
+      let reads = 0;
+      return {
+        deps: {
+          ...deps,
+          read: async (c: QuotaConfig) => {
+            reads += 1;
+            return deps.read(c);
+          },
+        },
+        reads: () => reads,
+      };
+    };
+    const lastOk = async () => poolRow(t);
+
+    await t.client.exec("update channels set enabled = false where id = 'grok-subscription'");
+    const a = guarded();
+    await expect(runQuotaReadJob(a.deps)).resolves.toMatchObject({ outcome: 'unscanned' });
+    expect(a.reads()).toBe(0);
+    expect(await lastOk()).toBeNull();
+
+    await t.client.exec("update channels set enabled = true where id = 'grok-subscription'");
+    await t.client.exec(
+      "insert into channel_states (channel_id, status, reason, flagged_at) values ('grok-subscription', 'disabled', '上游 401', now())",
+    );
+    const b = guarded();
+    await expect(runQuotaReadJob(b.deps)).resolves.toMatchObject({ outcome: 'unscanned' });
+    expect(b.reads()).toBe(0);
+    expect(await lastOk()).toBeNull();
+  });
+
   it('unknown 账单结构仍返回 bad_response，不生成任何窗口', async () => {
     body = { config: { usagePercent: 47 } };
     const report = await readAllQuotas(

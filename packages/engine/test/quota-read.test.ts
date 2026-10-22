@@ -74,6 +74,8 @@ function world(
   results: PoolQuotaResult[],
   over: {
     lastOk?: Record<string, Date | null>;
+    /** 库里渠道被停用的池 → 原因（deps.disabledPools 的返回）。 */
+    disabled?: Record<string, string>;
     loadConfig?: () => Promise<QuotaConfig>;
     read?: () => Promise<QuotaReport>;
   } = {},
@@ -91,6 +93,8 @@ function world(
       saved.push(s);
     },
     lastReadOk: async (ids) => new Map(ids.map((id) => [id, over.lastOk?.[id] ?? null])),
+    disabledPools: async (ids) =>
+      new Map(Object.entries(over.disabled ?? {}).filter(([id]) => ids.includes(id))),
     raise: async (a) => {
       raised.push(a);
     },
@@ -167,6 +171,59 @@ describe('定时读额度', () => {
 
     await expect(runQuotaReadJob(w.deps)).resolves.toMatchObject({ outcome: 'ok', scanned: 1 });
     expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
+  });
+
+  it('库里渠道被停用的池：不交给读取层、不写库、不报警、不计入整轮结局，其余池都读成就是 ok', async () => {
+    const w = world([ok('p1'), failed('p2', 'unreachable')], {
+      disabled: { p2: '渠道 c2 在库里已停用（channels.enabled = false）' },
+      loadConfig: async () =>
+        ({
+          pools: [
+            { poolId: 'p1', channelId: 'c1', reader: 'reclaude-carpool' },
+            { poolId: 'p2', channelId: 'c2', reader: 'reclaude-carpool' },
+          ],
+        }) as unknown as QuotaConfig,
+    });
+    const readPoolIds: string[][] = [];
+    w.deps.read = async (config) => {
+      readPoolIds.push(config.pools.map((p) => p.poolId));
+      return { startedAt: NOW.toISOString(), finishedAt: NOW.toISOString(), results: [ok('p1')] };
+    };
+    const run = await runQuotaReadJob(w.deps);
+    expect(readPoolIds).toEqual([['p1']]);
+    expect(run).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
+    expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
+    expect(w.raised).toEqual([]);
+    expect(w.resolved).toContain(poolAlertKey('p2'));
+  });
+
+  it('库里停用的池即使被读取层交回结果：也不写库、不计入结局；其余池失败仍是 partial 且不列停用的池', async () => {
+    const w = world([ok('p1'), failed('p2', 'unreachable'), ok('p3')], {
+      disabled: { p3: '渠道 c3 在库里标着 disabled（channel_states）：上游 401' },
+      loadConfig: async () =>
+        ({ pools: [{ poolId: 'p1' }, { poolId: 'p2' }, { poolId: 'p3' }] }) as unknown as QuotaConfig,
+    });
+    const run = await runQuotaReadJob(w.deps);
+    expect(run).toMatchObject({ outcome: 'partial', scanned: 2 });
+    expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
+    expect(run.why).toContain('failed [p2]');
+    expect(run.why).not.toContain('p3');
+  });
+
+  it('必读的池渠道全被停用：这一轮没有要读的池，记 unscanned，不调读取层', async () => {
+    const w = world([ok('p1')], {
+      disabled: { p1: '渠道 c1 在库里已停用（channels.enabled = false）' },
+      loadConfig: async () => ({ pools: [{ poolId: 'p1' }] }) as unknown as QuotaConfig,
+    });
+    let read = 0;
+    w.deps.read = async () => {
+      read += 1;
+      throw new Error('不该读');
+    };
+    const run = await runQuotaReadJob(w.deps);
+    expect(read).toBe(0);
+    expect(run.outcome).toBe('unscanned');
+    expect(w.saved).toEqual([]);
   });
 
   it('没有退役标记时，渠道即使下架也不能替必读池免读；缺凭据仍是明确 partial', async () => {

@@ -125,6 +125,7 @@ async function alertBody(result: PoolQuotaResult, last: Date | null): Promise<st
     }),
     save: async () => undefined,
     lastReadOk: async () => new Map([['grok', last]]),
+    disabledPools: async () => new Map(),
     raise: async (a) => {
       raised.push(a);
     },

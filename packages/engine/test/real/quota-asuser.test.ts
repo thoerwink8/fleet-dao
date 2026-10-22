@@ -121,6 +121,7 @@ async function runRound(files: Files) {
       saved.push(s);
     },
     lastReadOk: async (ids) => new Map(ids.map((id) => [id, null])),
+    disabledPools: async () => new Map(),
     raise: async (a) => {
       raised.push(a);
     },
@@ -365,6 +366,7 @@ describe('额度读取：claude-solo 经会话用户通道起 reclaude，不由�
           saved.push(s);
         },
         lastReadOk: async (ids) => new Map(ids.map((id) => [id, null])),
+        disabledPools: async () => new Map(),
         raise: async (a) => {
           raised.push(a);
         },

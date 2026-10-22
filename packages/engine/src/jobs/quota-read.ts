@@ -18,7 +18,8 @@
 //   另一个池本来就读不到。照旧留着旧读数、不报警，但这个池记 unknown，整轮写明哪几个池没读，不记成全读到了。
 // - 整轮结局由各池结局汇总（#3592）：每个池各记 ok / unknown（回包认不出、账单没报用量、没挂着这个组织、丢过窗口）/
 //   failed（没读成）。全部 ok → ok；一个池也没读到数 → failed（抛）；其余 partial，明细列出各结局下是哪几个池。
-//   退役/停用的池（有效配置的 notRead）不读，也不计入整轮结局。
+//   退役/停用的池不读，也不计入整轮结局：有效配置的 notRead，加上库里渠道被停用的（channels.enabled 为 false、channel_states
+//   标 disabled，deps.disabledPools）；读取前就从要读的池里剔掉，读取层不会去连它们。
 // - 配置读不到、认不出：这一轮整个没跑成，当场报（key 单独一个），不拿上一次的配置顶。
 // - 有效配置 notRead 里的池不读（没有这种数据或已退役）。每轮撤掉它们的 quota-read 提醒，不留着报错；退役池的旧读数不动。
 // - 读到的窗口里被读取器丢过的（notes 里写着「没收」）不算读全：只写收到的窗口，不标别的窗口过期、不算一次读成。
@@ -70,6 +71,8 @@ export interface QuotaReadJobDeps {
   save(snapshot: PoolQuotaSnapshot, now: Date): Promise<unknown>;
   /** 这些池最近一次读成的时刻（pools.last_read_ok_at），在写之前读；没有的池给 null。 */
   lastReadOk(poolIds: readonly string[]): Promise<Map<string, Date | null>>;
+  /** 这些池里渠道在库里被停用的（channels.enabled 为 false 或 channel_states 标 disabled）：池 id → 原因。不读，也不计入整轮结局（#3592）。 */
+  disabledPools(poolIds: readonly string[]): Promise<Map<string, string>>;
   /** 推一条提醒（同一个 key 只留一条）。 */
   raise(alert: { key: string; title: string; body: string }): Promise<void>;
   /** 撤掉这个 key 的提醒（没有就什么都不做）。 */
@@ -180,13 +183,22 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
   await deps.resolve(configAlertKey());
   for (const skip of config.notRead ?? []) await deps.resolve(poolAlertKey(skip.poolId));
 
-  if (config.pools.length === 0) {
-    return { result: { outcome: 'unscanned', why: '额度配置里一个池都没有' } };
+  // 库里渠道被停用的池跟配置里的 notRead 一样：不读、不报警、不计入整轮结局，旧读数不动，撤掉它们的旧提醒。
+  const dbDisabled = await deps.disabledPools(config.pools.map((p) => p.poolId));
+  for (const poolId of dbDisabled.keys()) await deps.resolve(poolAlertKey(poolId));
+  const required = config.pools.filter((p) => !dbDisabled.has(p.poolId));
+  if (required.length === 0) {
+    const why =
+      dbDisabled.size > 0
+        ? `必读的池渠道都已停用（${[...dbDisabled.keys()].join('、')}），这一轮没有要读的池`
+        : '额度配置里一个池都没有';
+    return { result: { outcome: 'unscanned', why } };
   }
+  const readConfig: QuotaConfig = dbDisabled.size > 0 ? { ...config, pools: required } : config;
 
-  const before = await deps.lastReadOk(config.pools.map((p) => p.poolId));
-  const report = await deps.read(config);
-  const retired = new Set((config.notRead ?? []).map((skip) => skip.poolId));
+  const before = await deps.lastReadOk(required.map((p) => p.poolId));
+  const report = await deps.read(readConfig);
+  const retired = new Set([...(config.notRead ?? []).map((skip) => skip.poolId), ...dbDisabled.keys()]);
   const outcomes: PoolOutcome[] = [];
   const problems: string[] = [];
   let toAlert = 0;
@@ -263,13 +275,13 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
 
   // 每个必读的池都要有一条结局：读取层没交回结果的池记 failed，不当成没事。
   const seen = new Set(outcomes.map((o) => o.poolId));
-  for (const p of config.pools) {
+  for (const p of required) {
     if (seen.has(p.poolId)) continue;
     const why = `${p.poolId} 读取层没交回这个池的结果`;
     problems.push(why);
     outcomes.push({ poolId: p.poolId, outcome: 'failed', why, gotData: false });
   }
-  const scanned = config.pools.length;
+  const scanned = required.length;
   return { result: summarizePools(outcomes, problems, scanned, toAlert) };
 }
 
