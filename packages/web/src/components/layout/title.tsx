@@ -8,6 +8,7 @@ const LEVEL = {
   1: 'text-title text-ink',
   2: 'text-heading text-ink',
   3: 'text-body font-medium text-ink',
+  4: 'text-body font-medium text-ink',
 } as const;
 
 export function Title({
@@ -18,9 +19,10 @@ export function Title({
   children,
   ...rest
 }: {
-  level?: 1 | 2 | 3;
+  /** 4 是 h4（更新日志里「####」那一级，样子同 3）。 */
+  level?: 1 | 2 | 3 | 4;
   /** 字号字重照哪一档画（不写＝照 level）：页内的名字要大一号、但不该是第二个 h1 时，level 2 配 look 1。 */
-  look?: 1 | 2 | 3;
+  look?: 1 | 2 | 3 | 4;
   truncate?: boolean;
   /** 悬停给全文（truncate 时用）。 */
   title?: string;

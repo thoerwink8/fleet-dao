@@ -45,6 +45,7 @@ import {
   HistoryStrip,
   kindStatus,
 } from '../components/channel-status';
+import { Breadcrumb } from '../components/layout/breadcrumb';
 import { Button } from '../components/layout/button';
 import { Code } from '../components/layout/code';
 import { Descriptions, type DescriptionsItem } from '../components/layout/descriptions';
@@ -108,6 +109,8 @@ export function meta() {
 }
 
 const SUMMARY = '每条路由现在通不通，多久探一次。';
+/** 面包屑：路由 / 渠道状态（渠道状态归在路由下）。 */
+const CRUMB = <Breadcrumb items={[{ label: '路由', href: '/routing' }, { label: '渠道状态' }]} />;
 const DESCRIPTION =
   '活跃路由每小时探一次，不活跃的每天一次，派活前 15 分钟内没探过会先探；中转渠道的活跃模型额外问一道身份题。点「立即探测」让法国引擎现在就探。';
 
@@ -254,7 +257,7 @@ export default function RoutingStatus() {
   // 从没读成：整页只写哪一份没读成和原因（各带重试）。读成过、刷新时失败：照旧画上一次的，顶上一条横幅（#1922）
   if ((routing.error && !routing.data) || (layers.error && !layers.data)) {
     return (
-      <Page title="渠道状态" description={SUMMARY} detail={DESCRIPTION}>
+      <Page title="渠道状态" breadcrumb={CRUMB} description={SUMMARY} detail={DESCRIPTION}>
         <Stack gap="md">
           {routing.error ? (
             <LoadError what="渠道目录" error={routing.error} onRetry={() => void routing.refetch()} />
@@ -268,14 +271,14 @@ export default function RoutingStatus() {
   }
   if (!routing.data || !layers.data) {
     return (
-      <Page title="渠道状态" description={SUMMARY} detail={DESCRIPTION}>
+      <Page title="渠道状态" breadcrumb={CRUMB} description={SUMMARY} detail={DESCRIPTION}>
         <LoadingRows rows={5} />
       </Page>
     );
   }
   if (cards.length === 0) {
     return (
-      <Page title="渠道状态" description={SUMMARY} detail={DESCRIPTION}>
+      <Page title="渠道状态" breadcrumb={CRUMB} description={SUMMARY} detail={DESCRIPTION}>
         <Section>
           <EmptyState title="目录里一个渠道都没有" hint="渠道在库里没配上：去看后端日志" />
         </Section>
@@ -440,6 +443,7 @@ export default function RoutingStatus() {
   return (
     <Page
       title="渠道状态"
+      breadcrumb={CRUMB}
       description={SUMMARY}
       detail={DESCRIPTION}
       refresh={{
@@ -451,8 +455,6 @@ export default function RoutingStatus() {
         // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
         dataUpdatedAt: routing.dataUpdatedAt > now ? now : routing.dataUpdatedAt,
         staleAfterMs: ROUTING_STATUS_STALE_AFTER_MS,
-        // 刷新收成一个图标钮，最后更新在悬停和读屏里（路由页样板 #1914）
-        variant: 'dot',
       }}
     >
       <Stack>

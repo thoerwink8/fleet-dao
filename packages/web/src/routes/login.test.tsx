@@ -119,6 +119,42 @@ describe('登录页：已登录、没登录', () => {
   });
 });
 
+describe('mock 下看真登录页（?preview）', () => {
+  const mockApi = () => createMockApi({ live: false }) as FleetApi;
+
+  test('mock 已登录也不跳走：?preview 摆出账密表单和「用飞书登录」，不写「假数据模式」', async () => {
+    renderApp(<App />, { api: mockApi(), route: '/login?preview' });
+    expect(await screen.findByLabelText('用户名')).toBeTruthy();
+    expect(screen.getByRole('link', { name: /用飞书登录/ })).toBeTruthy();
+    expect(screen.queryByText(/假数据模式/)).toBeNull();
+    expect(screen.queryByTestId('landed')).toBeNull();
+  });
+
+  test('旁边有账密的「登录」主按钮时，飞书是描边按钮；只有飞书一条路时它是蓝的主按钮（样稿 Login.dc.html）', async () => {
+    const both = renderApp(<App />, { api: mockApi(), route: '/login?preview' });
+    expect((await screen.findByRole('link', { name: /用飞书登录/ })).getAttribute('data-variant')).toBe(
+      'outline',
+    );
+    expect(screen.getByRole('button', { name: '登录' }).getAttribute('data-variant')).toBe('primary');
+    both.unmount();
+    renderApp(<App />, { api: mockApi(), route: '/login?preview=feishu' });
+    expect((await screen.findByRole('link', { name: /用飞书登录/ })).getAttribute('data-variant')).toBe(
+      'primary',
+    );
+    expect(screen.queryByLabelText('用户名')).toBeNull();
+  });
+
+  test('不带 preview：mock 照旧自动登录跳走；真后端（非 mock）带 preview 也不生效', async () => {
+    renderApp(<App />, { api: mockApi(), route: '/login?next=%2Fquota' });
+    expect((await screen.findByTestId('landed')).textContent).toBe('/quota');
+    cleanup();
+    const real = loggedOut({ devLogin: false, passwordLogin: false, feishuAppId: 'cli_x' });
+    renderApp(<App />, { api: real, route: '/login?preview=password' });
+    expect(await screen.findByRole('link', { name: /用飞书登录/ })).toBeTruthy();
+    expect(screen.queryByLabelText('用户名')).toBeNull();
+  });
+});
+
 describe('开发环境免登', () => {
   const type = (value: string) => fireEvent.change(screen.getByLabelText(/用户编号/), { target: { value } });
   const submit = () => fireEvent.click(screen.getByRole('button', { name: '免登' }));

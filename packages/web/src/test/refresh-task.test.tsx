@@ -43,7 +43,7 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
   open('/tasks/t-c9', api);
   // 读取中不写 disabled，等 aria-busy 变成 false 才是读完；disabled 一直是 false，会在读完前就点下去。
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBe('false'),
+    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBeNull(),
   );
   expect(screen.getByText(/最后更新/).textContent).toContain('刚刚');
   expect(screen.queryByText('数据已过期')).toBeNull();

@@ -1,17 +1,17 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Link, Outlet, useLocation, useNavigate } from 'react-router';
+import { Outlet, useLocation, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
 import { ApiError, errorText, useLiveSync, useMe, useNotifications } from '../api/client';
 import { loginPath } from '../api/index';
 import { GatewayHealthLink } from '../components/gateway-health-link';
+import { Button } from '../components/layout/button';
 import { isRemotePage, OnlyLocalNotice } from '../components/node-notice';
 import { RepoProvider } from '../components/repo-context';
 import { CommandMenu } from '../components/shell/command-menu';
 import { AppFrame, ShellScreen } from '../components/shell/frame';
 import { TopbarSlotProvider } from '../components/shell/topbar-slot';
 import { TaskActionsProvider } from '../components/task-actions';
-import { Button } from '../components/ui/button';
 import { useLocalState, useMediaQuery } from '../lib/hooks';
 import { useNodeSelection } from '../lib/node';
 import { useAppBadge, useBadgeCount } from '../lib/pwa/hooks';
@@ -46,12 +46,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
       actions={
         <>
           {unauthenticated ? null : (
-            <Button size="sm" variant="outline" onClick={() => void me.refetch()}>
+            <Button size="sm" variant="secondary" onClick={() => void me.refetch()}>
               重试
             </Button>
           )}
-          <Button asChild size="sm">
-            <Link to={loginPath()}>去登录页</Link>
+          <Button size="sm" variant="primary" href={loginPath()}>
+            去登录页
           </Button>
         </>
       }

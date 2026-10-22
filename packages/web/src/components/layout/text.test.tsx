@@ -62,4 +62,16 @@ describe('Text', () => {
     expect(el.className).toContain('truncate');
     expect(el.getAttribute('title')).toBe('全文全文');
   });
+
+  test('as=strong 是行内的 strong；breakWords 长词折行', () => {
+    render(
+      <Text as="strong" strong breakWords>
+        粗
+      </Text>,
+    );
+    const el = screen.getByText('粗');
+    expect(el.tagName).toBe('STRONG');
+    expect(el.className).not.toContain('block');
+    expect(el.className).toContain('break-words');
+  });
 });

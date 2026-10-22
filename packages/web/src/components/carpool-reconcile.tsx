@@ -2,8 +2,10 @@ import { Scale } from 'lucide-react';
 import { brand } from '#brand';
 import type { CarpoolReconcileView } from '../api/types';
 import { formatClock } from '../lib/format';
-import { cn } from '../lib/utils';
+import { Glyph } from './layout/glyph';
 import { Section } from './layout/section';
+import { Stack } from './layout/stack';
+import { Text, type TextTone } from './layout/text';
 
 export type CarpoolReconcileTone = 'muted' | 'ok' | 'stall';
 
@@ -29,10 +31,10 @@ export function carpoolReconcileSummary(v: CarpoolReconcileView): CarpoolReconci
   };
 }
 
-const TONE_CLASS: Record<CarpoolReconcileTone, string> = {
-  muted: 'text-muted-foreground',
-  ok: 'text-foreground',
-  stall: 'text-ink-stall',
+const TEXT_TONE: Record<CarpoolReconcileTone, TextTone> = {
+  muted: 'muted',
+  ok: 'default',
+  stall: 'warning',
 };
 
 /** 额度表顶上、切号现状下面的一栏（没有这项 = 老后端，不画）。 */
@@ -42,15 +44,22 @@ export function CarpoolReconcileBanner({ view }: { view: CarpoolReconcileView | 
   return (
     <Section
       {...(s.tone === 'stall' ? { tone: 'stall' as const } : {})}
-      className="mb-3"
       data-tone={s.tone}
       data-testid="carpool-reconcile"
     >
-      <div className="flex items-center gap-2">
-        <Scale className={cn('size-4 shrink-0', TONE_CLASS[s.tone])} aria-hidden />
-        <span className={cn('text-body font-medium', TONE_CLASS[s.tone])}>{s.headline}</span>
-      </div>
-      {s.detail ? <p className="mt-1.5 pl-6 text-meta text-muted-foreground">{s.detail}</p> : null}
+      <Stack direction="horizontal" gap="sm" align="start">
+        <Glyph icon={Scale} tone={TEXT_TONE[s.tone]} />
+        <Stack gap="sm">
+          <Text strong tone={TEXT_TONE[s.tone]}>
+            {s.headline}
+          </Text>
+          {s.detail ? (
+            <Text as="p" size="meta" tone="muted">
+              {s.detail}
+            </Text>
+          ) : null}
+        </Stack>
+      </Stack>
     </Section>
   );
 }

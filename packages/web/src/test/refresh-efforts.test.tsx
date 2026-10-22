@@ -18,10 +18,10 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
   await screen.findByRole('button', { name: '刷新' });
   await screen.findAllByText('Opus 5.5');
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-disabled')).toBe('false'),
+    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-disabled')).toBeNull(),
   );
   const button = screen.getByRole('button', { name: '刷新' });
-  const fresh = document.querySelector('[data-refresh-bar="dot"] [role="status"]');
+  const fresh = document.querySelector('[data-refresh-bar] [data-freshness]');
   expect(fresh?.getAttribute('title')).toMatch(/最后更新/);
   expect(fresh?.getAttribute('title')).toContain('刚刚');
   expect(screen.queryByText('数据已过期')).toBeNull();

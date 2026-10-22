@@ -326,7 +326,7 @@
    */
   /* 尺寸一律写 rem（用户在浏览器调大默认字号时整站一起变）。括号里是像素（1rem = 16px）。 */
   --spacing-topbar: 3.75rem; /* 60 */
-  --spacing-sidebar: 13.75rem; /* 220 */
+  --spacing-sidebar: 220px; /* 220，写 px：左菜单宽不随根字号变（验收在 12px 根字号下量到 165） */
   --spacing-sidebar-collapsed: 3.75rem; /* 60 */
   --spacing-sidebar-sheet: 16.25rem; /* 260 */
   /* 主页右侧抽屉（要你拍的 / 做完的）宽 22.5rem（360px）；≥1920 时停靠成一列、其余浮在画布上。 */

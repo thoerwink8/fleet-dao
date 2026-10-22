@@ -300,6 +300,11 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   },
   // 提需求页（12，#2062）：列表三处、对话、拍板卡、删除恢复、接着这条提
   { files: [`${W}routes/intake.tsx`, `${W}components/intake/`], specs: [spec('12-intake')] },
+  // 外壳（13 量左菜单宽固定 220：正文再宽、根字号再小都不被挤窄）
+  {
+    files: [`${W}components/shell/frame.tsx`],
+    specs: [spec('13-shell-menu-width')],
+  },
 ];
 
 /** 夹具、配置、备库：e2e 自己的地基，改了就是全套。 */

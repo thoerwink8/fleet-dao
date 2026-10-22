@@ -7,7 +7,7 @@ import { CalendarClock } from 'lucide-react';
 import { useState } from 'react';
 import { brand } from '#brand';
 import { POLL_FAST_MS, useJobs } from '../api/client';
-import { Button } from '../components/layout/button';
+import { Breadcrumb } from '../components/layout/breadcrumb';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { LoadError, LoadingRows, LoadStale } from '../components/layout/load-state';
@@ -35,14 +35,7 @@ export default function Schedules() {
   const retry = () => void refetch();
   const page = {
     title: '定时任务',
-    breadcrumb: (
-      <>
-        <Button variant="text" size="xs" href="/france">
-          法国
-        </Button>
-        <span aria-hidden>/</span>
-      </>
-    ),
+    breadcrumb: <Breadcrumb items={[{ label: '法国', href: '/france' }, { label: '定时任务' }]} />,
     description: '后台定时跑的活，各自上次跑得怎么样。',
     detail: (
       <>

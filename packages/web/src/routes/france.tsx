@@ -174,6 +174,8 @@ function Overview({
   );
 }
 
+const NO_NODES: NodeListItem[] = [];
+
 export default function France() {
   const { view: masterView } = useMasterView();
   const env = useEnv();
@@ -187,7 +189,8 @@ export default function France() {
   const facts = env.data?.facts;
   const jobList = jobs.data?.jobs;
   const failed = jobList?.filter((j) => j.lastRun?.outcome === 'failed').length ?? 0;
-  const remote = nodes.data?.nodes ?? [];
+  // 没读到列表（还在读或读失败）时是空的，不代表没有远程环境：读失败由下面的 pageRead 和机器表的读态说
+  const remote = nodes.data === undefined ? NO_NODES : nodes.data.nodes;
   // 收到过快照的远程环境各读一份；从没收到过的（never）没有快照可读，那一行只写「从没收到过」
   const received = remote.filter((n) => n.receivedAt !== undefined);
   const snapshots = useNodeSnapshots(received.map((n) => n.id));

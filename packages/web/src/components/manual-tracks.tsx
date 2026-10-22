@@ -3,50 +3,52 @@
 import type { RoutingLayers } from '../api/types';
 import { tierLabel } from '../lib/segments';
 import { Section } from './layout/section';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
+import { Table, type TableColumn } from './layout/table';
+import { Text } from './layout/text';
 
 export type ManualTrackRow = NonNullable<RoutingLayers['manualTracks']>[number];
-
-const HEADS = ['模型', '派工档', '一段过', '单数', '下界', '没做成', '平均分钟'] as const;
 
 function cell(n: number): string {
   return Number.isInteger(n) ? String(n) : String(Math.round(n));
 }
 
+/** 一个数字格：data-track 标出是哪一列（测试、e2e 按它找）。 */
+function numCol(
+  key: 'onePass' | 'tasks' | 'lower' | 'notDone' | 'avgMinutes',
+  title: string,
+  show: (row: ManualTrackRow) => string,
+): TableColumn<ManualTrackRow> {
+  return {
+    key,
+    title,
+    align: 'right',
+    render: (_v, row) => (
+      <span className="num" data-track={key}>
+        {show(row)}
+      </span>
+    ),
+  };
+}
+
+const COLUMNS: readonly TableColumn<ManualTrackRow>[] = [
+  { key: 'modelName', title: '模型' },
+  { key: 'tier', title: '派工档', render: (_v, row) => tierLabel[row.tier] },
+  numCol('onePass', '一段过', (r) => cell(r.onePass)),
+  numCol('tasks', '单数', (r) => cell(r.tasks)),
+  numCol('lower', '下界', (r) => r.lower.toFixed(2)),
+  numCol('notDone', '没做成', (r) => cell(r.notDone)),
+  numCol('avgMinutes', '平均分钟', (r) => cell(r.avgMinutes)),
+];
+
 export function ManualTracksTable({ rows }: { rows: readonly ManualTrackRow[] }) {
   return (
-    <Table aria-label="动手战绩">
-      <TableHeader>
-        <TableRow>
-          {HEADS.map((name) => (
-            <TableHead key={name}>{name}</TableHead>
-          ))}
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map((row) => (
-          <TableRow key={`${row.modelId}:${row.tier}`} data-manual-track={row.modelId} data-tier={row.tier}>
-            <TableCell>{row.modelName}</TableCell>
-            <TableCell>{tierLabel[row.tier]}</TableCell>
-            <TableCell className="num" data-track="onePass">
-              {cell(row.onePass)}
-            </TableCell>
-            <TableCell className="num" data-track="tasks">
-              {cell(row.tasks)}
-            </TableCell>
-            <TableCell className="num" data-track="lower">
-              {row.lower.toFixed(2)}
-            </TableCell>
-            <TableCell className="num" data-track="notDone">
-              {cell(row.notDone)}
-            </TableCell>
-            <TableCell className="num" data-track="avgMinutes">
-              {cell(row.avgMinutes)}
-            </TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <Table
+      caption="动手战绩"
+      columns={COLUMNS}
+      rows={rows}
+      rowKey={(row) => `${row.modelId}:${row.tier}`}
+      rowData={(row) => ({ 'data-manual-track': row.modelId, 'data-tier': row.tier })}
+    />
   );
 }
 
@@ -59,7 +61,9 @@ export function ManualTracks({
   if (data.manualTracksUnavailable) {
     return (
       <Section title="动手战绩">
-        <p role="note">动手战绩没读成：{data.manualTracksUnavailable}</p>
+        <div role="note">
+          <Text as="p">动手战绩没读成：{data.manualTracksUnavailable}</Text>
+        </div>
       </Section>
     );
   }
@@ -71,7 +75,9 @@ export function ManualTracks({
       flush={data.manualTracks.length > 0}
     >
       {data.manualTracks.length === 0 ? (
-        <p className="text-body text-muted-foreground">近 14 天没有到终态的分档动手单</p>
+        <Text as="p" tone="muted">
+          近 14 天没有到终态的分档动手单
+        </Text>
       ) : (
         <ManualTracksTable rows={data.manualTracks} />
       )}

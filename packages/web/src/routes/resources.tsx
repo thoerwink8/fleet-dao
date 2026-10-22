@@ -8,7 +8,7 @@
 import { brand } from '#brand';
 import { isNotFound, useHome, useLiveState, useNodeHome } from '../api/client';
 import { MissingEnv } from '../components/home/missing-env';
-import { Button } from '../components/layout/button';
+import { Breadcrumb } from '../components/layout/breadcrumb';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { Stack } from '../components/layout/stack';
@@ -50,18 +50,10 @@ export default function Resources() {
   return (
     <Page
       title="资源"
-      breadcrumb={
-        <>
-          <Button variant="text" size="xs" href="/france">
-            法国
-          </Button>
-          <span aria-hidden>/</span>
-        </>
-      }
+      breadcrumb={<Breadcrumb items={[{ label: '法国', href: '/france' }, { label: '资源' }]} />}
       description="整机此刻的内存、CPU、磁盘，每个上线项目、每个仓各占多少"
       detail="CPU、内存每 5 秒随推送更新（读各 systemd 单元的 cgroup，1 核 = 占满一个核）；按目录的磁盘占用每 10 分钟测一次；仓和工作树的清单由引擎每小时对账时出一份，「清理没用的工作树」只删没人用、没有没提交或没推改动的树。读不到写「没读到」，读不全写「不全」，不拿 0 顶。"
       refresh={{
-        variant: 'dot',
         onRefresh: retry,
         isFetching: main.isFetching,
         dataUpdatedAt: main.dataUpdatedAt,
