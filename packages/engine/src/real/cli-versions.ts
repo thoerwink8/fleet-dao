@@ -5,6 +5,7 @@ import { type Db, finishScheduleRun, saveCliToolReading, startScheduleRun } from
 import {
   CLI_NPM_TOOLS,
   CLI_USER_TOOLS,
+  matchReclaudeArtifact,
   parseCursorChangelog,
   parseCursorInstallScript,
   parseMirasimChangelog,
@@ -118,7 +119,10 @@ function npmPackage(tool: string): string | null {
 }
 
 /** 官方最新。失败回 error，不回空版本。 */
-export async function fetchCliLatest(tool: string): Promise<CliLatestOk | { error: string }> {
+export async function fetchCliLatest(
+  tool: string,
+  readReclaudeStable = () => fetchText(CLI_RELEASE_URLS.reclaudeStable, 'application/json'),
+): Promise<CliLatestOk | { error: string }> {
   const pkg = npmPackage(tool);
   if (pkg) {
     try {
@@ -150,7 +154,7 @@ export async function fetchCliLatest(tool: string): Promise<CliLatestOk | { erro
   }
   if (tool === 'reclaude') {
     try {
-      return parseReclaudeStable(await fetchText(CLI_RELEASE_URLS.reclaudeStable, 'application/json'));
+      return parseReclaudeStable(await readReclaudeStable());
     } catch (err) {
       return { error: errMessage(err) };
     }
@@ -192,16 +196,29 @@ export function cliVersionsJob(w: CliVersionsWiring): () => CliVersionsJobDeps {
   const run = w.run ?? spawnProbe;
   const helper = w.helper ?? 'fleet-agent-scope';
   const call = async (argv: string[]) => probeOutcome(await run(argv, PROBE_TIMEOUT_MS));
-  return () => ({
-    probeUser: (user, tool) => call(cliProbeArgv({ user, tool }, helper)),
-    probeNpm: (tool) => call(cliProbeArgv({ npmTool: tool }, helper)),
-    fetchLatest: fetchCliLatest,
-    save: (row) => saveCliToolReading(w.db, row),
-    runs: {
-      start: (job, at) => startScheduleRun(w.db, job, at),
-      finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
-    },
-    now,
-    log,
-  });
+  return () => {
+    // 每轮共用一次官方读取（包括失败），两个用户的安装摘要和 latest 都对同一份清单；下一轮重新取。
+    let stable: Promise<string> | undefined;
+    const readStable = () => (stable ??= fetchText(CLI_RELEASE_URLS.reclaudeStable, 'application/json'));
+    return {
+      probeUser: async (user, tool) => {
+        const got = await call(cliProbeArgv({ user, tool }, helper));
+        if (tool !== 'reclaude' || 'error' in got) return got;
+        try {
+          return matchReclaudeArtifact(got.stdout, await readStable());
+        } catch (err) {
+          return { error: `来源不明：reclaude 官方 artifact 没读成：${errMessage(err)}` };
+        }
+      },
+      probeNpm: (tool) => call(cliProbeArgv({ npmTool: tool }, helper)),
+      fetchLatest: (tool) => fetchCliLatest(tool, readStable),
+      save: (row) => saveCliToolReading(w.db, row),
+      runs: {
+        start: (job, at) => startScheduleRun(w.db, job, at),
+        finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
+      },
+      now,
+      log,
+    };
+  };
 }

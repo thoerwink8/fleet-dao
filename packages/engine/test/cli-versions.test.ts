@@ -17,7 +17,7 @@ const STDOUT: Record<string, string> = {
   'mirasim-server': '0.0.355\n',
 };
 
-// fleet-agent-scope probe 对 reclaude 的真实回答：不执行它，报来源不明（deploy/test/agent-scope-probe.test.sh 钉住）
+// 无法证实来源的路径保持失败；不拿 latest 或旧 CLI 输出顶成在用。
 const RECLAUDE_UNKNOWN = 'fleet-agent-scope：reclaude 的在用版本来源不明：它没有只读的自身版本入口';
 
 function harness(over: Partial<CliVersionsJobDeps> = {}) {
@@ -62,6 +62,25 @@ function harness(over: Partial<CliVersionsJobDeps> = {}) {
 }
 
 describe('命令行工具版本这一轮', () => {
+  it('artifact 核对成功才存自身版本；另一用户失败仍 partial，不抹原设备解绑事实', async () => {
+    const h = harness({
+      probeUser: async (user, tool) => {
+        if (tool === 'reclaude')
+          return user === 'pilot' ? { version: '1.5.0' } : { error: '来源不明：二进制摘要不符' };
+        return { stdout: STDOUT[tool] ?? '' };
+      },
+    });
+    const result = await runCliVersionsJob(h.deps);
+    expect(result.outcome).toBe('partial');
+    expect(h.saved.find((r) => r.tool === 'reclaude' && r.owner === 'pilot')).toMatchObject({
+      installedVersion: '1.5.0',
+      installedError: null,
+    });
+    expect(h.saved.find((r) => r.tool === 'reclaude' && r.owner === 'fleet-agent-carpool')).toMatchObject({
+      installedVersion: null,
+      installedError: '来源不明：二进制摘要不符',
+    });
+  });
   it('【故意造出的失败】读不到记原因，不写成 0 或 ok；两个用户分开存；reclaude 的版本列表保持 null', async () => {
     const h = harness();
     const result = await runCliVersionsJob(h.deps);
