@@ -1,11 +1,6 @@
 {
   "version": 1,
   "files": {
-    "src/components/call-row.tsx": {
-      "R13": 33,
-      "R14": 1,
-      "R17": 1
-    },
     "src/components/carpool-reconcile.tsx": {
       "R13": 11
     },
@@ -13,9 +8,6 @@
       "R13": 71,
       "R17": 3,
       "R20": 2
-    },
-    "src/components/diff-stat.tsx": {
-      "R13": 5
     },
     "src/components/engine-master-card.tsx": {
       "R13": 14,
@@ -115,9 +107,6 @@
       "R13": 23,
       "R17": 2
     },
-    "src/components/markdown.tsx": {
-      "R13": 24
-    },
     "src/components/node-notice.tsx": {
       "R13": 7,
       "R14": 1
@@ -174,9 +163,6 @@
       "R17": 1,
       "R20": 4
     },
-    "src/components/round-progress.tsx": {
-      "R13": 33
-    },
     "src/components/route-error.tsx": {
       "R13": 15,
       "R17": 1
@@ -221,52 +207,9 @@
       "R14": 1,
       "R17": 2
     },
-    "src/components/run-transcript.tsx": {
-      "R13": 137,
-      "R14": 2,
-      "R17": 2,
-      "R20": 10
-    },
     "src/components/schedule-row.tsx": {
       "R13": 23,
       "R20": 4
-    },
-    "src/components/segment-usage.tsx": {
-      "R13": 135,
-      "R14": 1,
-      "R17": 1,
-      "R20": 6
-    },
-    "src/components/task-actions.tsx": {
-      "R13": 9,
-      "R14": 2
-    },
-    "src/components/task-model-pins.tsx": {
-      "R13": 50,
-      "R14": 2,
-      "R20": 2
-    },
-    "src/components/task-panel.tsx": {
-      "R13": 37,
-      "R14": 2,
-      "R17": 3
-    },
-    "src/components/task-process.tsx": {
-      "R13": 241,
-      "R14": 1,
-      "R15": 2,
-      "R17": 5,
-      "R20": 1
-    },
-    "src/components/task-summary.tsx": {
-      "R13": 100,
-      "R14": 1,
-      "R17": 3,
-      "R20": 4
-    },
-    "src/components/usage-fold.tsx": {
-      "R13": 16,
-      "R17": 1
     },
     "src/routes/bare.tsx": {
       "R13": 1
@@ -328,21 +271,6 @@
     "src/routes/soon.tsx": {
       "R13": 8,
       "R14": 1
-    },
-    "src/routes/task-run.tsx": {
-      "R13": 44,
-      "R17": 1
-    },
-    "src/routes/task.tsx": {
-      "R13": 25,
-      "R14": 1,
-      "R20": 2
-    },
-    "src/routes/tasks.tsx": {
-      "R13": 32,
-      "R14": 1,
-      "R19": 2,
-      "R20": 2
     }
   }
 }
