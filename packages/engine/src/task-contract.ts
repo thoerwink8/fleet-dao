@@ -31,9 +31,9 @@ export const MAX_ROUND_RESETS = 3;
 /**
  * 一张单（这一代任务工作流）动手最多累计几轮（#3603）：跨「继续」累计，继续不清零，自动续、人点继续都算在里面。
  * 到了贴「本机做」交还本机、留言、停下；「继续」要带原因（ContinueCommand.note）才放行，放行一次再给 MAX_IMPLEMENT_ROUNDS 轮。
- * 重做另起一代，不在这里数。
+ * 重做另起一代时按历代累计数这个上限，在重做入口数（conventions 的 totalRoundsHoldOf，#3625）；这个数定义在 shared，api 也要读。
  */
-export const MAX_TOTAL_ROUNDS = 6;
+export { MAX_TOTAL_ROUNDS } from '@fleet-dao/shared/continue-exhausted';
 /**
  * 全程模式（#2826）一张单最多交付几次：CI 红、冲突、冷验收被拒都续同一个会话、不算新的一轮，这个数兜底。
  * 每回到动手一次算一次（推上去的、交活没提交被打回的都算），到了停下等人。冷验收被拒的上限仍是 MAX_VERIFY_ROUNDS。

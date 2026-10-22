@@ -75,7 +75,7 @@ import { registerFranceReleaseRoutes } from './france-release.ts';
 import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
-import { holdOffDiff } from './local-hold.ts';
+import { holdOffDiff, holdTotalRounds } from './local-hold.ts';
 import { readLocalSessions } from './local-sessions.ts';
 import { manualTracksView } from './manual-tracks.ts';
 import { modelRosterFields } from './model-roster.ts';
@@ -515,6 +515,24 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     if (held) {
       await markRedoFailed(audit, held.why);
       throw new ApiError(409, 'off_diff_hold', held.why);
+    }
+    // 历代累计动手轮数到了上限不另起新一代（#3625）：另起一代会把 #3603 的总轮数清零，交回本机
+    let capped: Awaited<ReturnType<typeof holdTotalRounds>>;
+    try {
+      capped = await holdTotalRounds(
+        await store.listSegmentRuns(task.id),
+        { repo: { owner: repo.owner, name: repo.name }, issueNumber: task.issueNumber },
+        'task.redo',
+        deps.localHold,
+      );
+    } catch (err) {
+      await markRedoFailed(audit, `读不到这张单历代的动手轮数：${String(err)}`);
+      deps.log.error('重做前读历代动手轮数失败', { taskId: task.id, error: fullStack(err) });
+      throw new ApiError(503, 'redo_unavailable', '重做没起成：读不到这张单历代的动手轮数，稍后再试');
+    }
+    if (capped) {
+      await markRedoFailed(audit, capped.why);
+      throw new ApiError(409, 'total_rounds_hold', capped.why);
     }
     try {
       const outcome = await deps.taskRedo.redo({

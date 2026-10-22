@@ -14,7 +14,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { continueSignals } from './continue-signals.ts';
 import type { TaskRedoPort } from './deps.ts';
 import type { HistoricalAuditSource } from './historical-audit-cli.ts';
-import { holdOffDiff, type LocalHoldPort } from './local-hold.ts';
+import { holdOffDiff, holdTotalRounds, type LocalHoldPort } from './local-hold.ts';
 import type { Store, TaskSignal, WorkflowControl } from './ports.ts';
 import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableError } from './ports.ts';
 import { correctMerged } from './task-correct-merged.ts';
@@ -396,6 +396,19 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
       deps.localHold,
     );
     if (held) return refuse(ref, held.why, task.id);
+    // 历代累计动手轮数到了上限不另起新一代（#3625）：另起一代会把 #3603 的总轮数清零，交回本机
+    let capped: Awaited<ReturnType<typeof holdTotalRounds>>;
+    try {
+      capped = await holdTotalRounds(
+        await deps.store.listSegmentRuns(task.id),
+        { repo: { owner: repo.owner, name: repo.name }, issueNumber: task.issueNumber },
+        'task.redo',
+        deps.localHold,
+      );
+    } catch (err) {
+      return refuse(ref, `重做没起成：读不到这张单历代的动手轮数：${errMessage(err)}`, task.id);
+    }
+    if (capped) return refuse(ref, capped.why, task.id);
     let outcome: Awaited<ReturnType<TaskRedoPort['redo']>>;
     try {
       outcome = await deps.taskRedo.redo({
