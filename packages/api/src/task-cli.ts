@@ -39,7 +39,9 @@ export const TASK_USAGE =
   '才放行这一份成果；不调用「继续」、不授权后续交付，测不全、超预算、换头换代都保留原停点' +
   '。已结束却误记 abandoned 的真实已合任务：fleet-api task correct-merged <owner/仓名> <单号> --pr <PR号> --head <完整sha> --merge <完整合并提交sha> --run <原Temporal runId> --note "<为什么>"' +
   ' 默认只读预检（现读 GitHub PR、Temporal 原 run、库里任务账，不写任何东西）；预检通过后加 --execute --task <任务编号> --seen <摘要>（取自预检输出）' +
-  '才在一个事务里把任务改成 done 并记操作记录；保留原 abandoned 结论、原 run 和 Temporal 历史，不关 issue、不动验收责任，同一请求重复是幂等，换了任何身份或证据都拒绝';
+  '才在一个事务里把任务改成 done 并记操作记录；保留原 abandoned 结论、原 run 和 Temporal 历史，不关 issue、不动验收责任，同一请求重复是幂等，换了任何身份或证据都拒绝。' +
+  '也可带 --workflow <task:owner/仓名#单号>（核对工作流编号）回 JSON 回执（mode、status、preview），预检通过后在同一命令末尾加 --apply 执行（不用 --task/--seen，' +
+  '这一次调用自己重读全部事实并在事务里 CAS；--apply 不与 --execute 同用）';
 
 const ACTIONS = ['continue', 'abandon', 'redo', 'budget-remeasure', 'correct-merged'] as const;
 export type TaskAction = (typeof ACTIONS)[number];
@@ -61,12 +63,25 @@ export interface TaskArgs {
   merge?: string;
   task?: string;
   seen?: string;
+  /** correct-merged 专用：--workflow 核对工作流编号；--apply 不带预检摘要执行；两者任一给了就回 JSON 回执。 */
+  workflow?: string;
+  apply?: boolean;
 }
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const TEMPORAL_RUN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const UUID = TEMPORAL_RUN;
-const VALUE_FLAGS = ['--head', '--base', '--run', '--park', '--pr', '--merge', '--task', '--seen'] as const;
+const VALUE_FLAGS = [
+  '--head',
+  '--base',
+  '--run',
+  '--park',
+  '--pr',
+  '--merge',
+  '--task',
+  '--seen',
+  '--workflow',
+] as const;
 type ValueFlag = (typeof VALUE_FLAGS)[number];
 
 /** GitHub 的写法：owner 是字母、数字、连字符，仓名再加 . 和 _。和 dispatch 同一条。 */
@@ -83,6 +98,7 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
   let note: string | undefined;
   const flags: Partial<Record<ValueFlag, string>> = {};
   let execute = false;
+  let apply = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? '';
     if (arg === '--note') {
@@ -96,6 +112,8 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
       flags[arg as ValueFlag] = value.trim();
     } else if (arg === '--execute') {
       execute = true;
+    } else if (arg === '--apply') {
+      apply = true;
     } else if (arg.startsWith('-')) {
       usage(`认不出参数 ${arg.split('=')[0]}`);
     } else {
@@ -121,7 +139,10 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
       '--pr': pr,
       '--task': taskId,
       '--seen': seen,
+      '--workflow': workflow,
     } = flags;
+    if (apply && (execute || taskId !== undefined || seen !== undefined))
+      usage('--apply 不与 --execute、--task、--seen 同用（这一次调用自己重读事实并在事务里 CAS）');
     if (flags['--base'] !== undefined || flags['--park'] !== undefined)
       usage('--base、--park 只给 budget-remeasure 用');
     if (pr === undefined || !/^[1-9]\d{0,8}$/.test(pr)) usage('--pr 要写精确的 PR 号（正整数）');
@@ -143,13 +164,16 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
       run,
       ...(taskId === undefined ? {} : { task: taskId }),
       ...(seen === undefined ? {} : { seen }),
+      ...(workflow === undefined ? {} : { workflow }),
       ...(execute ? { execute: true } : {}),
+      ...(apply ? { apply: true } : {}),
     };
   }
+  if (apply) usage('--apply 只给 correct-merged 用');
   if (action !== 'budget-remeasure') {
     if (execute || Object.keys(flags).length > 0)
       usage(
-        '--head、--base、--run、--park、--pr、--merge、--task、--seen、--execute 只给 budget-remeasure 或 correct-merged 用',
+        '--head、--base、--run、--park、--pr、--merge、--task、--seen、--workflow、--execute 只给 budget-remeasure 或 correct-merged 用',
       );
     return base;
   }
@@ -157,9 +181,10 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
     flags['--pr'] !== undefined ||
     flags['--merge'] !== undefined ||
     flags['--task'] !== undefined ||
-    flags['--seen'] !== undefined
+    flags['--seen'] !== undefined ||
+    flags['--workflow'] !== undefined
   )
-    usage('--pr、--merge、--task、--seen 只给 correct-merged 用');
+    usage('--pr、--merge、--task、--seen、--workflow 只给 correct-merged 用');
   const { '--head': head, '--base': from, '--run': run, '--park': park } = flags;
   if (head === undefined || !FULL_SHA.test(head)) usage('--head 要完整 40 位小写 sha（精确的成果头）');
   if (from === undefined || !FULL_SHA.test(from)) usage('--base 要完整 40 位小写 sha（固定的测量基线）');
@@ -234,7 +259,11 @@ function isFinished(state: TaskState): boolean {
 
 /** 重评、纠正的预检只读：不写操作记录；其余动作和它们的执行，成功失败都记。 */
 function writesAudit(args: TaskArgs): boolean {
-  return (args.action !== 'budget-remeasure' && args.action !== 'correct-merged') || args.execute === true;
+  return (
+    (args.action !== 'budget-remeasure' && args.action !== 'correct-merged') ||
+    args.execute === true ||
+    args.apply === true
+  );
 }
 
 interface Recorded {
@@ -444,6 +473,8 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
         mergeCommit: args.merge as string,
         run: args.run as string,
         execute: args.execute === true,
+        apply: args.apply === true,
+        workflow: args.workflow,
         expectTask: args.task,
         seen: args.seen,
         note: args.note,
@@ -452,7 +483,10 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
       { store: deps.store, workflows: deps.workflows, pulls: deps.pulls },
     );
     if (!outcome.ok) return refuse(ref, outcome.result, task.id);
-    return outcome.text;
+    // 带 --workflow 或 --apply 的是回执路径：打 JSON（mode、status、preview），别的照旧一行文本
+    return args.apply === true || args.workflow !== undefined
+      ? JSON.stringify(outcome.receipt, null, 2)
+      : outcome.text;
   }
 
   const word = args.action === 'continue' ? '继续' : '放弃';

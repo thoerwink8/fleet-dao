@@ -41,8 +41,13 @@ export interface CorrectMergedRequest {
   mergeCommit: string;
   /** 原 Temporal run 编号。 */
   run: string;
+  /** 执行（预检摘要路径）：必带 expectTask 和 seen。 */
   execute: boolean;
-  /** 执行必带：预检打印的任务编号和摘要。 */
+  /** 执行（回执路径，--apply）：不带预检摘要，由这一次调用自己重读全部事实、事务内 CAS；不与 execute 同用。 */
+  apply?: boolean | undefined;
+  /** 请求里写明的工作流编号（--workflow）：必须等于按单号推出的那一个，不一致拒绝。 */
+  workflow?: string | undefined;
+  /** execute 必带：预检打印的任务编号和摘要。 */
   expectTask?: string | undefined;
   seen?: string | undefined;
   note: string;
@@ -56,7 +61,28 @@ export interface CorrectMergedDeps {
   pulls: HistoricalAuditSource | undefined;
 }
 
-export type CorrectMergedOutcome = { ok: true; text: string } | { ok: false; result: string };
+/** 回执路径（带 --workflow 或 --apply）的结构化结果：mode 是 precheck 或 apply，status 是 precheck、corrected 或 already。 */
+export interface CorrectMergedReceipt {
+  mode: 'precheck' | 'apply';
+  status: 'precheck' | 'corrected' | 'already';
+  message: string;
+  preview: {
+    repo: string;
+    issue: number;
+    taskId: string;
+    workflowId: string;
+    run: string;
+    pr: number;
+    head: string;
+    mergeCommit: string;
+    current: { state: string; phase: string | null; doing: string | null };
+    proposed: { state: 'done'; phase: 'done'; merged: true; doing: string };
+  };
+}
+
+export type CorrectMergedOutcome =
+  | { ok: true; text: string; receipt: CorrectMergedReceipt }
+  | { ok: false; result: string };
 
 const Pull = z.object({
   number: z.number().int(),
@@ -100,15 +126,19 @@ export async function correctMerged(
   req: CorrectMergedRequest,
   deps: CorrectMergedDeps,
 ): Promise<CorrectMergedOutcome> {
-  const { repo, task, execute } = req;
+  const { repo, task } = req;
+  const execute = req.execute || req.apply === true;
   const repoFull = `${repo.owner}/${repo.name}`;
   const ref = `${repoFull}#${task.issueNumber}`;
   const workflowId = taskWorkflowId(repo, task.issueNumber);
   const fail = (result: string): CorrectMergedOutcome => ({ ok: false, result });
 
-  if (execute) {
-    if (!req.operator.trim() || req.operator.includes(UNTRUSTED_OPERATOR))
-      return fail('没有可信的实际操作者（要经 bin/fleet-api 跑，带 FLEET_OPS_OPERATOR），不执行纠正');
+  if (req.workflow !== undefined && req.workflow !== workflowId)
+    return fail(`--workflow 要写 ${workflowId}，现在给的是 ${req.workflow}`);
+  if (req.execute && req.apply) return fail('--execute 和 --apply 只能用一个');
+  if (execute && (!req.operator.trim() || req.operator.includes(UNTRUSTED_OPERATOR)))
+    return fail('没有可信的实际操作者（要经 bin/fleet-api 跑，带 FLEET_OPS_OPERATOR），不执行纠正');
+  if (req.execute) {
     if (req.expectTask !== task.id)
       return fail(`--task 要写预检打印的任务编号 ${task.id}，现在给的是 ${req.expectTask ?? '没给'}`);
     if (!req.seen) return fail('执行要带预检打印的 --seen，不凭当前最新状态直接改');
@@ -247,24 +277,38 @@ export async function correctMerged(
   const summary =
     `${ref}（任务 ${task.id}）：工作流 ${workflowId} 的 run ${req.run} 已 COMPLETED，当初记 abandoned；` +
     `GitHub 上 PR #${req.pr} 已合并，头 ${req.head}，合并提交 ${req.mergeCommit}`;
-  if (verdict.result === 'already_corrected')
-    return {
-      ok: true,
-      text: `已纠正过（同一请求，幂等，没有再写）：${summary}；任务现为 ${facts.task.state}`,
-    };
-
-  if (!execute) {
-    return {
-      ok: true,
-      text:
-        `预检通过（只读，没改任何数据）：${summary}。拟把任务从 stopped/abandoned 改成 done，` +
-        '保留原 abandoned 结论、原 run 和 Temporal 历史，不关 issue、不动验收责任。要执行：' +
-        `fleet-api task correct-merged ${repoFull} ${task.issueNumber} --pr ${req.pr} --head ${req.head} ` +
-        `--merge ${req.mergeCommit} --run ${req.run} --execute --task ${task.id} --seen ${seen} --note "<为什么>"`,
-    };
+  const receipt = (status: CorrectMergedReceipt['status'], message: string): CorrectMergedReceipt => ({
+    mode: execute ? 'apply' : 'precheck',
+    status,
+    message,
+    preview: {
+      repo: repoFull,
+      issue: task.issueNumber,
+      taskId: task.id,
+      workflowId,
+      run: req.run,
+      pr: req.pr,
+      head: req.head,
+      mergeCommit: req.mergeCommit,
+      current: { state: facts.task.state, phase: facts.ledger.phase ?? null, doing: facts.ledger.doing },
+      proposed: { state: 'done', phase: 'done', merged: true, doing },
+    },
+  });
+  if (verdict.result === 'already_corrected') {
+    const text = `已纠正过（同一请求，幂等，没有再写）：${summary}；任务现为 ${facts.task.state}`;
+    return { ok: true, text, receipt: receipt('already', text) };
   }
 
-  if (req.seen !== seen)
+  if (!execute) {
+    const text =
+      `预检通过（只读，没改任何数据）：${summary}。拟把任务从 stopped/abandoned 改成 done，` +
+      '保留原 abandoned 结论、原 run 和 Temporal 历史，不关 issue、不动验收责任。要执行：' +
+      `fleet-api task correct-merged ${repoFull} ${task.issueNumber} --pr ${req.pr} --head ${req.head} ` +
+      `--merge ${req.mergeCommit} --run ${req.run} --execute --task ${task.id} --seen ${seen} --note "<为什么>"`;
+    return { ok: true, text, receipt: receipt('precheck', text) };
+  }
+
+  if (req.execute && req.seen !== seen)
     return fail('预检之后任务账、run 集合或 GitHub/Temporal 证据变了（--seen 对不上），请重新预检');
 
   const by = `服务器上 ${req.operator} 跑的 fleet-api task correct-merged ${ref}`;
@@ -301,11 +345,9 @@ export async function correctMerged(
     },
   });
   if (done.result === 'not_found' || done.result === 'conflict') return fail(`没纠正：${done.why}`);
-  return {
-    ok: true,
-    text:
-      done.result === 'already_corrected'
-        ? `已纠正过（同一请求，幂等，没有再写）：${summary}`
-        : `已纠正：${summary}；任务改为 done，原 abandoned 结论、原 run 和 Temporal 历史保留在操作记录里，issue 与验收责任没动`,
-  };
+  const again = done.result === 'already_corrected';
+  const text = again
+    ? `已纠正过（同一请求，幂等，没有再写）：${summary}`
+    : `已纠正：${summary}；任务改为 done，原 abandoned 结论、原 run 和 Temporal 历史保留在操作记录里，issue 与验收责任没动`;
+  return { ok: true, text, receipt: receipt(again ? 'already' : 'corrected', text) };
 }
