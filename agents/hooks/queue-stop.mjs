@@ -2,7 +2,7 @@
 // 10-16 15:06 旧会话说「本机现在没有工人在跑」就收了，队列里还有 4 件；以前的判据（unattended.mjs）只数 background_tasks 的条数、
 // 只在无人值守时判，人在场时什么都不查。
 //
-// 判法（人在不在场都判，stop.mjs 在无人值守那一段之前调）：
+// 判法（只在无人值守开着（on）时判：没开时 stop.mjs 传 judgeQueue:false，不读队列、不读容量，只剩下面的 --enforce 后台提醒）：
 // 0. 本会话显式 off → 停止优先，不读队列、不再拉起；从未开启且未 off 的会话仍照常对账。
 // 1. 有子代理在跑（Stop 输入 background_tasks 里 type 不是 shell、monitor 的：subagent、workflow、teammate……）或有定时唤醒
 //    （session_crons）→ 放行，它们收口会把会话叫回来。只有后台命令、监视器在跑不算：照样往下判。
@@ -51,7 +51,8 @@ const NOT_AGENT_TASKS = new Set(['shell', 'monitor']);
  *   readQueue?: (root: string) => Promise<QueueRead>,
  *   readCap?: () => Promise<import('./capacity.mjs').Reading>,
  *   enforceStats?: (root: string) => EnforceResult,
- * }} QueueStopOpts
+ *   judgeQueue?: boolean,
+ * }} QueueStopOpts judgeQueue 为 false 时只跑 --enforce 提醒，不读队列和容量（stop.mjs 在无人值守没开时传）
  */
 /** @typedef {{ ran: boolean, why?: string, notice?: string }} EnforceResult 顺手跑 --enforce：起成了（或限频没起）ran 为真；notice 是上次后台跑完留下的话 */
 
@@ -320,6 +321,7 @@ export async function decideQueueStop(opts) {
     return { block: false, notice: `会话停止记录没查成：${why(err)}；不再拉起队列。` };
   }
   const extra = enforceNotice(opts);
+  if (opts.judgeQueue === false) return extra ? { block: false, notice: extra } : { block: false };
   const r = await decideQueue(opts);
   if (r.block || !extra) return r;
   return { block: false, notice: [r.notice, extra].filter(Boolean).join('\n') };

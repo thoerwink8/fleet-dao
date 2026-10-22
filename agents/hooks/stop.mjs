@@ -1,5 +1,5 @@
 // 共享同步 Stop：Claude 在订阅项目登记，Codex 在用户 hooks.json 登记并信任。
-// 先续本会话未完成工作并注入工人终态，后台任务条数不作为通知送达证明；未开无人值守才做原有队列对账。
+// 先续本会话未完成工作并注入工人终态，后台任务条数不作为通知送达证明；无人值守开着（on）才做队列对账。
 // 起子代理、后台活不自动开；成功完成的新工作才重置无进展计数，三次无进展明确故障暂停。
 // 引擎的无头会话（FLEET_HEADLESS=1）、机器派的会话（工人、反方）直接放行。
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
@@ -118,8 +118,13 @@ export async function runStop(expectedCli) {
         process.exit(0);
       }
       if (un.notice) notes.push(un.notice);
-      // 未开无人值守时仍做原有收轮前对账。
-      const q = await decideQueueStop({ input, dir, sessionId });
+      // 队列和容量对账只在本会话无人值守是 on 时做（两条 gh + 读容量，p50 7 秒）；没开时只跑 --enforce 的后台提醒（单 #3588）。
+      const q = await decideQueueStop({
+        input,
+        dir,
+        sessionId,
+        judgeQueue: initial?.ok === true && initial.state?.state === 'on',
+      });
       if (q.block) {
         await emitContinuation(context, { decision: 'block', reason: q.reason }, [], 'queue');
         process.exit(0);
