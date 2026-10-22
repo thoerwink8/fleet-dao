@@ -43,6 +43,7 @@
 //   下一个引擎用 attachVerifier 接回、同一份判法读结论；没脱开的会话在引擎要走时（deps.released）没跑完、接回的会话没给出结论，
 //   回 lostOnRelease（调用方重验一次）。
 
+import { isMergeGateItem } from '@fleet-dao/conventions';
 import { criterionNumbersOf, type RunVerdict } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
@@ -433,6 +434,25 @@ export const VERIFY_MAY_READ_HEAD = '你可以在 PR 头的完整检出里读文
 export const VERIFY_RECHECK_RULE =
   '只复核上轮没过的条和增量里的改动，新提出的、不在增量里的问题只记备注、不拒';
 
+/**
+ * 「不归我验」里引的是收尾条（#3629：检查全绿、PR 合进主线）的去掉：这类条由合并闸满足，不转人、合并后关单视为已满足。
+ * 只在条目引的编号全都落在收尾条上才去；没引编号、引了别的条的原样留（其余条照常转人）。
+ */
+export function dropMergeGateHandovers(
+  outOfScope: readonly string[],
+  criteria: readonly string[] | undefined,
+): string[] {
+  if (criteria === undefined) return [...outOfScope];
+  return outOfScope.filter((entry) => {
+    const nums = criterionNumbersIn(entry);
+    if (nums.length === 0) return true;
+    return !nums.every((n) => {
+      const text = criteria[n - 1];
+      return text !== undefined && isMergeGateItem(text);
+    });
+  });
+}
+
 /** 问题正文里的验收条编号（从 1 起）。认不出就空。 */
 export function criterionNumbersIn(problem: string): number[] {
   return [...problem.matchAll(/第\s*(\d+)\s*条/g)]
@@ -628,6 +648,7 @@ function renderPrompt(
     `- 材料里看得出做到了：成立。只有「某条验收条在 diff 或测试输出里明明看得到没做到」才写进「## 问题」（${BLOCKING_KIND}）。这一句只管 diff 能看见的内容（测试输出里明确写出的失败也算），不包括只要求测试、检查、构建或类型检查通过的条目。`,
     '- 这一条要 diff 以外的证据才判得了（截图、页面现场、线上或法国的数据、审计结果、人手操作的结果、没给你看的运行结果），或只靠标了「跳过」的文件才判得了：',
     '  不算没做到，不许判不过，写进「## 不归我验」，引擎转给人验。你只是推测、担心、觉得边界没覆盖到的，写进「## 建议」，同样不挡。',
+    '- 「检查全绿」「CI 全绿」「PR 合进主线」「合并」这类收尾条由合并闸满足（PR 能合进主线就说明必过检查全绿了）：你不核、不要求 CI 或平台现场证据、不写进「## 不归我验」，也不因它转人。同一张单其余的条照常判。',
     '- 验收条原文写明「只算建议」「不挡」「可选」的：不挡，有意见写进「## 建议」。',
     '- PR 正文是写代码的会话自己写的说明，只当线索、不当做到了的证据；验收条没要求 PR 正文写什么，就不许拿「PR 正文没写」挡。',
     '- 「怎么算做完」里只要求「某某测试/检查/构建/类型检查通过」的条目，一律由合并闸的 CI 保证，你不核对、不因测试输出里没出现它判不过；只有测试输出里明确出现失败时才作为问题写出。输出里写「没跑」「跳过」、或没有这一条的输出，不算失败，不写进问题。',
@@ -848,6 +869,7 @@ function judgeVerifierSession(
   picked: PickedVerifier,
   round: 1 | 2,
   released?: () => string | undefined,
+  criteria?: readonly string[],
 ): SessionJudgement {
   const session = sessionOf(result, picked);
   const who = `家族 ${picked.family}（model ${picked.modelId}）`;
@@ -920,12 +942,17 @@ function judgeVerifierSession(
       `模型另外在「## 问题」里写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见（推测、验收条以外的边界、没指出具体证据的），按决定 0115 不挡合并，已挪进建议`,
     );
   }
-  const { outOfScope, suggestions } = stdoutPieces;
+  const { suggestions } = stdoutPieces;
+  const outOfScope = dropMergeGateHandovers(stdoutPieces.outOfScope, criteria);
+  if (outOfScope.length < stdoutPieces.outOfScope.length)
+    notes.push(
+      `不归我验里有 ${stdoutPieces.outOfScope.length - outOfScope.length} 条是收尾条（检查全绿、PR 合进主线），由合并闸满足，不转人`,
+    );
   if (outOfScope.length > 0) notes.push(`不归我验 ${outOfScope.length} 条（要 diff 以外的证据，转给人）`);
   if (
     word === 'fail' &&
     stdoutPieces.problems.length === 0 &&
-    (outOfScope.length > 0 || stdoutPieces.droppedStyleNotes > 0)
+    (stdoutPieces.outOfScope.length > 0 || stdoutPieces.droppedStyleNotes > 0)
   ) {
     // 只写了「不归我验」或不算挡的意见却给了 fail：不算没做到（决定 0093 / 0115），按过算；不归我验的转给人，意见进建议
     notes.push('模型写了 verdict: fail，但没有能挡的问题（只有不归我验或建议）：按过算');
@@ -1309,7 +1336,13 @@ async function invokeVerifierInner(
       // 备的目录会话收场后就还回去（成败都还）；还不掉不改结论，备目录的那一侧自己记日志
       await prepared?.release().catch(() => undefined);
       lastSession = sessionOf(oneShotResult, picked);
-      const judged = judgeVerifierSession(oneShotResult, picked, parsed.round, deps.released);
+      const judged = judgeVerifierSession(
+        oneShotResult,
+        picked,
+        parsed.round,
+        deps.released,
+        parsed.howToFinish,
+      );
       if (judged.kind === 'final') return judged;
       if (judged.kind === 'miss') {
         if (await missAndNext(label, judged.why)) continue;
