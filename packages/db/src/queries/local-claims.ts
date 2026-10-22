@@ -3,9 +3,9 @@
 // 读不到、写不成照抛，不拿空顶。
 import type { LocalClaimRefusal, LocalFinishOutcome, TaskExecutor, TaskState } from '@fleet-dao/shared';
 import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
-import { and, arrayContains, asc, desc, eq, gt, gte, like, lt, or, sql } from 'drizzle-orm';
+import { and, arrayContains, asc, desc, eq, gt, gte, isNull, like, lt, ne, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog, pullRequests, repos, tasks } from '../schema/index.ts';
+import { auditLog, pullRequests, repos, runs, taskExecutionOperations, tasks } from '../schema/index.ts';
 
 /** 操作记录的动作名（A4 的统计按它认「本机领过、放过」）。 */
 export const LOCAL_CLAIM_AUDIT = {
@@ -13,6 +13,7 @@ export const LOCAL_CLAIM_AUDIT = {
   renew: 'task.local.renew',
   finish: 'task.local.finish',
   expire: 'task.local.expire',
+  takeoverConfirm: 'task.local.takeover_confirm',
 } as const;
 
 export type LocalClaimResult =
@@ -35,6 +36,27 @@ export type TakeOverEngine = (task: {
 }) => Promise<{ ok: true } | { ok: false; why: string }>;
 
 export const TAKEOVER_NOTE = '本机接手';
+
+/** 受管接手（已有 PR 的单）：精确 PR 号 + 完整 head；后端自己现核，回调只负责读/叫停引擎的那一个精确 run。 */
+export interface WorkflowIdentity {
+  workflowId: string;
+  runId: string;
+  running: boolean;
+}
+export type ReadWorkflow = (task: {
+  taskId: string;
+  issueNumber: number;
+}) => Promise<({ ok: true } & WorkflowIdentity) | { ok: false; why: string }>;
+export type SignalRun = (
+  task: { taskId: string; issueNumber: number },
+  run: WorkflowIdentity,
+) => Promise<{ ok: true } | { ok: false; why: string }>;
+export interface TakeoverPr {
+  pr: number;
+  head: string;
+  readWorkflow: ReadWorkflow;
+  signalRun: SignalRun;
+}
 
 async function repoIdOf(db: Pick<Db, 'select'>, slug: string): Promise<string | null> {
   const [owner, name] = slug.split('/');
@@ -67,8 +89,11 @@ export async function claimLocalTask(
     nodeId: string;
     now: Date;
     takeOver?: TakeOverEngine | undefined;
+    /** 给了就走受管接手（单上有原 PR）：另一条协议，见 takeoverLocalTask。 */
+    takeoverPr?: TakeoverPr | undefined;
   },
 ): Promise<LocalClaimResult> {
+  if (input.takeoverPr) return takeoverLocalTask(db, { ...input, takeoverPr: input.takeoverPr });
   const leaseUntil = new Date(input.now.getTime() + LOCAL_LEASE_MS);
   return db.transaction(async (tx) => {
     const repoId = await repoIdOf(tx, input.repo);
@@ -161,6 +186,290 @@ export async function claimLocalTask(
       via: 'agent',
     });
     return { ok: true, taskId, state: 'running', executor: 'local', leaseUntil } as const;
+  });
+}
+
+const TAKEOVER_PENDING_DOING = '本机接手中：等原工作流确认终态';
+const TAKEOVER_DONE_DOING = '本机接手完成，原 PR 保留';
+
+const takeoverRefused = (why: string) => ({ ok: false, code: 'takeover_refused', why }) as const;
+const takeoverPending = (why: string) => ({ ok: false, code: 'takeover_pending', why }) as const;
+
+/** 原 PR 现核（读 PR 镜像）：这张单开着的 PR 必须正好一个、号和完整 head 对上、分支是引擎受管前缀。回 null 表示对得上，否则是拒绝原因。 */
+async function takeoverPrProblem(
+  tx: Pick<Db, 'select'>,
+  repoId: string,
+  issueNumber: number,
+  want: { pr: number; head: string },
+): Promise<string | null> {
+  const open = await tx
+    .select({ number: pullRequests.number, headRef: pullRequests.headRef, headSha: pullRequests.headSha })
+    .from(pullRequests)
+    .where(
+      and(
+        eq(pullRequests.repoId, repoId),
+        eq(pullRequests.state, 'open'),
+        or(
+          arrayContains(pullRequests.issueRefs, [issueNumber]),
+          like(pullRequests.headRef, `fleet/${issueNumber}-%`),
+          like(pullRequests.headRef, `local/${issueNumber}-%`),
+        ),
+      ),
+    );
+  if (open.length !== 1) {
+    return `这张单在本仓开着的 PR 有 ${open.length} 个（${open.map((p) => `#${p.number}`).join('、') || '无'}），只接手唯一的原 PR #${want.pr}，不忽略别的`;
+  }
+  const [only] = open;
+  if (only?.number !== want.pr) return `开着的 PR 是 #${only?.number}，不是要接手的 #${want.pr}`;
+  if (!only.headRef.startsWith(`fleet/${issueNumber}-`))
+    return `PR #${want.pr} 的分支 ${only.headRef} 不是本单的引擎受管分支 fleet/${issueNumber}-`;
+  if (only.headSha.toLowerCase() !== want.head) {
+    return `PR #${want.pr} 的 head 是 ${only.headSha}，和请求的 ${want.head} 对不上（换过头），不接手`;
+  }
+  return null;
+}
+
+/** 持久协调边界：这张任务有没有未结清的受管执行操作（task_execution_operations 里非 resolved 的）；有就不推进。 */
+async function openOperation(tx: Pick<Db, 'select'>, taskId: string): Promise<string | null> {
+  const [op] = await tx
+    .select({ phase: taskExecutionOperations.phase, kind: taskExecutionOperations.kind })
+    .from(taskExecutionOperations)
+    .where(and(eq(taskExecutionOperations.taskId, taskId), ne(taskExecutionOperations.phase, 'resolved')))
+    .limit(1);
+  return op ? `这张任务有未结清的受管执行操作（${op.kind}，${op.phase}），持久协调边界不放行` : null;
+}
+
+async function unfinishedRuns(tx: Pick<Db, 'select'>, taskId: string): Promise<number> {
+  const rows = await tx
+    .select({ id: runs.id })
+    .from(runs)
+    .where(and(eq(runs.taskId, taskId), isNull(runs.endedAt)))
+    .limit(1);
+  return rows.length;
+}
+
+interface RecordedTakeover {
+  pr: number;
+  head: string;
+  workflowId: string;
+  runId: string;
+}
+
+/** 本机接手那一条 claim 操作记录里记下的原身份（PR、head、原 workflow/run）；没有回 null。 */
+async function recordedTakeover(tx: Pick<Db, 'select'>, taskId: string): Promise<RecordedTakeover | null> {
+  const [row] = await tx
+    .select({ takeover: sql<unknown>`${auditLog.after}->'takeover'` })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.target, `task:${taskId}`),
+        eq(auditLog.action, LOCAL_CLAIM_AUDIT.claim),
+        eq(auditLog.ok, true),
+        sql`${auditLog.after}->'takeover' is not null`,
+      ),
+    )
+    .orderBy(desc(auditLog.at), desc(auditLog.id))
+    .limit(1);
+  const v = row?.takeover as Partial<RecordedTakeover> | null | undefined;
+  if (
+    !v ||
+    typeof v.pr !== 'number' ||
+    typeof v.head !== 'string' ||
+    typeof v.workflowId !== 'string' ||
+    typeof v.runId !== 'string'
+  )
+    return null;
+  return { pr: v.pr, head: v.head, workflowId: v.workflowId, runId: v.runId };
+}
+
+/**
+ * 受管接手一张有原 PR 的停下的单（第一步：登记责任，不宣称交接完成）。
+ * 同一事务里锁行，依次现核：原 PR 唯一且号/head/分支对上；没有未结束的 run；没有未结清的受管执行操作；
+ * 行是引擎明确停下的（stalled / running+parked，或 stopped 且工作流已不在跑）。核过才对「刚读到的那个精确 run」发 taskAbandon，
+ * 再改 local + 租约并把原 PR/head/workflow/run 记进操作记录。不等工作流终态（等的话会和需要同一把行锁的收尾互相卡死）：终态由 confirmLocalTakeover 另查。
+ * 同一接手重入（本机已领着、记录的身份一致）只续租；别人已领着、或身份不一致一律拒，不覆盖赢家。
+ */
+async function takeoverLocalTask(
+  db: Db,
+  input: {
+    repo: string;
+    issueNumber: number;
+    nodeId: string;
+    now: Date;
+    takeoverPr: TakeoverPr;
+  },
+): Promise<LocalClaimResult> {
+  const leaseUntil = new Date(input.now.getTime() + LOCAL_LEASE_MS);
+  const { pr, head, readWorkflow, signalRun } = input.takeoverPr;
+  return db.transaction(async (tx) => {
+    const repoId = await repoIdOf(tx, input.repo);
+    if (!repoId) return unknownRepo(input.repo);
+    const [row] = await tx
+      .select({
+        id: tasks.id,
+        state: tasks.state,
+        executor: tasks.executor,
+        phase: tasks.phase,
+        claimedBy: tasks.claimedBy,
+      })
+      .from(tasks)
+      .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, input.issueNumber)))
+      .for('update');
+    if (!row) return takeoverRefused(`${input.repo}#${input.issueNumber} 没有任务行，没有可接手的原单`);
+    const prProblem = await takeoverPrProblem(tx, repoId, input.issueNumber, { pr, head });
+    if (prProblem) return takeoverRefused(prProblem);
+    if (await unfinishedRuns(tx, row.id)) {
+      return takeoverRefused('这张任务还有未结束的 run（工人可能还活着），不接手；不会放弃或取消它');
+    }
+    const op = await openOperation(tx, row.id);
+    if (op) return takeoverRefused(op);
+
+    if (row.executor === 'local') {
+      const prior = await recordedTakeover(tx, row.id);
+      if (
+        row.state === 'running' &&
+        row.claimedBy === input.nodeId &&
+        prior &&
+        prior.pr === pr &&
+        prior.head === head
+      ) {
+        await tx.update(tasks).set({ leaseUntil, updatedAt: input.now }).where(eq(tasks.id, row.id));
+        return { ok: true, taskId: row.id, state: 'running', executor: 'local', leaseUntil } as const;
+      }
+      return takeoverRefused(`这张单已是本机在做（${row.claimedBy ?? '？'}），不是同一次接手，不覆盖`);
+    }
+    const parked = isParked(row);
+    if (!parked && row.state !== 'stopped') {
+      return takeoverRefused(
+        `引擎没有明确停下这张单（状态 ${row.state}${row.phase ? `，阶段 ${row.phase}` : ''}），不接手`,
+      );
+    }
+    const task = { taskId: row.id, issueNumber: input.issueNumber };
+    const wf = await readWorkflow(task);
+    if (!wf.ok) return takeoverRefused(`读不到原工作流身份，不接手：${wf.why}`);
+    if (parked && wf.running) {
+      const signalled = await signalRun(task, wf);
+      if (!signalled.ok) {
+        return {
+          ok: false,
+          code: 'engine_has_it',
+          why: `叫停原工作流没成（行原样，重跑可恢复）：${signalled.why}`,
+        } as const;
+      }
+    } else if (!parked && wf.running) {
+      return takeoverRefused('任务行是 stopped 但原工作流仍在运行，身份对不上，不接手');
+    }
+    await tx
+      .update(tasks)
+      .set({
+        state: 'running',
+        executor: 'local',
+        leaseUntil,
+        claimedBy: input.nodeId,
+        phase: null,
+        lastProblem: null,
+        doing: TAKEOVER_PENDING_DOING,
+        updatedAt: input.now,
+      })
+      .where(eq(tasks.id, row.id));
+    await tx.insert(auditLog).values({
+      at: input.now,
+      actorKind: 'agent',
+      actorId: `node:${input.nodeId}`,
+      action: LOCAL_CLAIM_AUDIT.claim,
+      target: `task:${row.id}`,
+      before: { state: row.state, executor: row.executor, phase: row.phase },
+      after: {
+        state: 'running',
+        executor: 'local',
+        leaseUntil: leaseUntil.toISOString(),
+        takeover: { pr, head, workflowId: wf.workflowId, runId: wf.runId },
+      },
+      reason: TAKEOVER_NOTE,
+      via: 'agent',
+    });
+    return { ok: true, taskId: row.id, state: 'running', executor: 'local', leaseUntil } as const;
+  });
+}
+
+/**
+ * 受管接手第二步：确认交接完成。只读现核，不等工作流、不发信号：
+ * 本机仍领着且租约在、记录的 PR/head 一致、原 PR 还对得上、没有未结束的 run、原工作流是记录的那个 run 且已结束，才回 ok。
+ * 工作流还在跑 / run 还没收 / 读不到 → takeover_pending（责任仍在本机，稍后重确认）；身份对不上 → takeover_refused。
+ */
+export async function confirmLocalTakeover(
+  db: Db,
+  input: {
+    repo: string;
+    issueNumber: number;
+    nodeId: string;
+    now: Date;
+    pr: number;
+    head: string;
+    readWorkflow: ReadWorkflow;
+  },
+): Promise<LocalClaimResult> {
+  return db.transaction(async (tx) => {
+    const repoId = await repoIdOf(tx, input.repo);
+    if (!repoId) return unknownRepo(input.repo);
+    const [row] = await tx
+      .select({
+        id: tasks.id,
+        state: tasks.state,
+        executor: tasks.executor,
+        claimedBy: tasks.claimedBy,
+        leaseUntil: tasks.leaseUntil,
+        doing: tasks.doing,
+      })
+      .from(tasks)
+      .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, input.issueNumber)))
+      .for('update');
+    if (row?.executor !== 'local' || row.state !== 'running' || row.claimedBy !== input.nodeId) {
+      return notClaimed(input.repo, input.issueNumber, row ?? null);
+    }
+    if (!row.leaseUntil || row.leaseUntil < input.now) {
+      return takeoverRefused('本机租约已到期，交接不算数：重跑 pnpm work claim … --takeover-pr 重新登记');
+    }
+    const prior = await recordedTakeover(tx, row.id);
+    if (!prior || prior.pr !== input.pr || prior.head !== input.head) {
+      return takeoverRefused('这张单没有记录同一次（PR、head）的接手，不确认');
+    }
+    const prProblem = await takeoverPrProblem(tx, repoId, input.issueNumber, input);
+    if (prProblem) return takeoverRefused(prProblem);
+    const op = await openOperation(tx, row.id);
+    if (op) return takeoverRefused(op);
+    const wf = await input.readWorkflow({ taskId: row.id, issueNumber: input.issueNumber });
+    if (!wf.ok) return takeoverPending(`读不到原工作流状态，交接未确认：${wf.why}`);
+    if (wf.workflowId !== prior.workflowId || wf.runId !== prior.runId) {
+      return takeoverRefused('原工作流现在的 run 和接手时记录的不是同一个（可能起了新一代），不确认');
+    }
+    if (wf.running) return takeoverPending('原工作流还没确认结束，交接未完成');
+    if (await unfinishedRuns(tx, row.id))
+      return takeoverPending('原工作流已结束但还有未结束的 run，交接未完成');
+    if (row.doing !== TAKEOVER_DONE_DOING) {
+      await tx
+        .update(tasks)
+        .set({ doing: TAKEOVER_DONE_DOING, updatedAt: input.now })
+        .where(eq(tasks.id, row.id));
+      await tx.insert(auditLog).values({
+        at: input.now,
+        actorKind: 'agent',
+        actorId: `node:${input.nodeId}`,
+        action: LOCAL_CLAIM_AUDIT.takeoverConfirm,
+        target: `task:${row.id}`,
+        before: { doing: row.doing },
+        after: { pr: input.pr, head: input.head, workflowId: wf.workflowId, runId: wf.runId },
+        reason: TAKEOVER_NOTE,
+        via: 'agent',
+      });
+    }
+    return {
+      ok: true,
+      taskId: row.id,
+      state: 'running',
+      executor: 'local',
+      leaseUntil: row.leaseUntil,
+    } as const;
   });
 }
 

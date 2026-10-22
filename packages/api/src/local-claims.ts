@@ -8,9 +8,16 @@
 // - 不成的（引擎在做、不是本机领着的、仓不归法国管）回 409 / 404 带原因，本机命令照原因停下，不当成登记上了。
 // - 没接库（开发、内存版）回 503，不假装登记了。
 
-import { TAKEOVER_NOTE, type TakeOverEngine } from '@fleet-dao/db';
+import {
+  type ReadWorkflow,
+  type SignalRun,
+  TAKEOVER_NOTE,
+  type TakeOverEngine,
+  type TakeoverPr,
+} from '@fleet-dao/db';
 import {
   LOCAL_CLAIMS_PATH,
+  type LocalClaimRefusal,
   type LocalClaimRequest,
   LocalClaimRequestSchema,
   type LocalClaimResponse,
@@ -112,7 +119,20 @@ export function pgLocalClaims(ops: {
     nodeId: string;
     now: Date;
     takeOver?: TakeOverEngine | undefined;
+    takeoverPr?: TakeoverPr | undefined;
   }) => Promise<Result>;
+  /** 受管接手的交接确认：真装配是 db 的 confirmLocalTakeover。不给就确认不了（接手也不开：见 apply）。 */
+  confirmTakeover?:
+    | ((i: {
+        repo: string;
+        issueNumber: number;
+        nodeId: string;
+        now: Date;
+        pr: number;
+        head: string;
+        readWorkflow: ReadWorkflow;
+      }) => Promise<Result>)
+    | undefined;
   renew: (i: { repo: string; issueNumber: number; nodeId: string; now: Date }) => Promise<Result>;
   finish: (i: {
     repo: string;
@@ -133,12 +153,38 @@ export function pgLocalClaims(ops: {
     },
     async apply({ nodeId, request, now }) {
       const base = { repo: request.repo, issueNumber: request.issue, nodeId, now };
+      const noTakeover = {
+        ok: false,
+        code: 'takeover_refused',
+        why: '这台后端没接工作流读取或交接确认，不开受管接手',
+      } as const;
+      if (request.action === 'takeover_confirm') {
+        if (!ops.workflows || !ops.confirmTakeover) return noTakeover;
+        const r = await ops.confirmTakeover({
+          ...base,
+          pr: request.takeoverPr.pr,
+          head: request.takeoverPr.head,
+          readWorkflow: readTaskWorkflow(ops.workflows, request.repo),
+        });
+        return r.ok ? { ...r, leaseUntil: r.leaseUntil ? r.leaseUntil.toISOString() : null } : r;
+      }
+      if (request.action === 'claim' && request.takeoverPr && !(ops.workflows && ops.confirmTakeover))
+        return noTakeover;
       const r =
         request.action === 'claim'
           ? await ops.claim({
               ...base,
               title: request.title,
               takeOver: ops.workflows ? engineTakeOver(ops.workflows, request.repo, nodeId) : undefined,
+              ...(request.takeoverPr && ops.workflows
+                ? {
+                    takeoverPr: {
+                      ...request.takeoverPr,
+                      readWorkflow: readTaskWorkflow(ops.workflows, request.repo),
+                      signalRun: signalTaskRun(ops.workflows, nodeId),
+                    },
+                  }
+                : {}),
             })
           : request.action === 'renew'
             ? await ops.renew(base)
@@ -151,7 +197,44 @@ export function pgLocalClaims(ops: {
 
 type Result =
   | { ok: true; taskId: string; state: string; executor: 'engine' | 'local'; leaseUntil: Date | null }
-  | { ok: false; code: 'engine_has_it' | 'not_claimed' | 'unknown_repo'; why: string };
+  | { ok: false; code: LocalClaimRefusal; why: string };
+
+/** 精确读这张单现在的任务工作流（编号、run、是否还在跑）。读不到、没有精确读能力都明确失败，不猜最新 run。 */
+export function readTaskWorkflow(workflows: WorkflowControl, repoSlug: string): ReadWorkflow {
+  const [owner = '', name = ''] = repoSlug.split('/');
+  return async ({ issueNumber }) => {
+    if (!workflows.taskWorkflowExecution) return { ok: false, why: '没有精确工作流 run 现读能力' };
+    try {
+      const workflowId = workflows.runningTaskWorkflow
+        ? await workflows.runningTaskWorkflow({ owner, name }, issueNumber)
+        : taskWorkflowId({ owner, name }, issueNumber);
+      const e = await workflows.taskWorkflowExecution(workflowId);
+      if (!e.workflowId || !e.runId) return { ok: false, why: '工作流身份不完整' };
+      return { ok: true, workflowId: e.workflowId, runId: e.runId, running: e.running };
+    } catch (err) {
+      return { ok: false, why: errMessage(err) };
+    }
+  };
+}
+
+/** 只对刚读到的那个精确 run 发 taskAbandon（本机接手）；那个 run 已经没了当已结束，连不上、别的错带原因拒。 */
+export function signalTaskRun(workflows: WorkflowControl, nodeId: string): SignalRun {
+  return async (_task, run) => {
+    try {
+      await workflows.signal(
+        run.workflowId,
+        { name: TASK_SIGNAL_NAMES.abandon, by: `node:${nodeId}`, reason: TAKEOVER_NOTE },
+        run.runId,
+      );
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof WorkflowGoneError || err instanceof WorkflowTargetNotFoundError) return { ok: true };
+      if (err instanceof WorkflowUnavailableError)
+        return { ok: false, why: '工作流服务暂时连不上，叫停信号没发出去' };
+      return { ok: false, why: `叫停信号没发出去：${errMessage(err)}` };
+    }
+  };
+}
 
 /** 接手：给引擎的任务工作流发 taskAbandon（by = node:<环境>，reason = 本机接手）。工作流已经没了当已叫停；连不上、查不清就带原因拒。 */
 export function engineTakeOver(workflows: WorkflowControl, repoSlug: string, nodeId: string): TakeOverEngine {
