@@ -751,12 +751,18 @@ export function assignTests(
   if (!plan.full && plan.testUnits.length === 0) return { plan, packed: undefined };
   if (typeof input.all === 'string') return `列不出测试文件：${input.all}`;
   const units = plan.full ? undefined : new Set(plan.testUnits);
-  const picked = input.all.filter((f) => units === undefined || units.has(unitOfTestFile(f) ?? ''));
+  // 重型 / 不确定测试（test-split.ts 的 HEAVY_TESTS）不进必过的 test 台，在独立的 heavy job 里跑
+  const picked = input.all.filter(
+    (f) => !isHeavy(f) && (units === undefined || units.has(unitOfTestFile(f) ?? '')),
+  );
   if (picked.length === 0) {
     const what = plan.full ? '全部' : plan.testUnits.join('、');
     return `要测 ${what}，却一个测试文件都没有（vitest 没收到文件会红）`;
   }
   const files = withSiblings(picked, input.all);
+  const pulledHeavy = files.filter(isHeavy);
+  if (pulledHeavy.length > 0)
+    return `${pulledHeavy.join('、')} 是重型 / 不确定测试，却被别的文件的名字（vitest 子串过滤）拉进了必过的测试台：先改名`;
   const temporal = new Set<string>();
   for (const f of files) {
     const text = input.read(f);
@@ -822,6 +828,12 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
  */
 export const PLANNED_JOBS = ['test', 'web', 'e2e', 'deploy'] as const;
 export const ALWAYS_JOBS = ['changes', 'lint'] as const;
+/**
+ * 不挡的 job（#3597）：ci.yml 里有、但不在 check 的 needs 里，也不进上面两份名单——必过检查不看它。
+ * `heavy`：重型 / 不确定测试（test-split.ts 的 HEAVY_TESTS），每个 PR 和主线推送都跑、串行、可重试，红了只让这个 job 红，不挡合并、
+ * 不自动开单、不更新汇总单；发版车预检（release-train-lib.mjs）另外要求被发的提交上它是绿的。
+ */
+export const NON_BLOCKING_JOBS = ['heavy'] as const;
 
 /**
  * CI 不管改了什么都跑的测试：lint job 里 docs 那一步（.github/workflows/ci.yml 写死同一份；test/test-changed.test.ts 现读
@@ -908,12 +920,10 @@ function testsProblem(plan: CiPlan): string | undefined {
     }
     if (labels.has(x.label)) return `两台测试同名：${x.label}`;
     labels.add(x.label);
-    // 重负载多进程文件必须独占一台（#3469）：和别的文件同台并行跑，会把别的文件的 5 秒用例饿超时
-    if (x.files.some(isHeavy)) {
-      const others = x.files.filter((f) => !isHeavy(f));
-      if (others.length > 0)
-        return `${x.label}：重负载多进程文件和别的测试同台（${others.slice(0, 3).join('、')}）`;
-    }
+    // 重型 / 不确定测试（#3597）不许进必过的 test 台：它们去独立的 heavy job，红了只让那个 job 红
+    const heavy = x.files.filter(isHeavy);
+    if (heavy.length > 0)
+      return `${x.label}：重型 / 不确定测试进了必过的测试台（${heavy.slice(0, 3).join('、')}），该在独立的 heavy job 里跑`;
     for (const f of x.files) {
       if (seen.has(f)) return `${f} 分到了两台`;
       seen.add(f);

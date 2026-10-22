@@ -51,6 +51,19 @@ const DIAGNOSTIC: readonly RegExp[] = [
   /完整\s*CI[^\n。；;]{0,24}\d+\s*(?:秒|毫秒|ms|s)[^\n。；;]{0,4}超时/i,
 ];
 
+/**
+ * 诊断型单的标题（#3597，验收条部分是上面的 DIAGNOSTIC，#3595）：「定位……在完整 CI 的原 N 秒超时」一类——要的是某一次 CI 运行里
+ * 实际卡在哪，证据在那次运行的日志里，引擎的冷验收看不到，派给引擎只会白跑几轮再被拒。这种单判成本机做，不派引擎。
+ * 只认以「定位 / 查明 / 查清 / 弄清 / 核实」开头、后面带「原 N 秒超时」或「在完整 CI 的 N 秒超时」的标题（N 可以是汉字数字）；
+ * 「修复……超时」「把……改成在限定时间内跑完」这类是改代码的单，不算。真标题钉在 test/off-diff-acceptance.test.ts（#3413、#3414、#3450）。
+ */
+const DIAGNOSTIC_TITLE =
+  /^\s*(?:定位|查明|查清|弄清|核实)[^\n]{0,80}?(?:原|在完整\s*CI[^\n]{0,8}?)[0-9零一二三四五六七八九十百千]+\s*(?:秒|毫秒|ms|s)\s*超时/i;
+
+export function isDiagnosticTitle(title: string): boolean {
+  return DIAGNOSTIC_TITLE.test(title);
+}
+
 /** 本身多半要 diff 外证据、但同一条写了测试锚点就算看得见的写法。 */
 const SOFT: readonly RegExp[] = [
   /线上|现网|生产环境|正式环境/,

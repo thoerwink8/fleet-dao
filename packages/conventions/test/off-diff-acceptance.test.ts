@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeOffDiff,
+  isDiagnosticTitle,
   offDiffAcceptanceItems,
   offDiffHoldOf,
   offDiffWords,
@@ -197,5 +198,32 @@ describe('offDiffAcceptanceItems / describeOffDiff', () => {
 
   it('splitAcceptanceItems：列表项各一条，非列表的连续行合成一段', () => {
     expect(splitAcceptanceItems('1. a\n2) b\n续行\n\nc\nd')).toEqual(['1. a', '2) b\n续行', 'c\nd']);
+  });
+});
+
+describe('诊断型单的标题（#3597）：「定位……原 N 秒超时」判成本机做', () => {
+  it.each([
+    // 真单标题（2026-10-22 从 GitHub 读的）
+    '定位权限交还测试在worker替换后原六十秒超时，保留自身历史',
+    '定位SQLite COMMIT峰值测试在完整CI的原十五秒超时',
+    '定位cleanup-status命名空间测试在完整CI的原五秒超时，保留帮手等待阶段',
+    // 写法变体
+    '定位 task-budget 用例在完整 CI 的 180 秒超时',
+    '查明 push-handback 契约测试在完整 CI 的原 60s 超时',
+  ])('诊断型：%s', (title) => {
+    expect(isDiagnosticTitle(title)).toBe(true);
+  });
+
+  it.each([
+    // 改代码的单、不是定位某次运行的单：照常派
+    '『第257条明确capacity』用例改成在限定时间内跑完并留下实测分段耗时',
+    'CI test (3/8) 台上 admission-alert-crash 32 进程重负载用例让同台 5 秒用例偶发超时：先对照实验，再给重负载文件单独排台',
+    '修复登录接口在完整 CI 的 30 秒超时',
+    '定位按钮在窄屏下错位',
+    '定位并修复请求超时（没有写是哪一秒）',
+    '重型和不确定测试移出必过 CI，进每个 PR 都跑的独立 job、发版前必须绿；诊断型单不派引擎',
+    '',
+  ])('不是诊断型：%s', (title) => {
+    expect(isDiagnosticTitle(title)).toBe(false);
   });
 });
