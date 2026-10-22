@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   describeOffDiff,
   offDiffAcceptanceItems,
+  offDiffHoldOf,
   offDiffWords,
   splitAcceptanceItems,
 } from '../src/off-diff-acceptance.ts';
@@ -175,6 +176,23 @@ describe('offDiffAcceptanceItems / describeOffDiff', () => {
     expect(describeOffDiff(hits)).toBe(
       '- 带两张截图。（认出：截图）\n- 上线后看一眼\n监控面板。（认出：上线后、监控面板）',
     );
+  });
+
+  it('offDiffHoldOf（#3602）：#3414 的验收条原文命中三个入口，普通单和没有验收条的不命中；同样的条目同一个键', () => {
+    for (const action of ['continue', 'task.redo', 'commander.redo'] as const) {
+      const hold = offDiffHoldOf(splitAcceptanceItems(ISSUE_3414_DONE), action);
+      expect(hold?.hits).toHaveLength(1);
+      expect(hold?.why).toContain('已交回本机做');
+      expect(hold?.comment).toContain('本机做');
+      expect(hold?.key).toMatch(new RegExp(`^off-diff-hold:${action.replace('.', '\\.')}:[0-9a-f]{12}$`));
+    }
+    const a = offDiffHoldOf(splitAcceptanceItems(ISSUE_3414_DONE), 'continue');
+    const b = offDiffHoldOf(splitAcceptanceItems(ISSUE_3414_DONE), 'continue');
+    expect(a?.key).toBe(b?.key);
+    expect(
+      offDiffHoldOf(['- 新增 foo.test.ts，断言 bar 返回 3。', '- pnpm check 通过。'], 'continue'),
+    ).toBeNull();
+    expect(offDiffHoldOf([], 'task.redo')).toBeNull();
   });
 
   it('splitAcceptanceItems：列表项各一条，非列表的连续行合成一段', () => {

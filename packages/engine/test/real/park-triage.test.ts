@@ -104,6 +104,56 @@ describe('real/park-triage', () => {
     spin: null,
   });
 
+  it('重做前的诊断判据（#3602）：按库里这张任务的单子正文判；命中就留言并贴「本机做」，普通单不命中', async () => {
+    const calls: string[] = [];
+    const gh = {
+      commentIssue: async (i: { issueNumber: number; key: string; body: string }) => {
+        calls.push(`comment ${i.issueNumber} ${i.body.includes('核实原场景卡在哪个COMMIT')}`);
+        return { commentId: 1, url: 'u', created: true };
+      },
+      addIssueLabel: async (i: { issueNumber: number; label: string }) => {
+        calls.push(`label ${i.issueNumber} ${i.label}`);
+        return [i.label];
+      },
+    };
+    const wired = parkTriageJob({
+      db: t.db,
+      gh: gh as never,
+      trees: {} as never,
+      exec: {} as never,
+      tmpDir: '/tmp/none',
+      spawner: {} as never,
+      pickRoute: (async () => ({ ok: false, detail: '测试里不选路' })) as never,
+      sessions: {} as never,
+      temporal: { use: async () => Promise.reject(new Error('测试里不连 Temporal')) },
+      taskQueue: 'fleet',
+      now: () => NOW,
+      log: () => {},
+    })();
+    const hold = wired.offDiffHold;
+    if (!hold) throw new Error('真装配要接上 offDiffHold');
+    const task = await seedTask();
+    const row = itemOf(task.id).row;
+    // 单子正文还没有「怎么算做完」一节：判不了，不拦
+    expect(await hold.check(row)).toBeNull();
+    await t.db.update(tasks).set({
+      rawRequest:
+        '## 怎么算做完\n\n- diff与测试输出能核实原场景卡在哪个COMMIT/等待/收尾边界；新增失败诊断只记录合成数据、阶段与必要资源读数。\n',
+    });
+    const found = await hold.check(row);
+    expect(found?.why).toContain('不续');
+    if (!found) throw new Error('应当命中');
+    await hold.handBack({ id: 'r', owner: 'acme', name: 'app' } as never, 7, found);
+    expect(calls).toEqual(['comment 7 true', 'label 7 本机做']);
+    await t.db
+      .update(tasks)
+      .set({ rawRequest: '## 怎么算做完\n\n- 新增 packages/engine/test/foo.test.ts，断言 bar 返回 3。\n' });
+    expect(await hold.check(row)).toBeNull();
+    await expect(hold.check({ ...row, taskId: '00000000-0000-4000-8000-000000000000' })).rejects.toThrow(
+      '库里没有任务',
+    );
+  });
+
   it('开关：没设过算开；false 关；认不出的值按关并说明', async () => {
     expect(await deps().enabled()).toEqual({ on: true });
     await t.db.insert(settings).values({ key: COMMANDER_SETTING, value: false });
