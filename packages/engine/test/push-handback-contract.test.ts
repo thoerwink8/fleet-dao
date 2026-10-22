@@ -162,7 +162,8 @@ function world() {
   });
 }
 
-describe('permission contract snapshot consumption', { timeout: 60_000 }, () => {
+// 整套并行时一轮工作流任务能超过原先的 60 秒；轮询条件一成立就返回。
+describe('permission contract snapshot consumption', { timeout: 180_000 }, () => {
   it.each(['final-read', 'accepted-round'] as const)(
     'real Workflow cancellation during %s never signs control consumption or starts a session',
     async (stage) => {

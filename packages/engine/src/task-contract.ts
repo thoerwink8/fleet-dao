@@ -560,7 +560,8 @@ export interface ColdVerifyInput {
   /** 引擎在会话收场后自己跑过的测试输出（有才给）：放进验收材料（决定 0093）。老历史里没有这个字段。 */
   testOutput?: string;
   /**
-   * 第 2 轮复核（patched('verify-recheck')）。sinceSha 是上一轮验收时的头，这一轮 diff 用 sinceSha..headSha。
+   * 第 2 轮复核（patched('verify-recheck')）。sinceSha 是上一轮验收时的头。
+   * 活动现读可信主线后拆增量：本单返工才算新增，主线同步留作上下文。旧基线不够拿来拆。
    * failedCriteria 是上轮问题里的验收条编号（从 1 起）。priorProblems 是上轮问题原话。老历史没有。
    */
   recheck?: {

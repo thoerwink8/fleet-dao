@@ -39,6 +39,7 @@ import {
   sameStatus,
   type WriteColdVerifyStatus,
 } from './cold-verify-status.ts';
+import { PortError } from './ports.ts';
 import type { RunRecord, RunsWriter } from './runner/not-wired.ts';
 import type { OneShotDeps } from './runner/one-shot.ts';
 import {
@@ -168,6 +169,8 @@ export async function runColdVerifyForPr(
   try {
     pr = await deps.sources.pr(prNumber);
   } catch (err) {
+    // 现读 PR 时 GitHub 不通：按失败分流重试，不写成「读不到 PR」停给人，也不按旧头继续贴状态。
+    if (err instanceof PortError) throw err;
     const why = errMessage(err);
     const status = coldVerifyNotRun(`读不到 PR #${prNumber} 现在的样子（${why}）`);
     return await post(null, status, { sourceProblem: `读不到 PR：${why}` });
@@ -446,24 +449,76 @@ function readNamedFilesAtHead(args: { head: string; workflowId: string | undefin
 }
 
 /**
- * 第 2 轮的增量 diff：镜像里 `since..head`（上一轮验收的头到现在的头）。
- * 读不到抛错，调用方写成「读不到 diff」，不许退回整张 PR 的 diff 再从头判一遍。
+ * 第 2 轮的增量 diff。
+ *
+ * 上一轮头到当前头的两头树比较，会把这段里同步进来的主线（别人已合并的删除、公共文件改动）算进本单新增。
+ * 线性、没有合并、又没给可信主线时，区间里只有作者自己的提交，仍用这两头（旧调用方、旧测试）。
+ * 给了可信主线（装配现读 `refs/fleet/main`，和 github 包 fetchMainline 写的是同一条引用）就按提交关系拆：
+ * 本单返工进 changedFiles；主线同步留在 diff 正文里作上下文，不从材料里拿掉；当前头相对它所含主线的路径名单单独守卫整张 PR。
+ * 当前头的 blob 和它所含主线相同，只说明最终树一致。上一轮之后、又不在这条主线上的非合并提交若改过该路径，
+ * 仍算本单返工，补丁取这些作者提交（两头树比较是空的）。作者没改过、只是主线同步进来的，留在主线同步。
+ * 列不出这些提交就抛，不退回只比最终 blob。
+ * 对象不在、引用对不上、历史对不上、合并进来的不是这条主线，都抛，不回空 diff，也不退回没拆开的两头 diff。
+ * 引擎同步主线是合并，第二父是刚读到的主线（sync.ts 的 commit-tree -p 头 -p 主线）。第二父不是这条主线的祖先就失败。
+ * 现读的尖若是旧的、作者又用没有合并提交的变基接到了更新的主线上，第二父检查够不着，可能把那截主线算进本单；
+ * 生产每次现读远端尖，不用工作流记下的旧基线顶替这条尖。
  */
-export async function incrementalDiffAtHead(args: {
+export interface IncrementalDiffArgs {
   workflowId: string | undefined;
   sinceSha: string;
   headSha: string;
-}): Promise<{ diffText: string; changedFiles: string[] }> {
+  /** 有可信主线时必给：和镜像、工作流编号对得上的仓。 */
+  repo?: { owner: string; name: string };
+  /** 有可信主线时必给。 */
+  prNumber?: number;
+  /** 有可信主线时必给，还要和工作流编号里的单号一致。 */
+  issueNumber?: number;
+  /**
+   * 工作流记下的基线（建树时的主线，可能已经旧了）。不是拆归属用的主线。
+   * 有可信主线时必给，并且得还在当前头和可信主线的历史上。
+   */
+  baseSha?: string;
+  /**
+   * 这一轮现读的主线尖，必须等于镜像里的 `refs/fleet/main`。
+   * 当前头还没含这个尖时，拆归属用的是两边的分叉点（头里真正有的那截主线），不用这条旧基线顶上去。
+   */
+  mainlineSha?: string;
+}
+
+/** fetchMainline 写进镜像的主线引用。没导出，这里跟它保持同一条。 */
+const FETCHED_MAINLINE_REF = 'refs/fleet/main';
+
+export async function incrementalDiffAtHead(
+  args: IncrementalDiffArgs,
+): Promise<{ diffText: string; changedFiles: string[] }> {
   if (!SHA40.test(args.sinceSha) || !SHA40.test(args.headSha)) {
     throw new Error('增量 diff 的两头要是完整提交号');
   }
   const mirror = mirrorDir(args.workflowId);
   if (!mirror.ok) throw new Error(mirror.reason);
   if (!existsSync(mirror.dir)) throw new Error('引擎镜像里没有这个仓，读不了增量 diff');
-  const range = `${args.sinceSha}..${args.headSha}`;
-  const names = await runGit(mirror.dir, ['diff', '--name-only', '--no-ext-diff', range]);
+  if (args.mainlineSha === undefined) {
+    if (await linearAuthorRange(mirror.dir, args.sinceSha, args.headSha)) {
+      return rawRangeDiff(mirror.dir, args.sinceSha, args.headSha);
+    }
+    // 提交不在镜像里时仍走两头 diff，把 git 的失败原因抛出去。提交都在、但这段不是线性作者区间，不能退回没拆开的两头 diff。
+    if (!(await isCommit(mirror.dir, args.sinceSha)) || !(await isCommit(mirror.dir, args.headSha))) {
+      return rawRangeDiff(mirror.dir, args.sinceSha, args.headSha);
+    }
+    throw new Error('区间里有合并，或旧验收头不是当前头的祖先，没有可信主线就不能拆归属');
+  }
+  return attributedIncrementalDiff(mirror.dir, args);
+}
+
+async function rawRangeDiff(
+  mirror: string,
+  sinceSha: string,
+  headSha: string,
+): Promise<{ diffText: string; changedFiles: string[] }> {
+  const range = `${sinceSha}..${headSha}`;
+  const names = await runGit(mirror, ['diff', '--name-only', '--no-ext-diff', range]);
   if (names.code !== 0) throw new Error(`读不到增量 diff：${oneLine(names.stderr)}`);
-  const patch = await runGit(mirror.dir, ['diff', '--no-color', '--no-ext-diff', range]);
+  const patch = await runGit(mirror, ['diff', '--no-color', '--no-ext-diff', range]);
   if (patch.code !== 0) throw new Error(`读不到增量 diff：${oneLine(patch.stderr)}`);
   const changedFiles = names.stdout
     .toString('utf8')
@@ -471,6 +526,370 @@ export async function incrementalDiffAtHead(args: {
     .map((line) => line.trim())
     .filter((line) => line !== '');
   return { diffText: patch.stdout.toString('utf8'), changedFiles };
+}
+
+/** 旧头是新头的祖先，且这段里没有合并：两头 diff 就是作者自己的提交，用不到主线。 */
+async function linearAuthorRange(mirror: string, sinceSha: string, headSha: string): Promise<boolean> {
+  const ancestor = await runGit(mirror, ['merge-base', '--is-ancestor', sinceSha, headSha]);
+  if (ancestor.code !== 0) return false;
+  const merges = await runGit(mirror, ['rev-list', '--merges', '--count', `${sinceSha}..${headSha}`]);
+  if (merges.code !== 0) return false;
+  return merges.stdout.toString('utf8').trim() === '0';
+}
+
+function assertBoundSha(label: string, sha: string | undefined): asserts sha is string {
+  if (sha === undefined || !SHA40.test(sha)) throw new Error(`${label}要是完整提交号`);
+}
+
+async function isCommit(mirror: string, sha: string): Promise<boolean> {
+  const typed = await runGit(mirror, ['cat-file', '-t', sha]);
+  return typed.code === 0 && typed.stdout.toString('utf8').trim() === 'commit';
+}
+
+async function isAncestor(mirror: string, ancestor: string, descendant: string): Promise<boolean> {
+  if (ancestor === descendant) return true;
+  const result = await runGit(mirror, ['merge-base', '--is-ancestor', ancestor, descendant]);
+  if (result.code === 0) return true;
+  if (result.code === 1) return false;
+  throw new Error(`读不到提交关系：${oneLine(result.stderr)}`);
+}
+
+async function mergeBase(mirror: string, left: string, right: string): Promise<string | null> {
+  const result = await runGit(mirror, ['merge-base', left, right]);
+  if (result.code !== 0) return null;
+  const sha = result.stdout.toString('utf8').trim();
+  if (!SHA40.test(sha)) throw new Error(`分叉点不是完整提交号：${oneLine(sha)}`);
+  return sha;
+}
+
+async function commitParents(mirror: string, sha: string): Promise<string[]> {
+  const result = await runGit(mirror, ['rev-list', '--parents', '-n', '1', sha]);
+  if (result.code !== 0) throw new Error(`读不到父提交：${oneLine(result.stderr)}`);
+  return result.stdout.toString('utf8').trim().split(/\s+/).slice(1);
+}
+
+/** `ls-tree -r -z`：路径 → blob（或子模块）号。缺路径表示这棵树上没有。 */
+async function treeBlobs(mirror: string, rev: string): Promise<Map<string, string>> {
+  const listed = await runGit(mirror, ['ls-tree', '-r', '-z', rev]);
+  if (listed.code !== 0) throw new Error(`读不到提交的树：${oneLine(listed.stderr)}`);
+  const map = new Map<string, string>();
+  for (const part of listed.stdout.toString('utf8').split('\0')) {
+    if (part === '') continue;
+    const tab = part.indexOf('\t');
+    if (tab < 0) throw new Error(`树清单认不出：${oneLine(part)}`);
+    const sha = part.slice(0, tab).split(' ')[2];
+    const path = part.slice(tab + 1);
+    if (sha === undefined || !SHA40.test(sha) || path === '') {
+      throw new Error(`树清单认不出：${oneLine(part)}`);
+    }
+    map.set(path, sha);
+  }
+  return map;
+}
+
+function byPath(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+async function diffPaths(
+  mirror: string,
+  from: string,
+  to: string,
+  paths: readonly string[],
+): Promise<string> {
+  if (paths.length === 0) return '';
+  const patch = await runGit(mirror, [
+    'diff',
+    '--no-color',
+    '--no-ext-diff',
+    '--no-renames',
+    from,
+    to,
+    '--',
+    ...paths,
+  ]);
+  if (patch.code !== 0) throw new Error(`读不到增量 diff：${oneLine(patch.stderr)}`);
+  return patch.stdout.toString('utf8');
+}
+
+/**
+ * 上一轮之后、当前头能走到、又不是当前头所含主线的祖先的非合并提交。
+ * 合并提交本身只是把主线接进来，不拿它的结果证明作者改过。
+ */
+async function authorCommitsAfter(
+  mirror: string,
+  sinceSha: string,
+  headSha: string,
+  contained: string,
+): Promise<string[]> {
+  const listed = await runGit(mirror, [
+    'rev-list',
+    '--reverse',
+    '--no-merges',
+    `${sinceSha}..${headSha}`,
+    '--not',
+    contained,
+  ]);
+  if (listed.code !== 0) throw new Error(`读不到提交关系：${oneLine(listed.stderr)}`);
+  const shas = listed.stdout
+    .toString('utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  for (const sha of shas) {
+    if (!SHA40.test(sha)) throw new Error(`读不到提交关系：作者提交 ${oneLine(sha)} 不是完整提交号`);
+  }
+  return shas;
+}
+
+/** 这个提交相对第一父改了哪些路径。列不出来就抛，不退回只比最终 blob。 */
+async function pathsTouchedBy(mirror: string, sha: string): Promise<string[]> {
+  const diff = await runGit(mirror, [
+    'diff-tree',
+    '--no-commit-id',
+    '--name-only',
+    '-r',
+    '--no-renames',
+    sha,
+  ]);
+  if (diff.code !== 0) throw new Error(`读不到增量 diff：${oneLine(diff.stderr)}`);
+  return diff.stdout
+    .toString('utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+}
+
+/** 作者提交在这些路径上的补丁。最终树和主线一致时，两头 diff 是空的，补丁只能从这些提交取。 */
+async function authorCommitPatch(
+  mirror: string,
+  commits: readonly string[],
+  paths: readonly string[],
+): Promise<string> {
+  if (paths.length === 0 || commits.length === 0) return '';
+  const chunks: string[] = [];
+  for (const sha of commits) {
+    const patch = await runGit(mirror, [
+      'diff-tree',
+      '--no-commit-id',
+      '-p',
+      '--no-color',
+      '--no-ext-diff',
+      '--no-renames',
+      '-r',
+      sha,
+      '--',
+      ...paths,
+    ]);
+    if (patch.code !== 0) throw new Error(`读不到增量 diff：${oneLine(patch.stderr)}`);
+    const text = patch.stdout.toString('utf8').trim();
+    if (text !== '') chunks.push(text);
+  }
+  return chunks.join('\n');
+}
+
+async function attributedIncrementalDiff(
+  mirror: string,
+  args: IncrementalDiffArgs,
+): Promise<{ diffText: string; changedFiles: string[] }> {
+  assertBoundSha('可信主线', args.mainlineSha);
+  assertBoundSha('记录的基线', args.baseSha);
+  const mainlineSha = args.mainlineSha;
+  const baseSha = args.baseSha;
+  if (!Number.isInteger(args.prNumber) || (args.prNumber ?? 0) < 1) {
+    throw new Error('增量归属没绑 PR');
+  }
+  if (!Number.isInteger(args.issueNumber) || (args.issueNumber ?? 0) < 1) {
+    throw new Error('增量归属没绑单号');
+  }
+  if (args.repo === undefined || args.repo.owner.trim() === '' || args.repo.name.trim() === '') {
+    throw new Error('增量归属没绑仓');
+  }
+  const parsed = parseTaskWorkflowId(args.workflowId ?? '');
+  if (parsed === null) throw new Error('工作流编号对不上仓，没有引擎镜像可查');
+  if (
+    parsed.repo.owner.toLowerCase() !== args.repo.owner.toLowerCase() ||
+    parsed.repo.name.toLowerCase() !== args.repo.name.toLowerCase()
+  ) {
+    throw new Error(
+      `增量归属的仓对不上：工作流是 ${parsed.repo.owner}/${parsed.repo.name}，要验的是 ${args.repo.owner}/${args.repo.name}`,
+    );
+  }
+  if (parsed.issueNumber !== args.issueNumber) {
+    throw new Error(`增量归属的单号对不上：工作流是 #${parsed.issueNumber}，要验的是 #${args.issueNumber}`);
+  }
+  const prNumber = args.prNumber;
+  const issueNumber = args.issueNumber;
+
+  const ref = await runGit(mirror, ['rev-parse', '--verify', '--quiet', `${FETCHED_MAINLINE_REF}^{commit}`]);
+  const refSha = ref.code === 0 ? ref.stdout.toString('utf8').trim() : '';
+  if (!SHA40.test(refSha)) throw new Error(`镜像里没有可信主线 ${FETCHED_MAINLINE_REF}`);
+  if (refSha !== mainlineSha) {
+    throw new Error(`给出的可信主线和镜像里的 ${FETCHED_MAINLINE_REF} 不一致`);
+  }
+
+  if (!(await isCommit(mirror, args.sinceSha))) throw new Error('镜像里没有旧验收头');
+  if (!(await isCommit(mirror, args.headSha))) throw new Error('镜像里没有当前头');
+  if (!(await isCommit(mirror, mainlineSha))) throw new Error('镜像里没有可信主线');
+  if (!(await isCommit(mirror, baseSha))) throw new Error('镜像里没有记录的基线');
+
+  const contained = await mergeBase(mirror, args.headSha, mainlineSha);
+  if (contained === null) throw new Error('当前头和可信主线没有共同历史');
+  if ((await mergeBase(mirror, args.sinceSha, mainlineSha)) === null) {
+    throw new Error('旧验收头和可信主线没有共同历史');
+  }
+  if (!(await isAncestor(mirror, baseSha, args.headSha))) {
+    throw new Error('记录的基线不在当前头的历史上');
+  }
+  if (!(await isAncestor(mirror, baseSha, mainlineSha))) {
+    throw new Error('记录的基线不在可信主线的历史上');
+  }
+  if (args.headSha !== args.sinceSha && (await isAncestor(mirror, args.headSha, args.sinceSha))) {
+    throw new Error('当前头是旧验收头的祖先，历史被回退改写了');
+  }
+  const fork = await mergeBase(mirror, args.sinceSha, contained);
+  if (fork === null) throw new Error('旧验收头和当前头含有的主线没有共同历史');
+
+  const merges = await runGit(mirror, ['rev-list', '--merges', `${contained}..${args.headSha}`]);
+  if (merges.code !== 0) throw new Error(`读不到合并提交：${oneLine(merges.stderr)}`);
+  for (const merge of merges.stdout
+    .toString('utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)) {
+    const parents = await commitParents(mirror, merge);
+    const other = parents[1];
+    if (parents.length !== 2 || other === undefined || !(await isAncestor(mirror, other, mainlineSha))) {
+      throw new Error(`合并 ${merge} 的另一侧不在可信主线上，归属证明不了`);
+    }
+  }
+
+  const [atSince, atHead, atMain, atFork] = await Promise.all([
+    treeBlobs(mirror, args.sinceSha),
+    treeBlobs(mirror, args.headSha),
+    treeBlobs(mirror, contained),
+    treeBlobs(mirror, fork),
+  ]);
+  const authorCommits = await authorCommitsAfter(mirror, args.sinceSha, args.headSha, contained);
+  const authorTouched = new Set<string>();
+  for (const sha of authorCommits) {
+    for (const path of await pathsTouchedBy(mirror, sha)) authorTouched.add(path);
+  }
+  const paths = new Set<string>([
+    ...atSince.keys(),
+    ...atHead.keys(),
+    ...atMain.keys(),
+    ...atFork.keys(),
+    ...authorTouched,
+  ]);
+  const authorPure: string[] = [];
+  const authorMixed: string[] = [];
+  // 最终 blob 和主线一样，但上一轮之后的作者提交改过。两头树比较看不出来。
+  const authorCoincided: string[] = [];
+  const mainlineContext: string[] = [];
+  const prRange: string[] = [];
+  for (const path of paths) {
+    const sinceBlob = atSince.get(path);
+    const headBlob = atHead.get(path);
+    const mainBlob = atMain.get(path);
+    const forkBlob = atFork.get(path);
+    if (mainBlob !== headBlob) prRange.push(path);
+    if (headBlob === mainBlob) {
+      if (authorTouched.has(path)) authorCoincided.push(path);
+      else if (sinceBlob !== headBlob) mainlineContext.push(path);
+      continue;
+    }
+    const mainlineChanged = mainBlob !== forkBlob;
+    const changedSinceVerify = headBlob !== sinceBlob;
+    if (!changedSinceVerify && !mainlineChanged) continue;
+    if (mainlineChanged) authorMixed.push(path);
+    else authorPure.push(path);
+  }
+  authorPure.sort(byPath);
+  authorMixed.sort(byPath);
+  authorCoincided.sort(byPath);
+  mainlineContext.sort(byPath);
+  prRange.sort(byPath);
+  const coincided = new Set(authorCoincided);
+  const changedFiles = [...authorPure, ...authorMixed, ...authorCoincided].sort(byPath);
+  for (const path of changedFiles) {
+    // 最终内容和主线一致的返工不在「当前树相对主线」的名单里，作者提交已经证明过。
+    if (coincided.has(path)) continue;
+    if (!prRange.includes(path))
+      throw new Error(`本单返工 ${path} 不在当前 PR 相对主线的范围内，归属证明不了`);
+  }
+
+  const sameBase = baseSha === contained;
+  const behind = contained === mainlineSha ? '当前头含有这条主线尖' : '当前头还没含主线尖，按两边的分叉点拆';
+  const lines = [
+    '# 增量归属',
+    `# 仓 ${parsed.repo.owner}/${parsed.repo.name}  PR #${prNumber}  单 #${issueNumber}`,
+    `# 旧验收头 ${args.sinceSha}`,
+    `# 当前头 ${args.headSha}`,
+    `# 可信主线 ${mainlineSha}（${FETCHED_MAINLINE_REF}）`,
+    `# 当前头含有的主线 ${contained}（${behind}）`,
+    `# 记录的基线 ${baseSha}（${sameBase ? '与用来拆归属的主线相同' : '是旧基线，不用它拆归属'}）`,
+    `# 旧验收头与当前头含有的主线的分叉 ${fork}`,
+    '# 本单返工',
+  ];
+  if (changedFiles.length === 0) {
+    lines.push('# （没有。相对上一轮，没有还能证明是本单新增、或仍和主线不一致的分歧。）');
+  } else {
+    lines.push(
+      '# 只有这一节的路径能当本轮增量。主线也改过的路径不能按文件名跳过，作者相对主线的分歧写在下面。',
+    );
+  }
+  const purePatch = await diffPaths(mirror, args.sinceSha, args.headSha, authorPure);
+  const mixedPatch = await diffPaths(mirror, contained, args.headSha, authorMixed);
+  const coincidedPatch = await authorCommitPatch(mirror, authorCommits, authorCoincided);
+  if (authorCoincided.length > 0 && coincidedPatch === '') {
+    throw new Error(`本单返工 ${authorCoincided.join('、')} 的作者提交读不出改动，归属证明不了`);
+  }
+  if (purePatch !== '') lines.push(purePatch.trimEnd());
+  if (authorMixed.length > 0) {
+    lines.push(`# 主线也改过、作者仍有分歧：${authorMixed.join('、')}`);
+    if (mixedPatch !== '') lines.push(mixedPatch.trimEnd());
+  }
+  if (authorCoincided.length > 0) {
+    lines.push(`# 最终内容和主线一致，作者提交仍改过：${authorCoincided.join('、')}`);
+    lines.push('# 当前树和主线的 blob 一样。下面是上一轮之后这些作者提交里的改动，不是主线同步。');
+    lines.push(coincidedPatch.trimEnd());
+  }
+  lines.push('# 主线同步');
+  lines.push(
+    '# 这些变动在当前头上与当前头含有的主线一致，是同步进来的上下文，不是本单新增。不要要求本单恢复主线已删除的模块。',
+  );
+  const contextPatch = await diffPaths(mirror, args.sinceSha, args.headSha, mainlineContext);
+  const mixedMainlinePatch = await diffPaths(mirror, fork, contained, authorMixed);
+  const coincidedMainlinePatch = await diffPaths(mirror, fork, contained, authorCoincided);
+  if (contextPatch === '' && mixedMainlinePatch === '' && coincidedMainlinePatch === '') {
+    lines.push('# （没有。）');
+  }
+  if (contextPatch !== '') lines.push(contextPatch.trimEnd());
+  if (mixedMainlinePatch !== '') {
+    lines.push('# 本单也改过的路径上，主线自己的改动（上下文）：');
+    lines.push(mixedMainlinePatch.trimEnd());
+  }
+  if (coincidedMainlinePatch !== '') {
+    lines.push('# 最终内容已和主线一致的路径上，主线自己的改动（上下文）：');
+    lines.push(coincidedMainlinePatch.trimEnd());
+  }
+  const guard = await runGit(mirror, [
+    'diff',
+    '--name-status',
+    '--no-renames',
+    '--no-ext-diff',
+    contained,
+    args.headSha,
+  ]);
+  if (guard.code !== 0) throw new Error(`读不到增量 diff：${oneLine(guard.stderr)}`);
+  lines.push('# 当前 PR 相对当前头含有的主线的完整范围');
+  lines.push('# 这一节守卫整张 PR 还改了什么，不是本轮增量，不能拿这里的路径当新返工。');
+  const guardText = guard.stdout.toString('utf8').trim();
+  lines.push(guardText === '' ? '# （没有。）' : guardText);
+  return { diffText: `${lines.join('\n')}\n`, changedFiles };
 }
 
 /**
