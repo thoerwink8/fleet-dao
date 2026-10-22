@@ -1,5 +1,5 @@
-// 任务页「过程」（#3140）：回合 → 笔 → 步骤 → 调用 四层，照引擎实际走法排。
-// 照 Claude 桌面版的 Agent 展示：什么都先收成一行，细节靠点开；颜色只表示语义（绿增、红删和失败、蓝在跑，其余黑白灰）。
+// 任务页「过程」（#3140，#3533 照 Arco 重拼）：回合 → 笔 → 步骤 → 调用 四层，照引擎实际走法排。
+// 什么都先收成一行，细节靠点开；颜色只给异常（失败红、超时红、读不到橙），其余黑白灰。
 // - 回合：一次「动手 → 自测 → 推分支 → CI → 验收」（task_rounds）。返工回合顶上写为什么返工；老记录没记回合的单列一组。
 // - 笔：一次起会话（runs 的一行）。写为什么起、新会话还是接上一笔的会话、结局、用时、小计；笔之间写引擎在会话外做的事
 //   （自测、推分支、开 PR、等 CI、验收、合并），连着的等待折成一行。
@@ -8,17 +8,17 @@
 // - 调用：展开一步才去读这一步的序号区间。
 // - 顶上一条时间条，看每笔各占多久。
 // 读不到的写「没读到」和原因：老后端没给 overview、哪一块读不了、这一笔跑在记录之前，都分开写，不画 0。
-import { errMessage } from '@fleet-dao/shared/util';
-import { Check, ChevronRight, CircleDashed, LoaderCircle, X } from 'lucide-react';
+// 读成过、这次刷新没成：照画上一次的，顶上一条橙提示加重试（lib/query-view.ts）。
+// 页面只拼 components/layout 的件，不写样式（design 第三节）。
 import { type ReactNode, useState } from 'react';
 import { STEP_CALLS_MAX, useRunProcess, useStepCalls } from '../api/client';
 import type { ProcessStep, RunTally, TaskDetail } from '../api/types';
-import { formatClock, formatClockSeconds, formatDuration } from '../lib/format';
+import { formatClock, formatClockSeconds, formatDuration, TIME } from '../lib/format';
+import { viewOf } from '../lib/query-view';
 import {
   runNth,
   type SegmentRunView,
   segmentLabel,
-  segmentOutcomeLabel,
   segmentOutcomeTone,
   UNKNOWN_SEGMENT,
 } from '../lib/segments';
@@ -33,6 +33,7 @@ import {
   roundDurationMs,
   roundOutcome,
   roundProgress,
+  roundStatusKey,
   runDurationMs,
   runOrder,
   sessionLink,
@@ -43,16 +44,34 @@ import {
   waitLabel,
 } from '../lib/task-process';
 import { groupEntries } from '../lib/transcript-items';
-import { cn } from '../lib/utils';
+import { toStatus } from '../theme/status-dict';
 import { CallRow } from './call-row';
 import { DiffStat } from './diff-stat';
+import { Band } from './layout/band';
+import { Button } from './layout/button';
+import { Disclosure, DisclosureRow } from './layout/disclosure';
 import { EmptyState } from './layout/empty-state';
+import { List, RowDetail } from './layout/list';
+import { LoadError, LoadingRows, LoadStale } from './layout/load-state';
+import { MetaLine } from './layout/meta-line';
+import { Nest } from './layout/nest';
 import { Notice } from './layout/notice';
 import { Section } from './layout/section';
-import { inkClass } from './layout/tone';
-import { Button } from './ui/button';
+import { Stack } from './layout/stack';
+import { StatusBadge } from './layout/status-badge';
+import { Tag } from './layout/tag';
+import { Text } from './layout/text';
+import { TimeBar } from './layout/time-bar';
 
 export { DiffStat };
+
+/** 读成过、这次刷新没成的旧数据多久算过期：过程里的步骤、调用在跑时每 3 秒读一次，超过 5 分钟没读成就标「数据已过期」。 */
+const STALE_AFTER_MS = 5 * TIME.MIN;
+
+/** 子代理的东西缩进一级，主会话的不缩。 */
+function indented(key: number, sub: boolean, node: ReactNode): ReactNode {
+  return sub ? <Nest key={key}>{node}</Nest> : <div key={key}>{node}</div>;
+}
 
 /** 一步展开后的调用：只读这一步的序号区间；条目多于一页的写明还有多少，去会话抽屉看全部。 */
 function StepCalls({
@@ -74,104 +93,100 @@ function StepCalls({
     { firstSeq: step.firstSeq, lastSeq: step.lastSeq, running: step.running },
     true,
   );
-  if (q.isPending) {
+  const view = viewOf(q);
+  if (view.status === 'loading') {
     return (
-      <p className="flex items-center gap-1.5 py-1 text-meta text-muted-foreground" role="status">
-        <LoaderCircle className="size-3.5 animate-spin" aria-hidden />
-        正在读这一步的调用…
-      </p>
+      <div role="status">
+        <LoadingRows rows={2} />
+        <Text size="meta" tone="muted">
+          正在读这一步的调用…
+        </Text>
+      </div>
     );
   }
-  if (q.isError) {
-    return (
-      <Notice
-        tone="fail"
-        action={
-          <Button type="button" size="xs" variant="outline" onClick={() => void q.refetch()}>
-            重试
-          </Button>
-        }
-      >
-        <span className="break-words">没读成：{errMessage(q.error).replace(/^没读成[：:]\s*/, '')}</span>
-      </Notice>
-    );
+  if (view.status === 'error') {
+    return <LoadError what="这一步的调用" error={view.error} onRetry={view.retry} />;
   }
-  const entries = q.data.entries.filter((e) => e.seq >= step.firstSeq && e.seq <= step.lastSeq);
+  const entries = view.data.entries.filter((e) => e.seq >= step.firstSeq && e.seq <= step.lastSeq);
   const items = groupEntries(entries);
   const total = step.lastSeq - step.firstSeq + 1;
   return (
-    <div className="space-y-0.5" data-step-calls>
-      {items.map((item) => {
-        if (item.kind === 'call') {
-          const sub = item.call.meta?.subagent !== undefined;
-          return (
-            <div key={item.call.seq} className={cn(sub && 'ml-4 border-l-2 pl-3')}>
-              <CallRow call={item.call} result={item.result} live={live} />
-            </div>
-          );
-        }
-        const e = item.entry;
-        if (e.kind === 'assistant') {
-          // 这一步的标题就是第一句话，不重复；后面补的话、子代理说的话灰字露出来
-          if (title !== null && e.text.trim().startsWith(title.replace(/…$/, '').slice(0, 20))) return null;
-          return (
-            <p
-              key={e.seq}
-              className={cn(
-                'line-clamp-3 px-1 py-0.5 text-meta break-words whitespace-pre-wrap text-muted-foreground',
-                e.meta?.subagent !== undefined && 'ml-4 border-l-2 pl-3',
-              )}
-            >
-              {e.text}
-            </p>
-          );
-        }
-        if (e.kind === 'error') {
-          return (
-            <p key={e.seq} role="alert" className="px-1 py-0.5 text-body break-words text-ink-fail">
-              <span className="font-medium">报错 </span>
-              {e.text}
-            </p>
-          );
-        }
-        if (e.kind === 'result') {
-          return (
-            <p
-              key={e.seq}
-              className={cn(
-                'px-1 py-0.5 text-body font-medium break-words',
-                e.ok === false ? 'text-ink-fail' : 'text-ink-done',
-              )}
-            >
-              结论：{e.text}
-            </p>
-          );
-        }
-        return null;
-      })}
-      {total > STEP_CALLS_MAX && q.data.entries.length >= STEP_CALLS_MAX ? (
-        <p className="px-1 text-meta text-muted-foreground">
-          这一步一共 {total} 条，这里只读了前 {STEP_CALLS_MAX} 条，全部在「看会话」里。
-        </p>
-      ) : null}
-    </div>
+    <Stack gap="sm">
+      {view.stale ? <LoadStale what="这一步的调用" stale={view.stale} staleAfterMs={STALE_AFTER_MS} /> : null}
+      <div data-step-calls>
+        <Stack gap="sm">
+          {items.map((item) => {
+            if (item.kind === 'call') {
+              return indented(
+                item.call.seq,
+                item.call.meta?.subagent !== undefined,
+                <CallRow call={item.call} result={item.result} live={live} />,
+              );
+            }
+            const e = item.entry;
+            if (e.kind === 'assistant') {
+              // 这一步的标题就是第一句话，不重复；后面补的话、子代理说的话灰字露出来
+              if (title !== null && e.text.trim().startsWith(title.replace(/…$/, '').slice(0, 20)))
+                return null;
+              return indented(
+                e.seq,
+                e.meta?.subagent !== undefined,
+                <Text as="p" size="meta" tone="muted" pre lines={3}>
+                  {e.text}
+                </Text>,
+              );
+            }
+            if (e.kind === 'error') {
+              return (
+                <div key={e.seq} role="alert">
+                  <Text as="p" tone="danger" pre>
+                    <Text tone="danger" strong>
+                      报错{' '}
+                    </Text>
+                    {e.text}
+                  </Text>
+                </div>
+              );
+            }
+            if (e.kind === 'result') {
+              return (
+                <Text key={e.seq} as="p" strong tone={e.ok === false ? 'danger' : 'default'} pre>
+                  结论：{e.text}
+                </Text>
+              );
+            }
+            return null;
+          })}
+          {total > STEP_CALLS_MAX && view.data.entries.length >= STEP_CALLS_MAX ? (
+            <Text size="meta" tone="muted">
+              这一步一共 {total} 条，这里只读了前 {STEP_CALLS_MAX} 条，全部在「看会话」里。
+            </Text>
+          ) : null}
+        </Stack>
+      </div>
+    </Stack>
   );
 }
 
-/** 一步的小计：灰字，用「·」隔开；失败数标红，读了几个文件、改了几个文件 +/- 带徽标。 */
-export function StepTally({ step }: { step: ProcessStep }) {
+const UNKNOWN_HINT = '命令没有结果：老记录对不上、笔收场了没记下、这一家的流里没有退出码';
+const NO_LINES_HINT = '这几次编辑没有记行数';
+
+/** 一步的小计，给一行灰字（MetaLine）用：调用数、命令数、失败数（红）、结果未知、读了几次文件、改了几个文件 +/-。 */
+export function stepTallyItems(step: ProcessStep): ReactNode[] {
   const parts: ReactNode[] = [];
   if (step.calls > 0) parts.push(<span key="calls">{step.calls} 个调用</span>);
   if (step.commands > 0) parts.push(<span key="cmd">{step.commands} 个命令</span>);
   if (step.callsFailed > 0)
     parts.push(
-      <span key="fail" className="font-medium text-ink-fail" data-step-failed-count>
-        {step.callsFailed} 个失败
+      <span key="fail" data-step-failed-count>
+        <Text size="meta" tone="danger" strong>
+          {step.callsFailed} 个失败
+        </Text>
       </span>,
     );
   if (step.commandsUnknown > 0)
     parts.push(
-      <span key="unk" title="命令没有结果：老记录对不上、笔收场了没记下、这一家的流里没有退出码">
+      <span key="unk" title={UNKNOWN_HINT}>
         {step.commandsUnknown} 个结果未知
       </span>,
     );
@@ -179,31 +194,22 @@ export function StepTally({ step }: { step: ProcessStep }) {
   if (step.files.length > 0) {
     const anyCounted = step.files.some((f) => f.added !== undefined || f.removed !== undefined);
     parts.push(
-      <span key="files" className="inline-flex items-baseline gap-1">
-        改 {step.files.length} 个文件
+      <Stack key="files" direction="horizontal" gap="sm" align="baseline">
+        <span>改 {step.files.length} 个文件</span>
         {anyCounted ? (
           <DiffStat added={step.added} removed={step.removed} title={uncountedHint(step.uncounted)} />
         ) : (
-          <span title="这几次编辑没有记行数">没记行数</span>
+          <span title={NO_LINES_HINT}>没记行数</span>
         )}
-      </span>,
+      </Stack>,
     );
   }
-  return (
-    <>
-      {parts.map((p, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: 固定顺序的几段，p 自己带 key
-        <span key={i} className="inline-flex items-baseline gap-1.5">
-          {i > 0 ? (
-            <span aria-hidden className="text-muted-foreground">
-              ·
-            </span>
-          ) : null}
-          {p}
-        </span>
-      ))}
-    </>
-  );
+  return parts;
+}
+
+/** 这一笔里要默认展开的步骤：有失败的、在跑的。 */
+export function defaultOpenSteps(steps: readonly ProcessStep[]): Set<number> {
+  return new Set(steps.filter((s) => s.failed || s.running).map((s) => s.index));
 }
 
 function StepRow({
@@ -232,91 +238,50 @@ function StepRow({
       data-step={step.index}
       data-failed={step.failed ? '' : undefined}
       data-running={step.running ? '' : undefined}
-      className="min-w-0"
     >
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={onToggle}
-        className="flex w-full min-w-0 flex-col gap-0.5 px-4 py-2 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset"
+      <Disclosure
+        size="compact"
+        open={open}
+        onToggle={onToggle}
+        trailing={
+          step.running ? (
+            <StatusBadge status="task:segment:running" variant="dot" />
+          ) : step.failed ? (
+            <Tag tone="error">有失败</Tag>
+          ) : undefined
+        }
+        header={
+          <>
+            <span data-step-title>
+              <Text
+                truncate
+                tone={step.failed ? 'danger' : title === null ? 'muted' : 'default'}
+                title={title ?? UNTITLED_STEP}
+              >
+                {title ?? UNTITLED_STEP}
+              </Text>
+            </span>
+            <span data-step-meta>
+              <MetaLine
+                items={[
+                  <span key="time" data-step-time>
+                    {formatClockSeconds(step.startedAt)}–
+                    {step.endedAt ? formatClockSeconds(step.endedAt) : '现在'}
+                  </span>,
+                  <span key="dur" data-step-duration>
+                    用时 {formatDuration(dur)}
+                  </span>,
+                  ...(hasTally ? stepTallyItems(step) : []),
+                ]}
+              />
+            </span>
+          </>
+        }
       >
-        <span className="flex min-w-0 items-center gap-2">
-          <StateIcon state={step.running ? 'running' : step.failed ? 'fail' : 'done'} />
-          <span
-            className={cn(
-              'min-w-0 truncate text-body',
-              title === null && 'text-muted-foreground',
-              step.failed && 'text-ink-fail',
-            )}
-            title={title ?? UNTITLED_STEP}
-            data-step-title
-          >
-            {title ?? UNTITLED_STEP}
-          </span>
-          <ChevronRight
-            className={cn('ml-auto size-3.5 shrink-0 text-muted-foreground', open && 'rotate-90')}
-            aria-hidden
-          />
-        </span>
-        <span
-          className={cn(
-            'num flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 pl-6 text-meta',
-            step.running ? 'text-ink-run' : 'text-muted-foreground',
-          )}
-          data-step-meta
-        >
-          <span data-step-time>
-            {formatClockSeconds(step.startedAt)}–{step.endedAt ? formatClockSeconds(step.endedAt) : '现在'}
-          </span>
-          <span aria-hidden>·</span>
-          <span data-step-duration>用时 {formatDuration(dur)}</span>
-          {hasTally ? (
-            <>
-              <span aria-hidden>·</span>
-              <StepTally step={step} />
-            </>
-          ) : null}
-        </span>
-      </button>
-      {open ? (
-        <div className="pr-4 pb-2 pl-10 max-md:pl-8">
-          <StepCalls taskId={taskId} runId={runId} step={step} live={live} title={title} />
-        </div>
-      ) : null}
+        <StepCalls taskId={taskId} runId={runId} step={step} live={live} title={title} />
+      </Disclosure>
     </li>
   );
-}
-
-type RowState = 'running' | 'fail' | 'done' | 'unknown';
-const STATE_SAID: Record<RowState, string> = {
-  running: '在跑',
-  fail: '有失败',
-  done: '完成',
-  unknown: '结局没读到',
-};
-
-/** 行首的状态图标（照设计稿）：完成绿勾、没成红叉、在跑蓝圈转、读不到的灰虚圈；屏幕阅读器读字。 */
-function StateIcon({ state, size = 'sm' }: { state: RowState; size?: 'sm' | 'md' }) {
-  const cls = cn('shrink-0', size === 'md' ? 'size-4' : 'size-3.5');
-  return (
-    <>
-      {state === 'running' ? (
-        <LoaderCircle className={cn(cls, 'animate-spin text-ink-run')} aria-hidden />
-      ) : state === 'fail' ? (
-        <X className={cn(cls, 'text-ink-fail')} aria-hidden />
-      ) : state === 'done' ? (
-        <Check className={cn(cls, 'text-ink-done')} aria-hidden />
-      ) : (
-        <CircleDashed className={cn(cls, 'text-muted-foreground')} aria-hidden />
-      )}
-      <span className="sr-only">{STATE_SAID[state]}</span>
-    </>
-  );
-}
-
-/** 这一笔里要默认展开的步骤：有失败的、在跑的。 */
-export function defaultOpenSteps(steps: readonly ProcessStep[]): Set<number> {
-  return new Set(steps.filter((s) => s.failed || s.running).map((s) => s.index));
 }
 
 /** 一笔里每一步一段的时间条：失败红、在跑蓝、其余灰；点一段展开那一步。 */
@@ -332,101 +297,84 @@ function StepBar({
   if (steps.length < 2) return null;
   const weights = barWeights(steps.map((s) => stepDurationMs(s, now)));
   return (
-    <ul className="flex h-2 gap-px overflow-hidden rounded-full" aria-label="每一步各占多久" data-step-bar>
-      {steps.map((s, i) => (
-        <li key={s.index} className="flex min-w-1" style={{ flex: `${weights[i] ?? 1} 1 0` }}>
-          <button
-            type="button"
-            onClick={() => onPick(s.index)}
-            title={`${s.title ?? UNTITLED_STEP}：${formatDuration(stepDurationMs(s, now))}`}
-            aria-label={`第 ${s.index + 1} 步：${s.title ?? UNTITLED_STEP}，用时 ${formatDuration(stepDurationMs(s, now))}`}
-            data-bar-step={s.index}
-            className={cn(
-              'w-full hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
-              s.failed ? 'bg-st-fail' : s.running ? 'bg-st-run' : 'bg-border-strong',
-            )}
-          />
-        </li>
-      ))}
-    </ul>
+    <div data-step-bar>
+      <TimeBar
+        label="每一步各占多久"
+        onPick={(id) => onPick(Number(id))}
+        items={steps.map((s, i) => {
+          const name = s.title ?? UNTITLED_STEP;
+          const dur = formatDuration(stepDurationMs(s, now));
+          return {
+            id: String(s.index),
+            weight: weights[i] ?? 1,
+            state: s.failed ? 'fail' : s.running ? 'run' : 'idle',
+            label: `第 ${s.index + 1} 步：${name}，用时 ${dur}`,
+            title: `${name}：${dur}`,
+          };
+        })}
+      />
+    </div>
   );
 }
 
 /** 笔头一行的小计：命令几个、失败几个、改了几次文件 +/-；读不到小计的整行不写（概览顶上已写了原因）。 */
-function RunTallyLine({ tally, running }: { tally: RunTally; running: boolean }) {
+function runTallyItems(tally: RunTally, running: boolean): ReactNode[] {
   const anyCounted = tally.added > 0 || tally.removed > 0;
   const bits: ReactNode[] = [];
   if (tally.commands > 0) bits.push(<span key="cmd">{tally.commands} 个命令</span>);
   if (tally.commandsFailed > 0)
     bits.push(
-      <span key="fail" className="font-medium text-ink-fail">
+      <Text key="fail" size="meta" tone="danger" strong>
         {tally.commandsFailed} 个失败
-      </span>,
+      </Text>,
     );
-  if (tally.commandsRunning > 0 && running)
-    bits.push(
-      <span key="run" className="text-ink-run">
-        {tally.commandsRunning} 个在跑
-      </span>,
-    );
+  if (tally.commandsRunning > 0 && running) bits.push(<span key="run">{tally.commandsRunning} 个在跑</span>);
   if (tally.commandsUnknown > 0)
     bits.push(
-      <span key="unk" title="命令没有结果：老记录对不上、笔收场了没记下、这一家的流里没有退出码">
+      <span key="unk" title={UNKNOWN_HINT}>
         {tally.commandsUnknown} 个结果未知
       </span>,
     );
   if (tally.editsOk > 0)
     bits.push(
-      <span key="edit" className="inline-flex items-baseline gap-1">
-        改 {tally.editsOk} 次
+      <Stack key="edit" direction="horizontal" gap="sm" align="baseline">
+        <span>改 {tally.editsOk} 次</span>
         {anyCounted ? (
           <DiffStat added={tally.added} removed={tally.removed} title={uncountedHint(tally.uncounted)} />
         ) : (
-          <span title="这几次编辑没有记行数">没记行数</span>
+          <span title={NO_LINES_HINT}>没记行数</span>
         )}
-      </span>,
+      </Stack>,
     );
-  if (bits.length === 0) return null;
-  return (
-    <span
-      className="num flex flex-wrap items-baseline gap-x-1.5 text-meta text-muted-foreground"
-      data-run-tally
-    >
-      {bits.map((b, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: 固定顺序的几段，b 自己带 key
-        <span key={i} className="inline-flex items-baseline gap-1.5">
-          {i > 0 ? (
-            <span aria-hidden className="text-muted-foreground">
-              ·
-            </span>
-          ) : null}
-          {b}
-        </span>
-      ))}
-    </span>
-  );
+  return bits;
 }
 
 /** 验收那一笔的结论：过没过、没过的问题、转给人的。 */
 function Verdict({ verdict }: { verdict: NonNullable<SegmentRunView['verdict']> }) {
   return (
-    <div className="px-4 pb-2 pl-10 max-md:pl-8" data-verdict>
-      <p className={cn('text-body font-medium', verdict.pass ? 'text-ink-done' : 'text-ink-fail')}>
-        {verdict.pass ? '验收通过' : '验收没过'}
-        {verdict.failedCriteria.length > 0 ? `（第 ${verdict.failedCriteria.join('、')} 条）` : ''}
-      </p>
-      {verdict.problems.length > 0 ? (
-        <ul className="mt-0.5 list-disc space-y-0.5 pl-4 text-meta text-muted-foreground">
-          {verdict.problems.map((p) => (
-            <li key={p} className="break-words">
-              {p}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {verdict.handedOver.length > 0 ? (
-        <p className="mt-0.5 text-meta text-muted-foreground">转给人：{verdict.handedOver.join('；')}</p>
-      ) : null}
+    <div data-verdict>
+      <Stack gap="sm">
+        <Text as="p" strong tone={verdict.pass ? 'default' : 'danger'}>
+          {verdict.pass ? '验收通过' : '验收没过'}
+          {verdict.failedCriteria.length > 0 ? `（第 ${verdict.failedCriteria.join('、')} 条）` : ''}
+        </Text>
+        {verdict.problems.length > 0 ? (
+          <List divided={false}>
+            {verdict.problems.map((p) => (
+              <li key={p}>
+                <Text size="meta" tone="secondary" pre>
+                  {p}
+                </Text>
+              </li>
+            ))}
+          </List>
+        ) : null}
+        {verdict.handedOver.length > 0 ? (
+          <Text as="p" size="meta" tone="secondary">
+            转给人：{verdict.handedOver.join('；')}
+          </Text>
+        ) : null}
+      </Stack>
     </div>
   );
 }
@@ -446,68 +394,62 @@ function RunBody({
 }) {
   const q = useRunProcess(d.task.id, run.id, run.running, !noRecordKnown);
   const [stepPicks, setStepPicks] = useState<Record<number, boolean>>({});
+  const view = viewOf(q);
   const body = (() => {
-    if (noRecordKnown || (q.data && q.data.state === 'noRecord')) {
+    if (noRecordKnown || (view.status === 'data' && view.data.state === 'noRecord')) {
       return (
-        <p className="px-4 pb-1 pl-10 text-body text-muted-foreground" data-no-record>
-          这一笔跑在记录会话内容之前，没有过程记录
-        </p>
-      );
-    }
-    if (q.isPending) {
-      return (
-        <p className="flex items-center gap-1.5 px-4 pl-10 text-meta text-muted-foreground" role="status">
-          <LoaderCircle className="size-3.5 animate-spin" aria-hidden />
-          正在读这一笔的步骤…
-        </p>
-      );
-    }
-    if (q.isError) {
-      return (
-        <div className="px-4 pl-10">
-          <Notice
-            tone="fail"
-            title="这一笔的步骤没读到"
-            action={
-              <Button type="button" size="xs" variant="outline" onClick={() => void q.refetch()}>
-                重试
-              </Button>
-            }
-          >
-            <span className="break-words">{errMessage(q.error).replace(/^没读成[：:]\s*/, '')}</span>
-          </Notice>
+        <div data-no-record>
+          <Text as="p" tone="muted">
+            这一笔跑在记录会话内容之前，没有过程记录
+          </Text>
         </div>
       );
     }
-    if (q.data.state !== 'ok') return null;
-    const proc = q.data.process;
+    if (view.status === 'loading') {
+      return (
+        <div role="status">
+          <LoadingRows rows={2} />
+          <Text size="meta" tone="muted">
+            正在读这一笔的步骤…
+          </Text>
+        </div>
+      );
+    }
+    if (view.status === 'error') {
+      return <LoadError what="这一笔的步骤" error={view.error} onRetry={view.retry} />;
+    }
+    if (view.data.state !== 'ok') return null;
+    const proc = view.data.process;
     const auto = defaultOpenSteps(proc.steps);
     const stepOpen = (i: number) => stepPicks[i] ?? auto.has(i);
     if (proc.steps.length === 0) {
       return (
-        <p className="px-4 pb-1 pl-10 text-body text-muted-foreground">
+        <Text as="p" tone="muted">
           {run.running ? '会话刚起来，还没有内容。' : '这一笔没有可分步的内容（只有提示词）。'}
-        </p>
+        </Text>
       );
     }
     return (
-      <>
-        {proc.legacyCalls > 0 ? (
-          <p className="px-4 pb-1 pl-10 text-meta text-muted-foreground" data-legacy-note>
-            老记录有 {proc.legacyCalls} 个调用没有调用号，对不上结果，命令成败写「结果未知」。
-          </p>
+      <Stack gap="sm">
+        {view.stale ? (
+          <LoadStale what="这一笔的步骤" stale={view.stale} staleAfterMs={STALE_AFTER_MS} />
         ) : null}
-        <div className="px-4 pb-1 pl-10 max-md:pl-8">
-          <StepBar
-            steps={proc.steps}
-            now={now}
-            onPick={(i) => {
-              setStepPicks((p) => ({ ...p, [i]: true }));
-              document.getElementById(`step-${run.id}-${i}`)?.scrollIntoView({ block: 'nearest' });
-            }}
-          />
-        </div>
-        <ol className="divide-y divide-border" aria-label="步骤">
+        {proc.legacyCalls > 0 ? (
+          <div data-legacy-note>
+            <Text as="p" size="meta" tone="muted">
+              老记录有 {proc.legacyCalls} 个调用没有调用号，对不上结果，命令成败写「结果未知」。
+            </Text>
+          </div>
+        ) : null}
+        <StepBar
+          steps={proc.steps}
+          now={now}
+          onPick={(i) => {
+            setStepPicks((p) => ({ ...p, [i]: true }));
+            document.getElementById(`step-${run.id}-${i}`)?.scrollIntoView({ block: 'nearest' });
+          }}
+        />
+        <List aria-label="步骤">
           {proc.steps.map((s) => (
             <StepRow
               key={s.index}
@@ -520,25 +462,34 @@ function RunBody({
               live={run.running}
             />
           ))}
-        </ol>
+        </List>
         {proc.truncated ? (
-          <p className="px-4 pt-1 pl-10 text-meta text-muted-foreground">
+          <Text as="p" size="meta" tone="muted">
             这一笔到了每段 3000 条的记录上限，后面的没记。
-          </p>
+          </Text>
         ) : null}
-      </>
+      </Stack>
     );
   })();
   return (
-    <div className="pb-2" data-run-body>
-      {run.verdict ? <Verdict verdict={run.verdict} /> : null}
-      {body}
+    <div data-run-body>
+      <Stack gap="sm">
+        {run.verdict ? <Verdict verdict={run.verdict} /> : null}
+        {body}
+      </Stack>
     </div>
   );
 }
 
+/** 一笔的结局：字典里的词（完成、超时、被停掉……）；在跑、结局没读到另有词。 */
+function runOutcomeStatus(run: SegmentRunView) {
+  if (run.running) return 'task:segment:running' as const;
+  if (!run.outcome) return 'task:segment:unread' as const;
+  return toStatus('task', `segment:${run.outcome}`);
+}
+
 /**
- * 一笔（照设计稿）：状态图标 + 「第 N 笔 · 段 · 为什么起」+ 新会话还是接上；第二行模型、起止、用时、结局；
+ * 一笔（照设计稿）：「第 N 笔 · 段 · 为什么起」+ 新会话还是接上；第二行模型、起止、用时、结局；
  * 再下面起因摘要、小计。右边展开箭头和「看会话」。展开是这一笔的步骤。
  */
 function RunRow({
@@ -568,96 +519,74 @@ function RunRow({
   const link = sessionLink(run);
   const label = run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT;
   const dur = runDurationMs(run, now);
-  const state: RowState = run.running
-    ? 'running'
-    : !run.outcome
-      ? 'unknown'
-      : failedOutcome
-        ? 'fail'
-        : 'done';
-  const tone = run.running ? 'run' : run.outcome ? segmentOutcomeTone[run.outcome] : 'stall';
   // 收场了、概览里没有这一笔的小计：库里一条记录都没有（跑在记录会话内容之前）；概览读不到小计时不下这个结论
   const noRecordKnown = d.overview?.tally.state === 'ok' && tally === undefined && !run.running;
+  const tallyBits = tally ? runTallyItems(tally, run.running) : [];
   return (
-    <li data-run-process={run.id} data-open={open ? '' : undefined} className="min-w-0">
-      <div className="flex min-w-0 items-start gap-2 px-4 py-2.5">
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => setPicked(!open)}
-          className="flex min-w-0 flex-1 items-start gap-2.5 rounded-md text-left focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none max-md:min-h-10"
-        >
-          <span className="mt-0.5 flex">
-            <StateIcon state={state} size="md" />
-          </span>
-          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+    <li data-run-process={run.id} data-open={open ? '' : undefined}>
+      <Disclosure
+        open={open}
+        onToggle={() => setPicked(!open)}
+        actions={
+          <Button variant="text" size="xs" onClick={() => onViewTranscript(run.id)}>
+            看会话
+          </Button>
+        }
+        header={
+          <>
             {/* 第一行：第几笔 · 段 · 为什么起，后面灰字新会话还是接上一笔 */}
-            <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <span className="text-body font-medium">
-                <span className="num">第 {nth} 笔</span> · {label}
+            <Stack direction="horizontal" gap="sm" align="baseline" wrap>
+              <Text strong>
+                第 {nth} 笔 · {label}
                 {cause ? (
                   <>
                     {' · '}
-                    <span
-                      className={cause.recorded ? '' : 'font-normal text-muted-foreground'}
-                      data-run-cause={run.cause ?? 'unrecorded'}
-                    >
-                      {cause.text}
+                    <span data-run-cause={run.cause ?? 'unrecorded'}>
+                      <Text strong={cause.recorded} tone={cause.recorded ? 'default' : 'muted'}>
+                        {cause.text}
+                      </Text>
                     </span>
                   </>
                 ) : null}
-              </span>
+              </Text>
               {link ? (
-                <span className="text-meta text-muted-foreground" data-run-link>
-                  {link}
+                <span data-run-link>
+                  <Text size="meta" tone="muted">
+                    {link}
+                  </Text>
                 </span>
               ) : null}
-            </span>
-            {/* 第二行：模型 · 起止 · 用时 · 结局（结局用语义色字） */}
-            <span className="num flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-meta text-muted-foreground">
-              <span className="min-w-0 truncate">{run.modelName}</span>
-              {run.startedAt ? (
-                <>
-                  <span aria-hidden>·</span>
-                  <span>
-                    {formatClock(run.startedAt)}–{run.endedAt ? formatClock(run.endedAt) : '现在'}
-                  </span>
-                </>
-              ) : null}
-              <span aria-hidden>·</span>
-              <span>{dur !== undefined ? formatDuration(dur) : '耗时没读到'}</span>
-              <span aria-hidden>·</span>
-              <span className={cn('font-medium', inkClass[tone])} data-run-outcome>
-                {run.running ? '在跑' : run.outcome ? segmentOutcomeLabel[run.outcome] : '结局没读到'}
-              </span>
-            </span>
+            </Stack>
+            {/* 第二行：模型 · 起止 · 用时 · 结局 */}
+            <MetaLine
+              items={[
+                run.modelName,
+                run.startedAt
+                  ? `${formatClock(run.startedAt)}–${run.endedAt ? formatClock(run.endedAt) : '现在'}`
+                  : undefined,
+                dur !== undefined ? formatDuration(dur) : '耗时没读到',
+                <span key="outcome" data-run-outcome>
+                  <StatusBadge status={runOutcomeStatus(run)} variant="dot" />
+                </span>,
+              ]}
+            />
             {run.causeSummary ? (
-              <span
-                className="min-w-0 truncate text-meta text-muted-foreground"
-                title={run.causeSummary}
-                data-run-cause-summary
-              >
-                {run.causeSummary}
+              <span data-run-cause-summary>
+                <Text size="meta" tone="muted" truncate title={run.causeSummary}>
+                  {run.causeSummary}
+                </Text>
               </span>
             ) : null}
-            {tally ? <RunTallyLine tally={tally} running={run.running} /> : null}
-          </span>
-          <ChevronRight
-            className={cn('mt-1 size-4 shrink-0 text-muted-foreground', open && 'rotate-90')}
-            aria-hidden
-          />
-        </button>
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost"
-          className="shrink-0 text-muted-foreground"
-          onClick={() => onViewTranscript(run.id)}
-        >
-          看会话
-        </Button>
-      </div>
-      {open ? <RunBody d={d} run={run} now={now} noRecordKnown={noRecordKnown} /> : null}
+            {tallyBits.length > 0 ? (
+              <span data-run-tally>
+                <MetaLine items={tallyBits} />
+              </span>
+            ) : null}
+          </>
+        }
+      >
+        <RunBody d={d} run={run} now={now} noRecordKnown={noRecordKnown} />
+      </Disclosure>
     </li>
   );
 }
@@ -675,20 +604,26 @@ function EnginePiece({ item }: { item: EngineItem }) {
   }
   const step = item.step;
   const failed = step.outcome !== 'ok';
+  const text = `${ACTIVITY_LABEL[step.activity] ?? step.activity}${step.attempt > 1 ? `（第 ${step.attempt} 次）` : ''}${
+    failed
+      ? step.outcome === 'cancelled'
+        ? ' 被取消'
+        : ` 没成${step.errorCode ? `：${step.errorCode}` : ''}`
+      : ''
+  }`;
   return (
     <span
       data-engine={step.activity}
       data-failed={failed ? '' : undefined}
       title={`${formatClockSeconds(step.startedAt)} 起，用时 ${formatDuration(step.runMs)}`}
-      className={failed ? 'font-medium text-ink-fail' : 'text-foreground'}
     >
-      {ACTIVITY_LABEL[step.activity] ?? step.activity}
-      {step.attempt > 1 ? `（第 ${step.attempt} 次）` : ''}
-      {failed
-        ? step.outcome === 'cancelled'
-          ? ' 被取消'
-          : ` 没成${step.errorCode ? `：${step.errorCode}` : ''}`
-        : ''}
+      {failed ? (
+        <Text size="meta" tone="danger" strong>
+          {text}
+        </Text>
+      ) : (
+        text
+      )}
     </span>
   );
 }
@@ -700,20 +635,25 @@ function EnginePiece({ item }: { item: EngineItem }) {
 function EngineChain({ items }: { items: readonly EngineItem[] }) {
   const total = items.reduce((n, it) => n + (it.kind === 'waits' ? it.totalMs : it.step.runMs), 0);
   return (
-    <li
-      data-engine-chain
-      className="flex min-w-0 items-baseline gap-2 bg-muted px-4 py-1.5 text-meta text-muted-foreground"
-    >
-      <span className="shrink-0">引擎</span>
-      <span className="min-w-0 flex-1 break-words">
-        {items.map((it, i) => (
-          <span key={it.key}>
-            {i > 0 ? <span aria-hidden> → </span> : null}
-            <EnginePiece item={it} />
-          </span>
-        ))}
-      </span>
-      <span className="num shrink-0">{formatDuration(total)}</span>
+    <li data-engine-chain>
+      <Band>
+        <Stack direction="horizontal" gap="sm" align="baseline" justify="between">
+          <Stack direction="horizontal" gap="sm" align="baseline">
+            <Text size="meta" tone="muted">
+              引擎
+            </Text>
+            <span>
+              {items.map((it, i) => (
+                <span key={it.key}>
+                  {i > 0 ? <span aria-hidden> → </span> : null}
+                  <EnginePiece item={it} />
+                </span>
+              ))}
+            </span>
+          </Stack>
+          <span>{formatDuration(total)}</span>
+        </Stack>
+      </Band>
     </li>
   );
 }
@@ -738,9 +678,24 @@ function chainItems(
   return out;
 }
 
+/** 回合头右边的结局：字典里的词；引擎多出来的新收场名认不出，原样写成橙标签，不猜。 */
+function RoundVerdict({ g, roundsKnown, isLast }: { g: RoundGroup; roundsKnown: boolean; isLast: boolean }) {
+  if (g.round) {
+    const key = roundStatusKey(g.round.outcome);
+    return key ? (
+      <StatusBadge status={key} />
+    ) : (
+      <Tag tone="warning">{roundOutcome(g.round.outcome).label}</Tag>
+    );
+  }
+  // 回合表没读到（老后端、读不了）：不判「进行中」，什么结局都不写
+  if (!roundsKnown) return null;
+  return <StatusBadge status={isLast ? 'task:round:open' : 'task:round:unrecorded'} />;
+}
+
 /**
- * 回合头（照设计稿）：第几回合、起止、用时、几笔，结局用语义色字放右边，点了收起 / 展开；
- * 返工回合下面一个淡红框写为什么返工。
+ * 回合头（照设计稿）：第几回合、起止、用时、几笔，结局放右边，点了收起 / 展开；
+ * 返工回合下面一条淡红色带写为什么返工。
  */
 function RoundHeader({
   g,
@@ -762,82 +717,76 @@ function RoundHeader({
     const onlyScope = g.items.every((i) => i.kind !== 'run' || i.run.segment === 'scope');
     if (onlyScope) {
       return (
-        <div className="px-4 py-1.5" data-round-header="scope">
-          <p className="text-body font-semibold text-muted-foreground">回合之前</p>
-        </div>
+        <RowDetail indent={false} data-round-header="scope">
+          <Text as="p" strong tone="muted">
+            回合之前
+          </Text>
+        </RowDetail>
       );
     }
     return (
-      <div className="px-4 py-1.5" data-round-header="old">
-        <p className="text-body font-semibold text-muted-foreground">更早的几笔</p>
-        <p className="text-meta text-muted-foreground">老记录没记回合，不猜它们属于哪一回合。</p>
-      </div>
+      <RowDetail indent={false} data-round-header="old">
+        <Text as="p" strong tone="muted">
+          更早的几笔
+        </Text>
+        <Text as="p" size="meta" tone="muted">
+          老记录没记回合，不猜它们属于哪一回合。
+        </Text>
+      </RowDetail>
     );
   }
-  const out = g.round ? roundOutcome(g.round.outcome) : undefined;
   const dur = roundDurationMs(g);
   const prevOut = g.reworkOf ? roundOutcome(g.reworkOf.outcome) : undefined;
   const reworkWhy = g.reworkOf ? reworkDetail(g.reworkOf.outcome, g.reworkOf.summary) : undefined;
   const runs = g.items.filter((i) => i.kind === 'run');
   const firstRun = runs[0];
   const start = g.round?.startedAt ?? (firstRun?.kind === 'run' ? firstRun.run.startedAt : undefined);
-  // 结局放右边，用语义色字（照设计稿），不用徽章
-  const verdict = out
-    ? { text: out.label, tone: out.tone }
-    : !roundsKnown
-      ? undefined
-      : isLast
-        ? { text: '进行中', tone: 'run' as const }
-        : { text: '结局没记', tone: 'doubt' as const };
+  const facts = [
+    start ? `${formatClock(start)}${g.round ? `–${formatClock(g.round.endedAt)}` : ' 起'}` : undefined,
+    dur !== undefined ? formatDuration(dur) : undefined,
+    runs.length ? `${runs.length} 笔` : undefined,
+    g.round?.tier,
+    g.round?.addedLines !== undefined ? `PR 新增 ${g.round.addedLines} 行` : undefined,
+  ].filter(Boolean);
   return (
-    <div className="px-4 pt-3 pb-1.5" data-round-header={g.seq}>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={onToggle}
-        className="flex w-full min-w-0 items-center gap-x-2 rounded-md text-left focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none max-md:min-h-10"
-      >
-        <span className="shrink-0 text-body font-semibold">第 {g.seq} 回合</span>
-        {g.reworkOf ? <span className="shrink-0 text-meta text-muted-foreground">返工</span> : null}
-        <span className="num min-w-0 truncate text-meta text-muted-foreground">
-          {[
-            start
-              ? `${formatClock(start)}${g.round ? `–${formatClock(g.round.endedAt)}` : ' 起'}`
-              : undefined,
-            dur !== undefined ? formatDuration(dur) : undefined,
-            runs.length ? `${runs.length} 笔` : undefined,
-            g.round?.tier,
-            g.round?.addedLines !== undefined ? `PR 新增 ${g.round.addedLines} 行` : undefined,
-          ]
-            .filter(Boolean)
-            .join(' · ')}
-        </span>
-        {verdict ? (
-          <span className={cn('ml-auto shrink-0 text-meta font-medium', inkClass[verdict.tone])}>
-            {verdict.text}
-          </span>
-        ) : null}
-        <ChevronRight
-          className={cn('size-4 shrink-0 text-muted-foreground', !verdict && 'ml-auto', open && 'rotate-90')}
-          aria-hidden
-        />
-      </button>
+    <div data-round-header={g.seq}>
+      <DisclosureRow
+        open={open}
+        onToggle={onToggle}
+        trailing={<RoundVerdict g={g} roundsKnown={roundsKnown} isLast={isLast} />}
+        header={
+          <Stack direction="horizontal" gap="sm" align="baseline" wrap>
+            <Text strong>第 {g.seq} 回合</Text>
+            {g.reworkOf ? (
+              <Text size="meta" tone="muted">
+                返工
+              </Text>
+            ) : null}
+            <Text size="meta" tone="muted">
+              {facts.join(' · ')}
+            </Text>
+          </Stack>
+        }
+      />
       {g.reworkOf ? (
-        <p
-          className="mt-2 rounded-md border border-st-fail-line bg-st-fail-soft px-3 py-2 text-meta"
-          data-rework-why
-        >
-          <span className="font-medium text-ink-fail">为什么返工</span>
-          <span className="text-muted-foreground">
-            {'　'}上一回合{prevOut?.label ?? g.reworkOf.outcome}
-            {reworkWhy ? `——${reworkWhy}` : '（没记返工意见）'}
-          </span>
-        </p>
+        <RowDetail indent={false}>
+          <Band tone="danger" data-rework-why>
+            <Text size="meta" tone="danger" strong>
+              为什么返工
+            </Text>{' '}
+            <Text size="meta" tone="secondary">
+              上一回合{prevOut?.label ?? g.reworkOf.outcome}
+              {reworkWhy ? `——${reworkWhy}` : '（没记返工意见）'}
+            </Text>
+          </Band>
+        </RowDetail>
       ) : null}
       {g.byTime ? (
-        <p className="mt-1 text-meta text-muted-foreground" data-round-bytime>
-          其中 {g.byTime} 笔是旧引擎跑的、没记回合号，按回合收场时刻归进来
-        </p>
+        <RowDetail indent={false} data-round-bytime>
+          <Text as="p" size="meta" tone="muted">
+            其中 {g.byTime} 笔是旧引擎跑的、没记回合号，按回合收场时刻归进来
+          </Text>
+        </RowDetail>
       ) : null}
     </div>
   );
@@ -857,28 +806,24 @@ function RunBar({
   if (runs.length < 2) return null;
   const weights = barWeights(runs.map((r) => runDurationMs(r, now) ?? 0));
   return (
-    <ul className="flex h-2 gap-px overflow-hidden rounded-full" aria-label="每一笔各占多久" data-run-bar>
-      {runs.map((r, i) => {
-        const failed = r.outcome !== undefined && segmentOutcomeTone[r.outcome] === 'fail';
-        const label = `${r.segment ? segmentLabel[r.segment] : UNKNOWN_SEGMENT}第 ${runNth(runs, r.id) ?? 1} 次`;
-        const dur = runDurationMs(r, now);
-        return (
-          <li key={r.id} className="flex min-w-1" style={{ flex: `${weights[i] ?? 1} 1 0` }}>
-            <button
-              type="button"
-              onClick={() => onPick(r.id)}
-              title={`${label}：${dur === undefined ? '耗时没读到' : formatDuration(dur)}`}
-              aria-label={`${label}，${dur === undefined ? '耗时没读到' : `用时 ${formatDuration(dur)}`}`}
-              data-bar-run={r.id}
-              className={cn(
-                'w-full hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
-                failed ? 'bg-st-fail' : r.running ? 'bg-st-run' : 'bg-border-strong',
-              )}
-            />
-          </li>
-        );
-      })}
-    </ul>
+    <div data-run-bar>
+      <TimeBar
+        label="每一笔各占多久"
+        onPick={onPick}
+        items={runs.map((r, i) => {
+          const failed = r.outcome !== undefined && segmentOutcomeTone[r.outcome] === 'fail';
+          const name = `${r.segment ? segmentLabel[r.segment] : UNKNOWN_SEGMENT}第 ${runNth(runs, r.id) ?? 1} 次`;
+          const dur = runDurationMs(r, now);
+          return {
+            id: r.id,
+            weight: weights[i] ?? 1,
+            state: failed ? 'fail' : r.running ? 'run' : 'idle',
+            label: `${name}，${dur === undefined ? '耗时没读到' : `用时 ${formatDuration(dur)}`}`,
+            title: `${name}：${dur === undefined ? '耗时没读到' : formatDuration(dur)}`,
+          };
+        })}
+      />
+    </div>
   );
 }
 
@@ -898,11 +843,15 @@ function BarAxis({
   if (!first) return null;
   const last = ends.at(-1);
   return (
-    <div className="num mt-1 flex text-meta text-muted-foreground" data-bar-axis>
-      <span>{formatClock(first)}</span>
-      <span className="ml-auto">
-        {finished ? (last ? formatClock(last) : '') : `现在 ${formatClock(new Date(now).toISOString())}`}
-      </span>
+    <div data-bar-axis>
+      <Stack direction="horizontal" justify="between">
+        <Text size="meta" tone="muted">
+          {formatClock(first)}
+        </Text>
+        <Text size="meta" tone="muted">
+          {finished ? (last ? formatClock(last) : '') : `现在 ${formatClock(new Date(now).toISOString())}`}
+        </Text>
+      </Stack>
     </div>
   );
 }
@@ -940,7 +889,7 @@ export function TaskProcess({
   d: TaskDetail;
   now: number;
   onViewTranscript: (runId: string) => void;
-  /** 放在任务页右侧面板里（#3277）：标题和那一句在面板头上，这里不再画标题、不再套卡片。 */
+  /** 放在面板或页签里（#3277）：标题和那一句在外面写，这里不再画标题、不再套卡片。 */
   inPanel?: boolean;
 }) {
   const o = d.overview;
@@ -989,13 +938,13 @@ export function TaskProcess({
     if (o.rounds.state === 'unavailable')
       notes.push(
         <Notice key="rounds" tone="stall" title="回合没读到">
-          <span className="break-words">{o.rounds.reason}</span>
+          {o.rounds.reason}
         </Notice>,
       );
     if (o.engineSteps.state === 'unavailable')
       notes.push(
         <Notice key="engine" tone="stall" title="引擎做的事没读到">
-          <span className="break-words">{o.engineSteps.reason}</span>
+          {o.engineSteps.reason}
         </Notice>,
       );
   }
@@ -1010,59 +959,72 @@ export function TaskProcess({
       {runs.length === 0 ? (
         <EmptyState title="还没有过程" hint="三段跑起来以后，每一笔、每一步都记在这里。" />
       ) : (
-        <>
-          {notes.length > 0 ? <div className="space-y-2 p-4 pb-0">{notes}</div> : null}
-          <div className="px-4 pt-3 pb-1">
-            <RunBar runs={runs} now={now} onPick={jumpTo} />
-            <BarAxis runs={runs} now={now} finished={finished} />
-          </div>
-          <div className="divide-y">
+        <Stack gap="sm">
+          {notes.length > 0 ? (
+            <RowDetail indent={false}>
+              <Stack gap="sm">{notes}</Stack>
+            </RowDetail>
+          ) : null}
+          <RowDetail indent={false}>
+            <Stack gap="sm">
+              <RunBar runs={runs} now={now} onPick={jumpTo} />
+              <BarAxis runs={runs} now={now} finished={finished} />
+            </Stack>
+          </RowDetail>
+          <List>
             {timeline.map((g, i) => {
               const open = roundOpen(g, i);
               const isLast = i === timeline.length - 1;
               return (
-                <section key={g.key} aria-label={g.seq === undefined ? '更早的几笔' : `第 ${g.seq} 回合`}>
-                  <RoundHeader
-                    g={g}
-                    roundsKnown={o?.rounds.state === 'ok'}
-                    isLast={isLast}
-                    open={open}
-                    onToggle={() => setRoundPicks((p) => ({ ...p, [g.key]: !open }))}
-                  />
-                  {open ? (
-                    <ol className="divide-y divide-border" data-round-items>
-                      {chainItems(g.items).map((row) =>
-                        row.kind === 'run' ? (
-                          <RunRow
-                            key={row.item.key}
-                            d={d}
-                            run={row.item.run}
-                            nth={nthOf.get(row.item.run.id) ?? 1}
-                            tally={tallyByRun?.[row.item.run.id]}
-                            now={now}
-                            startOpen={row.item.run.id === lastRunId}
-                            onViewTranscript={onViewTranscript}
-                          />
-                        ) : (
-                          <EngineChain key={row.key} items={row.items} />
-                        ),
-                      )}
-                      {isLast && nextText ? (
-                        <li
-                          data-next-steps
-                          className="flex min-w-0 items-baseline gap-2 px-4 py-2 text-meta text-muted-foreground"
-                        >
-                          <span className="shrink-0">接下来</span>
-                          <span className="min-w-0 break-words">{nextText}</span>
-                        </li>
-                      ) : null}
-                    </ol>
-                  ) : null}
-                </section>
+                <li key={g.key}>
+                  <section aria-label={g.seq === undefined ? '更早的几笔' : `第 ${g.seq} 回合`}>
+                    <RoundHeader
+                      g={g}
+                      roundsKnown={o?.rounds.state === 'ok'}
+                      isLast={isLast}
+                      open={open}
+                      onToggle={() => setRoundPicks((p) => ({ ...p, [g.key]: !open }))}
+                    />
+                    {open ? (
+                      <List data-round-items>
+                        {chainItems(g.items).map((row) =>
+                          row.kind === 'run' ? (
+                            <RunRow
+                              key={row.item.key}
+                              d={d}
+                              run={row.item.run}
+                              nth={nthOf.get(row.item.run.id) ?? 1}
+                              tally={tallyByRun?.[row.item.run.id]}
+                              now={now}
+                              startOpen={row.item.run.id === lastRunId}
+                              onViewTranscript={onViewTranscript}
+                            />
+                          ) : (
+                            <EngineChain key={row.key} items={row.items} />
+                          ),
+                        )}
+                        {isLast && nextText ? (
+                          <li data-next-steps>
+                            <RowDetail indent={false}>
+                              <Stack direction="horizontal" gap="sm" align="baseline">
+                                <Text size="meta" tone="muted">
+                                  接下来
+                                </Text>
+                                <Text size="meta" tone="secondary">
+                                  {nextText}
+                                </Text>
+                              </Stack>
+                            </RowDetail>
+                          </li>
+                        ) : null}
+                      </List>
+                    ) : null}
+                  </section>
+                </li>
               );
             })}
-          </div>
-        </>
+          </List>
+        </Stack>
       )}
     </Section>
   );

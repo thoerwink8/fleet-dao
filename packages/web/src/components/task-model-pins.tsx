@@ -21,48 +21,46 @@ import {
 } from '../lib/route-pins';
 import { segmentLabel } from '../lib/segments';
 import { isTaskFinished } from '../lib/status';
-import { cn } from '../lib/utils';
+import { Button } from './layout/button';
+import { ConfirmDialog } from './layout/confirm-dialog';
+import { FormItem } from './layout/form';
+import { NativeSelect } from './layout/native-select';
+import { Notice } from './layout/notice';
 import { Section } from './layout/section';
-import { StatusBadge } from './layout/status-badge';
-import type { LayoutTone } from './layout/tone';
-import { Button } from './ui/button';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 
 const LIVE_WORD: Record<Liveness['verdict'], string> = { live: '派得出', dead: '派不出', unknown: '不确定' };
-const LIVE_TONE: Record<Liveness['verdict'], LayoutTone> = {
-  live: 'done',
-  dead: 'fail',
-  unknown: 'stall',
-};
 
-function LiveTag({ l }: { l: Liveness }) {
-  return <StatusBadge tone={LIVE_TONE[l.verdict]} label={LIVE_WORD[l.verdict]} />;
+/** 下拉选项里的模型名后面跟一句现在派不派得出（原生下拉的选项只有文字）。 */
+function withLive(name: string, l: Liveness): string {
+  return `${name}（${LIVE_WORD[l.verdict]}）`;
 }
 
 /** 「现在」那一句：指定了谁（谁、什么时候、为什么），或自动。 */
 function Current({ pin, models, now }: { pin: ActivePin | undefined; models: ModelChoice[]; now: number }) {
   if (!pin) {
     return (
-      <div>
-        <div className="text-body font-medium">自动</div>
-        <div className="text-meta text-muted-foreground">按路由两层的顺序选，前面的派不出顺延到下一个</div>
-      </div>
+      <Stack gap="sm">
+        <Text strong>自动</Text>
+        <Text size="meta" tone="muted">
+          按路由两层的顺序选，前面的派不出顺延到下一个
+        </Text>
+      </Stack>
     );
   }
   const m = models.find((x) => x.modelId === pin.modelId);
   const route = pin.routeId ? m?.routes.find((r) => r.routeId === pin.routeId) : undefined;
   return (
-    <div>
-      <div className="text-body font-medium" data-pinned={pin.modelId}>
-        指定 {m?.name ?? pin.modelId}
-        {pin.routeId ? (
-          <span className="font-normal text-muted-foreground">，只走 {route?.name ?? pin.routeId}</span>
-        ) : null}
-      </div>
-      <div className="text-meta text-muted-foreground">
+    <Stack gap="sm">
+      <span data-pinned={pin.modelId}>
+        <Text strong>指定 {m?.name ?? pin.modelId}</Text>
+        {pin.routeId ? <Text tone="muted">，只走 {route?.name ?? pin.routeId}</Text> : null}
+      </span>
+      <Text size="meta" tone="muted">
         {formatAgo(pin.setAt, now)}定的{pin.reason ? `：${pin.reason}` : ''}
-      </div>
-    </div>
+      </Text>
+    </Stack>
   );
 }
 
@@ -100,6 +98,7 @@ function SegmentRow({
     pin.modelId !== last.model;
   const [confirming, setConfirming] = useState(false);
 
+  // 失败抛给确认框：框留着、写原因、能再点
   const repinNow = async () => {
     if (!pin) return;
     try {
@@ -107,12 +106,12 @@ function SegmentRow({
         taskId: d.task.id,
         body: { segment, modelId: pin.modelId, routeId: pin.routeId ?? null, now: true },
       });
-      setConfirming(false);
       toast.success(`${segmentLabel[segment]}正在换成 ${chosen?.name ?? pin.modelId}`, {
         description: '这一轮已停下，从分支上接着做',
       });
     } catch (e) {
       toast.error('没换成', { description: errorText(e) });
+      throw e;
     }
   };
 
@@ -130,124 +129,94 @@ function SegmentRow({
     }
   };
 
-  return (
-    <li className="grid gap-x-4 gap-y-2 py-3 md:grid-cols-12 md:items-start" data-pin-segment={segment}>
-      <div className="md:col-span-1">
-        <span className="font-medium">{segmentLabel[segment]}</span>
-      </div>
-      <div className="min-w-0 md:col-span-5">
-        <Current pin={pin} models={models} now={now} />
-        {last ? (
-          <div className="mt-0.5 text-meta text-muted-foreground" data-last-run>
+  const help = (
+    <Stack gap="sm">
+      <Current pin={pin} models={models} now={now} />
+      {last ? (
+        <span data-last-run>
+          <Text size="meta" tone="muted">
             {last.running ? '这一轮在跑的' : '上一轮用的'}是 {last.modelName}
             {last.running && pin && pin.modelId !== last.model ? '：不打断，下一轮起换' : ''}
+          </Text>
+        </span>
+      ) : null}
+    </Stack>
+  );
+
+  return (
+    <div data-pin-segment={segment}>
+      <Stack gap="md">
+        <FormItem label={segmentLabel[segment]} help={help}>
+          <Stack direction="horizontal" gap="sm" align="center" wrap>
+            <NativeSelect
+              aria-label={`${segmentLabel[segment]}用哪个模型`}
+              value={pin?.modelId ?? AUTO}
+              disabled={locked || busy}
+              onChange={(e) => void send(e.target.value === AUTO ? null : e.target.value)}
+            >
+              <option value={AUTO}>自动（按路由顺序）</option>
+              {models.map((m) => (
+                <option key={m.modelId} value={m.modelId}>
+                  {withLive(m.name, m.liveness)}
+                </option>
+              ))}
+              {pin && !chosen ? <option value={pin.modelId}>{pin.modelId}（不在这个用途里）</option> : null}
+            </NativeSelect>
+            {chosen && chosen.routes.length > 1 ? (
+              <NativeSelect
+                aria-label={`${segmentLabel[segment]}走哪条渠道`}
+                value={pin?.routeId ?? AUTO}
+                disabled={locked || busy}
+                onChange={(e) => void send(chosen.modelId, e.target.value === AUTO ? null : e.target.value)}
+              >
+                <option value={AUTO}>任一渠道（按顺序）</option>
+                {chosen.routes.map((r) => (
+                  <option key={r.routeId} value={r.routeId}>
+                    {withLive(r.name, r.liveness)}
+                  </option>
+                ))}
+              </NativeSelect>
+            ) : null}
+            {canRepin ? (
+              <Button
+                size="sm"
+                disabledReason={busy ? '正在改' : undefined}
+                onClick={() => setConfirming(true)}
+              >
+                现在就换
+              </Button>
+            ) : null}
+            {pin && !finished ? (
+              <Button size="sm" variant="text" loading={busy} onClick={() => void send(null)}>
+                回到自动
+              </Button>
+            ) : null}
+          </Stack>
+        </FormItem>
+        {health && health.verdict !== 'live' ? (
+          <div data-pin-health={health.verdict}>
+            <Notice tone={health.verdict === 'dead' ? 'fail' : 'stall'}>
+              {chosen?.name ?? pin?.modelId}
+              {health.verdict === 'dead' ? ' 现在派不出' : ' 现在说不准派不派得出'}：{health.why}。
+              引擎轮到这一段时只等它，派不出就停下等你，不会换别的模型；要换就在这里改，或回到自动。
+            </Notice>
           </div>
         ) : null}
-      </div>
-      {/* 下拉和按钮靠右排成一组（#1920）：左边读「现在用谁」，右边改 */}
-      <div className="flex min-w-0 flex-wrap items-center gap-2 md:col-span-6 md:justify-end">
-        <Select
-          value={pin?.modelId ?? AUTO}
-          disabled={locked || busy}
-          onValueChange={(v) => void send(v === AUTO ? null : v)}
-        >
-          <SelectTrigger
-            size="sm"
-            className="w-56 max-md:w-full"
-            aria-label={`${segmentLabel[segment]}用哪个模型`}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={AUTO}>自动（按路由顺序）</SelectItem>
-            {models.map((m) => (
-              <SelectItem key={m.modelId} value={m.modelId}>
-                <span className="num">{m.name}</span>
-                <LiveTag l={m.liveness} />
-              </SelectItem>
-            ))}
-            {pin && !chosen ? (
-              <SelectItem value={pin.modelId}>
-                <span className="num">{pin.modelId}</span>
-                <span className="text-meta text-ink-fail">不在这个用途里</span>
-              </SelectItem>
-            ) : null}
-          </SelectContent>
-        </Select>
-        {chosen && chosen.routes.length > 1 ? (
-          <Select
-            value={pin?.routeId ?? AUTO}
-            disabled={locked || busy}
-            onValueChange={(v) => void send(chosen.modelId, v === AUTO ? null : v)}
-          >
-            <SelectTrigger
-              size="sm"
-              className="w-56 max-md:w-full"
-              aria-label={`${segmentLabel[segment]}走哪条渠道`}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={AUTO}>任一渠道（按顺序）</SelectItem>
-              {chosen.routes.map((r) => (
-                <SelectItem key={r.routeId} value={r.routeId}>
-                  <span>{r.name}</span>
-                  <LiveTag l={r.liveness} />
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : null}
-        {canRepin ? (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            data-repin-open
-            onClick={() => setConfirming((v) => !v)}
-          >
-            现在就换
-          </Button>
-        ) : null}
-        {pin && !finished ? (
-          <Button size="sm" variant="ghost" loading={busy} disabled={busy} onClick={() => void send(null)}>
-            回到自动
-          </Button>
-        ) : null}
-      </div>
+      </Stack>
       {canRepin && confirming ? (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center gap-3 rounded-md bg-st-stall-soft px-3 py-2 text-body text-ink-stall md:col-span-11 md:col-start-2"
-          data-repin-confirm
-        >
-          <span className="min-w-0 flex-1">
-            现在就换：正在跑的这一轮马上停下，改用 {chosen?.name ?? pin?.modelId} 在原分支上接着做。
-            这一轮已做的会从分支上接着做，已花的 token 不退。
-          </span>
-          <Button size="sm" loading={busy} disabled={busy} data-repin-go onClick={() => void repinNow()}>
-            确认现在就换
-          </Button>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>
-            先不换
-          </Button>
-        </div>
+        <ConfirmDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setConfirming(false);
+          }}
+          title={`现在就换到 ${chosen?.name ?? pin?.modelId}？`}
+          description={`正在跑的这一轮马上停下，改用 ${chosen?.name ?? pin?.modelId} 在原分支上接着做。这一轮已做的会从分支上接着做，已花的 token 不退。`}
+          confirmText="确认现在就换"
+          cancelText="先不换"
+          onConfirm={repinNow}
+        />
       ) : null}
-      {health && health.verdict !== 'live' ? (
-        <p
-          role="alert"
-          className={cn(
-            'rounded-md px-3 py-2 text-body md:col-span-11 md:col-start-2',
-            health.verdict === 'dead' ? 'bg-st-fail-soft text-ink-fail' : 'bg-st-stall-soft text-ink-stall',
-          )}
-          data-pin-health={health.verdict}
-        >
-          {chosen?.name ?? pin?.modelId}
-          {health.verdict === 'dead' ? ' 现在派不出' : ' 现在说不准派不派得出'}：{health.why}。
-          引擎轮到这一段时只等它，派不出就停下等你，不会换别的模型；要换就在这里改，或回到自动。
-        </p>
-      ) : null}
-    </li>
+    </div>
   );
 }
 
@@ -266,20 +235,24 @@ export function TaskModelPins({ d, now }: { d: TaskDetail; now: number }) {
       ? { segment, models: [], problem: got.problem }
       : { segment, models: got.models, problem: undefined };
   });
+  const firstProblem = problems.find((p) => p.problem)?.problem;
   return (
     <Section
+      variant="plain"
       title="用哪个模型"
       // 块头只留一句；「现在就换」「派不出时停下等你」的整段说明在任务页页头 ⓘ 里（#1920），派不出时这一行下面也会写
       description={finished ? '这张单已经结束，指定只留作记录' : '下一次选路起照它，在跑的这一轮不打断'}
-      tight
     >
-      <ul className="divide-y">
-        <li className="grid gap-x-4 gap-y-1 py-3 md:grid-cols-12 md:items-baseline" data-pin-segment="scope">
-          <span className="font-medium text-muted-foreground md:col-span-1">{segmentLabel.scope}</span>
-          <span className="text-meta text-muted-foreground md:col-span-11">
-            在对话里和你一起做，引擎不起会话、不经选路，没有模型可指定
-          </span>
-        </li>
+      <Stack gap="lg">
+        {firstProblem ? <Notice tone="fail">{firstProblem}</Notice> : null}
+        <div data-pin-segment="scope">
+          <FormItem
+            label={segmentLabel.scope}
+            help="在对话里和你一起做，引擎不起会话、不经选路，没有模型可指定"
+          >
+            <Text tone="muted">不指定</Text>
+          </FormItem>
+        </div>
         {problems.map((p) => (
           <SegmentRow
             key={p.segment}
@@ -290,12 +263,7 @@ export function TaskModelPins({ d, now }: { d: TaskDetail; now: number }) {
             now={now}
           />
         ))}
-      </ul>
-      {problems.find((p) => p.problem) ? (
-        <p role="alert" className="mb-3 rounded-md bg-st-fail-soft px-3 py-2 text-body text-ink-fail">
-          {problems.find((p) => p.problem)?.problem}
-        </p>
-      ) : null}
+      </Stack>
     </Section>
   );
 }

@@ -3,7 +3,7 @@
 // 已暂停不画「暂停」，在跑且没暂停不画「继续」；已完成、已失败一个都不画。
 // 停滞是停下等人，给继续、叫停、重做，不画暂停。合并中在等合并，不画暂停。
 // 真要置灰的按钮，悬停要写明为什么。地址是纯数字时，「没有这张单」要多写一句单号和任务编号的区别。
-import { cleanup, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
@@ -67,10 +67,26 @@ describe('任务页操作按钮按状态', () => {
     const button = screen.getByRole('button', {
       name: '继续次数已用满（3 次），继续无效；要重开用 redo',
     });
-    expect((button as HTMLButtonElement).disabled).toBe(true);
+    // 新的 Button 置灰用 aria-disabled（点击不触发），不用 disabled 属性
+    expect(button.getAttribute('aria-disabled')).toBe('true');
     expect(button.getAttribute('title')).toBe('继续次数已用满（3 次），继续无效；要重开用 redo');
     expect(screen.getByRole('button', { name: '叫停' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '重做' })).toBeTruthy();
+  });
+
+  test('任务页（moreRedo）：停滞时「重做」收进「更多」，外面只有继续、叫停；已叫停的单「重做」仍摆在外面', async () => {
+    const view = renderApp(<ActionButtons moreRedo target={{ ...base, state: 'stalled' }} />);
+    // 「更多」是只有图标的按钮，没有字
+    expect(labels().filter(Boolean)).toEqual(['继续', '叫停']);
+    expect(screen.queryByRole('button', { name: '重做' })).toBeNull();
+    const more = screen.getByRole('button', { name: '更多操作' });
+    fireEvent.keyDown(more, { key: 'Enter' });
+    expect(await screen.findByRole('menuitem', { name: '重做' })).toBeTruthy();
+    view.unmount();
+
+    renderApp(<ActionButtons moreRedo target={{ ...base, state: 'stopped' }} />);
+    expect(labels()).toEqual(['重做']);
+    expect(screen.queryByRole('button', { name: '更多操作' })).toBeNull();
   });
 
   test('合并中：不画暂停；没暂停只给叫停，已经暂停给继续和叫停', () => {

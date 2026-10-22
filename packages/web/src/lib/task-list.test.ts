@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'vitest';
+import type { TaskListRow } from '../api/types';
 import {
   backToList,
+  dedupeRows,
   detailLink,
   filterOf,
   isFiltered,
   paramsWithView,
-  rowStatus,
+  rowStatusKey,
   viewOfParams,
 } from './task-list';
 
@@ -60,9 +62,21 @@ describe('详情页返回', () => {
 });
 
 describe('一行的状态', () => {
-  test('暂停的单写已暂停（等待色），不画成失败；其余照状态', () => {
-    expect(rowStatus({ state: 'running', paused: '已暂停：x' })).toEqual({ tone: 'stall', label: '已暂停' });
-    expect(rowStatus({ state: 'failed' })).toMatchObject({ tone: 'fail', label: '失败' });
-    expect(rowStatus({ state: 'done' })).toMatchObject({ tone: 'done' });
+  test('暂停的单归已暂停（等人），不画成在干活或失败；其余照状态取字典键', () => {
+    expect(rowStatusKey({ state: 'running', paused: '已暂停：x' })).toBe('task:paused');
+    expect(rowStatusKey({ state: 'running' })).toBe('task:running');
+    expect(rowStatusKey({ state: 'failed' })).toBe('task:failed');
+    expect(rowStatusKey({ state: 'done' })).toBe('task:done');
+  });
+});
+
+describe('翻页去重', () => {
+  const r = (taskId: string, title: string) => ({ taskId, title }) as TaskListRow;
+  test('同一张单在两页都出现：只留先出现的那一行，顺序不乱', () => {
+    const rows = dedupeRows([
+      { items: [r('a', '甲旧'), r('b', '乙')] },
+      { items: [r('a', '甲新'), r('c', '丙')] },
+    ]);
+    expect(rows.map((x) => `${x.taskId}:${x.title}`)).toEqual(['a:甲旧', 'b:乙', 'c:丙']);
   });
 });

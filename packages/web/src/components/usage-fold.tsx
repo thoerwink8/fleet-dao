@@ -1,15 +1,15 @@
-// 任务页「用量和模型」（#3228）：四个数、用哪个模型、三段、每一笔收成一行，点开才展开，照设计稿。
+// 任务页「用量与模型」页签（#3228 收成一行，#3509 改成页签）：几个数、三段、每一笔、用哪个模型。
 // 摘要只写读到的：几笔、已用时、输入当量、模型指定了没有；读不到的那项不写，不拿 0 顶。
-// 收起时里面照样挂着（只是藏起来），展开不用重新读、指定模型的操作状态也不丢。默认收起。
-import { ChevronDown, ChevronRight } from 'lucide-react';
-import type { ReactNode } from 'react';
-import { useSearchParams } from 'react-router';
+// 选中这个页签记在地址里（?tab=usage，旧链接 ?usage=open 一样认）：刷新、发给别人都还是同一处。
 import type { TaskDetail } from '../api/types';
 import { formatDuration } from '../lib/format';
 import { segmentLabel } from '../lib/segments';
 import { isTaskFinished } from '../lib/status';
 import { Section } from './layout/section';
-import { wallMs } from './segment-usage';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
+import { SegmentBreakdown, SegmentRunList, SegmentStats, wallMs } from './segment-usage';
+import { TaskModelPins } from './task-model-pins';
 
 const COUNT = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 });
 
@@ -29,42 +29,40 @@ export function usageFoldSummary(d: TaskDetail, now: number): string {
   return parts.join(' · ');
 }
 
-/** 展没展开记在地址里（?usage=open）：点开后的链接发给别人也是展开的，刷新不收回去。 */
+/** 旧链接 `?usage=open`（用量折叠区展开）：现在等于选中「用量与模型」页签。 */
 export const USAGE_PARAM = 'usage';
 
-export function UsageFold({ summary, children }: { summary: string; children: ReactNode }) {
-  const [params, setParams] = useSearchParams();
-  const open = params.get(USAGE_PARAM) === 'open';
-  const setOpen = (next: boolean) =>
-    setParams(
-      (p) => {
-        const n = new URLSearchParams(p);
-        if (next) n.set(USAGE_PARAM, 'open');
-        else n.delete(USAGE_PARAM);
-        return n;
-      },
-      { replace: true },
-    );
-  const Icon = open ? ChevronDown : ChevronRight;
+/** 「用哪个模型」：结束了的单从没指定过，也没什么可看的，不画。 */
+export function canPinModels(d: TaskDetail): boolean {
+  return !(isTaskFinished(d.task) && !d.routePins.pins.length && !d.routePins.unavailable);
+}
+
+export function UsageTab({
+  d,
+  now,
+  onViewTranscript,
+}: {
+  d: TaskDetail;
+  now: number;
+  onViewTranscript: (runId: string) => void;
+}) {
   return (
-    <div data-usage-fold className="flex min-w-0 flex-col gap-4 lg:gap-6">
-      <Section flush aria-label="用量和模型">
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-          className="flex min-h-11 w-full min-w-0 items-center gap-3 px-4 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset"
-        >
-          <span className="shrink-0 font-semibold">用量和模型</span>
-          <span data-usage-summary className="min-w-0 truncate text-meta text-muted-foreground">
-            {summary}
-          </span>
-          <Icon className="ml-auto size-4 shrink-0 text-muted-foreground" aria-hidden />
-        </button>
-      </Section>
-      <div hidden={!open} className="flex min-w-0 flex-col gap-4 lg:gap-6">
-        {children}
-      </div>
+    <div data-usage-fold>
+      <Stack gap="xl">
+        <span data-usage-summary>
+          <Text size="meta" tone="muted">
+            {usageFoldSummary(d, now)}
+          </Text>
+        </span>
+        <SegmentStats d={d} now={now} />
+        <Section variant="plain" title="三段" description="对题 → 动手 → 验收，每段再按模型分">
+          <SegmentBreakdown d={d} now={now} />
+        </Section>
+        <Section variant="plain" title="每一笔" description="按起跑先后，点「看会话」在右侧看会话内容">
+          <SegmentRunList d={d} now={now} onViewTranscript={onViewTranscript} />
+        </Section>
+        {canPinModels(d) ? <TaskModelPins d={d} now={now} /> : null}
+      </Stack>
     </div>
   );
 }

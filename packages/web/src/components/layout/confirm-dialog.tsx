@@ -27,11 +27,17 @@ export function ConfirmDialog({
   onConfirm,
   confirmDisabled,
   children,
+  secondary,
 }: {
   /** 确定键现在不能点（原因必填但还没填）。 */
   confirmDisabled?: boolean;
   /** 说明下面的内容：原因输入框这类。 */
   children?: ReactNode;
+  /**
+   * 另一个能点的确定键（暂停框的「立刻停下」：和主确定键是同一件事的两种做法），排在主确定键左边、灰底次按钮。
+   * 和主确定键共用忙态：一个在等的时候另一个点不动。
+   */
+  secondary?: { text: ReactNode; onConfirm: () => unknown };
   /** 受控：外面管开关。不传＝自己管（配 trigger 用）。 */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -56,6 +62,16 @@ export function ConfirmDialog({
         {children}
         <AlertDialogFooter>
           <AlertDialogCancel>{cancelText}</AlertDialogCancel>
+          {secondary ? (
+            <AlertDialogAction
+              variant="secondary"
+              onConfirm={async () => {
+                await secondary.onConfirm();
+              }}
+            >
+              {secondary.text}
+            </AlertDialogAction>
+          ) : null}
           <AlertDialogAction
             variant={danger ? 'danger' : 'primary'}
             {...(confirmDisabled ? { disabled: true } : {})}

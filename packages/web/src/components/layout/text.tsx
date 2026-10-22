@@ -25,6 +25,7 @@ export function Text({
   truncate,
   block,
   pre,
+  lines,
   as: Tag = 'span',
   title,
   id,
@@ -33,6 +34,8 @@ export function Text({
 }: DataAttrs & {
   /** 给 aria-describedby 指过来的元素 id。 */
   id?: string;
+  /** 最多露几行，多的省略（按块排）。 */
+  lines?: 2 | 3;
   /** meta 12（时间戳、表头、计数）、body 14（默认）、heading 16（小标题）。 */
   size?: TextSize;
   /** default 正文黑、secondary 次要、muted 灰字说明；warning、danger 只给异常。 */
@@ -64,6 +67,8 @@ export function Text({
         truncate ? 'block min-w-0 truncate' : block && 'block',
         Tag !== 'span' && !truncate && 'block',
         pre && 'block whitespace-pre-wrap break-words',
+        lines === 2 && 'line-clamp-2 block',
+        lines === 3 && 'line-clamp-3 block',
       )}
     >
       {children}

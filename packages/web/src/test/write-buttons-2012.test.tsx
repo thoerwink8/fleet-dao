@@ -184,7 +184,8 @@ describe('单子页「用哪个模型」', () => {
     await screen.findByRole('heading', { name: '用哪个模型' });
     const manual = document.querySelector('[data-pin-segment="manual"]') as HTMLElement;
     fireEvent.click(await within(manual).findByRole('button', { name: '现在就换' }));
-    const go = await within(manual).findByRole('button', { name: '确认现在就换' });
+    // 确认框盖在页面上（不在这一行里）
+    const go = await screen.findByRole('button', { name: '确认现在就换' });
     await busyOnce(go, calls);
     await act(async () => d.resolve({ ok: true }));
   });

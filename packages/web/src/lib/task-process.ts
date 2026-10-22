@@ -3,6 +3,7 @@
 import { RUN_CAUSE_LABELS, toolClass } from '@fleet-dao/shared';
 import type { EngineStep, ProcessStep, TaskOverview, TaskPr, TaskRound } from '../api/types';
 import type { LayoutTone } from '../components/layout/tone';
+import { STATUS_DICT, type StatusKey } from '../theme/status-dict';
 import type { SegmentRunView } from './segments';
 
 export type { TaskPr };
@@ -87,22 +88,27 @@ export function barWeights(ms: readonly number[]): number[] {
 
 // —— 回合 → 笔 → 引擎做的事 ——
 
-/** 回合怎么收场的说法和状态色；名单是引擎的 RoundOutcome，认不出的原样写。 */
+/** 回合怎么收场：说法和等级都在状态字典（task:round:*）里，这里只给每个收场名配一个状态色（别的页还在用 tone）。 */
 export const ROUND_OUTCOME: Record<string, { label: string; tone: LayoutTone }> = {
-  merged: { label: '做成了', tone: 'done' },
-  verify_rejected: { label: '验收没过', tone: 'fail' },
-  ci_red: { label: 'CI 红了', tone: 'fail' },
-  leftover: { label: '交活有剩', tone: 'stall' },
-  no_commit: { label: '没提交', tone: 'fail' },
-  push_conflict: { label: '推分支时冲突', tone: 'fail' },
-  merge_conflict: { label: '等合并时冲突', tone: 'fail' },
-  timeout: { label: '超时', tone: 'fail' },
-  stopped: { label: '被叫停', tone: 'stop' },
-  other: { label: '别的原因收场', tone: 'stall' },
+  merged: { label: STATUS_DICT.task['round:merged'].label, tone: 'done' },
+  verify_rejected: { label: STATUS_DICT.task['round:verify_rejected'].label, tone: 'fail' },
+  ci_red: { label: STATUS_DICT.task['round:ci_red'].label, tone: 'fail' },
+  leftover: { label: STATUS_DICT.task['round:leftover'].label, tone: 'stall' },
+  no_commit: { label: STATUS_DICT.task['round:no_commit'].label, tone: 'fail' },
+  push_conflict: { label: STATUS_DICT.task['round:push_conflict'].label, tone: 'fail' },
+  merge_conflict: { label: STATUS_DICT.task['round:merge_conflict'].label, tone: 'fail' },
+  timeout: { label: STATUS_DICT.task['round:timeout'].label, tone: 'fail' },
+  stopped: { label: STATUS_DICT.task['round:stopped'].label, tone: 'stop' },
+  other: { label: STATUS_DICT.task['round:other'].label, tone: 'stall' },
 };
 
 export function roundOutcome(outcome: string): { label: string; tone: LayoutTone } {
   return ROUND_OUTCOME[outcome] ?? { label: outcome, tone: 'doubt' };
+}
+
+/** 回合收场名对应的字典键；引擎多出来的新收场名认不出返回 undefined（页面把原值当灰字写出来，不猜）。 */
+export function roundStatusKey(outcome: string): StatusKey | undefined {
+  return Object.hasOwn(ROUND_OUTCOME, outcome) ? (`task:round:${outcome}` as StatusKey) : undefined;
 }
 
 /**

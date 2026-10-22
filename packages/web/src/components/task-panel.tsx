@@ -1,13 +1,13 @@
-// 任务页右侧面板（#3277，照 Claude 桌面版右侧面板）：「过程」和「看会话」在同一个随开随关的抽屉里，不再常驻右栏。
+// 任务页右侧面板（#3277，照 Claude 桌面版右侧面板；#3533 照 Arco 重拼）：「过程」和「看会话」在同一个随开随关的抽屉里，不再常驻右栏。
 // - 所有宽度都是盖在右边的抽屉（加遮罩），不占正文的位置；手机从底下整屏盖上来。
-// - 开没开、多宽记在浏览器本地（读不到就默认关、默认宽）；页头「过程」按钮和 `\` 键开关。
-// - 面板里先是过程；点一笔「看会话」把 ?run=<笔号> 压进地址（能分享，后退回到过程），「‹ 过程」退回；K / J 上一笔、下一笔，
+// - 开没开、多宽记在浏览器本地（读不到就默认关、默认宽）；`\` 键开关。任务页把「过程」放在页签里，面板里平时是一笔的会话。
+// - 面板里可以是过程（TaskProcess inPanel）；点一笔「看会话」把 ?run=<笔号> 压进地址（能分享，后退回到过程），「‹ 过程」退回；K / J 上一笔、下一笔，
 //   按整张单起跑先后（runOrder，和过程、汇报同一个「第 N 笔」）切，用替换不压历史。
 // - 面板头「弹出到新窗口」开 /tasks/:taskId/runs/:runId 独立页（routes/task-run.tsx），窗口名按笔定，同一笔复用同一个窗口。
 // 改这里之前必须知道：直接打开带 ?run= 的链接也要看得到面板（哪怕本地记的是关着）；关面板顺手把 ?run= 去掉，不留一个看不见的参数。
-import { ChevronDown, ChevronLeft, ChevronUp, ExternalLink, ListTree, PanelRight, X } from 'lucide-react';
+// 页面只拼 components/layout 的件，不写样式（design 第三节）；抽屉本体是 layout/side-panel.tsx。
+import { ChevronDown, ChevronLeft, ChevronUp, ExternalLink, X } from 'lucide-react';
 import {
-  type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
   type PointerEvent as ReactPointerEvent,
@@ -20,13 +20,13 @@ import type { TaskDetail } from '../api/types';
 import { useLocalState } from '../lib/hooks';
 import type { SegmentRunView } from '../lib/segments';
 import { runOrder } from '../lib/task-process';
-import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
-import { Section } from './layout/section';
+import { Button } from './layout/button';
+import { PanelResizer, SidePanel } from './layout/side-panel';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 import { RunMeta, RunOutcomeBadge, RunTranscript, runTitle } from './run-transcript';
 import { processSummaryOf, TaskProcess } from './task-process';
-import { Button } from './ui/button';
-import { Sheet, SheetContent, SheetDescription, SheetTitle } from './ui/sheet';
 
 /** 网址里看的是哪一笔的会话。 */
 export const RUN_PARAM = 'run';
@@ -149,70 +149,24 @@ export function usePanelKeys(panel: TaskPanel): void {
   }, []);
 }
 
-/** 页头「过程」按钮：开关面板，按下态跟着面板。 */
-export function PanelToggle({ panel }: { panel: TaskPanel }) {
-  return (
-    <Button
-      type="button"
-      size="sm"
-      variant={panel.shown ? 'secondary' : 'outline'}
-      aria-pressed={panel.shown}
-      aria-keyshortcuts="\"
-      title="过程面板（\）"
-      onClick={panel.toggle}
-      data-panel-toggle
-    >
-      <PanelRight aria-hidden />
-      过程
-    </Button>
-  );
-}
-
-/** 面板关着时正文末尾一行：「过程 · N 个回合 · M 笔 · 用时 …」，有在跑的再写第几笔在跑；点开面板。 */
-export function PanelLauncher({ d, now, panel }: { d: TaskDetail; now: number; panel: TaskPanel }) {
-  if (panel.shown || !d.segmentRuns.length) return null;
-  const order = runOrder(d.segmentRuns);
-  const running = d.segmentRuns.filter((r) => r.running).at(-1);
-  // 和「用量和模型」收起时同一个样子：一张卡一行，整行可点
-  return (
-    <Section flush aria-label="过程">
-      <button
-        type="button"
-        onClick={panel.show}
-        data-panel-launcher
-        className="flex min-h-11 w-full min-w-0 items-center gap-3 px-4 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset"
-      >
-        <ListTree className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-        <span className="shrink-0 font-semibold">过程</span>
-        <span className="min-w-0 truncate text-meta text-muted-foreground">
-          {processSummaryOf(d, now)}
-          {running ? ` · 第 ${order.get(running.id) ?? '?'} 笔在跑` : ''}
-        </span>
-        <ChevronLeft className="ml-auto size-4 shrink-0 text-muted-foreground" aria-hidden />
-      </button>
-    </Section>
-  );
-}
-
 function IconButton({
   label,
   onClick,
-  disabled,
+  disabledReason,
   children,
 }: {
   label: string;
   onClick: () => void;
-  disabled?: boolean;
+  disabledReason?: string;
   children: ReactNode;
 }) {
   return (
     <Button
-      type="button"
-      size="icon-sm"
-      variant="ghost"
+      size="sm"
+      variant="text"
       aria-label={label}
       title={label}
-      disabled={disabled}
+      {...(disabledReason ? { disabledReason } : {})}
       onClick={onClick}
     >
       {children}
@@ -220,8 +174,8 @@ function IconButton({
   );
 }
 
-/** 面板里的东西：头（过程或「‹ 过程 / 第 N 笔 · 段」）加内容（过程或这一笔的会话）。贴边和 Sheet 共用。 */
-function PanelBody({ d, now, panel }: { d: TaskDetail; now: number; panel: TaskPanel }) {
+/** 面板头：看过程时「过程 + 那一句」，看一笔时「‹ 过程 / 第 N 笔 · 段」加上一笔、下一笔、弹出、关闭。 */
+function PanelHeader({ d, now, panel }: { d: TaskDetail; now: number; panel: TaskPanel }) {
   const phone = usePhone();
   const run = panel.run;
   const list = orderedRuns(d.segmentRuns);
@@ -230,76 +184,66 @@ function PanelBody({ d, now, panel }: { d: TaskDetail; now: number; panel: TaskP
   const popout = useHref(run ? runPopoutPath(d.task.id, run.id) : '/');
   const close = (
     <IconButton label="关掉面板（\）" onClick={panel.hide}>
-      <X />
+      <X aria-hidden />
     </IconButton>
   );
+  if (!run) {
+    return (
+      <Stack direction="horizontal" gap="sm" align="center" justify="between">
+        <Stack direction="horizontal" gap="sm" align="baseline">
+          <Text size="heading" strong>
+            过程
+          </Text>
+          <Text size="meta" tone="muted" truncate>
+            {processSummaryOf(d, now)}
+          </Text>
+        </Stack>
+        {close}
+      </Stack>
+    );
+  }
   return (
-    <div className="flex h-full min-h-0 flex-col" data-panel-view={run ? 'run' : 'process'}>
-      <header className="flex shrink-0 items-center gap-2 border-b py-2 pr-2 pl-4">
-        {run ? (
-          <>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="-ml-2 shrink-0 px-2"
-              onClick={panel.back}
-              data-panel-back
-            >
-              <ChevronLeft aria-hidden />
-              过程
-            </Button>
-            <span aria-hidden className="text-muted-foreground">
-              /
-            </span>
-            <h2 className="num min-w-0 truncate text-body font-medium" data-panel-run-title>
-              {runTitle(run, order.get(run.id) ?? at + 1)}
-            </h2>
-            <div className="ml-auto flex shrink-0 items-center">
-              <IconButton label="上一笔（K）" disabled={at <= 0} onClick={() => panel.step(-1)}>
-                <ChevronUp />
-              </IconButton>
-              <IconButton label="下一笔（J）" disabled={at >= list.length - 1} onClick={() => panel.step(1)}>
-                <ChevronDown />
-              </IconButton>
-              {phone ? null : (
-                <IconButton
-                  label="弹出到新窗口"
-                  onClick={() => {
-                    window.open(popout, runWindowName(run.id));
-                  }}
-                >
-                  <ExternalLink />
-                </IconButton>
-              )}
-              {close}
-            </div>
-          </>
-        ) : (
-          <>
-            <h2 className="shrink-0 text-heading">过程</h2>
-            <span className="min-w-0 truncate text-meta text-muted-foreground">
-              {processSummaryOf(d, now)}
-            </span>
-            <div className="ml-auto shrink-0">{close}</div>
-          </>
+    <Stack direction="horizontal" gap="sm" align="center" justify="between">
+      <Stack direction="horizontal" gap="sm" align="center">
+        <Button size="sm" variant="text" onClick={panel.back} data-panel-back>
+          <ChevronLeft aria-hidden />
+          过程
+        </Button>
+        <Text tone="muted">/</Text>
+        <span data-panel-run-title>
+          <Text strong truncate>
+            {runTitle(run, order.get(run.id) ?? at + 1)}
+          </Text>
+        </span>
+      </Stack>
+      <Stack direction="horizontal" gap="sm" align="center">
+        <IconButton
+          label="上一笔（K）"
+          {...(at <= 0 ? { disabledReason: '已经是第一笔' } : {})}
+          onClick={() => panel.step(-1)}
+        >
+          <ChevronUp aria-hidden />
+        </IconButton>
+        <IconButton
+          label="下一笔（J）"
+          {...(at >= list.length - 1 ? { disabledReason: '已经是最后一笔' } : {})}
+          onClick={() => panel.step(1)}
+        >
+          <ChevronDown aria-hidden />
+        </IconButton>
+        {phone ? null : (
+          <IconButton
+            label="弹出到新窗口"
+            onClick={() => {
+              window.open(popout, runWindowName(run.id));
+            }}
+          >
+            <ExternalLink aria-hidden />
+          </IconButton>
         )}
-      </header>
-      {run ? (
-        <>
-          {/* 结局放在这一行开头：头一行留给第几笔和四个按钮，面板窄时标题不被挤掉 */}
-          <div className="flex shrink-0 items-start gap-2 border-b px-4 py-2">
-            <RunOutcomeBadge run={run} />
-            <RunMeta run={run} now={now} />
-          </div>
-          <RunTranscript taskId={d.task.id} run={run} />
-        </>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain scrollbar-thin" data-panel-process>
-          <TaskProcess d={d} now={now} onViewTranscript={panel.openRun} inPanel />
-        </div>
-      )}
-    </div>
+        {close}
+      </Stack>
+    </Stack>
   );
 }
 
@@ -335,64 +279,47 @@ function usePanelWidth(): {
   return { width, onDown, onKey };
 }
 
-/** 左边沿的拉宽条（window splitter）。 */
-function Resizer({
-  width,
-  onDown,
-  onKey,
-}: {
-  width: number;
-  onDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
-  onKey: (e: KeyboardEvent<HTMLDivElement>) => void;
-}) {
-  return (
-    // biome-ignore lint/a11y/useSemanticElements: 可聚焦、可拖动的分隔条（window splitter），<hr> 不能带键盘和拖动
-    <div
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="拉宽过程面板"
-      aria-valuenow={width}
-      tabIndex={0}
-      onPointerDown={onDown}
-      onKeyDown={onKey}
-      data-panel-resizer
-      className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize hover:bg-border-strong focus-visible:bg-ring focus-visible:outline-none"
-    />
-  );
-}
-
 /**
- * 面板本身：盖在右边的抽屉（Sheet），手机从底下整屏盖上来。不占正文的位置：创始人定的，贴在正文旁边会把
+ * 面板本身：盖在右边的抽屉（SidePanel），手机从底下整屏盖上来。不占正文的位置：创始人定的，贴在正文旁边会把
  * 「这一回合走到哪」、汇报挤窄（2026-10-19）。
  */
 export function TaskPanelView({ d, now, panel }: { d: TaskDetail; now: number; panel: TaskPanel }) {
   const phone = usePhone();
   const { width, onDown, onKey } = usePanelWidth();
-  const style = { '--task-panel-w': `${width}px` } as CSSProperties;
+  const run = panel.run;
   return (
-    <Sheet
+    <SidePanel
       open={panel.shown}
       // 开面板不压历史（看会话时 ?run= 已经压过一条，后退回到过程）；点遮罩、Esc 关
-      historyEntry={false}
       onOpenChange={(o) => {
         if (!o) panel.hide();
       }}
+      title="过程"
+      description="这张单的过程，点一笔看它的会话"
+      phone={phone}
+      widthPx={width}
+      resizer={<PanelResizer width={width} label="拉宽过程面板" onPointerDown={onDown} onKeyDown={onKey} />}
+      view={run ? 'run' : 'process'}
+      scroll={!run}
+      header={<PanelHeader d={d} now={now} panel={panel} />}
+      subheader={
+        run ? (
+          // 结局放在这一行开头：头一行留给第几笔和四个按钮，面板窄时标题不被挤掉
+          <>
+            <RunOutcomeBadge run={run} />
+            <RunMeta run={run} now={now} />
+          </>
+        ) : undefined
+      }
+      data-task-panel="sheet"
     >
-      <SheetContent
-        side={phone ? 'bottom' : 'right'}
-        showCloseButton={false}
-        style={style}
-        className={cn(
-          'gap-0 p-0',
-          phone ? 'h-dvh max-h-dvh w-full' : 'w-[min(var(--task-panel-w),90vw)] sm:max-w-none',
-        )}
-        data-task-panel="sheet"
-      >
-        <SheetTitle className="sr-only">过程</SheetTitle>
-        <SheetDescription className="sr-only">这张单的过程，点一笔看它的会话</SheetDescription>
-        {phone ? null : <Resizer width={width} onDown={onDown} onKey={onKey} />}
-        <PanelBody d={d} now={now} panel={panel} />
-      </SheetContent>
-    </Sheet>
+      {run ? (
+        <RunTranscript taskId={d.task.id} run={run} />
+      ) : (
+        <div data-panel-process>
+          <TaskProcess d={d} now={now} onViewTranscript={panel.openRun} inPanel />
+        </div>
+      )}
+    </SidePanel>
   );
 }

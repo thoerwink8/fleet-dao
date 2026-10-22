@@ -35,13 +35,17 @@ afterEach(() => {
   window.history.replaceState({}, '', '/');
 });
 
-/** 只看正文的用例先把面板关上：面板是模态抽屉，开着时正文对按角色查找是藏起来的。 */
+/** 只看正文（最新汇报、改动文件）的用例：不带 ?tab=，默认就是「最新汇报」页签。 */
 function openBody(route: string) {
-  localStorage.setItem(PANEL_OPEN_KEY, 'false');
-  return open(route);
+  return openAt(route);
 }
 
+/** 过程是任务页的一个页签（#3509，?tab=process），不再是右侧面板：看过程的用例直接打开这个页签。 */
 function open(route: string, search = '') {
+  return openAt(`${route}${route.includes('?') ? '&' : '?'}tab=process`, search);
+}
+
+function openAt(route: string, search = '') {
   window.history.replaceState({}, '', `/${search}`);
   return renderApp(
     <Routes>
@@ -62,7 +66,7 @@ const found = async <T extends Element = HTMLElement>(selector: string, root: Pa
 const expandRounds = async () => {
   const proc = await found('[data-task-process]');
   await found('[data-round-header]', proc);
-  for (const b of proc.querySelectorAll('[data-round-header] > button[aria-expanded="false"]'))
+  for (const b of proc.querySelectorAll('[data-round-header] button[aria-expanded="false"]'))
     fireEvent.click(b);
   return proc;
 };
@@ -73,25 +77,32 @@ describe('概览：汇报、命令计数、PR、改动文件', () => {
     const box = await found('[data-task-summary]');
     const report = await found('[data-task-report]', box);
     expect(report.textContent).toContain('测试里写死了旧标签');
-    // 标题「最新汇报」后面写第几笔 · 段 · 模型 · 多久前（照设计稿，#3228）；这一笔是整张单第 3 笔
-    expect(box.querySelector('h2')?.textContent).toBe('最新汇报');
+    // 汇报下面一行灰字：第几笔 · 段 · 模型 · 多久前（照设计稿，#3228）；这一笔是整张单第 3 笔
     expect(box.textContent).toMatch(/第 3 笔 · 动手 · Opus 5\.5 · /);
     expect(within(box).getByRole('button', { name: '看全部过程' })).toBeTruthy();
     const line = await found('[data-progress-line]', box);
     expect(line.textContent).toContain('个命令已完成');
-    expect(within(line).getByText('1 个失败').className).toContain('text-ink-fail');
+    // 只有失败数标红（用警示字色，不涂底）
+    expect(within(line).getByText('1 个失败').className).toContain('text-fail-ink');
     expect(line.textContent).toContain('读了 1 次文件');
-    // PR 横条：号、仓、分支、状态
-    const pr = await found('[data-pr="12"]', box);
+    // PR 在页头那张结论卡里（#3509）：号、分支、状态
+    const pr = await found('[data-pr="12"]');
     expect(pr.getAttribute('data-pr-state')).toBe('merged');
-    expect(pr.textContent).toContain('#12');
+    expect(pr.textContent).toContain('PR #12');
     expect(pr.textContent).toContain('agent/9-readme-tz');
     expect(within(pr).getByText('已合并')).toBeTruthy();
-    expect(pr.className).toContain('bg-st-human-soft');
+    expect(box.contains(pr)).toBe(false);
   });
 
-  test('改动卡：数字来自按头记的 numstat；只露前 3 个，其余点「还有 N 个文件」；二进制不写 +/-', async () => {
+  test('「看全部过程」切到过程页签', async () => {
     openBody('/tasks/t-c9');
+    fireEvent.click(await screen.findByRole('button', { name: '看全部过程' }));
+    await found('[data-task-process]');
+    expect(screen.getByRole('tab', { name: '过程' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  test('改动文件页签：数字来自按头记的 numstat；只露前 3 个，其余点「还有 N 个文件」；二进制不写 +/-', async () => {
+    openBody('/tasks/t-c9?tab=files');
     const card = await found('[data-changed-files]');
     expect(card.textContent).toContain('已编辑 5 个文件');
     // 32 行增、4 行删（二进制不计）
@@ -99,24 +110,24 @@ describe('概览：汇报、命令计数、PR、改动文件', () => {
     expect(card.textContent).toContain('-4');
     expect(card.textContent).toContain('PR #12');
     expect(card.querySelectorAll('[data-file]')).toHaveLength(3);
-    expect(card.querySelector('[data-file="scripts/stamp.ts"]')?.textContent).toContain('+6');
+    expect(card.querySelector('[data-file="scripts/stamp.ts"]')?.closest('tr')?.textContent).toContain('+6');
     // 记的头就是 PR 现在的头：不标「不是最新的头」
     expect(card.querySelector('[data-files-stale]')).toBeNull();
     fireEvent.click(within(card).getByRole('button', { name: '还有 2 个文件' }));
     expect(card.querySelectorAll('[data-file]')).toHaveLength(5);
-    expect(card.querySelector('[data-file="assets/stamp-preview.png"]')?.textContent).toContain('二进制');
-    expect(card.querySelector('[data-file="assets/stamp-preview.png"] [data-diff-stat]')).toBeNull();
-    // 点文件行：说明这里不存 diff 正文，完整 diff 在 PR 页
-    fireEvent.click(card.querySelector('[data-file="scripts/stamp.ts"] button') as HTMLElement);
-    expect(card.querySelector('[data-file-detail]')?.textContent).toContain('不存 diff 正文');
+    const bin = card.querySelector('[data-file="assets/stamp-preview.png"]')?.closest('tr');
+    expect(bin?.textContent).toContain('二进制');
+    expect(bin?.querySelector('[data-diff-stat]')).toBeNull();
+    // 说明这里只记增删数、不存 diff 正文，完整 diff 在 PR 页
+    expect(await screen.findByText(/不存 diff 正文/)).toBeTruthy();
   });
 
   test('没记过改动文件的 PR：写原因，不画 0 个文件', async () => {
-    open('/tasks/t-12');
+    openBody('/tasks/t-12?tab=files');
     // t-12 没有 PR，不画改动卡也不画「0 个文件」
-    await found('[data-task-summary]');
+    await found('[data-tab-panel="files"]');
     expect(document.querySelector('[data-changed-files]')).toBeNull();
-    expect(document.querySelector('[data-task-summary]')?.textContent).not.toContain('已编辑 0 个文件');
+    expect(document.body.textContent).not.toContain('已编辑 0 个文件');
   });
 });
 
@@ -204,9 +215,9 @@ describe('过程：回合 → 笔 → 步骤 → 调用', () => {
   test('时间条：每一笔一段，超时的那段标红；点一段跳到那一笔', async () => {
     open('/tasks/t-c9');
     const bar = await found('[data-run-bar]');
-    expect(bar.querySelectorAll('[data-bar-run]').length).toBeGreaterThanOrEqual(2);
-    expect(bar.querySelector('[data-bar-run="seg-c9-2"]')?.className).toContain('bg-st-fail');
-    expect(bar.querySelector('[data-bar-run="seg-c9-3"]')?.className).toContain('bg-border-strong');
+    expect(bar.querySelectorAll('[data-bar-item]').length).toBeGreaterThanOrEqual(2);
+    expect(bar.querySelector('[data-bar-item="seg-c9-2"]')?.getAttribute('data-state')).toBe('fail');
+    expect(bar.querySelector('[data-bar-item="seg-c9-3"]')?.getAttribute('data-state')).toBe('idle');
   });
 
   test('跑在记录之前的那一笔：写「没有过程记录」，不画成 0 步', async () => {
@@ -257,27 +268,36 @@ describe('新旧引擎交替的单：没记回合号的笔按回合收场时刻�
   });
 });
 
-describe('排版：正文是结论，过程在右侧抽屉，用量收成一行（#3228、#3277）', () => {
-  test('用量和模型默认收起，摘要写几笔、用时、模型；点开才出明细，地址记下展开', async () => {
+describe('排版：结论卡、进度、四个页签（#3509）', () => {
+  test('默认是「最新汇报」页签，用量与模型要点页签才出明细；摘要写几笔、用时、模型', async () => {
     openBody('/tasks/t-c9');
-    const fold = await found('[data-usage-fold]');
-    const btn = fold.querySelector('button[aria-expanded]') as HTMLButtonElement;
-    expect(btn.getAttribute('aria-expanded')).toBe('false');
-    const summary = fold.querySelector('[data-usage-summary]')?.textContent ?? '';
+    const tab = await screen.findByRole('tab', { name: '用量与模型' });
+    expect(tab.getAttribute('aria-selected')).toBe('false');
+    expect(screen.getByRole('tab', { name: '最新汇报' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByRole('heading', { name: '每一笔' })).toBeNull();
+    fireEvent.click(tab);
+    await screen.findByRole('heading', { name: '每一笔' });
+    expect(tab.getAttribute('aria-selected')).toBe('true');
+    const summary = document.querySelector('[data-usage-summary]')?.textContent ?? '';
     expect(summary).toMatch(/^\d+ 笔 · 总耗时 /);
     expect(summary).toContain('动手、验收都是自动选');
-    expect(screen.queryByRole('heading', { name: '每一笔' })).toBeNull();
-    fireEvent.click(btn);
-    await screen.findByRole('heading', { name: '每一笔' });
-    expect(btn.getAttribute('aria-expanded')).toBe('true');
   });
 
-  test('过程在右侧面板里（#3277），结论（汇报、进度条）在正文', async () => {
+  test('旧链接 ?usage=open 等于选中「用量与模型」页签', async () => {
+    openBody('/tasks/t-c9?usage=open');
+    await screen.findByRole('heading', { name: '每一笔' });
+    expect(screen.getByRole('tab', { name: '用量与模型' }).getAttribute('aria-selected')).toBe('true');
+  });
+
+  test('过程是页签（不再是右侧面板）：面板里只有过程，没有汇报；进度条在页签外面', async () => {
     open('/tasks/t-c9');
-    const aside = await found('[data-task-panel]');
-    expect(aside.querySelector('[data-task-process]')).toBeTruthy();
-    expect(aside.querySelector('[data-task-summary]')).toBeNull();
-    expect(aside.querySelector('[data-round-progress]')).toBeNull();
+    const panel = await found('[role="tabpanel"]');
+    expect(panel.querySelector('[data-task-process]')).toBeTruthy();
+    expect(panel.querySelector('[data-task-summary]')).toBeNull();
+    expect(panel.querySelector('[data-round-progress]')).toBeNull();
+    expect(document.querySelector('[data-round-progress]')).toBeTruthy();
+    // 没点「看会话」就没有右侧抽屉
+    expect(document.querySelector('[data-task-panel]')).toBeNull();
   });
 });
 
@@ -310,12 +330,11 @@ describe('过程照设计稿（#3228）', () => {
     expect(b.querySelector('[data-run-outcome]')?.textContent).toBe('完成');
   });
 
-  test('时间条下面写起止；面板头上写几个回合、几笔、用时', async () => {
+  test('时间条下面写起止；页签顶上一行写几个回合、几笔、用时', async () => {
     open('/tasks/t-c9');
     const proc = await found('[data-task-process]');
     expect((await found('[data-bar-axis]', proc)).textContent).toMatch(/^\d\d:\d\d.*\d\d:\d\d$/);
-    const head = (await found('[data-task-panel] header')).textContent;
-    expect(head).toMatch(/^过程2 个回合 · 4 笔 · 用时 /);
+    expect((await found('[role="tabpanel"]')).textContent).toMatch(/^2 个回合 · 4 笔 · 用时 /);
   });
 
   test('t-12 在跑：最后一回合末尾写「接下来」还要走的几步', async () => {
@@ -333,10 +352,10 @@ describe('过程照设计稿（#3228）', () => {
 
 describe('页头下面：这一回合走到哪（#3169）', () => {
   test('t-12 在跑的返工回合：当前一步带 aria-current="step"，写上一回合怎么收场', async () => {
-    open('/tasks/t-12');
+    openBody('/tasks/t-12');
     const strip = await found('[data-round-progress]');
-    const stages = strip.querySelectorAll('[data-stage-state]');
-    expect([...stages].map((s) => s.getAttribute('data-stage'))).toEqual([
+    const stages = strip.querySelectorAll('[data-step]');
+    expect([...stages].map((s) => s.getAttribute('data-step'))).toEqual([
       '动手',
       '自测',
       '推分支 · CI',
@@ -345,10 +364,11 @@ describe('页头下面：这一回合走到哪（#3169）', () => {
     ]);
     const now = strip.querySelectorAll('[aria-current="step"]');
     expect(now).toHaveLength(1);
-    expect(now[0]?.getAttribute('data-stage-state')).toBe('now');
+    // 步骤条的状态用 antd 的词：process 是在做
+    expect(now[0]?.getAttribute('data-status')).toBe('process');
     // 每格第二行（#3228）：在做的写第几笔跑了多久，没到的写还没到
-    expect(now[0]?.querySelector('[data-stage-detail]')?.textContent).toMatch(/^第 3 笔 · \d/);
-    expect(strip.querySelector('[data-stage="验收"] [data-stage-detail]')?.textContent).toBe('还没到');
+    expect(now[0]?.querySelector('[data-step-description]')?.textContent).toMatch(/^第 3 笔 · \d/);
+    expect(strip.querySelector('[data-step="验收"] [data-step-description]')?.textContent).toBe('还没到');
     const rework = strip.querySelector('[data-round-rework]')?.textContent ?? '';
     expect(rework).toContain('上一回合');
     // 引擎记的意见以结局开头，页面不再重复一遍结局
@@ -356,18 +376,22 @@ describe('页头下面：这一回合走到哪（#3169）', () => {
   });
 
   test('t-c9 合并收场：五步都做完，没有当前一步', async () => {
-    open('/tasks/t-c9');
+    openBody('/tasks/t-c9');
     const strip = await found('[data-round-progress]');
     expect(strip.textContent).toContain('第 2 回合');
     expect(strip.textContent).toContain('合并了');
-    expect(
-      [...strip.querySelectorAll('[data-stage-state]')].map((s) => s.getAttribute('data-stage-state')),
-    ).toEqual(['done', 'done', 'done', 'done', 'done']);
+    expect([...strip.querySelectorAll('[data-step]')].map((s) => s.getAttribute('data-status'))).toEqual([
+      'finish',
+      'finish',
+      'finish',
+      'finish',
+      'finish',
+    ]);
     expect(strip.querySelector('[aria-current]')).toBeNull();
   });
 
   test('没有回合记录的老后端详情不画', async () => {
-    open('/tasks/t-c9', '?mockOverview=old');
+    openAt('/tasks/t-c9', '?mockOverview=old');
     const box = await found('[data-task-summary]');
     expect(box.textContent).toContain('这台后端还没有任务概览');
     expect(document.querySelector('[data-round-progress]')).toBeNull();
@@ -376,10 +400,11 @@ describe('页头下面：这一回合走到哪（#3169）', () => {
 
 describe('读不到：写原因，不画 0', () => {
   test('老后端没有 overview：概览写「这台后端还没有任务概览」，过程写没有回合这些项', async () => {
-    open('/tasks/t-c9', '?mockOverview=old');
+    openAt('/tasks/t-c9', '?mockOverview=old');
     const box = await found('[data-task-summary]');
     expect(box.textContent).toContain('这台后端还没有任务概览');
     expect(box.querySelector('[data-progress-line]')).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: '过程' }));
     const proc = await found('[data-task-process]');
     expect(proc.textContent).toContain('这台后端还没有「回合」「引擎做的事」这些项');
     // 笔还在，只是不分回合
@@ -387,16 +412,20 @@ describe('读不到：写原因，不画 0', () => {
   });
 
   test('会话内容读不到：汇报、命令计数、回合、引擎做的事各写各的原因；PR 条照样给', async () => {
-    open('/tasks/t-c9', '?mockOverview=unread');
+    openAt('/tasks/t-c9', '?mockOverview=unread');
     const box = await found('[data-task-summary]');
     await waitFor(() => expect(box.textContent).toContain('最新汇报没读到'));
     expect(box.textContent).toContain('命令计数没读到');
     expect(box.textContent).toContain('connection terminated');
     expect(box.querySelector('[data-progress-line]')).toBeNull();
-    expect(box.querySelector('[data-changed-files]')).toBeNull();
-    expect(box.querySelector('[data-pr="12"]')).toBeTruthy();
-    // 改动文件读不到：写在该 PR 下面
-    expect(box.querySelector('[data-changed-unread="12"]')?.textContent).toContain('没读到');
+    // PR 在页头那张卡里照样给
+    expect(document.querySelector('[data-pr="12"]')).toBeTruthy();
+    // 改动文件读不到：在改动文件页签里写在该 PR 的位置
+    fireEvent.click(screen.getByRole('tab', { name: '改动文件' }));
+    const unread = await found('[data-changed-unread="12"]');
+    expect(unread.textContent).toContain('没读到');
+    expect(document.querySelector('[data-changed-files]')).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: '过程' }));
     const proc = await found('[data-task-process]');
     expect(proc.textContent).toContain('回合没读到');
     expect(proc.textContent).toContain('引擎做的事没读到');
@@ -407,10 +436,11 @@ describe('读不到：写原因，不画 0', () => {
   });
 
   test('这个 PR 没记过改了哪些文件（在记这个账之前推的）：写原因，不画「0 个文件」', async () => {
-    open('/tasks/t-14');
-    await found('[data-task-summary]');
-    const box = document.querySelector('[data-task-summary]') as HTMLElement;
-    expect(box.textContent).not.toContain('已编辑 0 个文件');
+    openBody('/tasks/t-14?tab=files');
+    await found('[data-tab-panel="files"]');
+    const block = await found('[data-changed-block]');
+    expect(block.querySelector('[data-changed-unread]')?.textContent).toContain('没读到');
+    expect(block.textContent).not.toContain('已编辑 0 个文件');
     expect(screen.queryByText(/已编辑 0/)).toBeNull();
   });
 });

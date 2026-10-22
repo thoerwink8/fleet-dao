@@ -1,7 +1,8 @@
-// 把 lib/markdown.ts 解析出的几样画出来（#3277）：正文 text-body，行内代码、代码块 bg-muted + 等宽。
+// 把 lib/markdown.ts 解析出的几样画出来（#3277、#3533 挪进组件层）：正文 14，行内代码、代码块灰底加等宽。
+// 助手的话、结论、子代理说的话都用它。不收 className 和 style：灰一档的字用 tone="secondary"，加粗用 strong；data-* 落在最外层。
 import { Fragment } from 'react';
-import { type Inline, type MdBlock, parseMarkdown } from '../lib/markdown';
-import { cn } from '../lib/utils';
+import { type Inline, type MdBlock, parseMarkdown } from '../../lib/markdown';
+import { cn } from '../../lib/utils';
 
 function Spans({ inline }: { inline: readonly Inline[] }) {
   return (
@@ -11,7 +12,7 @@ function Spans({ inline }: { inline: readonly Inline[] }) {
         switch (s.kind) {
           case 'code':
             return (
-              <code key={key} className="num rounded-sm bg-muted px-1 py-0.5 text-meta">
+              <code key={key} className="num rounded-sm bg-fill-2 px-1 py-0.5 text-meta">
                 {s.text}
               </code>
             );
@@ -28,7 +29,7 @@ function Spans({ inline }: { inline: readonly Inline[] }) {
                 href={s.href}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="underline underline-offset-2 hover:text-foreground"
+                className="text-brand-ink underline underline-offset-2 hover:text-link-hover"
               >
                 {s.text}
               </a>
@@ -80,14 +81,14 @@ function Block({ b }: { b: MdBlock }) {
     }
     case 'quote':
       return (
-        <blockquote className="border-l-2 pl-3 text-muted-foreground">
+        <blockquote className="border-l-2 border-line-2 pl-3 text-ink-3">
           <Lines lines={b.lines} />
         </blockquote>
       );
     case 'code':
       return (
         <pre
-          className="num overflow-x-auto rounded-md bg-muted px-3 py-2 text-meta whitespace-pre"
+          className="num overflow-x-auto rounded-sm bg-fill-2 px-3 py-2 text-meta whitespace-pre"
           data-md-code
         >
           <code>{b.text}</code>
@@ -105,12 +106,26 @@ function Block({ b }: { b: MdBlock }) {
 /** 一段 Markdown：块之间留一行的距离。 */
 export function Markdown({
   text,
-  className,
+  tone = 'default',
+  strong,
   ...rest
-}: { text: string; className?: string } & Record<`data-${string}`, string>) {
+}: {
+  text: string;
+  /** default 正文黑；secondary 灰一档（子代理说的话）。 */
+  tone?: 'default' | 'secondary';
+  /** 字重 500（结论那句）。 */
+  strong?: boolean;
+} & Record<`data-${string}`, string>) {
   const blocks = parseMarkdown(text);
   return (
-    <div className={cn('min-w-0 space-y-2 text-body break-words', className)} {...rest}>
+    <div
+      className={cn(
+        'min-w-0 space-y-2 text-body break-words',
+        tone === 'secondary' ? 'text-ink-2' : 'text-ink',
+        strong && 'font-medium',
+      )}
+      {...rest}
+    >
       {blocks.map((b, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: 块的先后就是身份，内容变了整段重画
         <Block key={i} b={b} />

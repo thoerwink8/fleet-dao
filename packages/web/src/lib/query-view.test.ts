@@ -5,7 +5,9 @@ describe('viewOf：刷新失败但有旧数据不再当 error', () => {
   const refetch = vi.fn();
 
   test('没数据没错：loading', () => {
-    expect(viewOf({ error: null, data: undefined, dataUpdatedAt: 0, refetch })).toEqual({ status: 'loading' });
+    expect(viewOf({ error: null, data: undefined, dataUpdatedAt: 0, refetch })).toEqual({
+      status: 'loading',
+    });
   });
 
   test('没数据有错：error（从没读成），带重试', () => {
@@ -23,7 +25,7 @@ describe('viewOf：刷新失败但有旧数据不再当 error', () => {
     if (v.status === 'data') {
       expect(v.data).toEqual({ a: 1 });
       expect(v.stale?.dataUpdatedAt).toBe(1234);
-      expect((v.stale?.error as Error).message).toBe('超时');
+      expect(v.stale?.error).toEqual(new Error('超时'));
     }
   });
 
