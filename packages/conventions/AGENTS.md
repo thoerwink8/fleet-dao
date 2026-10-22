@@ -29,7 +29,7 @@
 - 只改一个包「对外面」以外的文件只测这个包自己（`package-surface.ts`）；认不出面就当整个包都是面。
 - 文档指针检查误报了就收窄 `doc-pointers.ts` 的规则，不往文档里加豁免；章节别光写「第 X 节」，写明是 design 还是 ops 的。
 - 合并闸：策略 reader 只在核准仓身份、PR 号和精确 head 后返回结构化 closed，不覆写已合旧头；`runMergeGate` 写模式退出码只表达是否算成并发表（0/2），不重复 required status 的裁决；`merge-gate.yml` 与 `managed-feedback.yml` 的写者必须共用 `merge-gate-${{ github.repository }}-pr-${{ matrix.pr }}` concurrency group，保持 `queue: max`、`cancel-in-progress: false`（`test/ci-plan.test.ts` 钉着）；批量入口只由 plan 列 PR、matrix 逐 PR 写。
-- `issue:close` 和 `close-on-merge` 收尾都现读数据库最终验收责任；`--note`、Bot 评论不能替代结清，没读成明确退出 2、不关单。`close-on-merge-gh.ts` 对写请求不重放，限流重试有 30 秒整轮预算。
+- `issue:close` 和 `close-on-merge` 不再读验收责任（#3630，决定 0113 第二片），只看受管工作的关单检查。`close-on-merge-gh.ts` 对写请求不重放，限流重试有 30 秒整轮预算。
 - 新 PR 的需求行完成用 `Closes #号`，分片用 `Refs #号（分片、关不了它）`；手写正文的裸 Refs 在任何推送或 GitHub 写入前拒绝。`pr-open` 同步 GitHub 运输用 `pr-arm.ts` 的 `livePrGh`，显式传 canonical repo。
 - 查询轴：`issue:new`、`pr:open` 显式带 `--domain engine|api|mirasim --nature bug|perf|process`；`issue:batch` 母单必须提供两轴，子单可逐轴继承，整批写入前检查；`query-metadata.yml` 不猜、不改排期。
 - 母子单：`mother-manifest.ts` 严格读写正文 JSON 清单，批量写失败整批补偿；`issue:new --parent` 清单失败须明说子单已开已挂，不能建议重开。空母单只对批量创建标记报错。

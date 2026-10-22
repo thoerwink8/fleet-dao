@@ -5,6 +5,7 @@
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]   开关关着时点名派一张单
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api groom <owner/仓名> [--note "<为什么>"]   叫一次临时指挥官整理待办（只排队，引擎几秒内接手）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api usage-backfill-once [--apply]   一次性回填没有会话号的老用量（默认只读）
+#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api acceptance-handback-once [--apply]   一次性把还开着的旧验收责任交回原单（#3630，默认只读）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"   续、放弃、重做一张单
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api feishu-push status|test   提醒推飞书通不通；test 建一条测试提醒等它推出去
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api daily-brief [--as-today]   手动跑一次每日简报（推飞书、#1055 评论）
@@ -39,6 +40,10 @@ elif [[ "${1:-}" == "groom" ]]; then
 # usage-backfill-once（#1948，一次性回填没有会话号的老用量）的本体同样在引擎包
 elif [[ "${1:-}" == "usage-backfill-once" ]]; then
   entry="$root/packages/engine/src/bin/usage-backfill-once.ts"
+  shift
+# acceptance-handback-once（#3630，一次性把还开着的旧验收责任交回原单）的本体同样在引擎包：留言、贴标签和读写库同一处
+elif [[ "${1:-}" == "acceptance-handback-once" ]]; then
+  entry="$root/packages/engine/src/bin/acceptance-handback-once.ts"
   shift
 # daily-brief（决定 0096，手动跑一次每日简报）的本体同样在引擎包：收集、写法和引擎定时那一轮是同一份
 elif [[ "${1:-}" == "daily-brief" ]]; then

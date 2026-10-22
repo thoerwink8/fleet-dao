@@ -86,7 +86,6 @@ export type DeliveryFailureKind = 'retry' | 'review' | 'external' | 'blocked';
 export interface DeliveryHold {
   kind: 'review' | 'external' | 'blocked';
   why: string;
-  acceptance?: 'open' | 'settled' | 'unknown';
   external?: ExternalDeliveryFact;
 }
 
@@ -96,15 +95,13 @@ export interface DeliveryHold {
  */
 export class DeliveryCheckError extends Error {
   readonly kind: DeliveryFailureKind;
-  readonly acceptance?: 'open' | 'settled' | 'unknown';
   readonly external?: ExternalDeliveryFact;
-  /** 还有本机未确认的退回意图或未结责任：即便外部事实齐了也不能终结 */
+  /** 还有本机未确认的退回意图：即便外部事实齐了也不能终结 */
   readonly retain?: boolean;
   constructor(
     kind: DeliveryFailureKind,
     message: string,
     extra?: {
-      acceptance?: 'open' | 'settled' | 'unknown';
       external?: ExternalDeliveryFact;
       retain?: boolean;
     },
@@ -112,7 +109,6 @@ export class DeliveryCheckError extends Error {
     super(message);
     this.name = 'DeliveryCheckError';
     this.kind = kind;
-    if (extra?.acceptance !== undefined) this.acceptance = extra.acceptance;
     if (extra?.external !== undefined) this.external = extra.external;
     if (extra?.retain !== undefined) this.retain = extra.retain;
   }
@@ -246,7 +242,6 @@ const READ_FAIL =
 export interface ClassifiedDelivery {
   kind: DeliveryFailureKind;
   why: string;
-  acceptance?: 'open' | 'settled' | 'unknown';
   external?: ExternalDeliveryFact;
   retain?: boolean;
 }
@@ -257,7 +252,6 @@ export function classifyDeliveryError(e: unknown): ClassifiedDelivery {
     return {
       kind: e.kind,
       why: e.message,
-      ...(e.acceptance ? { acceptance: e.acceptance } : {}),
       ...(e.external ? { external: e.external } : {}),
       ...(e.retain ? { retain: true } : {}),
     };
@@ -269,12 +263,14 @@ export function classifyDeliveryError(e: unknown): ClassifiedDelivery {
 
 const SHA = /^[a-f0-9]{40}$/;
 
-/** 他分支已交付可以终结：同仓、真实 PR/head/mergeCommit、验收已结清、没有仍要保留的责任。issue 关闭不算。 */
+/**
+ * 他分支已交付可以终结：同仓、真实 PR/head/mergeCommit。issue 关闭不算。
+ * 验收责任账不再参与（#3630，决定 0113 第二片：旧行已一次性交回原单）；旧状态文件里残留的 acceptance 字段不读。
+ */
 export function externalStop(spec: RunSpec, hold: DeliveryHold): boolean {
   const fact = hold.external;
   return (
     hold.kind === 'external' &&
-    hold.acceptance === 'settled' &&
     !!fact &&
     fact.repo.toLowerCase() === spec.repo.toLowerCase() &&
     Number.isSafeInteger(fact.pr) &&
@@ -295,7 +291,6 @@ function holdFrom(spec: RunSpec, failure: ClassifiedDelivery): DeliveryHold {
   return {
     kind,
     why: failure.why,
-    ...(failure.acceptance ? { acceptance: failure.acceptance } : {}),
     ...(kind === 'external' && same ? { external: same } : {}),
   };
 }
