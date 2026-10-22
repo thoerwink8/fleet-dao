@@ -28,6 +28,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createAdmissionAlertSink } from '../src/real/admission-alert-process.ts';
 import {
   ALERT_SPOOL_LIMITS,
+  formatSpoolCommitTiming,
   recordAdmissionAlert,
   transferOneAdmissionAlert,
 } from '../src/real/admission-alert-spool.ts';
@@ -51,7 +52,9 @@ beforeEach(() => {
   root = mkdtempSync(join(homedir(), '.fleet-admission-test-'));
   path = join(root, 'spool');
 });
-afterEach(() => {
+afterEach(({ task }) => {
+  // 只在用例真失败/超时时输出阶段计时；成功的一律不打印。
+  if (task.result?.state === 'fail') console.error(formatSpoolCommitTiming());
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
@@ -302,4 +305,67 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
     }
     expect(sink.status().active).toBe(0);
   }, 15000);
+});
+
+// 计时诊断只在测试真超时或失败时输出；成功用例（哪怕中间被拖慢）一律不打印。
+describe('SPOOL_COMMIT_TIMING 按真实阶段记录', () => {
+  const DELAY_MS = 100,
+    BUDGET_MS = 20;
+  const wait = () => {
+    for (const end = performance.now() + DELAY_MS; performance.now() < end; ) {
+      /* 人为延迟 */
+    }
+  };
+  const delayAt = (phase: 'open' | 'commit' | 'close') => {
+    const exec = DatabaseSync.prototype.exec,
+      close = DatabaseSync.prototype.close;
+    DatabaseSync.prototype.exec = function (sql: string) {
+      if (sql === 'COMMIT' ? phase === 'commit' : phase === 'open' && sql.startsWith('PRAGMA busy_timeout=0'))
+        wait();
+      return exec.call(this, sql);
+    };
+    DatabaseSync.prototype.close = function () {
+      if (phase === 'close') wait();
+      return close.call(this);
+    };
+    return () => {
+      DatabaseSync.prototype.exec = exec;
+      DatabaseSync.prototype.close = close;
+    };
+  };
+  const timedRecord = (phase: 'open' | 'commit' | 'close') => {
+    // 先建好库：首次建表的 open 本身就慢，会盖住注入的延迟。
+    recordAdmissionAlert(path, observation());
+    const restore = delayAt(phase),
+      start = performance.now();
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    } finally {
+      restore();
+    }
+    return performance.now() - start;
+  };
+  const diagnose = (failed: boolean) => {
+    const lines: string[] = [];
+    if (failed) {
+      const line = formatSpoolCommitTiming();
+      if (line) lines.push(line);
+    }
+    return lines;
+  };
+  it.each(['open', 'commit', 'close'] as const)('在%s注入延迟后超时：诊断指出的慢阶段就是该阶段', (phase) => {
+    const timedOut = timedRecord(phase) > BUDGET_MS;
+    expect(timedOut).toBe(true);
+    const [line, ...rest] = diagnose(timedOut);
+    expect(rest).toEqual([]);
+    expect(line).toMatch(new RegExp(`^SPOOL_COMMIT_TIMING phase=${phase} `));
+    expect(Number(new RegExp(`${phase}=([\\d.]+)ms`).exec(line ?? '')?.[1])).toBeGreaterThanOrEqual(
+      DELAY_MS - 1,
+    );
+  });
+  it.each(['open', 'commit', 'close'] as const)('在%s注入同样延迟但用例成功：不输出诊断', (phase) => {
+    const timedOut = timedRecord(phase) > 10_000;
+    expect(timedOut).toBe(false);
+    expect(diagnose(timedOut)).toEqual([]);
+  });
 });
