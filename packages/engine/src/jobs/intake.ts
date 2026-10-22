@@ -228,6 +228,12 @@ const UNREADABLE: ReadonlySet<IntakeSkipReason> = new Set(['created_at_unreadabl
 export interface IntakeSkip {
   reason: IntakeSkipReason;
   why: string;
+  /**
+   * 前置单开没开着没查成。reason 仍是 waiting_prerequisite（拉单不派，也不当成已经关了），
+   * 但和「日期没到 / 确知还开着」不是同一种事实：试判不能凭 reason 当成法国接得了。
+   * 只在 judgePrerequisites 回 kind:'unchecked' 时置上，不看错误原文像不像失败。
+   */
+  prerequisiteUnread?: true;
 }
 
 /** 贴了「交给引擎」：排序时同一规模档里靠前（不再绕过任何一道闸）。名字只认 conventions 的 ENGINE_LABEL。 */
@@ -733,7 +739,10 @@ async function holdReturned(
 
 /**
  * 法国接不接得了这张单（本机租约到期、退回之前先判一次，#3461）：把「本机做」标签拿掉之后，照拉单的准入关卡试判一遍，不留言、不贴标签、不看「派出过没有」
- * （这张单的任务行此刻正是本机在做）。过了，或只是前置没等完（等完照拉）→ 接得了；别的关卡挡着 → 接不了，带原因。
+ * （这张单的任务行此刻正是本机在做）。过了，或只是前置确知没等完（日期没到、前置单确知还开着，等完照拉）→ 接得了；别的关卡挡着 → 接不了，带原因。
+ * 前置开没开着没查成也是 waiting_prerequisite，但不能当成接得了：那会摘「本机做」。也不是确知接不了。
+ * 试判自己的 tally 出了这个函数就没了，所以这里照「读不到照抛」把没查成交回去。退回单（releaseReturned）和到期租约（sweepLocalLeases）都接这个抛错，
+ * 记进外层 unchecked、不摘标签。不看错误原文决定抛不抛。
  */
 async function franceVerdict(
   deps: IntakeDeps,
@@ -754,8 +763,16 @@ async function franceVerdict(
   const admitted = await admitIssue(quiet, repo, { ...issue, labels }, ctx, whitelist, prClaims, trial, {
     trial: true,
   });
-  if (admitted) return { ok: true };
   const blocked = trial.lastSkip;
+  // 已知在等：reason 是 waiting_prerequisite，且这一轮没有没查成。缺项、查询抛错会置 prerequisiteUnread，并记进 trial.unchecked。
+  if (
+    blocked &&
+    (blocked.prerequisiteUnread === true ||
+      (blocked.reason === 'waiting_prerequisite' && trial.unchecked.length > 0))
+  ) {
+    throw new Error(trial.unchecked.join('；') || blocked.why);
+  }
+  if (admitted) return { ok: true };
   if (!blocked) throw new Error('试判没挡住也没放行，没给出原因');
   if (blocked.reason === 'waiting_prerequisite') return { ok: true };
   return { ok: false, reason: blocked.reason, why: blocked.why };
@@ -764,7 +781,8 @@ async function franceVerdict(
 /**
  * 本机退回来、引擎接不了而贴回「本机做」的单（holdReturned），挡着的地方后来改好了：「引擎接不了」这个条件就不成立，
  * 照准入关卡再试判一遍，过了、而且这张单此刻还是没人接的退回行（没被本机重新领走）→ 摘「本机做」，下一轮照常拉；返回摘掉的单号。
- * 还挡着、或已经有人接了的不动。摘标签写不成、试判读不到记没查成，那张单照旧留着。
+ * 还挡着、或已经有人接了的不动。摘标签写不成、试判读不到（含前置没查成，franceVerdict 抛错）记没查成，那张单照旧留着。
+ * 派出状态问不清（readDispatchStanding 回 uncertain）同样记没查成、不摘：不能静默跳过，不然这一轮会记成 ok。
  */
 async function releaseReturned(
   deps: IntakeDeps,
@@ -790,6 +808,10 @@ async function releaseReturned(
     if (!issue?.labels.includes(LOCAL_LABEL)) continue;
     try {
       const standing = await readDispatchStanding(deps, repo, number);
+      if (standing.kind === 'uncertain') {
+        t.unchecked.push(`${slug}#${number}：${standing.why}`);
+        continue;
+      }
       if (standing.kind !== 'redispatch' && !(standing.kind === 'adopt' && standing.returnedAt)) continue;
       const verdict = await franceVerdict(deps, repo, issue, ctx, whitelist, prClaims);
       if (!verdict.ok) continue;
@@ -828,6 +850,16 @@ function listedSkip(repo: IntakeRepo, issue: IntakeIssue, whitelist: GithubWhite
     trusted: isTrusted(issue.author, whitelist) || isGithubActionsAuthor(issue.author),
     autoDispatchSince: repo.autoDispatchSince,
   });
+}
+
+/**
+ * 这张单的前置号进不进这一轮的批量读。列表里就能拉的单要读。只因「本机做」被挡下的也要读：
+ * 退回单和到期租约的试判会先拿掉这张标签再判前置，批量结果里没有那个号就会变成缺项，分不清「确知还开着 / 已经关了」和「没查成」。
+ * 作者不在白名单里时 listedSkip 先返回 untrusted_author，仍然不读，陌生人写一串号不会变成一次大查询。
+ */
+function prereqBatchEligible(repo: IntakeRepo, issue: IntakeIssue, whitelist: GithubWhitelist): boolean {
+  const skip = listedSkip(repo, issue, whitelist);
+  return skip === null || skip.reason === 'reserved_local';
 }
 
 const issueRefs = (numbers: readonly number[]) => numbers.map((n) => `#${n}`).join('、');
@@ -888,6 +920,7 @@ async function prerequisiteSkip(
   return {
     reason: 'waiting_prerequisite',
     why: `等前置 ${issueRefs(verdict.numbers)}（前置单状态没查成，按没关算）`,
+    prerequisiteUnread: true,
   };
 }
 
@@ -1253,12 +1286,13 @@ async function prepareRepo(
   let rules: Promise<StandardPath[]> | undefined;
   // 前置单开没开着（#2783）：在这一轮读到的开着的单列表里的，就是开着的，不用问；其余的（关了的、PR、不存在的）整个仓一次批量读，
   // 第一张走到这道关、写了这种前置的单才读，读一次（读失败的话，后面的单拿到的是同一个错，各自按「等前置」算、记没查成）。
-  // 要问的单号只圈列表里就能判过的单（作者在白名单里等，和 admitIssue 同一个口径）、日期还没到的不算：陌生人在正文里写一串号不会变成一次大查询。
+  // 要问的单号圈列表里就能判过的单，再加上只因「本机做」被挡下的单（试判会拿掉这张标签再看前置，见 prereqBatchEligible）。
+  // 日期还没到的不算。作者不在白名单里的不算：陌生人在正文里写一串号不会变成一次大查询。
   const openNow = new Set(listed.issues.map((i) => i.number));
   const toAsk = [
     ...new Set(
       listed.issues
-        .filter((i) => typeof i.body === 'string' && listedSkip(repo, i, whitelist) === null)
+        .filter((i) => typeof i.body === 'string' && prereqBatchEligible(repo, i, whitelist))
         .flatMap((i) => {
           const pre = parsePrerequisites(i.body);
           return waitingUntil(pre, deps.now()) === null ? pre.issues : [];
