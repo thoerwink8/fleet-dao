@@ -196,6 +196,39 @@ interface ParkIdentityWire {
 export const parkLabel = (id: Pick<ParkIdentityWire, 'parks' | 'generation' | 'continued'>): string =>
   `${id.parks}.${id.generation}.${id.continued}`;
 
+const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+
+/**
+ * 工作流回的回执要和请求、被核的停点逐项对上才算成功：头、base 是请求的、预算是停点的原预算、
+ * 行数是非负整数、原始行数是停下时的那个数、计量加已核生成等于原始行数且计量不超预算。对不上（含空对象）一律返回 null，调用方当未知，不当放行。
+ */
+export function checkedReceipt(
+  g: unknown,
+  want: { head: string; base: string; rawAddedLines: number; budget: number },
+): LineBudgetRemeasureReceiptView | null {
+  if (typeof g !== 'object' || g === null) return null;
+  const r = g as Partial<LineBudgetRemeasureReceiptView>;
+  if (r.head !== want.head || r.base !== want.base || r.budget !== want.budget) return null;
+  if (r.rawAddedLines !== want.rawAddedLines) return null;
+  if (!isCount(r.rawAddedLines) || !isCount(r.verifiedGeneratedLines) || !isCount(r.chargeableAddedLines))
+    return null;
+  if (
+    r.chargeableAddedLines > r.budget ||
+    r.chargeableAddedLines + r.verifiedGeneratedLines !== r.rawAddedLines
+  )
+    return null;
+  if (typeof r.reason !== 'string') return null;
+  return {
+    head: r.head,
+    base: r.base,
+    rawAddedLines: r.rawAddedLines,
+    verifiedGeneratedLines: r.verifiedGeneratedLines,
+    chargeableAddedLines: r.chargeableAddedLines,
+    budget: r.budget,
+    reason: r.reason,
+  };
+}
+
 interface RemeasureClientLike {
   connection: TemporalClientLike['connection'];
   workflow: {
@@ -234,7 +267,13 @@ export function createTemporalLineBudgetRemeasure(
         lineBudgetPark?: {
           version?: unknown;
           identity?: ParkIdentityWire | null;
-          resumed?: { identity: ParkIdentityWire; head: string; base: string } | null;
+          busy?: unknown;
+          resumed?: {
+            identity: ParkIdentityWire;
+            head: string;
+            base: string;
+            receipt?: LineBudgetRemeasureReceiptView;
+          } | null;
         };
       }
     )?.lineBudgetPark;
@@ -281,25 +320,25 @@ export function createTemporalLineBudgetRemeasure(
         detail?: string;
       };
       const where = current ? { park, current } : { park };
-      if (
-        (r.outcome === 'eligible' || r.outcome === 'resumed' || r.outcome === 'already_resumed') &&
-        r.receipt
-      ) {
-        const g = r.receipt;
-        return {
-          ok: true,
-          outcome: r.outcome,
-          park,
-          receipt: {
-            head: g.head,
-            base: g.base,
-            rawAddedLines: g.rawAddedLines,
-            verifiedGeneratedLines: g.verifiedGeneratedLines,
-            chargeableAddedLines: g.chargeableAddedLines,
-            budget: g.budget,
-            reason: g.reason,
-          },
-        };
+      // 预检只收 eligible，执行只收 resumed / already_resumed；回执逐项对上请求和停点，否则按未知处理。
+      const outcomeFits =
+        request.mode === 'check'
+          ? r.outcome === 'eligible'
+          : r.outcome === 'resumed' || r.outcome === 'already_resumed';
+      if (outcomeFits) {
+        const receipt = checkedReceipt(r.receipt, {
+          head: request.head,
+          base: request.base,
+          rawAddedLines: identity.rawAddedLines,
+          budget: identity.budget,
+        });
+        if (receipt)
+          return {
+            ok: true,
+            outcome: r.outcome as 'eligible' | 'resumed' | 'already_resumed',
+            park,
+            receipt,
+          };
       }
       if (r.outcome === 'refused') {
         return { ok: false, reason: String(r.reason), detail: String(r.detail ?? ''), ...where };
@@ -309,6 +348,7 @@ export function createTemporalLineBudgetRemeasure(
     };
     // 同一已放行请求重发：放行后停点身份已清空（或已是新停点），按工作流报的放行绑定（同 run、同停点编号、同头、同 base）
     // 原样带回，由工作流自己核对并回幂等回执；对不上就走下面的现停点核对，不放行别的头。
+    // 工作流已经结束时 Update 发不出去：只在查询里的回执和请求逐项对得上时回幂等回执，不再测、不放行别的头。
     const resumed = field.resumed;
     if (
       request.mode === 'resume' &&
@@ -317,14 +357,39 @@ export function createTemporalLineBudgetRemeasure(
       parkLabel(resumed.identity) === request.park &&
       resumed.head === request.head &&
       resumed.base === request.base
-    )
-      return send(resumed.identity, parkLabel(resumed.identity));
+    ) {
+      const park = parkLabel(resumed.identity);
+      try {
+        return await send(resumed.identity, park);
+      } catch (err) {
+        // send 把「已结束」包成 WorkflowGoneError，原始错误在 cause 上。
+        if (!(err instanceof WorkflowGoneError) && !isGone(err)) throw err;
+        const receipt = checkedReceipt(resumed.receipt, {
+          head: request.head,
+          base: request.base,
+          rawAddedLines: resumed.identity.rawAddedLines,
+          budget: resumed.identity.budget,
+        });
+        if (receipt) {
+          return { ok: true, outcome: 'already_resumed', park, receipt };
+        }
+        return {
+          ok: false,
+          reason: 'unknown',
+          detail: '工作流已结束，绑定的幂等回执读不全，不当作新的放行',
+          park,
+        };
+      }
+    }
     const id = field.identity;
     if (!id) {
+      if (field.busy === true) {
+        return { ok: false, reason: 'busy', detail: '已有重评正在跑，原停点保留' };
+      }
       return {
         ok: false,
         reason: 'stale',
-        detail: '工作流此刻不在可重评的体量停点（运行中、已继续、已放行、别的停法或正在重评）',
+        detail: '工作流此刻不在可重评的体量停点（运行中、已继续、已放行、别的停法或已结束）',
       };
     }
     const current = {

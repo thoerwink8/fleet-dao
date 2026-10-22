@@ -1,15 +1,16 @@
 // 体量关口重评（#3249）：停在体量预算停点的单，可信重评只放行「这一次停点的这一份交付」，不授权后续。
-// 真 Temporal 开发服务端（createRealEnv，不能跳时间）+ 假端口 + 脚本化的任务活动（重评走 readDelivery 的 budgetRemeasure 入参）。
-// 跨工人重放、整段历史离线重放那两条仍用可跳时间的测试服务端：真开发服务端录的历史会把 self-check-own-timeout 的补丁标记判成不确定（#3258）。
+// 真 Temporal 测试服务端 + 假端口 + 脚本化的任务活动（重评走 readDelivery 的 budgetRemeasure 入参）。
 // 不碰真实 #3207，不改生产数据。
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
-import { Worker } from '@temporalio/worker';
+import { bundleWorkflowCode, Worker, type WorkflowBundle } from '@temporalio/worker';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
@@ -31,6 +32,7 @@ import {
   taskStatusQuery,
 } from '../src/task-contract.ts';
 import { REMEASURE_CATCH_UP_SECONDS } from '../src/workflows/task-budget-remeasure.ts';
+import { runChild } from './child.ts';
 import {
   createRealEnv,
   engineBundle,
@@ -42,6 +44,7 @@ import {
 } from './helpers.ts';
 import { goodBrief, scripted } from './task-script.ts';
 
+// catchup 那组要真开发服务端（不能跳时间，才看得出 30 秒定时器起没起）；这条命令行路径和 test-split 的环境类清单对应。
 const installedCli = '/opt/fleet-dao/temporal/bin/temporal';
 if (!process.env.FLEET_TEST_TEMPORAL_CLI?.trim() && existsSync(installedCli)) {
   process.env.FLEET_TEST_TEMPORAL_CLI = installedCli;
@@ -99,6 +102,7 @@ function measured(
         reason: '已核单份快照',
         ...over.measurement,
       },
+      mergeBaseAfter: ask.base,
       ...over.answer,
     },
   } as DeliveryRead;
@@ -242,13 +246,488 @@ const OLD_PARK = (() => {
   return { workflowId: (JSON.parse(first) as { workflowId: string }).workflowId, events };
 })();
 const OLD_PARK_COMMANDS = commandsOf(OLD_PARK.events);
+
 /**
- * 夹具录下之后主线在 park() 里新加、只有新历史才写的标记（#3294 停法类别）。和 #3249 无关，旧历史重放时 patched() 为假不写；
- * 比「#3249 没改命令序」时从现录的历史里去掉它们，夹具不重录。
+ * 新代码在体量停点报警前问一次重评标记（提示句跟着它走），park() 记停法时再问一次主线的 park-kind（#3294）。
+ * 旧夹具两个标记都没有，命令序不该被改写成新的。
  */
-const NEWER_PARK_MARKERS = ['patch:park-kind'];
-const parkCommandsOf = (events: readonly CommandEvent[]): string[] =>
-  commandsOf(events).filter((c) => !NEWER_PARK_MARKERS.includes(c));
+function withRemeasurePatch(commands: readonly string[]): string[] {
+  const next = [...commands];
+  const alert = next.lastIndexOf('raiseAlert');
+  const save = next.lastIndexOf('saveTaskState', alert);
+  const at = save >= 0 && save < alert ? save : Math.max(alert, 0);
+  next.splice(at, 0, 'patch:line-budget-remeasure-v1', 'patch:park-kind');
+  return next;
+}
+
+describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
+  const currentEnv = useEnv();
+  beforeEach(() => {
+    env = currentEnv();
+  });
+
+  it('8037 行生成折扣、实际计量 1513：预检只测不放行，执行只放行这一份交付，不设永久豁免；旧停点历史可达、整段可重放', async () => {
+    const { world, tasks, asks } = setup((ask) => measured(ask), true);
+    const i = input();
+    const { run, parked, full, workflowId } = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        // 此刻的历史就是「停在体量关口的旧在途任务」：没有重评标记、没有重评 Update（下面核命令序）
+        const parked = await h.fetchHistory();
+        expect(id).toMatchObject({
+          rawAddedLines: RAW,
+          chargeableAddedLines: RAW,
+          budget: DEFAULT_PR_LINE_BUDGET,
+          base: BASE, // 停下时原始新增行实际按的 base（readDelivery 报的 addedLinesBase）
+        });
+
+        const checked = await send(h, command(i, h, id, { mode: 'check' }));
+        expect(checked).toMatchObject({
+          outcome: 'eligible',
+          receipt: {
+            chargeableAddedLines: 1513,
+            verifiedGeneratedLines: 8037,
+            rawAddedLines: RAW,
+            head: id.head,
+            base: BASE,
+          },
+        });
+        await waitingHuman(h);
+        expect(world.count('pushBranch')).toBe(0);
+
+        const resumed = await send(h, command(i, h, id));
+        expect(resumed.outcome).toBe('resumed');
+        // 放行绑定对外可读（同一请求重发凭它拿幂等回执），停点身份不再可用
+        expect((await status(h)).lineBudgetPark?.resumed).toMatchObject({
+          identity: id,
+          head: id.head,
+          base: BASE,
+          receipt: { head: id.head, base: BASE, chargeableAddedLines: 1513, verifiedGeneratedLines: 8037 },
+        });
+        // 这一份交付被推走；验收第一次不过，第 3 份交付没有折扣：必须重新计量并再次停下，没有永久豁免
+        const next = await parkedIdentity(h, id.parks);
+        expect(next.head).not.toBe(id.head);
+        expect(next.parks).toBeGreaterThan(id.parks);
+        expect(next.continued).toBe(id.continued); // 没有增加继续次数
+        expect(world.count('pushBranch')).toBe(1);
+
+        // 重放同一个已完成请求：只回原身份的回执，不放行新头
+        const again = await send(h, command(i, h, id));
+        expect(again).toMatchObject({ outcome: 'already_resumed', receipt: { head: id.head } });
+        await waitingHuman(h);
+        expect(world.count('pushBranch')).toBe(1);
+        // 旧停点身份对新头不生效
+        expect(await send(h, command(i, h, id, { head: next.head }))).toMatchObject({
+          outcome: 'refused',
+          reason: 'stale',
+        });
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        const run = (await h.result()) as TaskRun;
+        return { run, parked, full: await h.fetchHistory(), workflowId: h.workflowId };
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(asks).toHaveLength(2); // check + resume 各测一次；重放不再测
+    expect(asks[0]).toMatchObject({ base: BASE, rawAddedLines: RAW });
+
+    // 新代码停到体量关口：命令序只比旧夹具多出报警前的重评标记（提示句用它守着）。整段按现在的代码重放不报对不上。
+    const parkedCommands = commandsOf(parked.events ?? []);
+    expect(parkedCommands).toEqual(withRemeasurePatch(OLD_PARK_COMMANDS));
+    expect(JSON.stringify(parked)).not.toContain('taskRemeasureLineBudget');
+    expect(commandsOf(full.events ?? []).slice(0, parkedCommands.length)).toEqual(parkedCommands);
+    expect(JSON.stringify(full)).toContain('taskRemeasureLineBudget');
+    const bundle = { workflowBundle: await engineBundle() };
+    await Worker.runReplayHistory(bundle, parked, workflowId);
+    await Worker.runReplayHistory(bundle, full, workflowId);
+  });
+
+  it('人点「继续」仍保留既有授权语义：之后的交付不再判体量', async () => {
+    const { world, tasks } = setup((ask) => measured(ask), true);
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        await parkedIdentity(h);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    // 验收第一次不过后的第 3 份交付仍是 9550 行，没有再停下（budgetApproved）：全程没有第二次停点
+    expect(run.outcome).toBe('merged');
+    expect(world.alerts.filter((a) => a.title.includes('体量预算'))).toHaveLength(1);
+  });
+
+  it('硬界与未知都保留原停点并写明原因：不可信测量、仍超预算、读失败、旧 worker', async () => {
+    const answers: Remeasure[] = [
+      (ask) =>
+        measured(ask, {
+          measurement: {
+            verified: false,
+            verifiedGeneratedLines: 0,
+            chargeableAddedLines: RAW,
+            reason: 'raw 新增超过 20000 行，不适用自动折扣',
+          },
+        }),
+      (ask) => measured(ask, { measurement: { verifiedGeneratedLines: 4000, chargeableAddedLines: 5550 } }),
+      () => {
+        throw new Error('git 读取失败');
+      },
+      (ask) => ({ head: ask.head, commits: 0, changedFiles: [] }),
+      (ask) => measured(ask, { measurement: { verifiedGeneratedLines: 1, chargeableAddedLines: 1 } }),
+    ];
+    // 读失败的活动会被重试：答案按「第几个请求」换，不按调用次数
+    let current = answers[0] as Remeasure;
+    const { world, tasks } = setup((ask) => current(ask));
+    const i = input();
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        const reasons: string[] = [];
+        for (let k = 0; k < answers.length; k++) {
+          current = answers[k] as Remeasure;
+          const r = await send(h, command(i, h, id));
+          expect(r.outcome).toBe('refused');
+          if (r.outcome === 'refused') reasons.push(r.reason);
+          await waitingHuman(h);
+          expect((await status(h)).lineBudgetPark?.identity).toMatchObject({ parks: id.parks });
+        }
+        expect(reasons).toEqual(['unverified', 'over_budget', 'unknown', 'unsupported', 'unverified']);
+        expect(world.count('pushBranch')).toBe(0);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });
+        await h.result();
+      },
+      { tasks },
+    );
+  });
+
+  it('精确身份、脏树、未跟踪、头基线变化都拒绝并保留停点', async () => {
+    const dirty: Remeasure = (ask) => ({
+      head: ask.head,
+      commits: 0,
+      changedFiles: [],
+      budgetRemeasure: {
+        version: 1,
+        status: 'refused',
+        reason: 'dirty',
+        detail: '工作树有没提交的改动：?? new.ts',
+      },
+    });
+    const answers: Remeasure[] = [
+      dirty,
+      (ask) => measured(ask, { answer: { headAfter: fakeHead(999) } }),
+      (ask) => measured(ask, { answer: { cleanAfter: false } }),
+      (ask) => measured(ask, { answer: { base: fakeHead(2) } }),
+      (ask) => measured(ask, { measurement: { rawAddedLines: RAW + 1, chargeableAddedLines: 1514 } }),
+      (ask) => measured(ask, { answer: { mergeBaseAfter: fakeHead(4) } }),
+    ];
+    let n = 0;
+    // 停下时那次测量的 base 是 BASE：停点身份钉住它
+    const { world, tasks } = setup((ask) => (answers[n++] as Remeasure)(ask), false, { measuredBase: BASE });
+    const i = input();
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        expect(id.base).toBe(BASE);
+        // 换另一个（更早的）base 改测量范围：不进活动就拒
+        expect(await send(h, command(i, h, id, { base: fakeHead(3) }))).toMatchObject({
+          outcome: 'refused',
+          reason: 'changed',
+        });
+        expect(n).toBe(0);
+        for (let k = 0; k < answers.length; k++) {
+          const r = await send(h, command(i, h, id));
+          expect(r).toMatchObject({ outcome: 'refused', reason: 'changed' });
+        }
+        expect(n).toBe(answers.length);
+        // 以下不进活动：形状、仓、任务、工作流、run、head 不对
+        const bad: Partial<RemeasureLineBudgetCommand>[] = [
+          { head: 'abc' },
+          { base: 'abc' },
+          { repo: { owner: 'x', name: 'y' } },
+          { taskId: 'other' },
+          { workflowId: 'task:other#1' },
+          { identity: { ...id, runId: 'other-run' } },
+        ];
+        for (const over of bad) {
+          expect(await send(h, command(i, h, id, over))).toMatchObject({
+            outcome: 'refused',
+            reason: 'identity',
+          });
+        }
+        expect(await send(h, command(i, h, id, { head: fakeHead(555) }))).toMatchObject({ reason: 'stale' });
+        expect(await send(h, command(i, h, { ...id, continued: 7 }))).toMatchObject({ reason: 'stale' });
+        // 身份里的 base 也是身份的一部分：改了就不是这次停点
+        expect(
+          await send(h, command(i, h, { ...id, base: fakeHead(3) }, { base: fakeHead(3) })),
+        ).toMatchObject({ reason: 'stale' });
+        expect(n).toBe(answers.length);
+        expect(world.count('pushBranch')).toBe(0);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });
+        await h.result();
+      },
+      { tasks },
+    );
+  });
+
+  it('并发请求只一个测，另一个 busy；测量期间人点「继续」则旧测量作废，走原授权语义', async () => {
+    let release: () => void = () => {};
+    let entered: () => void = () => {};
+    const inFlight = new Promise<void>((r) => {
+      entered = r;
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { world, tasks } = setup(async (ask) => {
+      entered();
+      await gate;
+      return measured(ask);
+    });
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        const first = send(h, command(i, h, id));
+        await inFlight;
+        expect((await status(h)).lineBudgetPark).toMatchObject({ identity: null, busy: true });
+        expect(await send(h, command(i, h, id))).toMatchObject({ outcome: 'refused', reason: 'busy' });
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        release();
+        expect(await first).toMatchObject({ outcome: 'refused', reason: 'stale' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(world.count('pushBranch')).toBe(1);
+  });
+
+  it('测量期间放弃：取消测量、不放行任何东西', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let entered: () => void = () => {};
+    const inFlight = new Promise<void>((r) => {
+      entered = r;
+    });
+    const { world, tasks } = setup(async (ask) => {
+      entered();
+      await gate;
+      return measured(ask);
+    });
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        const pending = send(h, command(i, h, id));
+        await inFlight;
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '不要了' });
+        expect(await pending).toMatchObject({ outcome: 'refused', reason: 'unknown' });
+        const result = h.result() as Promise<TaskRun>;
+        release(); // 活动自己跑完的结果已被丢弃；放开它好让测试 worker 干净收场
+        return result;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(world.count('pushBranch')).toBe(0);
+  });
+
+  it('旧代码停下的真实历史：现在的代码重放不报对不上；那时没记测量 base，现停点这样的一律明确拒绝、不进活动', async () => {
+    // 夹具是旧代码录的：没有重评标记、没有重评 Update，停在体量预算的报警上
+    const text = JSON.stringify(OLD_PARK.events);
+    expect(text).not.toContain('taskRemeasureLineBudget');
+    expect(OLD_PARK_COMMANDS).not.toContain('patch:line-budget-remeasure-v1');
+    expect(OLD_PARK_COMMANDS).toContain('patch:pr-line-budget');
+    expect(OLD_PARK_COMMANDS.at(-1)).toBe('raiseAlert');
+    expect(text).not.toContain('addedLinesBase');
+    expect(text).not.toContain('budget-remeasure');
+    await Worker.runReplayHistory(
+      { workflowBundle: await engineBundle() },
+      { events: OLD_PARK.events } as never,
+      OLD_PARK.workflowId,
+    );
+
+    // 同样形状（交付不报 addedLinesBase）的停点在现在的代码上：身份 base 为 null，重评明确拒绝，不拿请求者给的 base 顶替
+    const { world, tasks, asks } = setup((ask) => measured(ask), false, { old: true });
+    const i = input();
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        expect(id.base).toBeNull();
+        expect(await send(h, command(i, h, id))).toMatchObject({ outcome: 'refused', reason: 'unsupported' });
+        await waitingHuman(h);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });
+        await h.result();
+      },
+      { tasks },
+    );
+    expect(asks).toHaveLength(0);
+    expect(world.count('pushBranch')).toBe(0);
+  });
+
+  it('跨工人接停点：停在体量关口时工人下线，新起的工人从历史整段重放接手，重评后下一头仍按原预算停下', async () => {
+    const { world, tasks, asks } = setup((ask) => measured(ask), true);
+    const i = input();
+    const taskQueue = `q-${randomUUID()}`;
+    // 第一个工人不缓存：下线后不留粘性队列（可跳时间的测试服务端不会把下线工人粘性队列里的任务挪回普通队列）
+    const { h, id } = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        return { h, id: await parkedIdentity(h) };
+      },
+      { tasks, taskQueue, maxCachedWorkflows: 0 },
+    );
+    // 下线时的停点历史：旧命令序加上报警前的重评标记（新代码才有；旧夹具本身在另一条用例里重放）
+    const parked = await h.fetchHistory();
+    expect(commandsOf(parked.events ?? [])).toEqual(withRemeasurePatch(OLD_PARK_COMMANDS));
+    // 新起的工人（像部署后的新进程，缓存是空的）：第一个工作流任务就是从上面那份历史整段重放，再处理重评
+    const run = await withWorker(
+      env,
+      world,
+      async () => {
+        expect(await send(h, command(i, h, id))).toMatchObject({
+          outcome: 'resumed',
+          receipt: { chargeableAddedLines: 1513, verifiedGeneratedLines: 8037, base: BASE },
+        });
+        const next = await parkedIdentity(h, id.parks);
+        expect(next.head).not.toBe(id.head);
+        expect(next.continued).toBe(id.continued);
+        expect(next.rawAddedLines).toBe(RAW);
+        // 接手后的重发：只回原身份的幂等回执，不放行新头
+        expect(await send(h, command(i, h, id))).toMatchObject({
+          outcome: 'already_resumed',
+          receipt: { head: id.head },
+        });
+        expect(await send(h, command(i, h, id, { head: next.head }))).toMatchObject({
+          outcome: 'refused',
+          reason: 'stale',
+        });
+        await waitingHuman(h);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks, taskQueue },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(asks).toHaveLength(1);
+    // 放行的那一头推了一次；下一头超预算又停下，人点继续后才再推。没有第三次体量停点（继续之后不再判）
+    expect(world.count('pushBranch')).toBe(2);
+    expect(world.alerts.filter((a) => a.title.includes('体量预算'))).toHaveLength(2);
+  });
+
+  it('改动前的工人停在体量关口：新 bundle 重放那段历史，新工人处理重评后人点继续仍是原授权', async () => {
+    const old = await oldParkWorkerBundle();
+    // 活动和旧工人同一形状：交付不报 addedLinesBase（828c9d47 的读交付结果里没有这个字段）。
+    const { world, tasks, asks } = setup((ask) => measured(ask), true, { old: true });
+    const i = input();
+    const taskQueue = `q-${randomUUID()}`;
+    const { h, history } = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        // 旧工人的查询没有 lineBudgetPark；用停下原因认体量停点（只在测试里等它，管理入口不凭这句自由文本放行）。
+        await pollQuery(
+          () => status(h),
+          (x) => x.phase === 'parked' && (x.lastProblem ?? '').includes('体量预算'),
+          '旧工人停在体量关口',
+          60_000,
+        );
+        expect((await status(h)).lineBudgetPark).toBeUndefined();
+        return { h, history: await h.fetchHistory() };
+      },
+      { tasks, taskQueue, maxCachedWorkflows: 0, workflowBundle: old },
+    );
+    const parkedCommands = commandsOf(history.events ?? []);
+    expect(parkedCommands).not.toContain('patch:line-budget-remeasure-v1');
+    expect(parkedCommands.at(-1)).toBe('raiseAlert');
+    expect(JSON.stringify(history)).not.toContain('budget-remeasure');
+    expect(JSON.stringify(history)).not.toContain('taskRemeasureLineBudget');
+    // 这段是旧工人真跑出来的停点，不是新代码自录后再用新 bundle 重放。
+    await Worker.runReplayHistory({ workflowBundle: await engineBundle() }, history, h.workflowId);
+    const run = await withWorker(
+      env,
+      world,
+      async () => {
+        const id = await parkedIdentity(h);
+        expect(id.base).toBeNull();
+        expect(await send(h, command(i, h, id))).toMatchObject({ outcome: 'refused', reason: 'unsupported' });
+        await waitingHuman(h);
+        expect(world.count('pushBranch')).toBe(0);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks, taskQueue },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(asks).toHaveLength(0);
+    expect(world.alerts.filter((a) => a.title.includes('体量预算'))).toHaveLength(1);
+  });
+});
+
+/**
+ * #3249 改动前的 828c9d47（树 99756f1fa095868b373a9360e3dcc43625458067）里的 packages/engine/src。
+ * CI 的测试检出是浅克隆，那个提交对象不在仓里，不能在测试里 git archive。源码包随夹具走，不许为了变绿重打包。
+ * 只打包那一版工作流；活动仍用现在的测试脚本。解析根是本包的 node_modules：
+ * 直接依赖的 package.json 记在 engine 这一台的缓存键里（INSTALLED_MANIFEST_PACKAGES）。
+ */
+const OLD_WORKER_ARCHIVE = fileURLToPath(
+  new URL('./replay/fixtures/old-park-worker-828c9d47.tar.gz', import.meta.url),
+);
+let oldParkBundle: Promise<WorkflowBundle> | undefined;
+
+function oldParkWorkerBundle(): Promise<WorkflowBundle> {
+  oldParkBundle ??= (async () => {
+    const root = mkdtempSync(join(tmpdir(), 'fleet-3249-old-park-'));
+    try {
+      const extracted = runChild('tar', ['-xz', '-C', root, '-f', OLD_WORKER_ARCHIVE]);
+      if (extracted.status !== 0) {
+        throw new Error(`解旧工人源码失败（退出码 ${extracted.status}）：${extracted.stderr.trim()}`);
+      }
+      const silent = { trace() {}, debug() {}, info() {}, warn() {}, error: console.error, log() {} };
+      const modules = join(import.meta.dirname, '..', 'node_modules');
+      return await bundleWorkflowCode({
+        workflowsPath: join(root, 'packages/engine/src/workflows/index.ts'),
+        logger: silent as never,
+        webpackConfigHook: (config) => {
+          config.resolve ??= {};
+          const current = config.resolve.modules ?? ['node_modules'];
+          config.resolve.modules = [modules, ...current];
+          return config;
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
+  return oldParkBundle;
+}
 
 /** 停点报警还挂着、waiting 尚未设上时，第一次体量停点应有的身份（交付头是第二份常规交付）。 */
 function formingPark(runId: string, over: Partial<LineBudgetParkIdentity> = {}): LineBudgetParkIdentity {
@@ -273,7 +752,6 @@ type HistEvent = {
   timerStartedEventAttributes?: { startToFireTimeout?: unknown } | null;
   timerFiredEventAttributes?: { startedEventId?: unknown } | null;
   timerCanceledEventAttributes?: { startedEventId?: unknown } | null;
-  workflowExecutionSignaledEventAttributes?: { signalName?: string | null } | null;
 };
 
 function timeoutSeconds(raw: unknown): number {
@@ -363,94 +841,10 @@ const expectNoCatchupTimer = (events: readonly HistEvent[]) => {
   expect(catchupTimers(events, true)).toEqual([]);
 };
 
-// 这条要把录下的整段历史离线重放：真开发服务端录的历史会间歇命中 #3258（self-check-own-timeout 标记 TMPRL1100），
-// 所以仍用可跳时间的测试服务端；它不经过 catchup 的 30 秒定时器，跳时间掩盖不了 catchup 的问题。
-describe('体量关口重评（#3249）：放行与整段重放（可跳时间的测试服务端）', { timeout: 180_000 }, () => {
-  const currentEnv = useEnv();
-  beforeEach(() => {
-    env = currentEnv();
-  });
-
-  it('8037 行生成折扣、实际计量 1513：预检只测不放行，执行只放行这一份交付，不设永久豁免；旧停点历史可达、整段可重放', async () => {
-    const { world, tasks, asks } = setup((ask) => measured(ask), true);
-    const i = input();
-    const { run, parked, full, workflowId } = await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        const id = await parkedIdentity(h);
-        // 此刻的历史就是「停在体量关口的旧在途任务」：没有重评标记、没有重评 Update（下面核命令序）
-        const parked = await h.fetchHistory();
-        expect(id).toMatchObject({
-          rawAddedLines: RAW,
-          chargeableAddedLines: RAW,
-          budget: DEFAULT_PR_LINE_BUDGET,
-          base: BASE, // 停下时原始新增行实际按的 base（readDelivery 报的 addedLinesBase）
-        });
-
-        const checked = await send(h, command(i, h, id, { mode: 'check' }));
-        expect(checked).toMatchObject({
-          outcome: 'eligible',
-          receipt: {
-            chargeableAddedLines: 1513,
-            verifiedGeneratedLines: 8037,
-            rawAddedLines: RAW,
-            head: id.head,
-            base: BASE,
-          },
-        });
-        await waitingHuman(h);
-        expect(world.count('pushBranch')).toBe(0);
-
-        const resumed = await send(h, command(i, h, id));
-        expect(resumed.outcome).toBe('resumed');
-        // 放行绑定对外可读（同一请求重发凭它拿幂等回执），停点身份不再可用
-        expect((await status(h)).lineBudgetPark?.resumed).toEqual({
-          identity: id,
-          head: id.head,
-          base: BASE,
-        });
-        // 这一份交付被推走；验收第一次不过，第 3 份交付没有折扣：必须重新计量并再次停下，没有永久豁免
-        const next = await parkedIdentity(h, id.parks);
-        expect(next.head).not.toBe(id.head);
-        expect(next.parks).toBeGreaterThan(id.parks);
-        expect(next.continued).toBe(id.continued); // 没有增加继续次数
-        expect(world.count('pushBranch')).toBe(1);
-
-        // 重放同一个已完成请求：只回原身份的回执，不放行新头
-        const again = await send(h, command(i, h, id));
-        expect(again).toMatchObject({ outcome: 'already_resumed', receipt: { head: id.head } });
-        await waitingHuman(h);
-        expect(world.count('pushBranch')).toBe(1);
-        // 旧停点身份对新头不生效
-        expect(await send(h, command(i, h, id, { head: next.head }))).toMatchObject({
-          outcome: 'refused',
-          reason: 'stale',
-        });
-        await h.signal(taskContinueSignal, { by: 'frank' });
-        const run = (await h.result()) as TaskRun;
-        return { run, parked, full: await h.fetchHistory(), workflowId: h.workflowId };
-      },
-      { tasks },
-    );
-    expect(run.outcome).toBe('merged');
-    expect(asks).toHaveLength(2); // check + resume 各测一次；重放不再测
-    expect(asks[0]).toMatchObject({ base: BASE, rawAddedLines: RAW });
-
-    // 旧在途历史：停到体量关口的命令序与重评之前的代码一致；这段前缀原样在整段历史里，后面接重评 Update
-    // （标记第一次在 Update 里问）和放行后的推、验收、再停、继续、合并。两段都按现在的代码重放不报对不上。
-    expect(parkCommandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
-    expect(JSON.stringify(parked)).not.toContain('taskRemeasureLineBudget');
-    expect(parkCommandsOf(full.events ?? []).slice(0, OLD_PARK_COMMANDS.length)).toEqual(OLD_PARK_COMMANDS);
-    expect(JSON.stringify(full)).toContain('taskRemeasureLineBudget');
-    const bundle = { workflowBundle: await engineBundle() };
-    await Worker.runReplayHistory(bundle, parked, workflowId);
-    await Worker.runReplayHistory(bundle, full, workflowId);
-  });
-});
-
-describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
+// 真开发服务端（不能跳时间）：catchup 的 30 秒定时器起没起、放弃或继续能不能把它叫醒，只有真时间才看得出。
+describe('体量关口重评（#3249）：catchup 遇过期身份提前结束（真 Temporal 开发服务端）', {
+  timeout: 180_000,
+}, () => {
   beforeAll(async () => {
     await engineBundle();
   }, 120_000);
@@ -461,250 +855,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     await env.teardown();
   }, 60_000);
 
-  it('人点「继续」仍保留既有授权语义：之后的交付不再判体量', async () => {
-    const { world, tasks } = setup((ask) => measured(ask), true);
-    const i = input();
-    const run = await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        await parkedIdentity(h);
-        await h.signal(taskContinueSignal, { by: 'frank' });
-        return h.result() as Promise<TaskRun>;
-      },
-      { tasks },
-    );
-    // 验收第一次不过后的第 3 份交付仍是 9550 行，没有再停下（budgetApproved）：全程没有第二次停点
-    expect(run.outcome).toBe('merged');
-    expect(world.alerts.filter((a) => a.title.includes('体量预算'))).toHaveLength(1);
-  });
-
-  it('硬界与未知都保留原停点并写明原因：不可信测量、仍超预算、读失败、旧 worker', async () => {
-    const answers: Remeasure[] = [
-      (ask) =>
-        measured(ask, {
-          measurement: {
-            verified: false,
-            verifiedGeneratedLines: 0,
-            chargeableAddedLines: RAW,
-            reason: 'raw 新增超过 20000 行，不适用自动折扣',
-          },
-        }),
-      (ask) => measured(ask, { measurement: { verifiedGeneratedLines: 4000, chargeableAddedLines: 5550 } }),
-      () => {
-        throw new Error('git 读取失败');
-      },
-      (ask) => ({ head: ask.head, commits: 0, changedFiles: [] }),
-      (ask) => measured(ask, { measurement: { verifiedGeneratedLines: 1, chargeableAddedLines: 1 } }),
-    ];
-    // 读失败的活动会被重试：答案按「第几个请求」换，不按调用次数
-    let current = answers[0] as Remeasure;
-    const { world, tasks } = setup((ask) => current(ask));
-    const i = input();
-    await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        const id = await parkedIdentity(h);
-        const reasons: string[] = [];
-        for (let k = 0; k < answers.length; k++) {
-          current = answers[k] as Remeasure;
-          const r = await send(h, command(i, h, id));
-          expect(r.outcome).toBe('refused');
-          if (r.outcome === 'refused') reasons.push(r.reason);
-          await waitingHuman(h);
-          expect((await status(h)).lineBudgetPark?.identity).toMatchObject({ parks: id.parks });
-        }
-        expect(reasons).toEqual(['unverified', 'over_budget', 'unknown', 'unsupported', 'unverified']);
-        expect(world.count('pushBranch')).toBe(0);
-        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });
-        await h.result();
-      },
-      { tasks },
-    );
-  });
-
-  it('精确身份、脏树、未跟踪、头基线变化都拒绝并保留停点', async () => {
-    const dirty: Remeasure = (ask) => ({
-      head: ask.head,
-      commits: 0,
-      changedFiles: [],
-      budgetRemeasure: {
-        version: 1,
-        status: 'refused',
-        reason: 'dirty',
-        detail: '工作树有没提交的改动：?? new.ts',
-      },
-    });
-    const answers: Remeasure[] = [
-      dirty,
-      (ask) => measured(ask, { answer: { headAfter: fakeHead(999) } }),
-      (ask) => measured(ask, { answer: { cleanAfter: false } }),
-      (ask) => measured(ask, { answer: { base: fakeHead(2) } }),
-      (ask) => measured(ask, { measurement: { rawAddedLines: RAW + 1, chargeableAddedLines: 1514 } }),
-    ];
-    let n = 0;
-    // 停下时那次测量的 base 是 BASE：停点身份钉住它
-    const { world, tasks } = setup((ask) => (answers[n++] as Remeasure)(ask), false, { measuredBase: BASE });
-    const i = input();
-    await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        const id = await parkedIdentity(h);
-        expect(id.base).toBe(BASE);
-        // 换另一个（更早的）base 改测量范围：不进活动就拒
-        expect(await send(h, command(i, h, id, { base: fakeHead(3) }))).toMatchObject({
-          outcome: 'refused',
-          reason: 'changed',
-        });
-        expect(n).toBe(0);
-        for (let k = 0; k < answers.length; k++) {
-          const r = await send(h, command(i, h, id));
-          expect(r).toMatchObject({ outcome: 'refused', reason: 'changed' });
-        }
-        expect(n).toBe(answers.length);
-        // 以下不进活动：形状、仓、任务、工作流、run、head 不对
-        const bad: Partial<RemeasureLineBudgetCommand>[] = [
-          { head: 'abc' },
-          { base: 'abc' },
-          { repo: { owner: 'x', name: 'y' } },
-          { taskId: 'other' },
-          { workflowId: 'task:other#1' },
-          { identity: { ...id, runId: 'other-run' } },
-        ];
-        for (const over of bad) {
-          expect(await send(h, command(i, h, id, over))).toMatchObject({
-            outcome: 'refused',
-            reason: 'identity',
-          });
-        }
-        expect(await send(h, command(i, h, id, { head: fakeHead(555) }))).toMatchObject({ reason: 'stale' });
-        expect(await send(h, command(i, h, { ...id, continued: 7 }))).toMatchObject({ reason: 'stale' });
-        // 身份里的 base 也是身份的一部分：改了就不是这次停点
-        expect(
-          await send(h, command(i, h, { ...id, base: fakeHead(3) }, { base: fakeHead(3) })),
-        ).toMatchObject({ reason: 'stale' });
-        expect(n).toBe(answers.length);
-        expect(world.count('pushBranch')).toBe(0);
-        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });
-        await h.result();
-      },
-      { tasks },
-    );
-  });
-
-  it('并发请求只一个测，另一个 busy；测量期间人点「继续」则旧测量作废，走原授权语义', async () => {
-    let release: () => void = () => {};
-    let entered: () => void = () => {};
-    const inFlight = new Promise<void>((r) => {
-      entered = r;
-    });
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    const { world, tasks } = setup(async (ask) => {
-      entered();
-      await gate;
-      return measured(ask);
-    });
-    const i = input();
-    const run = await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        const id = await parkedIdentity(h);
-        const first = send(h, command(i, h, id));
-        await inFlight;
-        expect((await status(h)).lineBudgetPark?.identity).toBeNull(); // 重评中不暴露可用身份
-        expect(await send(h, command(i, h, id))).toMatchObject({ outcome: 'refused', reason: 'busy' });
-        await h.signal(taskContinueSignal, { by: 'frank' });
-        release();
-        expect(await first).toMatchObject({ outcome: 'refused', reason: 'stale' });
-        return h.result() as Promise<TaskRun>;
-      },
-      { tasks },
-    );
-    expect(run.outcome).toBe('merged');
-    expect(world.count('pushBranch')).toBe(1);
-  });
-
-  it('测量期间放弃：取消测量、不放行任何东西', async () => {
-    let release: () => void = () => {};
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    let entered: () => void = () => {};
-    const inFlight = new Promise<void>((r) => {
-      entered = r;
-    });
-    const { world, tasks } = setup(async (ask) => {
-      entered();
-      await gate;
-      return measured(ask);
-    });
-    const i = input();
-    const run = await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        const id = await parkedIdentity(h);
-        const pending = send(h, command(i, h, id));
-        await inFlight;
-        await h.signal(taskAbandonSignal, { by: 'frank', reason: '不要了' });
-        expect(await pending).toMatchObject({ outcome: 'refused', reason: 'unknown' });
-        const result = h.result() as Promise<TaskRun>;
-        release(); // 活动自己跑完的结果已被丢弃；放开它好让测试 worker 干净收场
-        return result;
-      },
-      { tasks },
-    );
-    expect(run.outcome).toBe('abandoned');
-    expect(world.count('pushBranch')).toBe(0);
-  });
-
-  it('旧代码停下的真实历史：现在的代码重放不报对不上；那时没记测量 base，现停点这样的一律明确拒绝、不进活动', async () => {
-    // 夹具是旧代码录的：没有重评标记、没有重评 Update，停在体量预算的报警上
-    const text = JSON.stringify(OLD_PARK.events);
-    expect(text).not.toContain('taskRemeasureLineBudget');
-    expect(OLD_PARK_COMMANDS).not.toContain('patch:line-budget-remeasure-v1');
-    expect(OLD_PARK_COMMANDS).toContain('patch:pr-line-budget');
-    for (const marker of NEWER_PARK_MARKERS) expect(OLD_PARK_COMMANDS).not.toContain(marker);
-    expect(OLD_PARK_COMMANDS.at(-1)).toBe('raiseAlert');
-    expect(text).not.toContain('addedLinesBase');
-    await Worker.runReplayHistory(
-      { workflowBundle: await engineBundle() },
-      { events: OLD_PARK.events } as never,
-      OLD_PARK.workflowId,
-    );
-
-    // 同样形状（交付不报 addedLinesBase）的停点在现在的代码上：身份 base 为 null，重评明确拒绝，不拿请求者给的 base 顶替
-    const { world, tasks, asks } = setup((ask) => measured(ask), false, { old: true });
-    const i = input();
-    await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        const id = await parkedIdentity(h);
-        expect(id.base).toBeNull();
-        expect(await send(h, command(i, h, id))).toMatchObject({ outcome: 'refused', reason: 'unsupported' });
-        await waitingHuman(h);
-        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });
-        await h.result();
-      },
-      { tasks },
-    );
-    expect(asks).toHaveLength(0);
-    expect(world.count('pushBranch')).toBe(0);
-  });
-
-  it('catchup：同一身份在停点可见前等到，重评成功且 30 秒定时器取消', async () => {
+  it('同一身份在停点可见前等到，重评成功且 30 秒定时器取消', async () => {
     const { world, tasks, asks } = setup((ask) => measured(ask), false, { holdPorts: ['raiseAlert'] });
     const i = input();
     const run = await withWorker(
@@ -743,7 +894,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(world.count('pushBranch')).toBe(1);
   });
 
-  it('catchup：等待中放弃，定时器取消而不是响，旧请求 stale，工作流结束', async () => {
+  it('等待中放弃，定时器取消而不是响，旧请求 stale，工作流结束', async () => {
     const { world, tasks, asks } = setup((ask) => measured(ask), false, { holdPorts: ['raiseAlert'] });
     const i = input();
     const run = await withWorker(
@@ -777,7 +928,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(world.count('pushBranch')).toBe(0);
   });
 
-  it('catchup：先查停点，继续后旧请求立即 stale；不测不推、不起 30 秒定时器，工作流仍能放弃收场', async () => {
+  it('先查停点，继续后旧请求立即 stale；不测不推、不起 30 秒定时器，工作流仍能放弃收场', async () => {
     let releaseMirror: () => void = () => {};
     const gate = new Promise<void>((r) => {
       releaseMirror = r;
@@ -832,7 +983,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(asks).toHaveLength(0);
   });
 
-  it('catchup：请求到达时已经放弃，直接拒绝，不起 30 秒定时器', async () => {
+  it('请求到达时已经放弃，直接拒绝，不起 30 秒定时器', async () => {
     const { world, tasks, asks } = setup((ask) => measured(ask), false, { holdPorts: ['removeWorktree'] });
     const i = input();
     const run = await withWorker(
@@ -860,7 +1011,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(world.count('pushBranch')).toBe(0);
   });
 
-  it('catchup：请求到达时已经换代，直接拒绝，不测也不唤醒新停点', async () => {
+  it('请求到达时已经换代，直接拒绝，不测也不唤醒新停点', async () => {
     let releaseAlert: () => void = () => {};
     const gate = new Promise<void>((r) => {
       releaseAlert = r;
@@ -920,7 +1071,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(asks).toHaveLength(1);
   });
 
-  it('catchup：计数还小于请求时有界等满 30 秒再拒绝，不测不放行', async () => {
+  it('计数还小于请求时有界等满 30 秒再拒绝，不测不放行', async () => {
     let releaseRead: () => void = () => {};
     const gate = new Promise<void>((r) => {
       releaseRead = r;
@@ -968,54 +1119,5 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     );
     expect(run.outcome).toBe('abandoned');
     expect(asks).toHaveLength(0);
-  });
-});
-
-// 真开发服务端（上面那组）在 maxCachedWorkflows=0 时，查询重放会因 self-check-own-timeout 的补丁标记失败。
-// 这条只验换工人接手，仍用可跳时间的测试服务端；catchup 里放弃走上面的真服务端。
-describe('跨工人接停点（可跳时间的测试服务端）', { timeout: 180_000 }, () => {
-  const currentEnv = useEnv();
-  beforeEach(() => {
-    env = currentEnv();
-  });
-
-  it('跨工人接停点：停在体量关口时工人下线，新起的工人从历史整段重放接手，处理重评后照原路走完', async () => {
-    const { world, tasks, asks } = setup((ask) => measured(ask));
-    const i = input();
-    const taskQueue = `q-${randomUUID()}`;
-    // 第一个工人不缓存：下线后不留粘性队列（可跳时间的测试服务端不会把下线工人粘性队列里的任务挪回普通队列）
-    const { h, id } = await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        return { h, id: await parkedIdentity(h) };
-      },
-      { tasks, taskQueue, maxCachedWorkflows: 0 },
-    );
-    // 下线时的停点历史，命令序与旧代码录的真实历史逐条一致（主线后加的新历史标记除外）
-    const parked = await h.fetchHistory();
-    expect(parkCommandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
-    // 新起的工人（像部署后的新进程，缓存是空的）：第一个工作流任务就是从上面那份历史整段重放，再处理重评
-    const run = await withWorker(
-      env,
-      world,
-      async () => {
-        expect(await send(h, command(i, h, id))).toMatchObject({
-          outcome: 'resumed',
-          receipt: { chargeableAddedLines: 1513, verifiedGeneratedLines: 8037, base: BASE },
-        });
-        // 接手后的重发：只回原身份的幂等回执
-        expect(await send(h, command(i, h, id))).toMatchObject({
-          outcome: 'already_resumed',
-          receipt: { head: id.head },
-        });
-        return h.result() as Promise<TaskRun>;
-      },
-      { tasks, taskQueue },
-    );
-    expect(run.outcome).toBe('merged');
-    expect(asks).toHaveLength(1);
-    expect(world.count('pushBranch')).toBe(1);
   });
 });

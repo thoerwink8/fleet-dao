@@ -63,6 +63,12 @@ describe('固定 Git blob 的生成快照计量', { timeout: 30000 }, () => {
     ['M', 'pnpm-lock.yaml'],
     ['A', 'packages/engine/src/real/migration-budget.ts'],
     ['M', 'packages/engine/src/real/user-git.ts'],
+    ['A', 'packages/engine/src/workflows/task-budget-remeasure.ts'],
+    ['M', 'packages/engine/src/workflows/task-budget-remeasure.ts'],
+    ['D', 'packages/engine/src/workflows/task-budget-remeasure.ts'],
+    ['A', 'packages/engine/src/workflows/task-runtime.ts'],
+    ['M', 'packages/engine/src/workflows/task-runtime.ts'],
+    ['D', 'packages/engine/src/workflows/task-runtime.ts'],
     ['A', '.gitattributes'],
     ['A', 'packages/db/migrations/.gitattributes'],
   ])('候选信任根%s %s即无折扣，保留完整raw', async (status, p) => {
@@ -79,6 +85,41 @@ describe('固定 Git blob 的生成快照计量', { timeout: 30000 }, () => {
       chargeableAddedLines: raw,
       reason: expect.stringContaining(`信任根 ${p}`),
     });
+  });
+  it('重评资格链两处连同裁决依赖的合同一起改：整批无折扣，不是只拦单个文件', async () => {
+    const f = await fixture();
+    f.put('packages/engine/src/workflows/task-budget-remeasure.ts', '// 候选改资格裁决\n');
+    f.put('packages/engine/src/workflows/task-runtime.ts', '// 候选改放行消费\n');
+    f.put('packages/engine/src/task-contract.ts', '// 候选改回执形状\n');
+    const head = f.commit(),
+      raw = await addedLinesAgainst(f.tree, f.base, head);
+    expect(await measureMigrationBudget(f.tree, f.base, head, raw)).toMatchObject({
+      verified: false,
+      verifiedGeneratedLines: 0,
+      chargeableAddedLines: raw,
+      reason: expect.stringContaining('信任根'),
+    });
+  });
+  it('重评资格链源码引到的体量裁决专用相对模块，都在信任根里（防以后又漏一个）', async () => {
+    const chain = ['task-budget-remeasure.ts', 'task-runtime.ts'];
+    const asked = new Set<string>();
+    for (const file of chain) {
+      const source = readFileSync(new URL(`../../src/workflows/${file}`, import.meta.url), 'utf8');
+      for (const m of source.matchAll(/from '(\.\.?\/[^']*(?:budget|remeasure)[^']*\.ts)'/g))
+        asked.add(new URL(m[1] as string, new URL(`../../src/workflows/${file}`, import.meta.url)).pathname);
+    }
+    expect(asked.size).toBeGreaterThan(0);
+    for (const abs of asked) {
+      const rel = abs.slice(abs.lastIndexOf('packages/engine/'));
+      const f = await fixture();
+      f.put(rel, '// 候选改了体量裁决依赖\n');
+      const head = f.commit(),
+        raw = await addedLinesAgainst(f.tree, f.base, head);
+      expect(await measureMigrationBudget(f.tree, f.base, head, raw), rel).toMatchObject({
+        verified: false,
+        chargeableAddedLines: raw,
+      });
+    }
   });
   it('全局raw识别改名时，不用局部no-renames全量快照错误抵扣代码', async () => {
     const f = await fixture(true);
@@ -201,6 +242,7 @@ describe('体量关口重评活动（#3249）', { timeout: 30000 }, () => {
       base: f.base,
       headAfter: f.head,
       cleanAfter: true,
+      mergeBaseAfter: f.base,
       measurement: { verified: true, rawAddedLines: f.raw, base: f.base, head: f.head },
     });
     const m = (
@@ -307,6 +349,19 @@ describe('体量关口重评活动（#3249）', { timeout: 30000 }, () => {
       status: 'measured',
       measurement: { verified: false, base: s, chargeableAddedLines: fromS },
     });
+  });
+
+  it('测量期间主线引用变了、merge-base 不再是请求的 base：拒绝，不接受测量前的旧结果', async () => {
+    const f = await ready();
+    const got = await remeasureLineBudget(f.tree, repo, ask(f), async (tree, base, head, raw) => {
+      const measured = await measureMigrationBudget(tree, base, head, raw);
+      // 测量窗口里把钉住的主线挪到候选头上：merge-base 变成头自己，不再是停下时的 base
+      f.git('update-ref', 'refs/remotes/origin/main', head);
+      return measured;
+    });
+    expect(got.budgetRemeasure).toMatchObject({ status: 'refused', reason: 'base' });
+    const detail = (got.budgetRemeasure as { detail?: string }).detail ?? '';
+    expect(detail).toContain('测量之后');
   });
 
   it('原始新增行与停下时不同、不适用的仓、读失败：回 refused 或抛错，不当 0', async () => {
