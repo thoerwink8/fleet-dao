@@ -3,7 +3,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CLEANUP_PAGE_LIMITS, cleanupStatus, readCleanupNamespace } from '../src/tree-cleanup.ts';
+import {
+  CLEANUP_PAGE_LIMITS,
+  cleanupStatus,
+  readCleanupNamespace,
+  readTreeUsage,
+  readTreeUsageDetail,
+} from '../src/tree-cleanup.ts';
 
 const root = '/var/lib/fleet-work';
 const options = {
@@ -231,4 +237,126 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     pages(list());
     await expect(cleanupStatus(options)).rejects.toThrow(why);
   });
+});
+
+describe('tree-usage 读不出 idle/busy 时带有界的原因类别（#3557）', () => {
+  const place = {
+    lex: `${root}/acme_web/12-a`,
+    real: `${root}/acme_web/12-a`,
+    dev: '7',
+    ino: '8',
+    uid: '1000',
+  };
+  const secret = 'FLEET_TOKEN=sk-live-0123456789 /usr/bin/claude --dangerously ps-aux-list';
+  const usage = (over: Record<string, unknown>) =>
+    JSON.stringify({ version: 1, state: 'idle', identity: place, scanned: 3, failed: 0, ...over });
+  const keys = [
+    'FLEET_FAKE_SCOPE_USAGE_STDOUT',
+    'FLEET_FAKE_SCOPE_USAGE_STDERR',
+    'FLEET_FAKE_SCOPE_USAGE_EXIT',
+    'FLEET_FAKE_SCOPE_USAGE_HANG_MS',
+    'FLEET_FAKE_SCOPE_CAPABILITIES',
+  ];
+  afterEach(() => {
+    for (const key of keys) delete process.env[key];
+  });
+  /** 读数只许固定枚举和整数：不超 160 字节，不带帮手的 stderr/stdout 原文。 */
+  function bounded(reading: object) {
+    const text = JSON.stringify(reading);
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(160);
+    for (const part of ['sk-live', 'claude', 'ps-aux', 'FLEET_TOKEN', '受管', 'Error'])
+      expect(text).not.toContain(part);
+  }
+
+  it('idle/busy 语义不变，readTreeUsage 仍只回三态', async () => {
+    expect(await readTreeUsageDetail(place, options)).toEqual({ state: 'idle' });
+    expect(await readTreeUsage(place, options)).toBe('idle');
+    process.env.FLEET_FAKE_SCOPE_USAGE_STDOUT = usage({ state: 'busy' });
+    expect(await readTreeUsageDetail(place, options)).toEqual({ state: 'busy' });
+    expect(await readTreeUsage(place, options)).toBe('busy');
+  });
+
+  it.each([
+    [
+      '帮手非零退出',
+      { FLEET_FAKE_SCOPE_USAGE_EXIT: '3', FLEET_FAKE_SCOPE_USAGE_STDERR: secret },
+      { reason: 'call-failed', exitCode: 3 },
+    ],
+    ['回执不是 JSON', { FLEET_FAKE_SCOPE_USAGE_STDOUT: `not json ${secret}` }, { reason: 'protocol' }],
+    ['协议版本不对', { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ version: 2 }) }, { reason: 'protocol' }],
+    ['状态认不出', { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ state: secret }) }, { reason: 'protocol' }],
+    [
+      '能力不全',
+      { FLEET_FAKE_SCOPE_CAPABILITIES: JSON.stringify({ version: 1, state: 'ok', features: [] }) },
+      { reason: 'protocol' },
+    ],
+    [
+      '帮手明确 unknown',
+      { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ state: 'unknown', note: secret }) },
+      { reason: 'helper-unknown' },
+    ],
+    [
+      '回执换了树',
+      { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ identity: { ...place, ino: '9' } }) },
+      { reason: 'identity' },
+    ],
+    ['回执没身份', { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ identity: secret }) }, { reason: 'identity' }],
+    [
+      '一个进程都没扫到',
+      { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ scanned: 0 }) },
+      { reason: 'incomplete', scanned: 0, failed: 0 },
+    ],
+    [
+      '有进程没读成',
+      { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ state: 'busy', failed: 2 }) },
+      { reason: 'incomplete', scanned: 3, failed: 2 },
+    ],
+    [
+      '扫描数认不出',
+      { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ scanned: secret, failed: 1.5 }) },
+      { reason: 'incomplete' },
+    ],
+  ])('%s：unknown 带原因，不冒充 idle/busy', async (_name, env, expected) => {
+    Object.assign(process.env, env);
+    const reading = await readTreeUsageDetail(place, options);
+    expect(reading).toEqual({ state: 'unknown', ...expected });
+    bounded(reading);
+    expect(await readTreeUsage(place, options)).toBe('unknown');
+  });
+
+  it('请求身份本身无效：不调帮手，记身份不符', async () => {
+    const reading = await readTreeUsageDetail({ ...place, lex: 'relative', real: 'relative' }, options);
+    expect(reading).toEqual({ state: 'unknown', reason: 'identity' });
+  });
+
+  it('起不来的帮手是调用失败，不是超时', async () => {
+    const reading = await readTreeUsageDetail(place, {
+      ...options,
+      helper: '/nonexistent/fleet-agent-scope',
+    });
+    expect(reading.reason).toBe('call-failed');
+    bounded(reading);
+  });
+
+  it('本端期限到了杀掉帮手才算超时', async () => {
+    process.env.FLEET_FAKE_SCOPE_USAGE_HANG_MS = '20000';
+    const reading = await readTreeUsageDetail(place, { ...options, timeoutMs: 2500 });
+    expect(reading).toEqual({ state: 'unknown', reason: 'timeout' });
+  }, 15_000);
+
+  it('调用方取消（调用前、调用中）记中止，不当超时', async () => {
+    const before = new AbortController();
+    before.abort();
+    expect(await readTreeUsageDetail(place, { ...options, signal: before.signal })).toEqual({
+      state: 'unknown',
+      reason: 'aborted',
+    });
+    process.env.FLEET_FAKE_SCOPE_USAGE_HANG_MS = '20000';
+    const during = new AbortController();
+    setTimeout(() => during.abort(), 2500);
+    expect(await readTreeUsageDetail(place, { ...options, signal: during.signal })).toEqual({
+      state: 'unknown',
+      reason: 'aborted',
+    });
+  }, 15_000);
 });

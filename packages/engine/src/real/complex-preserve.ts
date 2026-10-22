@@ -17,7 +17,7 @@ import {
 } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readTreeUsage } from '@fleet-dao/adapters';
+import { readTreeUsageDetail, type TreeUsageReading, type TreeUsageReason } from '@fleet-dao/adapters';
 import { PortError } from '../ports.ts';
 import { describeFailure, type UserCommand, type UserCommandResult } from './exec.ts';
 import {
@@ -133,9 +133,15 @@ const SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const SCRIPT = fileURLToPath(new URL('./complex-snapshot.mjs', import.meta.url));
 
-function keep(code: 'ARCHIVE_FAILED' | 'WORKTREE_PRESERVED', message: string, dir?: string): PortError {
+function keep(
+  code: 'ARCHIVE_FAILED' | 'WORKTREE_PRESERVED',
+  message: string,
+  dir?: string,
+  extra?: Record<string, string | number>,
+): PortError {
   const text = message.includes('保留原树') ? message : `${message}，保留原树`;
-  return new PortError(code, text, { retryable: false, ...(dir ? { details: { dir } } : {}) });
+  const details = dir || extra ? { ...(dir ? { dir } : {}), ...extra } : undefined;
+  return new PortError(code, text, { retryable: false, ...(details ? { details } : {}) });
 }
 
 function sha256(bytes: Buffer): string {
@@ -417,9 +423,46 @@ export async function treeProcessUsage(
 }
 
 /** Production reads through the fixed root protocol; ProcLook is an explicit fixture only. */
-async function placeProcessUsage(t: UserTree, place: TreePlace, look?: ProcLook): Promise<IdleAnswer> {
-  if (look) return treeProcessUsage(place.real, place.uid, undefined, undefined, look);
-  return readTreeUsage(place, { ...(t.signal ? { signal: t.signal } : {}) });
+async function placeProcessUsage(t: UserTree, place: TreePlace, look?: ProcLook): Promise<TreeUsageReading> {
+  if (look) return { state: await treeProcessUsage(place.real, place.uid, undefined, undefined, look) };
+  return readTreeUsageDetail(place, { ...(t.signal ? { signal: t.signal } : {}) });
+}
+
+/** 占用核验答不出时的原因说法。只认帮手读数里的固定类别；缺证说原因未知，不说成超时。 */
+const USAGE_REASON: Record<TreeUsageReason, string> = {
+  'call-failed': '帮手调用失败',
+  aborted: '核验被取消',
+  timeout: '帮手调用超时',
+  protocol: '帮手回执协议无效',
+  identity: '回执身份和这棵树不符',
+  incomplete: '进程扫描不完整',
+  'helper-unknown': '帮手答确认不了',
+  unknown: '原因未知',
+};
+
+/** 进程占用核验必经点。busy、unknown 都留树；unknown 带核验阶段和有界原因进原保留错误。 */
+async function assertPlaceIdle(
+  t: UserTree,
+  place: TreePlace,
+  stage: '打快照前' | '存档后' | '删除前',
+  look?: ProcLook,
+): Promise<void> {
+  const usage = await placeProcessUsage(t, place, look);
+  if (usage.state === 'busy')
+    throw keep('WORKTREE_PRESERVED', `${stage}有进程正用着这棵树，保留原树`, t.dir, { stage, usage: 'busy' });
+  if (usage.state === 'idle') return;
+  const reason = usage.reason && Object.hasOwn(USAGE_REASON, usage.reason) ? usage.reason : 'unknown';
+  const counts = {
+    ...(usage.exitCode !== undefined ? { exitCode: usage.exitCode } : {}),
+    ...(usage.scanned !== undefined ? { scanned: usage.scanned } : {}),
+    ...(usage.failed !== undefined ? { failed: usage.failed } : {}),
+  };
+  throw keep(
+    'WORKTREE_PRESERVED',
+    `${stage}确认不了有没有进程用着这棵树（${reason}：${USAGE_REASON[reason]}），保留原树`,
+    t.dir,
+    { stage, usage: 'unknown', reason, ...counts },
+  );
 }
 
 export function cleanupLockPath(archiveDir: string, dev: string, ino: string, real: string): string {
@@ -668,10 +711,7 @@ export async function assertNoTreeProcess(
   place: TreePlace,
   processLook?: ProcLook,
 ): Promise<void> {
-  const usage = await placeProcessUsage(t, place, processLook);
-  if (usage === 'busy') throw keep('WORKTREE_PRESERVED', '删除前有进程正用着这棵树，保留原树', t.dir);
-  if (usage !== 'idle')
-    throw keep('WORKTREE_PRESERVED', '删除前确认不了有没有进程用着这棵树，保留原树', t.dir);
+  await assertPlaceIdle(t, place, '删除前', processLook);
 }
 
 const LOCATE_SCRIPT = [
@@ -1177,9 +1217,7 @@ export async function preserveComplexWorktree(
   await assertArchiveContainer(archiveDir);
   const place = await locateTree(t);
   assertTreeInside(context.workRoot, place);
-  const usage = await placeProcessUsage(t, place, context.processLook);
-  if (usage === 'busy') throw keep('WORKTREE_PRESERVED', '有进程正用着这棵树，保留原树', t.dir);
-  if (usage !== 'idle') throw keep('WORKTREE_PRESERVED', '确认不了有没有进程用着这棵树，保留原树', t.dir);
+  await assertPlaceIdle(t, place, '打快照前', context.processLook);
   await assertPeopleIdle(context.confirmIdle, '打快照前');
   const dir = join(archiveDir, `worktree-${randomUUID()}`);
   await makeArchiveDir(dir);
@@ -1192,8 +1230,7 @@ export async function preserveComplexWorktree(
   if (JSON.stringify(live.ignored) !== JSON.stringify(parsed.state.ignored)) {
     throw keep('WORKTREE_PRESERVED', '存档期间工作树成果发生变化，保留原树重新核验', t.dir);
   }
-  const again = await placeProcessUsage(t, place, context.processLook);
-  if (again !== 'idle') throw keep('WORKTREE_PRESERVED', '存档期间确认不了没人用，保留原树', t.dir);
+  await assertPlaceIdle(t, place, '存档后', context.processLook);
   await assertPeopleIdle(context.confirmIdle, '回执落盘前');
   const receipt: ComplexReceipt = {
     version: 3,
@@ -1289,8 +1326,7 @@ async function recheckComplex(
   ) {
     throw keep('WORKTREE_PRESERVED', '回执上的工作树身份和现在对不上，旧回执作废，保留原树', t.dir);
   }
-  const usage = await placeProcessUsage(t, place, context.processLook);
-  if (usage !== 'idle') throw keep('WORKTREE_PRESERVED', '删除前确认不了没人用，保留原树', t.dir);
+  await assertPlaceIdle(t, place, '删除前', context.processLook);
   if (context.confirmIdle) await assertPeopleIdle(context.confirmIdle, '删除前');
   const restored = await verifyArchive(t, dir, preserved, receipt.artifacts);
   const live = await inspectLive(t, preserved);

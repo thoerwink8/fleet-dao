@@ -12,6 +12,8 @@ export interface TreeHelperOptions {
   helper?: string;
   sudo?: readonly string[];
   signal?: AbortSignal;
+  /** 单次帮手调用的期限；默认 115 秒，只给测试缩短。 */
+  timeoutMs?: number;
 }
 
 type Reply = Record<string, unknown>;
@@ -27,8 +29,46 @@ export class TreeHelperError extends Error {
   }
 }
 
+/**
+ * tree-usage 答不出 idle/busy 时的原因类别。只有固定枚举和安全整数，不带 stderr、命令行、环境或异常原文。
+ * call-failed 帮手非零退出或起不来；aborted 调用方取消；timeout 本端期限到了杀掉帮手；protocol 回执或能力不是完整协议；
+ * identity 请求或回执不是原授权工作树；incomplete 扫描不完整（scanned/failed）；helper-unknown 帮手自己答 unknown；
+ * unknown 缺证，认不出是哪一类。
+ */
+export type TreeUsageReason =
+  | 'call-failed'
+  | 'aborted'
+  | 'timeout'
+  | 'protocol'
+  | 'identity'
+  | 'incomplete'
+  | 'helper-unknown'
+  | 'unknown';
+
+export interface TreeUsageReading {
+  state: 'idle' | 'busy' | 'unknown';
+  reason?: TreeUsageReason;
+  exitCode?: number;
+  scanned?: number;
+  failed?: number;
+}
+
+/** 帮手调用失败的类别只记在本模块；错误原文照旧，不随类别外传。 */
+const FAULT = new WeakMap<object, { reason: TreeUsageReason; exitCode?: number }>();
+
+function fault<E extends object>(error: E, reason: TreeUsageReason, exitCode?: number | null): E {
+  FAULT.set(error, {
+    reason,
+    ...(typeof exitCode === 'number' && Number.isSafeInteger(exitCode) ? { exitCode } : {}),
+  });
+  return error;
+}
+
 async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> {
-  options.signal?.throwIfAborted();
+  if (options.signal?.aborted) {
+    const why: unknown = options.signal.reason;
+    throw fault(why && typeof why === 'object' ? why : new Error('受管帮手调用已取消'), 'aborted');
+  }
   const [bin, ...rest] = [
     ...(options.sudo ?? ['/usr/bin/sudo', '-n']),
     options.helper ?? '/usr/local/sbin/fleet-agent-scope',
@@ -40,27 +80,49 @@ async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> 
       rest,
       {
         encoding: 'utf8',
-        timeout: 115_000,
+        timeout: options.timeoutMs ?? 115_000,
         maxBuffer: 128 * 1024,
         ...(options.signal ? { signal: options.signal } : {}),
       },
       (error, stdout, stderr) => {
-        if (error)
+        if (error) {
+          const exitCode = typeof error.code === 'number' ? error.code : null;
+          // 取消先认（取消也会杀帮手）；回执超出缓冲是协议坏；剩下只有本端期限到了才会自己杀帮手。
+          const reason: TreeUsageReason =
+            options.signal?.aborted || error.name === 'AbortError'
+              ? 'aborted'
+              : error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+                ? 'protocol'
+                : error.killed && error.signal === 'SIGTERM'
+                  ? 'timeout'
+                  : 'call-failed';
           return reject(
-            new TreeHelperError(
-              `受管删树未完成：${stderr.slice(0, 1000)} ${stdout.slice(0, 2000)} ${error.message}`,
-              typeof error.code === 'number' ? error.code : null,
+            fault(
+              new TreeHelperError(
+                `受管删树未完成：${stderr.slice(0, 1000)} ${stdout.slice(0, 2000)} ${error.message}`,
+                exitCode,
+              ),
+              reason,
+              exitCode,
             ),
           );
+        }
+        let explicit = false;
         try {
           const value: unknown = JSON.parse(stdout);
           if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('非对象回执');
           const row = value as Reply;
+          explicit = row.version === 1 && row.state === 'unknown';
           if (row.version !== 1 || typeof row.state !== 'string' || row.state === 'unknown')
             throw new Error('删树协议版本/状态不完整');
           resolve(row);
         } catch (error) {
-          reject(new Error(`受管删树回执读失败：${String(error)}`));
+          reject(
+            fault(
+              new Error(`受管删树回执读失败：${String(error)}`),
+              explicit ? 'helper-unknown' : 'protocol',
+            ),
+          );
         }
       },
     );
@@ -83,7 +145,7 @@ export async function invokeTreeHelper(options: TreeHelperOptions, args: string[
       'temporary-files',
     ].every((name) => features.includes(name))
   )
-    throw new Error('受管帮手不支持完整删树协议（含 temporary-files），保留原对象');
+    throw fault(new Error('受管帮手不支持完整删树协议（含 temporary-files），保留原对象'), 'protocol');
   return call(options, args);
 }
 
@@ -114,13 +176,18 @@ function identityArgs(identity: TreeIdentity): string[] {
 }
 
 function assertIdentity(reply: Reply, expected: TreeIdentity): void {
-  const actual = treeIdentity(reply.identity);
+  let actual: TreeIdentity;
+  try {
+    actual = treeIdentity(reply.identity);
+  } catch (error) {
+    throw fault(error as Error, 'identity');
+  }
   if (
     Object.keys(actual).some(
       (key) => actual[key as keyof TreeIdentity] !== expected[key as keyof TreeIdentity],
     )
   )
-    throw new Error('回执不是原授权工作树');
+    throw fault(new Error('回执不是原授权工作树'), 'identity');
 }
 
 export async function readTreePlace(
@@ -138,15 +205,42 @@ export async function readTreeUsage(
   identity: TreeIdentity,
   options: TreeHelperOptions = {},
 ): Promise<'idle' | 'busy' | 'unknown'> {
+  return (await readTreeUsageDetail(identity, options)).state;
+}
+
+function count(key: 'scanned' | 'failed', value: unknown): Partial<TreeUsageReading> {
+  return Number.isSafeInteger(value) ? { [key]: value as number } : {};
+}
+
+/** 同 readTreeUsage；答不出 idle/busy 时带上有界的原因类别。能从原回执确定的才确定，缺证仍是 unknown。 */
+export async function readTreeUsageDetail(
+  identity: TreeIdentity,
+  options: TreeHelperOptions = {},
+): Promise<TreeUsageReading> {
+  let reply: Reply;
   try {
-    const reply = await invokeTreeHelper(options, ['tree-usage', ...identityArgs(identity)]);
+    let args: string[];
+    try {
+      args = identityArgs(identity);
+    } catch (error) {
+      throw fault(error as Error, 'identity');
+    }
+    reply = await invokeTreeHelper(options, ['tree-usage', ...args]);
     assertIdentity(reply, identity);
-    if (!Number.isSafeInteger(reply.scanned) || (reply.scanned as number) <= 0 || reply.failed !== 0)
-      return 'unknown';
-    return reply.state === 'idle' || reply.state === 'busy' ? reply.state : 'unknown';
-  } catch {
-    return 'unknown';
+  } catch (error) {
+    const known = error && typeof error === 'object' ? FAULT.get(error) : undefined;
+    return { state: 'unknown', ...(known ?? { reason: 'unknown' }) };
   }
+  if (!Number.isSafeInteger(reply.scanned) || (reply.scanned as number) <= 0 || reply.failed !== 0)
+    return {
+      state: 'unknown',
+      reason: 'incomplete',
+      ...count('scanned', reply.scanned),
+      ...count('failed', reply.failed),
+    };
+  return reply.state === 'idle' || reply.state === 'busy'
+    ? { state: reply.state }
+    : { state: 'unknown', reason: 'protocol' };
 }
 
 export async function removeTreeIdentity(
