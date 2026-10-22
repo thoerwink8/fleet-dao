@@ -795,7 +795,11 @@ async function releaseReturned(
       if (!verdict.ok) continue;
       await deps.unmarkLocal({ repo, issueNumber: number });
       released.add(number);
-      deps.log('info', `拉单：${slug}#${number} 挡着的地方改好了，已摘掉「${LOCAL_LABEL}」，下一轮照常拉`, {});
+      deps.log(
+        'info',
+        `拉单：${slug}#${number} 挡着的地方改好了，已摘掉「${LOCAL_LABEL}」，下一轮照常拉`,
+        {},
+      );
     } catch (err) {
       t.unchecked.push(`${slug}#${number}：${errMessage(err)}`);
     }
@@ -1310,7 +1314,9 @@ async function prepareRepo(
   const released = await releaseReturned(deps, repo, listed, ctx, whitelist, prClaims, t);
   // 这一轮贴上（或试着贴上）「本机做」的单：贴的那步写不成、或报给本机之后留言写不成，也算留着，别让下面撤提醒把刚报给本机的话撤了
   const labelled = new Set(
-    listed.issues.filter((i) => i.labels.includes(LOCAL_LABEL) && !released.has(i.number)).map((i) => i.number),
+    listed.issues
+      .filter((i) => i.labels.includes(LOCAL_LABEL) && !released.has(i.number))
+      .map((i) => i.number),
   );
   const notifyKept = deps.notifyLocal;
   const tracked: IntakeDeps = {
