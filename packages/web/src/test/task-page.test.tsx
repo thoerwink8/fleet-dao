@@ -38,14 +38,19 @@ const panel = async (title: string) => {
   return section;
 };
 
+// 三段、每一笔都是表格：一行的身份在 tr 的 data-row-key 上（段：manual；段里的模型：manual/kimi-k3）
 const segmentRow = (box: HTMLElement, segment: string) => {
-  const row = box.querySelector(`[data-segment="${segment}"]`);
+  const row = box.querySelector(`tr[data-row-key="${segment}"]`);
   if (!(row instanceof HTMLElement)) throw new Error(`「三段」里没有 ${segment} 这一行`);
   return row;
 };
 
+const modelRows = (box: HTMLElement, segment: string) => [
+  ...box.querySelectorAll(`tr[data-row-key^="${segment}/"]`),
+];
+
 const runRow = (box: HTMLElement, id: string) => {
-  const row = box.querySelector(`[data-run="${id}"]`);
+  const row = box.querySelector(`tr[data-row-key="${id}"]`);
   if (!(row instanceof HTMLElement)) throw new Error(`「每一笔」里没有 ${id}`);
   return row;
 };
@@ -62,14 +67,15 @@ describe('三段的单：按段、按模型，每一笔', () => {
     expect(within(manual).getByText('动手')).toBeTruthy();
     expect(within(manual).getByText('快档')).toBeTruthy();
     expect(within(manual).getByText('2 次')).toBeTruthy();
-    expect([...manual.querySelectorAll('[data-model]')].map((m) => m.getAttribute('data-model'))).toEqual([
-      'kimi-k3',
-      'opus-5.5',
+    // 动手段用了两个模型：段行下面跟两个模型行
+    expect(modelRows(box, 'manual').map((m) => m.getAttribute('data-row-key'))).toEqual([
+      'manual/kimi-k3',
+      'manual/opus-5.5',
     ]);
     // 动手段两笔：一笔超时、没记缓存和花费——缓存那格写「不全」，不把没读到的当 0 加进去
     expect(within(manual).getAllByText(/另有 1 次没读到/).length).toBeGreaterThan(0);
     // Kimi 那一行的缓存一次都没读到：格子里留 —（不写 0、也不逐格写「没读到」），哪项读不到由「三段」顶上的 Notice 说
-    const kimi = manual.querySelector('[data-model="kimi-k3"]') as HTMLElement;
+    const kimi = segmentRow(box, 'manual/kimi-k3');
     expect(kimi.querySelectorAll('[data-unread]').length).toBeGreaterThan(0);
     expect(within(kimi).queryByText('没读到')).toBeNull();
     expect(within(box).queryByText('没读到')).toBeNull();
@@ -85,12 +91,12 @@ describe('三段的单：按段、按模型，每一笔', () => {
   test('每一笔：结局、起止和耗时、用量、PR；按单号对上的标「按单号兜底」；没读到的逐条写原因', async () => {
     open('/tasks/t-c9');
     const box = await panel('每一笔');
-    expect(box.querySelectorAll('[data-run]')).toHaveLength(4);
+    expect(box.querySelectorAll('tbody tr')).toHaveLength(4);
     const timeout = runRow(box, 'seg-c9-2');
     expect(within(timeout).getByText('超时')).toBeTruthy();
     expect(within(timeout).getByText('为什么没成：30 分钟没交活，按超时收了')).toBeTruthy();
     // 起止 → 耗时：174 分钟前起、144 分钟前收，跑了 30 分钟
-    expect(timeout.querySelector('.num.w-full')?.textContent).toMatch(/→ .* · 30 分钟$/);
+    expect(timeout.textContent).toMatch(/→ .* · 30 分钟/);
     const notes = [...timeout.querySelectorAll('[data-unread-item]')].map((n) => n.textContent);
     expect(notes).toEqual(['token · 没记到：缓存读、缓存写', '花费 · 花费没记到']);
     const verify = runRow(box, 'seg-c9-4');
@@ -186,15 +192,14 @@ describe('预算用量（#2859）：写在「输入当量」那一格的小字�
     open('/tasks/t-x', apiWith(detailWith([big])));
     const box = await panel('三段');
     expect(screen.queryByText('折算 token')).toBeNull();
-    expect(document.querySelector('[data-segment-stats] .grid')?.children.length).toBe(4);
-    const figure = screen.getByText('输入当量').closest('[data-figure]') as HTMLElement;
+    expect(document.querySelector('[data-segment-stats] [data-cols]')?.children.length).toBe(4);
+    const figure = screen.getByText('输入当量').closest('[data-stat]') as HTMLElement;
     // 2,000,000 + 500 × 5 + 2000 × 1.25 + 30000 × 0.1 = 2,008,000，占 700 万的 29%
-    expect(figure.querySelector('.num')?.textContent).toBe('200.8 万');
-    const hint = figure.querySelector('[data-figure-hint]') as HTMLElement;
+    expect(figure.textContent).toContain('200.8 万');
+    const hint = document.querySelector('[data-figure-hint="输入当量"]') as HTMLElement;
     expect(hint.textContent).toContain('预算用了 29%（上限 700 万）');
-    // 小字换行，不用省略号截断
-    expect(hint.className).not.toContain('truncate');
-    expect(hint.className).toContain('break-words');
+    // 小字整句写出来，不用省略号截断
+    expect(hint.textContent).not.toContain('…');
     // 原始的两格还在
     expect(within(segmentRow(box, 'manual')).getByText('200.0 万 / 500')).toBeTruthy();
   });
@@ -203,8 +208,7 @@ describe('预算用量（#2859）：写在「输入当量」那一格的小字�
     const unread = { ...big, id: 'x-2', inputTokens: undefined, outputTokens: undefined };
     open('/tasks/t-x', apiWith(detailWith([big, unread])));
     await panel('三段');
-    const figure = screen.getByText('输入当量').closest('[data-figure]') as HTMLElement;
-    const hint = figure.querySelector('[data-figure-hint]')?.textContent ?? '';
+    const hint = document.querySelector('[data-figure-hint="输入当量"]')?.textContent ?? '';
     expect(hint).toContain('预算用了');
     expect(hint).toContain('另有 1 次 token 没读到，没算进来');
   });
@@ -212,8 +216,9 @@ describe('预算用量（#2859）：写在「输入当量」那一格的小字�
   test('超了上限：照写超过 100% 的数，不封顶', async () => {
     open('/tasks/t-x', apiWith(detailWith([{ ...base, inputTokens: 9_000_000 }])));
     await panel('三段');
-    const figure = screen.getByText('输入当量').closest('[data-figure]') as HTMLElement;
-    expect(figure.querySelector('[data-figure-hint]')?.textContent).toContain('预算用了 129%（上限 700 万）');
+    expect(document.querySelector('[data-figure-hint="输入当量"]')?.textContent).toContain(
+      '预算用了 129%（上限 700 万）',
+    );
   });
 
   test('四样没读全：输入当量收成一行灰字，不写 0，也不出预算用量', async () => {
@@ -233,9 +238,9 @@ describe('【失败】读不到的都写明，不写 0', () => {
     expect(within(segmentRow(box, 'unknown')).getAllByText('段名认不出').length).toBeGreaterThan(0);
     const runs = await panel('每一笔');
     expect(within(runRow(runs, 'x-2')).getByText(/段名「fusion-execute」认不出/)).toBeTruthy();
-    // 段标签用提醒色：断言 Tag 的 data-tone，不断言类名
+    // 段标签用提醒色（橙）：断言 Tag 的 data-look，不断言类名
     const tag = within(runRow(runs, 'x-2')).getByText('段名认不出');
-    expect(tag.getAttribute('data-tone')).toBe('stall');
+    expect(tag.getAttribute('data-look')).toBe('warning');
   });
 
   test('起止缺一头（单子结束了这一段还开着）：耗时写「没读到」，原因写在那一笔下面', async () => {
@@ -368,7 +373,8 @@ describe('【失败】读不到的都写明，不写 0', () => {
     const box = await panel('三段');
     const scope = segmentRow(box, 'scope');
     expect(within(scope).getByText('在对话里做的，不计')).toBeTruthy();
-    expect(within(scope).getByText(/不是没记，是不计/)).toBeTruthy();
+    // 为什么不计的整句话在悬停里
+    expect(scope.querySelector('[title*="不是没记，是不计"]')).toBeTruthy();
     expect(within(scope).queryByText('没有这一段的记录')).toBeNull();
     const verify = segmentRow(box, 'verify');
     expect(within(verify).getByText('没有这一段的记录')).toBeTruthy();
@@ -425,15 +431,14 @@ describe('首屏结论块（#1920，照路由页样板）', () => {
     await screen.findByRole('heading', { level: 1, name: /README/ });
     const hero = document.querySelector('[data-now-banner]') as HTMLElement;
     const line = hero.querySelector('[data-hero-line]') as HTMLElement;
-    expect(line.className).toContain('whitespace-nowrap');
-    expect(line.className).toContain('text-heading');
+    // 整句在悬停里（放不下时截断）；一句结论只配一个状态
     expect(line.getAttribute('title')).toMatch(/^做完了/);
-    expect(line.querySelectorAll('[data-tone][data-variant]')).toHaveLength(1);
-    const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
-    expect(notes.className).toContain('whitespace-nowrap');
-    expect(notes.textContent).toContain('acme/orbit-canary#9');
-    expect(notes.textContent).toMatch(/开单/);
-    expect(notes.textContent).toContain('PR #12');
+    expect(line.querySelectorAll('[data-status]')).toHaveLength(1);
+    // 下面是键值：仓和单号、开单多久、PR 和它的状态
+    expect(hero.textContent).toContain('acme/orbit-canary#9');
+    expect(hero.textContent).toMatch(/开单/);
+    expect(hero.textContent).toContain('PR #12');
+    expect(hero.querySelector('[data-pr="12"] [data-status="task:pr:merged"]')).toBeTruthy();
     // 「已完成」只在结论块里出现一次（原来页头说明和首屏状态条各一枚）
     expect(screen.getAllByText('已完成')).toHaveLength(1);
     // 各块的长说明收进页头 ⓘ
@@ -459,7 +464,7 @@ describe('首屏结论块（#1920，照路由页样板）', () => {
     fail = true;
     fireEvent.click(screen.getByRole('button', { name: '刷新' }));
     // 「三段」顶上本来就有一条没读到的提醒（也是 alert），按字找这一条
-    const text = await screen.findByText(/这张单刷新没读成，下面是上一次读到的/, undefined, {
+    const text = await screen.findByText(/这张单刷新没成，下面是.*读到的/, undefined, {
       timeout: 8000,
     });
     const alert = text.closest('[role="alert"]') as HTMLElement;
@@ -467,7 +472,7 @@ describe('首屏结论块（#1920，照路由页样板）', () => {
     expect(screen.getByRole('heading', { name: '每一笔' })).toBeTruthy();
     fail = false;
     fireEvent.click(within(alert).getByRole('button', { name: '重试' }));
-    await waitFor(() => expect(screen.queryByText(/刷新没读成/)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/这张单刷新没成/)).toBeNull());
   }, 15000);
 });
 

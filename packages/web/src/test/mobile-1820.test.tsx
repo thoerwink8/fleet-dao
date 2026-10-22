@@ -124,35 +124,27 @@ describe('任务详情手机首屏一行摘要', () => {
       <Routes>
         <Route path="/tasks/:taskId" element={<TaskPage />} />
       </Routes>,
-      { route: '/tasks/t-c9' },
+      { route: '/tasks/t-c9?tab=usage' },
     );
 
-  test('手机：默认一行摘要，统计卡收着；点开才出四张卡', async () => {
+  // #3509：任务页收成页签后，用量几个数在「用量与模型」页签里，本来就不占首屏；手机上不再另收成一行摘要，
+  // 四个指标（已用时、干活合计、输入当量、花费；#2859 去掉了折算 token）直接摆着，手机两个一行
+  test('手机：四个指标直接摆着，不再先收成一行摘要', async () => {
     viewport(390);
     open();
-    const summary = await waitFor(() => {
-      const el = document.querySelector('[data-stats-summary]');
-      if (!el) throw new Error('还没出摘要');
-      return el as HTMLElement;
-    });
-    expect(summary.getAttribute('aria-expanded')).toBe('false');
-    // 耗时 · 花费 · 段，一行
-    expect(summary.textContent).toMatch(/(共|已用) .+ · .+ · \d+ 段/);
-    expect(document.querySelector('[data-segment-stats] .grid')).toBeNull();
-    expect(screen.queryByText('输入当量')).toBeNull();
-
-    fireEvent.click(summary);
-    expect(summary.getAttribute('aria-expanded')).toBe('true');
-    const grid = document.querySelector('[data-segment-stats] .grid') as HTMLElement;
-    expect(grid.children.length).toBe(4); // 已用时、干活合计、输入当量、花费（#2859 去掉了折算 token）
-    expect(screen.getByText('输入当量')).toBeTruthy();
+    await screen.findByText('输入当量');
+    expect(document.querySelector('[data-stats-summary]')).toBeNull();
+    const grid = document.querySelector('[data-segment-stats] [data-cols]') as HTMLElement;
+    expect(grid.children.length).toBe(4);
   });
 
-  test('电脑：没有摘要，四张卡直接铺开', async () => {
+  test('电脑：没有摘要，四个指标直接铺开', async () => {
     viewport(1366);
     open();
     await screen.findByText('输入当量');
     expect(document.querySelector('[data-stats-summary]')).toBeNull();
+    const grid = document.querySelector('[data-segment-stats] [data-cols]') as HTMLElement;
+    expect(grid.children.length).toBe(4);
   });
 
   test('手机：任务页头的状态行不收起（它是关键信息）', async () => {

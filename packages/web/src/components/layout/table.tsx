@@ -15,6 +15,8 @@ export interface TableColumn<T> {
   align?: 'left' | 'right' | 'center';
   /** 列宽（设计值，px）；不写按内容。 */
   width?: number;
+  /** 这一列的字可以折行（备注、原因这类长句）；不写＝不折，列宽跟着内容。折行的列至少 16rem 宽，窄了表格自己横滚。 */
+  wrap?: boolean;
   /** 自己画这一格。value 是 row[key]。 */
   render?: (value: unknown, row: T, index: number) => ReactNode;
 }
@@ -208,7 +210,14 @@ export function Table<T extends object>({
                   {columns.map((c) => {
                     const value = (row as Record<string, unknown>)[c.key];
                     return (
-                      <td key={c.key} className={cn(cellCls, ALIGN[c.align ?? 'left'])}>
+                      <td
+                        key={c.key}
+                        className={cn(
+                          cellCls,
+                          ALIGN[c.align ?? 'left'],
+                          c.wrap && 'min-w-64 whitespace-normal break-words',
+                        )}
+                      >
                         {c.render ? c.render(value, row, index) : cellText(value)}
                       </td>
                     );

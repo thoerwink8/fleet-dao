@@ -1,40 +1,27 @@
 // @vitest-environment happy-dom
-// 任务页花费一格（#1496）：按量、套餐内折合上下两行各带标签；大字只给按量真花的钱。
-// 三段表耗时列（#1533）：字不换行；列宽是各行共用的固定长度，不用 max-content。
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// 任务页花费一格（#1496）：大字只给按量真花的钱，套餐内折合写在下面的灰字里。
+// 三段表（#1533）：耗时格字不换行；表头、段行、模型行是同一张表里的行，列一定对得齐（原来是各自一个 grid，要靠共用列宽守）。
 import { cleanup, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from './segment-usage';
 
-/** grid-cols-segments 写在 app.css 里的那一行列宽（空白折成一行）。读不到就失败，不当成没有这条规则。 */
-function segmentColumns(): string {
-  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../app.css'), 'utf8');
-  const start = css.indexOf('@utility grid-cols-segments');
-  if (start < 0) throw new Error('app.css 里没有 grid-cols-segments');
-  const next = css.indexOf('@utility', start + 1);
-  const block = css.slice(start, next === -1 ? undefined : next);
-  const found = block.match(/grid-template-columns:\s*([\s\S]*?);/);
-  if (!found?.[1]) throw new Error('grid-cols-segments 没有写出列宽');
-  return found[1].replace(/\s+/g, ' ').trim();
-}
-
 afterEach(cleanup);
 
-describe('花费一格两行', () => {
-  test('按量和套餐内折合两个标签都在，上下排列，大字只在按量那一行', async () => {
+describe('花费一格', () => {
+  test('大字只在按量那一格（标签写「按量花费」）；套餐内折合另写一行灰字，不跟大字并排', async () => {
     const d = await createMockApi({ live: false }).task('t-12');
     // t-12 的三段流水只走套餐内。按量那一笔原先在老流程会话里，那一路已经不进用量，这里补上一笔按量才看得到大字。
     d.usage.total.cost.metered = { runs: 1, usd: 0.08, missing: 0 };
     render(<SegmentStats d={d} now={Date.now()} />);
-    const metered = screen.getByText('按量');
-    const folded = screen.getByText('套餐内折合');
-    const lines = document.querySelector('[data-cost]');
-    expect(lines?.className).toContain('flex-col');
-    expect(metered.nextElementSibling?.getAttribute('data-large')).toBe('true');
-    expect(folded.parentElement?.hasAttribute('data-large')).toBe(false);
+    const metered = document.querySelector('[data-metered]');
+    expect(screen.getByText('按量花费')).toBeTruthy();
+    expect(metered?.getAttribute('data-large')).toBe('true');
+    expect(metered?.textContent).toBe('$0.08');
+    const folded = document.querySelector('[data-figure-hint="套餐内折合"]');
+    expect(folded?.textContent).toContain('套餐内折合：');
+    expect(folded?.hasAttribute('data-large')).toBe(false);
   });
 
   test('四样 token 都没读到：写另有 N 段读不到用量', async () => {
@@ -45,17 +32,21 @@ describe('花费一格两行', () => {
   });
 });
 
-describe('三段表耗时列', () => {
+describe('三段表', () => {
   test('动手段显示没续上会话的原因', async () => {
     const d = await createMockApi({ live: false }).task('t-12');
     const manual = d.segmentRuns.find((run) => run.segment === 'manual');
     if (!manual) throw new Error('t-12 没有动手段');
     manual.resumeReason = '上一段没记下会话号';
-    render(<SegmentRunList d={d} now={Date.now()} onViewTranscript={() => {}} />);
+    render(
+      <MemoryRouter>
+        <SegmentRunList d={d} now={Date.now()} onViewTranscript={() => {}} />
+      </MemoryRouter>,
+    );
     expect(screen.getByText('为什么没续上：上一段没记下会话号')).toBeTruthy();
   });
 
-  test('「在跑 40 分钟」不换行；表头、段行、模型行共用固定耗时列，不用 max-content', async () => {
+  test('「在跑 40 分钟」不换行；表头、段行、模型行在同一张表里，格子数一样（列对得齐）', async () => {
     const t = Date.parse('2026-10-10T12:00:00Z');
     const d = await createMockApi({ live: false, now: () => t }).task('t-12');
     const manual = d.usage.bySegment.find((s) => s.segment === 'manual');
@@ -66,29 +57,20 @@ describe('三段表耗时列', () => {
 
     const notes = screen.getAllByText('在跑 40 分钟');
     expect(notes.length).toBeGreaterThan(0);
-    for (const note of notes) {
-      const line = note.closest('.whitespace-nowrap');
-      expect(line, '耗时格要带 whitespace-nowrap').toBeTruthy();
-      // 电脑上 min-w-0：长句子不能把这一行的固定耗时列撑得比表头宽，否则后面的列错位。
-      expect(line?.parentElement?.className ?? '').toContain('md:min-w-0');
-    }
     const note = notes[0];
     if (!note) throw new Error('没有「在跑 40 分钟」');
+    // 表格的格子默认不折行（whitespace-nowrap 在 Table 里一处写好），长句子不会从「分钟」中间断开
+    const cell = note.closest('td');
+    expect(cell, '耗时在表格的格子里').toBeTruthy();
+    expect(cell?.className ?? '').toContain('whitespace-nowrap');
 
-    const header = screen.getByText('段 / 模型').parentElement;
-    const segmentRow = note.closest('[data-segment="manual"]')?.firstElementChild;
-    const modelRow = document.querySelector('li[data-model]');
-    for (const row of [header, segmentRow, modelRow]) {
-      expect(row?.className ?? '', '表头、段行、模型行要同一套列宽').toContain('md:grid-cols-segments');
+    const table = note.closest('table');
+    const headCells = table?.querySelectorAll('thead th').length ?? 0;
+    expect(headCells).toBeGreaterThan(0);
+    for (const key of ['manual', 'manual/gpt-5.6-luna']) {
+      const row = table?.querySelector(`tr[data-row-key="${key}"]`);
+      expect(row, `三段表里有 ${key} 这一行`).toBeTruthy();
+      expect(row?.querySelectorAll('td').length, `${key} 这一行的格子数要和表头一样`).toBe(headCells);
     }
-    // 表头格子也要能缩到列宽以下，否则「token（输入 / 输出）」的最小内容会把表头的列撑得比数据行宽。
-    expect(header?.className ?? '').toContain('[&>span]:min-w-0');
-
-    // 耗时是第 4 列，固定长度。max-content 会按本行内容各算各的，表头和数据行对不齐。
-    const columns = segmentColumns();
-    expect(columns).toBe(
-      'minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) 8.5rem minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr) minmax(0, 2fr)',
-    );
-    expect(columns).not.toContain('max-content');
   });
 });

@@ -1,9 +1,8 @@
 // 任务列表页（/tasks，#1639）的纯逻辑：筛选条件和地址栏查询串互转、详情页「返回」落到哪、一行里各样东西怎么说。
 // 筛选全写在地址栏（?status=&repo=&q=）：刷新、返回、复制链接都保得住。不认的值当没给，不报错。
 import { TASK_LIST_GROUP_LABELS, TASK_LIST_GROUPS, type TaskListGroup } from '@fleet-dao/shared';
-import type { TaskListFilter, TaskListRow } from '../api/types';
-import type { Tone } from './status';
-import { taskStateLabel, taskTone } from './status';
+import type { TaskList, TaskListFilter, TaskListRow } from '../api/types';
+import { type StatusKey, toStatus } from '../theme/status-dict';
 
 export const TASKS_PATH = '/tasks';
 
@@ -84,8 +83,16 @@ export const segmentText: Record<NonNullable<TaskListRow['segment']>, string> = 
   merge: '合并',
 };
 
-/** 一行状态芯片的颜色和字：暂停的单 state 仍是在干活，但人让它停了，画成等待色，不画成失败。 */
-export function rowStatus(row: Pick<TaskListRow, 'state' | 'paused'>): { tone: Tone; label: string } {
-  if (row.paused !== undefined) return { tone: 'stall', label: '已暂停' };
-  return { tone: taskTone(row), label: taskStateLabel[row.state] };
+/** 一行状态的字典键：暂停的单 state 仍是在干活，但人让它停了，归「已暂停」（等人），不画成在干活也不画成失败。 */
+export function rowStatusKey(row: Pick<TaskListRow, 'state' | 'paused'>): StatusKey {
+  if (row.paused !== undefined) return 'task:paused';
+  return toStatus('task', row.state);
+}
+
+/** 翻页过程中单子的更新时刻会变，同一张单可能在两页都出现：只留先出现的那一行。 */
+export function dedupeRows(pages: readonly Pick<TaskList, 'items'>[]): TaskListRow[] {
+  const seen = new Map<string, TaskListRow>();
+  for (const page of pages)
+    for (const row of page.items) if (!seen.has(row.taskId)) seen.set(row.taskId, row);
+  return [...seen.values()];
 }

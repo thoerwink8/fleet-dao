@@ -119,8 +119,9 @@ describe('任务列表页', () => {
     expect(meta.textContent).toContain('example/canary#1');
     expect(meta.textContent).toContain('Opus 5.5');
     expect(meta.textContent).toContain('PR #7');
-    // StatusBadge 带 data-variant（里面的点只有 data-tone）
-    expect(link.querySelectorAll('[data-tone][data-variant]').length).toBe(1);
+    // 字典状态 StatusBadge 带 data-status，一行只有一个
+    expect(link.querySelectorAll('[data-status]').length).toBe(1);
+    expect(link.querySelector('[data-status]')?.getAttribute('data-status')).toBe('task:running');
   });
 
   test('刷新没读成：上一次的列表留着，顶上横幅写明是上一次的、带重试', async () => {
@@ -135,7 +136,8 @@ describe('任务列表页', () => {
     fail = true;
     fireEvent.click(screen.getByRole('button', { name: '刷新' }));
     const alert = await screen.findByRole('alert', undefined, { timeout: 8000 });
-    expect(alert.textContent).toContain('刷新没读成，下面是上一次读到的');
+    expect(alert.textContent).toContain('任务列表刷新没成，下面是');
+    expect(alert.textContent).toContain('读到的');
     expect(alert.textContent).toContain('后端出错了');
     expect(screen.getByText('留着的单')).toBeTruthy();
     fail = false;
@@ -357,7 +359,7 @@ describe('任务列表页', () => {
     // 原来断言表头有「单」「状态」「花费」；#1919 起没有表头，改成：每一行都有标题、一个状态和花费那一格
     for (const title of ['在跑有花费', '花费读不到', '已结束没花费']) {
       const a = (await screen.findByText(title)).closest('a') as HTMLElement;
-      expect(a.querySelectorAll('[data-tone][data-variant]').length).toBe(1);
+      expect(a.querySelectorAll('[data-status]').length).toBe(1);
       expect(a.querySelector('[data-cost-col]')).not.toBeNull();
     }
     expect(screen.queryByText('没读到')).toBeNull();

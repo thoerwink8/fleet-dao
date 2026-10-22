@@ -20,6 +20,7 @@ import type {
   NotWired,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
+import type { StaleInfo } from '../../lib/query-view';
 
 /** 「要你拍的」一条：谁发起的、等什么、去哪答。 */
 export type HomeDecision = z.infer<typeof HomeDecisionSchema>;
@@ -79,4 +80,4 @@ export type HomeState =
   | { status: 'loading' }
   | { status: 'error'; error: unknown; retry?: () => void }
   | { status: 'notWired'; notWired: NotWired }
-  | { status: 'data'; data: HomeData };
+  | { status: 'data'; data: HomeData; stale?: StaleInfo };

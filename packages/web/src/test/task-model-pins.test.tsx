@@ -162,17 +162,14 @@ describe('现在就换（#1216）', () => {
     open('/tasks/t-12', api);
     const manual = await row('manual');
     // 没点之前不发、也不先摆出确认
-    expect(manual.querySelector('[data-repin-confirm]')).toBeNull();
+    expect(screen.queryByRole('alertdialog')).toBeNull();
     fireEvent.click(await within(manual).findByRole('button', { name: '现在就换' }));
-    const confirm = await waitFor(() => {
-      const el = manual.querySelector('[data-repin-confirm]');
-      if (!el) throw new Error('没有摆出确认');
-      return el;
-    });
+    // 确认框盖在页面上（不再是行里的一条）：先写明代价
+    const confirm = await screen.findByRole('alertdialog');
     expect(confirm.textContent).toContain('已花的 token 不退');
     expect(confirm.textContent).toContain('从分支上接着做');
     expect(sent).toEqual([]);
-    fireEvent.click(within(manual).getByRole('button', { name: '确认现在就换' }));
+    fireEvent.click(within(confirm).getByRole('button', { name: '确认现在就换' }));
     await waitFor(() =>
       expect(sent).toEqual([{ segment: 'manual', modelId: 'kimi-k3', routeId: null, now: true }]),
     );
@@ -191,9 +188,12 @@ describe('现在就换（#1216）', () => {
     open('/tasks/t-12', api);
     const manual = await row('manual');
     fireEvent.click(await within(manual).findByRole('button', { name: '现在就换' }));
-    fireEvent.click(await within(manual).findByRole('button', { name: '确认现在就换' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认现在就换' }));
     await waitFor(() => expect(sent).toHaveLength(1));
-    expect(manual.querySelector('[data-repin-confirm]')).not.toBeNull();
+    // 确认框留着、红字写原因（不当成换成了），确认键恢复能再点
+    const dialog = await screen.findByRole('alertdialog');
+    await waitFor(() => expect(within(dialog).getByRole('alert').textContent).toContain('这张单现在不在跑'));
+    expect(within(dialog).getByRole('button', { name: '确认现在就换' })).toBeTruthy();
   });
 
   test('【故意造出的失败】没有在跑的动手会话（#14 动手上一轮已收场，在跑的是验收）：动手那一行没有「现在就换」；验收那一行也没有', async () => {
@@ -209,10 +209,10 @@ describe('每个环节的花费：没报的按目录单价估', () => {
   test('#14 动手有一笔订阅制没报花费：段那一格写「估算」，那一笔写估算的数；顶上花费写另估多少', async () => {
     open('/tasks/t-14');
     const box = (await screen.findByRole('heading', { name: '三段' })).closest('section');
-    const manual = box?.querySelector('[data-segment="manual"]');
+    const manual = box?.querySelector('tr[data-row-key="manual"]');
     expect(manual?.textContent).toContain('估算 $0.12');
     const run = await waitFor(() => {
-      const el = document.querySelector('[data-run="seg-t-14-manual-170"]');
+      const el = document.querySelector('tr[data-row-key="seg-t-14-manual-170"]');
       if (!el) throw new Error('每一笔里没有那一笔');
       return el;
     });
@@ -223,12 +223,12 @@ describe('每个环节的花费：没报的按目录单价估', () => {
   test('【故意造出的失败】Kimi 有单价了，但这一笔缓存读写没读到：写「估不了」和缺哪几样，不写 $0、不写「没有单价」', async () => {
     open('/tasks/t-c9');
     const run = await waitFor(() => {
-      const el = document.querySelector('[data-run="seg-c9-2"]');
+      const el = document.querySelector('tr[data-row-key="seg-c9-2"]');
       if (!el) throw new Error('每一笔里没有 Kimi 那一笔');
       return el;
     });
     expect(run.querySelector('[data-estimate-gap]')?.textContent).toContain('没读到缓存读、缓存写，估不了');
-    const manual = document.querySelector('[data-segment="manual"] [data-model="kimi-k3"]');
+    const manual = document.querySelector('tr[data-row-key="manual/kimi-k3"]');
     expect(manual?.textContent).toContain('估不了');
     expect(manual?.textContent).not.toContain('没有单价');
     expect(manual?.textContent).not.toContain('$0.00');

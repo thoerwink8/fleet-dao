@@ -1,9 +1,9 @@
-// 任务页的三段（对题 / 动手 / 验收）那几块：合计四格、按段每段再按模型的表、每一笔的明细（#216）。
+// 任务页的三段（对题 / 动手 / 验收）那几块：合计几个数、按段每段再按模型的表、每一笔的明细（#216）。
 // 数都是后端算好的（usage.bySegment、segmentRuns，算法在 shared 的 usage.ts、segment-runs.ts），这里只管怎么说：
 // 读到的照数写；读到一部分照数写、写明几次没读到；全没读到写「没读到」，不写 0；每一笔没读到的原因原样列出来。
+// 只拼 components/layout 的件，不写样式（#3533）。
 import { type SegmentKind, USAGE_BOARD_UNREAD, type UsageTotals } from '@fleet-dao/shared';
-import { ChevronDown } from 'lucide-react';
-import { Fragment, type ReactNode, useState } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import type { Repo, TaskDetail } from '../api/types';
 import { formatClock, formatCount, formatDateTime, formatDuration, formatUsd, span } from '../lib/format';
 import {
@@ -16,45 +16,49 @@ import {
   type SegmentTotals,
   segmentHint,
   segmentLabel,
-  segmentOutcomeLabel,
-  segmentOutcomeTone,
   tierLabel,
   tierText,
   UNKNOWN_SEGMENT,
   unreadItemLabel,
 } from '../lib/segments';
 import { isTaskFinished } from '../lib/status';
+import { runOrder } from '../lib/task-process';
 import { budgetUsedText, costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage';
-import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
+import type { StatusKey } from '../theme/status-dict';
+import { Button } from './layout/button';
 import { Code } from './layout/code';
 import { Notice } from './layout/notice';
-import { Section } from './layout/section';
+import { Stack } from './layout/stack';
+import { Stat, StatGrid } from './layout/stat';
 import { StatusBadge } from './layout/status-badge';
+import { Table, type TableColumn } from './layout/table';
 import { Tag } from './layout/tag';
+import { Text } from './layout/text';
 import { RepoLink } from './repo-link';
-import { Button } from './ui/button';
 
-/** 一项读数怎么写：全读到照写；读到一部分照写、写明几次没读到；全没读到写「没读到」；没有结束了的写 empty。 */
+/** 一项读数怎么写：全读到照写；读到一部分照写、写明几次没读到；全没读到写 —；没有结束了的写 empty。 */
 function Read({ r, empty = '—', children }: { r: Reading; empty?: ReactNode; children: ReactNode }) {
-  if (r.kind === 'none') return <span className="text-muted-foreground">{empty}</span>;
+  if (r.kind === 'none') return <Text tone="muted">{empty}</Text>;
   if (r.kind === 'missing') {
     // 没读到的格子只留 —；读不到的是什么、为什么，由区块顶上那一条 Notice 和「每一笔」说（#1903）
     return (
-      <span className="text-muted-foreground" data-unread title="没读到">
-        —
+      <span data-unread title="没读到">
+        <Text tone="muted">—</Text>
       </span>
     );
   }
   return (
-    <>
-      <span className="num">{children}</span>
+    <Stack gap="sm">
+      <Text>{children}</Text>
       {r.kind === 'partial' ? (
-        <span className="block text-meta text-muted-foreground" data-partial>
-          另有 {r.missing} 次没读到
+        <span data-partial>
+          <Text size="meta" tone="muted">
+            另有 {r.missing} 次没读到
+          </Text>
         </span>
       ) : null}
-    </>
+    </Stack>
   );
 }
 
@@ -90,65 +94,22 @@ function costCollapseLabel(t: UsageTotals): string | undefined {
   return undefined;
 }
 
-/** 手机一行摘要里的花费：和花费那一格同一套取舍，只留一个短词。 */
-function costBrief(t: UsageTotals): string {
-  const { metered, subscription, unknown } = t.cost;
-  const meteredR = reading(metered.usd, metered.missing, metered.runs);
-  const subR = reading(subscription.usd, subscription.missing, subscription.runs);
-  const pick = metered.runs ? metered : subscription.runs ? subscription : unknown;
-  const r = reading(pick.usd, pick.missing, pick.runs);
-  const e = t.estimate;
-  if (r.kind === 'missing' && (e.runs || e.noPrice || e.noTokens)) {
-    return e.runs ? `估算 ${formatUsd(e.usd)}` : e.noPrice ? '没有单价' : '估不了';
-  }
-  if (r.kind === 'missing') return '花费没读到';
-  if (r.kind === 'none') return '花费 —';
-  if (meteredR.kind === 'full' || meteredR.kind === 'partial') return formatUsd(meteredR.value);
-  if (subR.kind === 'full' || subR.kind === 'partial') return `折合 ${formatUsd(subR.value)}`;
-  return `花费 ${shareText(meteredR)}`;
+function shareText(r: Reading): string {
+  if (r.kind === 'none') return '—';
+  if (r.kind === 'missing') return '没读到';
+  return formatUsd(r.value);
 }
 
-/**
- * 结论块下面的一个数（#1920，照路由页样板）：不再是一张张带框的大卡片，而是一排不带框的数，桌面上用细竖线隔开；
- * 标签一行灰字、数一行（区块标题那一档，比页标题小）、说明一行灰字（放不下截断，整句在悬停里）。
- */
-function Figure({
-  label,
-  value,
-  hint,
-  title,
-  tone,
-}: {
-  label: string;
-  value: ReactNode;
-  hint?: ReactNode;
+interface FigureNote {
+  /** 是哪个数的说明（写在 data-figure-hint 上）。 */
+  of: string;
+  text: string;
   /** 悬停看的细账（折法）。 */
   title?: string;
-  tone?: 'stall' | undefined;
-}) {
-  return (
-    <div
-      data-tone={tone}
-      data-figure
-      title={title}
-      className="min-w-0 xl:border-l xl:pl-4 xl:first:border-l-0 xl:first:pl-0"
-    >
-      <div className="text-meta text-muted-foreground">{label}</div>
-      <div className={cn('num mt-1 text-heading', tone && 'text-ink-stall')}>{value}</div>
-      {hint ? (
-        // 小字放不下就换行，不用省略号截断（#2859：一截断，「预算用了多少、哪几次没读到」就看不全）
-        <div data-figure-hint className="mt-0.5 break-words text-meta text-muted-foreground">
-          {hint}
-        </div>
-      ) : null}
-    </div>
-  );
 }
 
-/** 顶上几个数：已用时、干活合计、输入当量、花费。没读到的不占一格，收成一行灰字（#1751）。 */
+/** 顶上几个数：已用时、干活合计、输入当量、花费。没读到的不占一格，收成一行灰字（#1751）；每个数的说明（几次没读到、预算用量）写在下面一行行灰字里。 */
 export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
-  const phone = usePhone();
-  const [expanded, setExpanded] = useState(false);
   const t = d.usage.total;
   const live = d.segmentRuns
     .map((r) => liveMs(r, now))
@@ -165,125 +126,91 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
         ? `${r.missing} 次都没读到${what}`
         : undefined;
 
-  const cards: ReactNode[] = [
-    <Figure
-      key="wall"
-      label={finished ? '总耗时' : '已用时'}
-      value={formatDuration(wallMs(d, now))}
-      hint={finished ? '从开单到最后一段收场' : '从开单算到现在'}
-    />,
+  const stats: ReactNode[] = [
+    <Stat key="wall" label={finished ? '总耗时' : '已用时'} value={formatDuration(wallMs(d, now))} />,
   ];
+  const notes: FigureNote[] = [];
   const collapsed: string[] = [];
 
   if (work.kind === 'missing') {
     collapsed.push('干活合计没读到');
   } else {
-    cards.push(
-      <Figure
+    stats.push(
+      <Stat
         key="work"
         label="干活合计"
         value={
           work.kind === 'none' && !live ? '—' : formatDuration((work.kind === 'none' ? 0 : work.value) + live)
         }
-        hint={
-          missingNote(work, '耗时') ??
-          (live ? `含在跑的 ${t.running} 段，算到现在` : work.kind === 'none' ? notYet : '各段起止加起来')
-        }
       />,
     );
+    const hint =
+      missingNote(work, '耗时') ??
+      (live ? `含在跑的 ${t.running} 段，算到现在` : work.kind === 'none' ? notYet : '');
+    if (hint) notes.push({ of: '干活合计', text: hint });
   }
 
   // 输入当量：额度和每单 token 预算都按它比（#2859），预算用量写在小字里；折法放悬停，原始四样在下面的段表里
   if (equivalent.kind === 'missing') {
     collapsed.push('输入当量没读到');
   } else {
-    cards.push(
-      <Figure
+    stats.push(
+      <Stat
         key="equivalent"
         label="输入当量"
         value={equivalent.kind === 'none' ? '—' : formatCount(equivalent.value)}
-        title={`按${EQUIVALENT_RULE}折`}
-        hint={
-          equivalent.kind === 'none'
-            ? notYet
-            : [budgetUsedText(equivalent.value), missingNote(equivalent, ' token ')]
-                .filter(Boolean)
-                .join(' · ')
-        }
       />,
     );
+    const hint =
+      equivalent.kind === 'none'
+        ? notYet
+        : [budgetUsedText(equivalent.value), missingNote(equivalent, ' token ')].filter(Boolean).join(' · ');
+    if (hint) notes.push({ of: '输入当量', text: hint, title: `按${EQUIVALENT_RULE}折` });
   }
 
   const costCollapsed = costCollapseLabel(t);
   if (costCollapsed) collapsed.push(costCollapsed);
-  else cards.push(<CostStat key="cost" t={t} notYet={notYet} />);
-
-  // 有几张大格排几栏；四格手机就是 2×2（#1802，一行一张页面太长），电脑宽屏四列并排；三格手机一列
-  const cols =
-    cards.length === 4
-      ? 'grid-cols-2 gap-4 xl:grid-cols-4'
-      : cards.length === 3
-        ? 'grid-cols-1 gap-3 sm:grid-cols-3'
-        : 'grid-cols-2 gap-3';
-
-  const wallText = formatDuration(wallMs(d, now));
-  const segmentCount = new Set(d.segmentRuns.map((r) => r.segment).filter(Boolean)).size;
+  else {
+    const cost = costStat(t, notYet);
+    stats.push(cost.stat);
+    notes.push(...cost.notes);
+  }
 
   return (
     <div data-segment-stats>
-      {phone ? (
-        // 手机首屏只放一行摘要（耗时 · 花费 · 段），点开才出四张统计卡（#1820）
-        <>
-          <Section flush>
-            <button
-              type="button"
-              data-stats-summary
-              aria-expanded={expanded}
-              onClick={() => setExpanded((v) => !v)}
-              className="flex min-h-10 w-full items-center gap-2 px-4 py-2 text-left text-body"
-            >
-              <span className="num min-w-0 flex-1 truncate">
-                {finished ? '共' : '已用'} {wallText} · {costBrief(t)} · {segmentCount} 段
-              </span>
-              <ChevronDown
-                className={cn(
-                  'size-4 shrink-0 text-muted-foreground transition-transform',
-                  expanded && 'rotate-180',
-                )}
-                aria-hidden
-              />
-            </button>
-          </Section>
-          {expanded ? <div className={cn('mt-3 grid', cols)}>{cards}</div> : null}
-        </>
-      ) : (
-        <div className={cn('grid', cols)}>{cards}</div>
-      )}
-      {collapsed.length ? (
-        <p className="mt-2 text-meta text-muted-foreground" data-stats-unread title={collapsed.join(' · ')}>
-          {collapsed.join(' · ')}
-        </p>
-      ) : null}
-      {(t.unreadSegments ?? 0) > 0 ? (
-        <p className="mt-2 text-meta text-muted-foreground" data-unread-segments>
-          另有 {t.unreadSegments} 段读不到用量
-        </p>
-      ) : null}
+      <Stack gap="md">
+        <StatGrid cols={stats.length === 4 ? 4 : stats.length === 3 ? 3 : 2}>{stats}</StatGrid>
+        {notes.map((n) => (
+          <span key={n.of} data-figure-hint={n.of} {...(n.title ? { title: n.title } : {})}>
+            <Text size="meta" tone="muted">
+              {n.of}：{n.text}
+            </Text>
+          </span>
+        ))}
+        {collapsed.length ? (
+          <span data-stats-unread title={collapsed.join(' · ')}>
+            <Text size="meta" tone="muted">
+              {collapsed.join(' · ')}
+            </Text>
+          </span>
+        ) : null}
+        {(t.unreadSegments ?? 0) > 0 ? (
+          <span data-unread-segments>
+            <Text size="meta" tone="muted">
+              另有 {t.unreadSegments} 段读不到用量
+            </Text>
+          </span>
+        ) : null}
+      </Stack>
     </div>
   );
 }
 
-function shareText(r: Reading): string {
-  if (r.kind === 'none') return '—';
-  if (r.kind === 'missing') return '没读到';
-  return formatUsd(r.value);
-}
-
 /**
- * 花费一格：按量、套餐内折合上下两行，各带标签。大字只给按量（真花的钱）；折合用小字，不跟大字并排。
+ * 花费一格：大字只给按量（真花的钱）；套餐内折合写在下面的灰字里，不跟大字并排。
  * 执行体一笔花费都没报（订阅制）时仍写按目录单价的估算；估都估不了的写明为什么，不写 0。
  */
-function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
+function costStat(t: UsageTotals, notYet: string): { stat: ReactNode; notes: FigureNote[] } {
   const { metered, subscription, unknown } = t.cost;
   const meteredR = reading(metered.usd, metered.missing, metered.runs);
   const subR = reading(subscription.usd, subscription.missing, subscription.runs);
@@ -298,17 +225,23 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
   ].filter(Boolean);
   if (r.kind === 'missing' && (e.runs || e.noPrice || e.noTokens)) {
     // 一笔都没报花费：大字写估算（标「估算」），估不了的写原因
-    return (
-      <Figure
-        label="花费"
-        value={e.runs ? `估算 ${formatUsd(e.usd)}` : e.noPrice ? '没有单价' : '估不了'}
-        tone={e.runs ? undefined : 'stall'}
-        hint={['执行体没报花费，按目录单价 × token 估', ...estimateNotes.slice(e.runs ? 1 : 0)].join(' · ')}
-      />
+    const hint = ['执行体没报花费，按目录单价 × token 估', ...estimateNotes.slice(e.runs ? 1 : 0)].join(
+      ' · ',
     );
+    return {
+      stat: (
+        <Stat
+          key="cost"
+          label="花费"
+          value={e.runs ? `估算 ${formatUsd(e.usd)}` : e.noPrice ? '没有单价' : '估不了'}
+          tone={e.runs ? undefined : 'stall'}
+        />
+      ),
+      notes: [{ of: '花费', text: hint }],
+    };
   }
-  if (r.kind === 'none') return <Figure label="花费" value="—" hint={notYet} />;
-  const meteredLarge = meteredR.kind === 'full' || meteredR.kind === 'partial';
+  if (r.kind === 'none')
+    return { stat: <Stat key="cost" label="花费" value="—" />, notes: [{ of: '花费', text: notYet }] };
   const notes = [
     meteredR.kind === 'partial' ? `按量另有 ${meteredR.missing} 次没读到` : '',
     subR.kind === 'partial' ? `套餐内另有 ${subR.missing} 次没读到` : '',
@@ -317,153 +250,78 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
     unknownR.kind === 'partial' ? `分不清的另有 ${unknownR.missing} 次没读到` : '',
     ...estimateNotes,
   ].filter(Boolean);
-  // 两行：「按量 $x」（真花的钱，数用这一格的字号）；下面一行灰字「套餐内折合 $y」。说明（几次没读到、另估）在第三行，悬停看全
-  return (
-    <Figure
-      label="花费"
-      value={
-        <span data-cost className="flex flex-col items-start gap-0.5 font-normal">
-          <span className="flex items-baseline gap-1.5">
-            <span className="text-meta font-normal text-muted-foreground" title="按量计费：真花的钱">
-              按量
-            </span>
-            <span
-              data-metered
-              data-large={meteredLarge}
-              className={cn(
-                'num',
-                meteredLarge ? 'text-heading' : 'text-body font-medium',
-                meteredR.kind === 'missing' && 'text-ink-stall',
-              )}
-            >
-              {shareText(meteredR)}
-            </span>
+  const meteredLarge = meteredR.kind === 'full' || meteredR.kind === 'partial';
+  return {
+    stat: (
+      <Stat
+        key="cost"
+        label="按量花费"
+        value={
+          <span data-cost data-metered data-large={meteredLarge}>
+            {shareText(meteredR)}
           </span>
-          <span
-            className="text-meta font-normal text-muted-foreground"
-            title="套餐内：按 API 价折合，账单不因它多一笔"
-          >
-            <span>套餐内折合</span> {shareText(subR)}
-          </span>
-        </span>
-      }
-      hint={notes.length ? notes.join(' · ') : undefined}
-    />
-  );
-}
-
-/** 表的列：段（或模型）、次数、派工档、耗时、token、缓存、当量、花费。电脑上一行（耗时列固定宽、不换行），手机上两列、每格带名字；表头和每行共用同一套列宽。 */
-const COLUMNS = 'grid-cols-2 gap-x-4 gap-y-1.5 md:grid-cols-segments md:items-baseline md:gap-y-0';
-const ROW = cn('grid', COLUMNS);
-
-function Cell({
-  label,
-  className,
-  nowrap,
-  children,
-}: {
-  label: string;
-  className?: string;
-  /** 耗时格：字不换行。电脑上 min-w-0，长句子不能把固定的耗时列撑得比别的行宽。 */
-  nowrap?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div className={cn(nowrap ? 'whitespace-nowrap md:min-w-0' : 'min-w-0', className)}>
-      <div className="text-meta text-muted-foreground md:hidden">{label}</div>
-      <div className={cn('text-body', nowrap ? 'whitespace-nowrap' : 'min-w-0')}>{children}</div>
-    </div>
-  );
+        }
+        tone={meteredR.kind === 'missing' ? 'stall' : undefined}
+      />
+    ),
+    notes: [
+      { of: '套餐内折合', text: shareText(subR), title: '套餐内：按 API 价折合，账单不因它多一笔' },
+      ...(notes.length ? [{ of: '花费', text: notes.join(' · ') }] : []),
+    ],
+  };
 }
 
 /** 花费那一格：按量、套餐内、分不清各一行（说法和 lib/usage 的 costParts 一样），读到一部分的另起一行写几次没读到。 */
 function CostCell({ t }: { t: UsageTotals }) {
   const parts = costParts(t);
-  if (!parts.length) return <span className="text-muted-foreground">{t.running ? '跑完才有' : '—'}</span>;
+  if (!parts.length) return <Text tone="muted">{t.running ? '跑完才有' : '—'}</Text>;
   // 一格里全是没读到：只留一个 —，原因放在 title 里（区块顶上的 Notice 已经说了这一项读不到）
   if (parts.every((p) => p.missing)) {
     // 「估不了」「没有单价」是说明为什么算不出来，不是单纯的没读到：照写在 — 下面，原因不丢
     const why = parts.filter((p) => p.missing && /估不了|没有单价/.test(p.missing));
     return (
-      <span className="flex flex-col text-muted-foreground">
+      <Stack gap="sm">
         <span data-unread title={parts.map((p) => p.missing).join('；')}>
-          —
+          <Text tone="muted">—</Text>
         </span>
         {why.map((p) => (
-          <span key={p.key} className="text-meta">
+          <Text key={p.key} size="meta" tone="muted">
             {p.missing}
-          </span>
+          </Text>
         ))}
-      </span>
+      </Stack>
     );
   }
   return (
-    <span className="flex flex-col">
+    <Stack gap="sm">
       {parts.map((p) => (
         <span key={p.key} title={p.title}>
           {p.missing ? (
-            <span className="text-muted-foreground" data-unread title={p.missing}>
-              {p.label ? `${p.label} ` : ''}—
+            <span data-unread title={p.missing}>
+              <Text tone="muted">{p.label ? `${p.label} ` : ''}—</Text>
             </span>
           ) : (
-            <span className="num">
+            <Text>
               {p.label} {p.value}
-              {p.unit ? <span className="text-meta text-muted-foreground"> {p.unit}</span> : null}
-            </span>
+              {p.unit ? (
+                <Text size="meta" tone="muted">
+                  {' '}
+                  {p.unit}
+                </Text>
+              ) : null}
+            </Text>
           )}
           {p.incomplete ? (
-            <span className="block text-meta text-muted-foreground" data-partial>
-              另有 {p.incomplete} 次没读到
+            <span data-partial>
+              <Text size="meta" tone="muted">
+                {' '}
+                另有 {p.incomplete} 次没读到
+              </Text>
             </span>
           ) : null}
         </span>
       ))}
-    </span>
-  );
-}
-
-/** 一组（一段或一段里的一个模型）的那几格：耗时、token、缓存、当量、花费。 */
-function Figures({ t, live }: { t: UsageTotals; live: number | undefined }) {
-  const work = reading(t.runMs, t.missingTime, t.runs);
-  const runningNote = t.running ? (live !== undefined ? `在跑 ${formatDuration(live)}` : '在跑') : undefined;
-  return (
-    <>
-      <Cell label="耗时" nowrap>
-        <Read r={work} empty={runningNote ?? '—'}>
-          {formatDuration(work.kind === 'none' || work.kind === 'missing' ? 0 : work.value)}
-        </Read>
-        {runningNote && work.kind !== 'none' ? (
-          <div className="text-meta text-ink-run">{runningNote}</div>
-        ) : null}
-      </Cell>
-      <Cell label="token（输入 / 输出）">
-        <Read
-          r={reading(t.inputTokens + t.outputTokens, t.missingTokens, t.runs)}
-          empty={t.running ? '跑完才有' : '—'}
-        >
-          {formatCount(t.inputTokens)} / {formatCount(t.outputTokens)}
-        </Read>
-      </Cell>
-      <Cell label="缓存（读 / 写）">
-        <Read
-          r={reading(t.cacheReadTokens + t.cacheWriteTokens, t.missingCache, t.runs)}
-          empty={t.running ? '跑完才有' : '—'}
-        >
-          {formatCount(t.cacheReadTokens)} / {formatCount(t.cacheWriteTokens)}
-        </Read>
-      </Cell>
-      <Cell label="当量">
-        <Read
-          r={reading(t.inputEquivalent, t.missingEquivalent, t.runs)}
-          empty={t.running ? '跑完才有' : '—'}
-        >
-          {formatCount(t.inputEquivalent)}
-        </Read>
-      </Cell>
-      <Cell label="花费">
-        <CostCell t={t} />
-      </Cell>
-    </>
+    </Stack>
   );
 }
 
@@ -522,83 +380,22 @@ function segmentSummary(s: SegmentTotals, live: number | undefined): string {
     .join(' · ');
 }
 
-/** 一段的那一行，加它下面按模型的几行；只用了一个模型的，模型名写在段名旁边，不再重复一行同样的数。手机上只留一行摘要。 */
-function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) => number | undefined }) {
-  const tier = tierText(s.segment, s);
-  const only = s.byModel.length === 1 ? s.byModel[0] : undefined;
-  const summary = segmentSummary(s, live());
-  return (
-    <li className="py-3" data-segment={s.segment ?? 'unknown'}>
-      <div className={cn('hidden md:grid', COLUMNS)}>
-        <div className="col-span-2 min-w-0 md:col-span-1">
-          {/* 段名一行：段名加只用了的那个模型，不折；这一段做什么收进段名的悬停（#1920，原来多占一行灰字） */}
-          <div className="flex min-w-0 items-baseline gap-x-2 whitespace-nowrap">
-            <span
-              className={cn('shrink-0 font-medium', s.segment === null && 'text-ink-stall')}
-              title={s.segment ? segmentHint[s.segment] : '原样写在下面每一笔里'}
-              data-segment-hint
-            >
-              {s.segment ? segmentLabel[s.segment] : UNKNOWN_SEGMENT}
-            </span>
-            {only ? (
-              <span
-                className="num min-w-0 truncate text-body text-muted-foreground"
-                title={only.model}
-                data-model={only.model}
-              >
-                {only.modelName}
-              </span>
-            ) : null}
-          </div>
-          {s.segment && SEGMENT_UNMETERED[s.segment] ? (
-            <div className="text-meta text-muted-foreground" data-unmetered={s.segment}>
-              {SEGMENT_UNMETERED[s.segment]?.partial}
-            </div>
-          ) : null}
-        </div>
-        <Cell label="次数">
-          <span className="num">{timesText(s)}</span>
-        </Cell>
-        <Cell label="派工档">
-          <span className={cn((tier.missing || !s.tiers.length) && 'text-muted-foreground')}>
-            {tier.text}
-          </span>
-          {tier.note ? <div className="text-meta text-muted-foreground">{tier.note}</div> : null}
-        </Cell>
-        <Figures t={s} live={live()} />
-      </div>
-      <p
-        className={cn('text-body break-words md:hidden', s.segment === null && 'text-ink-stall')}
-        data-segment-summary
-      >
-        {summary}
-      </p>
-      {s.byModel.length > 1 ? (
-        <ul className="mt-2 hidden space-y-2 md:block">
-          {s.byModel.map((m) => (
-            <li key={m.model} className={ROW} data-model={m.model}>
-              <div className="col-span-2 min-w-0 border-l-2 pl-2 md:col-span-1">
-                <span className="num block truncate text-body" title={m.model}>
-                  {m.modelName}
-                </span>
-              </div>
-              <Cell label="次数">
-                <span className="num text-muted-foreground">{timesText(m)}</span>
-              </Cell>
-              <div className="hidden md:block" />
-              <Figures t={m} live={live(m.model)} />
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </li>
-  );
+/** 三段表的一行：一段，或一段里的一个模型（只有多个模型时才有）。 */
+interface UsageRow {
+  key: string;
+  kind: 'segment' | 'model' | 'unmetered' | 'norecord';
+  segment: SegmentKind | null;
+  totals?: UsageTotals;
+  seg?: SegmentTotals;
+  model?: SegmentTotals['byModel'][number];
+  live: number | undefined;
 }
 
 /** 按段、每段再按模型：对题、动手、验收固定三行，没跑过的写明没有记录；段名认不出的单列一组排最后。 */
 export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
+  const phone = usePhone();
   const bySegment = new Map(d.usage.bySegment.map((s) => [s.segment, s]));
-  const liveOf = (segment: SegmentKind | null) => (model?: string) => {
+  const liveOf = (segment: SegmentKind | null, model?: string) => {
     const ms = d.segmentRuns
       .filter((r) => r.segment === segment && (model === undefined || r.model === model))
       .map((r) => liveMs(r, now))
@@ -612,72 +409,246 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
     .flatMap((s) => (s ? [s, ...s.byModel] : []))
     .flatMap(unreadOf);
   const unreadList = ['耗时', 'token', '缓存', '当量', '花费'].filter((k) => unreadItems.includes(k));
+
+  const rows: UsageRow[] = [];
+  const pushSegment = (segment: SegmentKind | null, s: SegmentTotals) => {
+    rows.push({
+      key: segment ?? 'unknown',
+      kind: 'segment',
+      segment,
+      seg: s,
+      totals: s,
+      live: liveOf(segment),
+    });
+    if (s.byModel.length > 1) {
+      for (const m of s.byModel) {
+        rows.push({
+          key: `${segment ?? 'unknown'}/${m.model}`,
+          kind: 'model',
+          segment,
+          model: m,
+          totals: m,
+          live: liveOf(segment, m.model),
+        });
+      }
+    }
+  };
+  for (const segment of SEGMENT_ORDER) {
+    const s = bySegment.get(segment);
+    if (s) pushSegment(segment, s);
+    else
+      rows.push({
+        key: segment,
+        kind: SEGMENT_UNMETERED[segment] ? 'unmetered' : 'norecord',
+        segment,
+        live: undefined,
+      });
+  }
+  if (unknown) pushSegment(null, unknown);
+
+  const dash = <Text tone="muted">—</Text>;
+  const figure = (row: UsageRow, f: (t: UsageTotals, live: number | undefined) => ReactNode) =>
+    row.totals ? f(row.totals, row.live) : dash;
+  const columns: TableColumn<UsageRow>[] = [
+    {
+      key: 'name',
+      title: '段 / 模型',
+      render: (_v, row) => {
+        if (row.kind === 'model' && row.model) {
+          return (
+            <span data-model={row.model.model} title={row.model.model}>
+              <Text tone="secondary">{row.model.modelName}</Text>
+            </span>
+          );
+        }
+        const segment = row.segment;
+        const name = segment ? segmentLabel[segment] : UNKNOWN_SEGMENT;
+        if (row.kind === 'unmetered' && segment) {
+          const unmetered = SEGMENT_UNMETERED[segment];
+          return (
+            <span data-unmetered={segment} data-segment-hint title={segmentHint[segment]}>
+              <Stack gap="sm">
+                <Text tone="muted">{name}</Text>
+                <Text size="meta" tone="muted" {...(unmetered ? { title: unmetered.why } : {})}>
+                  {unmetered?.short}
+                </Text>
+              </Stack>
+            </span>
+          );
+        }
+        if (row.kind === 'norecord' && segment) {
+          return (
+            <span title={segmentHint[segment]} data-segment-hint>
+              <Stack gap="sm">
+                <Text tone="muted">{name}</Text>
+                <Text size="meta" tone="muted">
+                  没有这一段的记录
+                </Text>
+              </Stack>
+            </span>
+          );
+        }
+        const only = row.seg && row.seg.byModel.length === 1 ? row.seg.byModel[0] : undefined;
+        return (
+          <Stack gap="sm">
+            <Stack direction="horizontal" gap="sm" align="baseline">
+              <span data-segment-hint title={segment ? segmentHint[segment] : '原样写在下面每一笔里'}>
+                <Text strong tone={segment === null ? 'warning' : 'default'}>
+                  {name}
+                </Text>
+              </span>
+              {only ? (
+                <span data-model={only.model} title={only.model}>
+                  <Text tone="muted">{only.modelName}</Text>
+                </span>
+              ) : null}
+            </Stack>
+            {segment && SEGMENT_UNMETERED[segment] ? (
+              <span data-unmetered={segment}>
+                <Text size="meta" tone="muted">
+                  {SEGMENT_UNMETERED[segment]?.partial}
+                </Text>
+              </span>
+            ) : null}
+          </Stack>
+        );
+      },
+    },
+    {
+      key: 'times',
+      title: '次数',
+      render: (_v, row) =>
+        figure(row, (t) => <Text tone={row.kind === 'model' ? 'muted' : 'default'}>{timesText(t)}</Text>),
+    },
+    {
+      key: 'tier',
+      title: '派工档',
+      render: (_v, row) => {
+        if (row.kind !== 'segment' || !row.seg) return row.kind === 'model' ? '' : dash;
+        const tier = tierText(row.segment, row.seg);
+        return (
+          <Stack gap="sm">
+            <Text tone={tier.missing || !row.seg.tiers.length ? 'muted' : 'default'}>{tier.text}</Text>
+            {tier.note ? (
+              <Text size="meta" tone="muted">
+                {tier.note}
+              </Text>
+            ) : null}
+          </Stack>
+        );
+      },
+    },
+    {
+      key: 'work',
+      title: '耗时',
+      align: 'right',
+      render: (_v, row) =>
+        figure(row, (t, live) => {
+          const work = reading(t.runMs, t.missingTime, t.runs);
+          const runningNote = t.running
+            ? live !== undefined
+              ? `在跑 ${formatDuration(live)}`
+              : '在跑'
+            : undefined;
+          return (
+            <Stack gap="sm" align="end">
+              <Read r={work} empty={runningNote ?? '—'}>
+                {formatDuration(work.kind === 'none' || work.kind === 'missing' ? 0 : work.value)}
+              </Read>
+              {runningNote && work.kind !== 'none' ? (
+                <Text size="meta" tone="muted">
+                  {runningNote}
+                </Text>
+              ) : null}
+            </Stack>
+          );
+        }),
+    },
+    {
+      key: 'tokens',
+      title: 'token（输入 / 输出）',
+      align: 'right',
+      render: (_v, row) =>
+        figure(row, (t) => (
+          <Read
+            r={reading(t.inputTokens + t.outputTokens, t.missingTokens, t.runs)}
+            empty={t.running ? '跑完才有' : '—'}
+          >
+            {formatCount(t.inputTokens)} / {formatCount(t.outputTokens)}
+          </Read>
+        )),
+    },
+    {
+      key: 'cache',
+      title: '缓存（读 / 写）',
+      align: 'right',
+      render: (_v, row) =>
+        figure(row, (t) => (
+          <Read
+            r={reading(t.cacheReadTokens + t.cacheWriteTokens, t.missingCache, t.runs)}
+            empty={t.running ? '跑完才有' : '—'}
+          >
+            {formatCount(t.cacheReadTokens)} / {formatCount(t.cacheWriteTokens)}
+          </Read>
+        )),
+    },
+    {
+      key: 'equivalent',
+      title: '当量',
+      align: 'right',
+      render: (_v, row) =>
+        figure(row, (t) => (
+          <Read
+            r={reading(t.inputEquivalent, t.missingEquivalent, t.runs)}
+            empty={t.running ? '跑完才有' : '—'}
+          >
+            {formatCount(t.inputEquivalent)}
+          </Read>
+        )),
+    },
+    {
+      key: 'cost',
+      title: '花费',
+      align: 'right',
+      render: (_v, row) => figure(row, (t) => <CostCell t={t} />),
+    },
+  ];
   return (
-    <Section title="三段" description="对题 → 动手 → 验收，每段再按模型分" tight>
+    <Stack gap="md">
       {unreadList.length ? (
-        <div className="mt-2" data-unread-notice>
+        <div data-unread-notice>
           <Notice tone="stall" title={`没读到：${unreadList.join('、')}`}>
             这几项在表里留成 —，不是 0。原因在下面「每一笔」里逐笔写着。
           </Notice>
         </div>
       ) : null}
-      <div
-        className={cn(
-          'hidden md:grid',
-          COLUMNS,
-          'border-b py-2 text-meta text-muted-foreground [&>span]:min-w-0',
-        )}
-        aria-hidden
-      >
-        <span>段 / 模型</span>
-        <span>次数</span>
-        <span>派工档</span>
-        <span className="whitespace-nowrap">耗时</span>
-        <span>token（输入 / 输出）</span>
-        <span>缓存（读 / 写）</span>
-        <span>当量</span>
-        <span>花费</span>
-      </div>
-      <ul className="divide-y">
-        {SEGMENT_ORDER.map((segment) => {
-          const s = bySegment.get(segment);
-          if (!s) {
-            const unmetered = SEGMENT_UNMETERED[segment];
-            if (unmetered) {
-              return (
-                <li
-                  key={segment}
-                  className="flex flex-wrap items-baseline gap-x-3 py-3"
-                  data-segment={segment}
-                  data-unmetered={segment}
-                >
-                  <span className="font-medium text-muted-foreground">{segmentLabel[segment]}</span>
-                  <span className="text-body text-muted-foreground">{unmetered.short}</span>
-                  <span className="w-full text-meta text-muted-foreground">{unmetered.why}</span>
-                </li>
-              );
-            }
-            return (
-              <li key={segment} className="flex flex-wrap items-baseline gap-x-3 py-3" data-segment={segment}>
-                <span className="font-medium text-muted-foreground">{segmentLabel[segment]}</span>
-                <span className="text-body text-muted-foreground">没有这一段的记录</span>
-              </li>
-            );
-          }
-          return <SegmentGroup key={segment} s={s} live={liveOf(segment)} />;
-        })}
-        {unknown ? <SegmentGroup s={unknown} live={liveOf(null)} /> : null}
-      </ul>
-    </Section>
-  );
-}
-
-/** 一笔的段：认不出的用提醒色写「段名认不出」。 */
-function SegmentTag({ segment }: { segment: SegmentKind | null }) {
-  return (
-    <Tag tone={segment === null ? 'stall' : 'neutral'}>
-      {segment ? segmentLabel[segment] : UNKNOWN_SEGMENT}
-    </Tag>
+      {phone ? (
+        // 手机上八列的表太宽：每段只留一行摘要（原来的做法，#1802）
+        <Stack gap="md">
+          {rows
+            .filter((r) => r.kind !== 'model')
+            .map((r) => (
+              <div key={r.key} data-segment={r.key} data-segment-summary>
+                {r.seg ? (
+                  <Text tone={r.segment === null ? 'warning' : 'default'}>
+                    {segmentSummary(r.seg, r.live)}
+                  </Text>
+                ) : (
+                  <Text tone="muted">
+                    {r.segment ? segmentLabel[r.segment] : UNKNOWN_SEGMENT}
+                    {' · '}
+                    {r.kind === 'unmetered' && r.segment
+                      ? SEGMENT_UNMETERED[r.segment]?.short
+                      : '没有这一段的记录'}
+                  </Text>
+                )}
+              </div>
+            ))}
+        </Stack>
+      ) : (
+        <Table<UsageRow> caption="三段用量" columns={columns} rows={rows} rowKey="key" />
+      )}
+    </Stack>
   );
 }
 
@@ -710,137 +681,88 @@ function estimateGap(run: SegmentRunView): string | undefined {
   return undefined;
 }
 
-function RunRow({
-  run,
-  repo,
-  now,
-  nth,
-  onView,
-}: {
-  run: SegmentRunView;
-  repo: Repo;
-  now: number;
-  /** 点「看会话」：由页面把 ?run=<笔号> 写进网址、开右侧抽屉。 */
-  onView: (runId: string) => void;
-  /** 这一段的第几次（按起跑先后）。 */
-  nth: number;
-}) {
-  const live = liveMs(run, now);
+/** 一笔的结局：在跑、记了的结局、没读到（不当完成）。 */
+function runStatus(run: SegmentRunView): StatusKey {
+  if (run.running) return 'task:segment:running';
+  if (run.outcome) return `task:segment:${run.outcome}` as StatusKey;
+  return 'task:segment:unread';
+}
+
+/** 一笔的备注：用量、为什么派它、为什么没续上、为什么没成、没读到的几项并成一段话。 */
+function RunNotes({ run }: { run: SegmentRunView }) {
   const gap = estimateGap(run);
   const figures = runFigures(run);
   return (
-    <li className="py-3" data-run={run.id}>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <SegmentTag segment={run.segment} />
-        <span className="num text-meta text-muted-foreground" data-nth={nth}>
-          第 {nth} 次
+    <Stack gap="sm">
+      {run.matchedBy === 'issueNumber' ? (
+        <span title="这一笔没记 task_id，是按单号对上的；单号在几个仓里可能重">
+          <Tag>按单号兜底</Tag>
         </span>
-        <Code>{run.modelName}</Code>
-        {run.tier ? (
-          <span className="text-meta text-muted-foreground">{tierLabel[run.tier]}</span>
-        ) : run.segment && run.segment !== 'manual' ? (
-          <span className="text-meta text-muted-foreground">{noTierText[run.segment]}</span>
-        ) : null}
-        {run.running ? (
-          <StatusBadge tone="run" label="在跑" />
-        ) : run.outcome ? (
-          <StatusBadge tone={segmentOutcomeTone[run.outcome]} label={segmentOutcomeLabel[run.outcome]} />
-        ) : (
-          <StatusBadge tone="stall" label="结局没读到" />
-        )}
-        {run.matchedBy === 'issueNumber' ? (
-          <span title="这一笔没记 task_id，是按单号对上的；单号在几个仓里可能重">
-            <Tag>按单号兜底</Tag>
-          </span>
-        ) : null}
-        <span className="num order-3 w-full text-meta text-muted-foreground sm:order-2 sm:ml-auto sm:w-auto">
-          {run.startedAt ? clockOf(run.startedAt, now) : '开始没读到'}
-          {run.running
-            ? ' 起'
-            : run.endedAt
-              ? ` → ${clockOf(run.endedAt, run.startedAt ? Date.parse(run.startedAt) : now)}`
-              : ''}
-          {' · '}
-          {run.durationMs !== undefined ? (
-            formatDuration(run.durationMs)
-          ) : live !== undefined ? (
-            <span className="text-ink-run">已跑 {formatDuration(live)}</span>
-          ) : (
-            '—'
-          )}
-        </span>
-        <Button
-          type="button"
-          size="xs"
-          variant="outline"
-          className="order-2 ml-auto sm:order-3 sm:ml-0"
-          aria-label={`看会话：${run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT}第 ${nth} 次`}
-          data-view-transcript={run.id}
-          onClick={() => onView(run.id)}
-        >
-          看会话
-        </Button>
-      </div>
-      {figures.length || run.prNumber !== undefined || run.branch ? (
-        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-meta text-muted-foreground">
-          {figures.map((f) =>
-            f === USAGE_BOARD_UNREAD ? (
-              <span key={f} data-usage-unread="">
-                {f}
-              </span>
-            ) : (
-              <span key={f} className="num">
-                {f}
-              </span>
-            ),
-          )}
-          {run.prNumber !== undefined ? (
-            <RepoLink
-              repo={repo}
-              kind="pull"
-              n={run.prNumber}
-              className="num underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center"
-            >
-              PR #{run.prNumber}
-            </RepoLink>
-          ) : null}
-          {run.branch ? <span className="num truncate">{run.branch}</span> : null}
-        </div>
       ) : null}
-      {run.segment === 'manual' ? (
-        <p className="mt-1 text-meta text-muted-foreground" data-route-why>
-          为什么派它：{run.routeWhy ?? '没记'}
-        </p>
-      ) : null}
-      {run.resumeReason ? (
-        <p className="mt-1 text-meta text-muted-foreground" data-resume-reason>
-          为什么没续上：{run.resumeReason}
-        </p>
-      ) : null}
-      {run.failureReason ? (
-        <p className="mt-1 text-meta text-muted-foreground">为什么没成：{run.failureReason}</p>
-      ) : null}
-      {run.unread.length || gap ? (
-        // 一笔里没读到的几项并成一段话（原来一项一行，一笔占五行）；颜色不再用提醒色，提醒由「三段」顶上那条 Notice 担着
-        <p className="mt-1 text-meta text-muted-foreground" data-unread-line>
-          没读到：
-          {run.unread.map((n, i) => (
-            <Fragment key={n.item}>
-              {i ? '；' : ''}
-              <span data-unread-item={n.item}>
-                <span className="font-medium">{unreadItemLabel[n.item]}</span> · {n.reason}
-              </span>
+      {figures.length ? (
+        <Stack direction="horizontal" gap="md" wrap>
+          {figures.map((f) => (
+            <Fragment key={f}>
+              {f === USAGE_BOARD_UNREAD ? (
+                <span data-usage-unread="">
+                  <Text size="meta" tone="muted">
+                    {f}
+                  </Text>
+                </span>
+              ) : (
+                <Text size="meta" tone="muted">
+                  {f}
+                </Text>
+              )}
             </Fragment>
           ))}
-          {gap ? (
-            <>
-              {run.unread.length ? '；' : ''}
-              <span data-estimate-gap>花费 · {gap}</span>
-            </>
-          ) : null}
-        </p>
+        </Stack>
       ) : null}
-    </li>
+      {run.segment === 'manual' ? (
+        <span data-route-why>
+          <Text size="meta" tone="muted">
+            为什么派它：{run.routeWhy ?? '没记'}
+          </Text>
+        </span>
+      ) : null}
+      {run.resumeReason ? (
+        <span data-resume-reason>
+          <Text size="meta" tone="muted">
+            为什么没续上：{run.resumeReason}
+          </Text>
+        </span>
+      ) : null}
+      {run.failureReason ? (
+        <Text size="meta" tone="muted">
+          为什么没成：{run.failureReason}
+        </Text>
+      ) : null}
+      {run.unread.length || gap ? (
+        // 一笔里没读到的几项并成一段话（原来一项一行，一笔占五行）；提醒由「三段」顶上那条 Notice 担着
+        <span data-unread-line>
+          <Text size="meta" tone="muted">
+            没读到：
+            {run.unread.map((n, i) => (
+              <Fragment key={n.item}>
+                {i ? '；' : ''}
+                <span data-unread-item={n.item}>
+                  <Text size="meta" strong tone="muted">
+                    {unreadItemLabel[n.item]}
+                  </Text>{' '}
+                  · {n.reason}
+                </span>
+              </Fragment>
+            ))}
+            {gap ? (
+              <>
+                {run.unread.length ? '；' : ''}
+                <span data-estimate-gap>花费 · {gap}</span>
+              </>
+            ) : null}
+          </Text>
+        </span>
+      ) : null}
+    </Stack>
   );
 }
 
@@ -854,25 +776,119 @@ export function SegmentRunList({
   now: number;
   onViewTranscript: (runId: string) => void;
 }) {
+  const order = runOrder(d.segmentRuns);
+  const repo: Repo = d.repo;
+  const columns: TableColumn<SegmentRunView>[] = [
+    {
+      key: 'nth',
+      title: '笔',
+      render: (_v, run) => (
+        <span data-nth={runNth(d.segmentRuns, run.id) ?? 1}>
+          <Text mono>第 {order.get(run.id) ?? '?'} 笔</Text>
+        </span>
+      ),
+    },
+    {
+      key: 'segment',
+      title: '段',
+      render: (_v, run) => (
+        <Tag tone={run.segment === null ? 'warning' : 'neutral'}>
+          {run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT}
+        </Tag>
+      ),
+    },
+    {
+      key: 'model',
+      title: '模型',
+      render: (_v, run) => (
+        <Stack gap="sm">
+          <Code>{run.modelName}</Code>
+          <Text size="meta" tone="muted">
+            {run.tier
+              ? tierLabel[run.tier]
+              : run.segment && run.segment !== 'manual'
+                ? noTierText[run.segment]
+                : ''}
+          </Text>
+        </Stack>
+      ),
+    },
+    {
+      key: 'outcome',
+      title: '结局',
+      render: (_v, run) => <StatusBadge status={runStatus(run)} />,
+    },
+    {
+      key: 'time',
+      title: '起止 · 耗时',
+      render: (_v, run) => {
+        const live = liveMs(run, now);
+        return (
+          <Text size="meta" tone="secondary">
+            {run.startedAt ? clockOf(run.startedAt, now) : '开始没读到'}
+            {run.running
+              ? ' 起'
+              : run.endedAt
+                ? ` → ${clockOf(run.endedAt, run.startedAt ? Date.parse(run.startedAt) : now)}`
+                : ''}
+            {' · '}
+            {run.durationMs !== undefined ? (
+              formatDuration(run.durationMs)
+            ) : live !== undefined ? (
+              <Text size="meta">已跑 {formatDuration(live)}</Text>
+            ) : (
+              '—'
+            )}
+          </Text>
+        );
+      },
+    },
+    {
+      key: 'pr',
+      title: 'PR',
+      render: (_v, run) =>
+        run.prNumber === undefined && !run.branch ? (
+          <Text tone="muted">—</Text>
+        ) : (
+          <Stack gap="sm">
+            {run.prNumber !== undefined ? (
+              <RepoLink repo={repo} kind="pull" n={run.prNumber}>
+                PR #{run.prNumber}
+              </RepoLink>
+            ) : null}
+            {run.branch ? (
+              <Text size="meta" mono tone="muted" title={run.branch}>
+                {run.branch}
+              </Text>
+            ) : null}
+          </Stack>
+        ),
+    },
+    { key: 'notes', title: '备注', wrap: true, render: (_v, run) => <RunNotes run={run} /> },
+    {
+      key: 'view',
+      title: '',
+      render: (_v, run) => (
+        <span data-view-transcript={run.id}>
+          <Button
+            size="xs"
+            variant="text"
+            aria-label={`看会话：${run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT}第 ${order.get(run.id) ?? '?'} 笔`}
+            onClick={() => onViewTranscript(run.id)}
+          >
+            看会话
+          </Button>
+        </span>
+      ),
+    },
+  ];
   return (
-    <Section
-      title="每一笔"
-      // 长说明（按单号兜底是什么、抽屉网址能分享）在页头 ⓘ 里（#1920）
-      description="按起跑先后，点「看会话」在右侧看会话内容"
-      tight
-    >
-      <ol className="divide-y">
-        {d.segmentRuns.map((run) => (
-          <RunRow
-            key={run.id}
-            run={run}
-            repo={d.repo}
-            now={now}
-            nth={runNth(d.segmentRuns, run.id) ?? 1}
-            onView={onViewTranscript}
-          />
-        ))}
-      </ol>
-    </Section>
+    <Table<SegmentRunView>
+      caption="每一笔"
+      columns={columns}
+      rows={d.segmentRuns}
+      rowKey="id"
+      empty="还没有哪一笔"
+    />
   );
 }

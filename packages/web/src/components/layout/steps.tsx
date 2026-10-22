@@ -12,6 +12,8 @@ export interface StepItem {
   title: ReactNode;
   description?: ReactNode;
   status?: StepStatus;
+  /** 这一步的身份，写在 li 的 data-step 上（给测试和脚本找；不影响样子）。 */
+  id?: string;
 }
 
 const ICON: Record<StepStatus, string> = {
@@ -34,6 +36,7 @@ export function Steps({ items, current = 0 }: { items: readonly StepItem[]; curr
             // biome-ignore lint/suspicious/noArrayIndexKey: 步骤的身份就是它的位置。
             key={i}
             data-status={status}
+            {...(it.id !== undefined ? { 'data-step': it.id } : {})}
             {...(status === 'process' ? { 'aria-current': 'step' as const } : {})}
             className={cn('flex min-w-0 items-center gap-3', !last && 'md:flex-1')}
           >
@@ -61,7 +64,9 @@ export function Steps({ items, current = 0 }: { items: readonly StepItem[]; curr
                 {it.title}
               </span>
               {it.description ? (
-                <span className="text-meta whitespace-nowrap text-ink-3">{it.description}</span>
+                <span data-step-description className="text-meta whitespace-nowrap text-ink-3">
+                  {it.description}
+                </span>
               ) : null}
             </span>
             {last ? null : (

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// 任务页右侧的「过程」面板（#3277，替掉 #1802 的看会话抽屉）：页头「过程」和 \ 开关、开没开记在本地；
-// 「看会话」压一条 ?run= 在面板里换成那一笔，「‹ 过程」和浏览器后退回到过程；K / J 换笔不压历史；
+// 任务页右侧的会话抽屉（#3277，替掉 #1802 的看会话抽屉；#3533 过程挪进「过程」页签）：过程在页签里，`\` 切到过程页签；
+// 抽屉只跟 ?run= 走：「看会话」压一条 ?run=，抽屉换成那一笔，「‹ 过程」和浏览器后退收起抽屉；K / J 换笔不压历史；
 // 所有宽度都是盖在右边的抽屉、不占正文，手机从底下整屏；左边沿左右键拉宽；弹出窗口不带外壳，左边按回合列笔。
 // 外加手机端：四张统计卡 2×2、三段每段一行摘要。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
@@ -71,134 +71,135 @@ function open(route: string) {
 const search = () => screen.getByTestId('search').textContent;
 const panel = () => document.querySelector<HTMLElement>('[data-task-panel]');
 const view = () => panel()?.querySelector('[data-panel-view]')?.getAttribute('data-panel-view');
-// 「每一笔」在「用量和模型」里，默认收起（#3228）：收着也挂在页面上，等它出来就行
+// 过程在「过程」页签里（?tab=process）；每一笔的「看会话」在笔行右边。前面收场的回合默认收着，点开再找
+const inProcess = (route: string) => `${route}${route.includes('?') ? '&' : '?'}tab=process`;
 const ready = () =>
   waitFor(() => {
-    if (!document.querySelector('[data-view-transcript]')) throw new Error('每一笔还没出来');
+    if (!document.querySelector('[data-task-process] [data-run-process]')) throw new Error('过程还没出来');
   });
-const viewRun = (id: string) =>
-  fireEvent.click(document.querySelector(`[data-usage-fold] [data-view-transcript="${id}"]`) as HTMLElement);
+const viewRun = (id: string) => {
+  for (const b of document.querySelectorAll('[data-round-header] button[aria-expanded="false"]'))
+    fireEvent.click(b);
+  const btn = [...document.querySelectorAll(`[data-run-process="${id}"] button`)].find(
+    (b) => b.textContent === '看会话',
+  );
+  fireEvent.click(btn as HTMLElement);
+};
 
 describe('开关', () => {
-  test('默认关：正文末尾一行「过程」摘要；点页头「过程」从右边盖上抽屉、记在本地，点叉关掉', async () => {
-    open('/tasks/t-c9');
+  test('默认关：过程在页签里，抽屉不开；点一笔的「看会话」从右边盖上抽屉，点叉关掉并去掉 ?run=', async () => {
+    open(inProcess('/tasks/t-c9'));
     await ready();
     expect(panel()).toBeNull();
-    const launcher = document.querySelector('[data-panel-launcher]') as HTMLElement;
-    expect(launcher.textContent).toMatch(/^过程.*回合/);
-    const toggle = document.querySelector('[data-panel-toggle]') as HTMLElement;
-    expect(toggle.getAttribute('aria-pressed')).toBe('false');
-    fireEvent.click(toggle);
+    expect(document.querySelector('[data-panel-toggle]')).toBeNull();
+    expect(document.querySelector('[data-panel-launcher]')).toBeNull();
+    viewRun('seg-c9-3');
     // 宽屏也是盖在右边的抽屉，不占正文的位置
     const dlg = await screen.findByRole('dialog');
     expect(dlg.getAttribute('data-task-panel')).toBe('sheet');
-    expect(view()).toBe('process');
-    expect(dlg.querySelector('[data-task-process]')).toBeTruthy();
-    expect(toggle.getAttribute('aria-pressed')).toBe('true');
-    expect(document.querySelector('[data-panel-launcher]')).toBeNull();
-    expect(localStorage.getItem(PANEL_OPEN_KEY)).toBe('true');
+    expect(view()).toBe('run');
     fireEvent.click(within(dlg).getByRole('button', { name: '关掉面板（\\）' }));
     await waitFor(() => expect(panel()).toBeNull());
-    expect(localStorage.getItem(PANEL_OPEN_KEY)).toBe('false');
+    expect(search()).toBe('?tab=process');
   });
 
-  test('上次开着的，再进来还开着；点正文末尾的摘要也能打开', async () => {
+  test('本地记着「面板开着」不再让抽屉自己打开：抽屉只跟 ?run= 走', async () => {
     localStorage.setItem(PANEL_OPEN_KEY, 'true');
-    const first = open('/tasks/t-c9');
+    open(inProcess('/tasks/t-c9'));
     await ready();
-    expect(view()).toBe('process');
-    first.unmount();
-    localStorage.setItem(PANEL_OPEN_KEY, 'false');
-    open('/tasks/t-c9');
-    await ready();
-    fireEvent.click(document.querySelector('[data-panel-launcher]') as HTMLElement);
-    expect(view()).toBe('process');
+    expect(panel()).toBeNull();
   });
 
-  test('\\ 开关面板；输入框里按 \\ 照常打字', async () => {
+  test('\\ 切到「过程」页签；输入框里按 \\ 照常打字', async () => {
     open('/tasks/t-c9');
-    await ready();
-    fireEvent.keyDown(window, { key: '\\' });
-    await waitFor(() => expect(view()).toBe('process'));
-    fireEvent.keyDown(window, { key: '\\' });
-    await waitFor(() => expect(panel()).toBeNull());
+    await screen.findByRole('tab', { name: '过程' });
+    expect(search()).toBe('');
     const input = document.createElement('input');
     document.body.append(input);
     fireEvent.keyDown(input, { key: '\\' });
-    expect(panel()).toBeNull();
+    expect(search()).toBe('');
     input.remove();
+    fireEvent.keyDown(window, { key: '\\' });
+    await ready();
+    expect(search()).toBe('?tab=process');
+    expect(screen.getByRole('tab', { name: '过程' }).getAttribute('aria-selected')).toBe('true');
+    expect(panel()).toBeNull();
   });
 
-  test('Esc 收起抽屉', async () => {
-    open('/tasks/t-c9');
+  test('Esc 收起抽屉，?run= 一起去掉', async () => {
+    open(inProcess('/tasks/t-c9'));
     await ready();
-    fireEvent.click(document.querySelector('[data-panel-toggle]') as HTMLElement);
+    viewRun('seg-c9-3');
     const dlg = await screen.findByRole('dialog');
     fireEvent.keyDown(dlg, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(localStorage.getItem(PANEL_OPEN_KEY)).toBe('false');
+    expect(search()).toBe('?tab=process');
   });
 });
 
 describe('看会话', () => {
-  test('点「看会话」：网址带 run=、面板换成那一笔；「‹ 过程」等于后退，面板留着看过程', async () => {
-    open('/tasks/t-c9?from=%2Ftasks');
+  test('点「看会话」：网址带 run=、抽屉换成那一笔；「‹ 过程」等于后退，抽屉收起、页面留在过程页签', async () => {
+    open(inProcess('/tasks/t-c9?from=%2Ftasks'));
     await ready();
     viewRun('seg-c9-3');
-    expect(search()).toBe('?from=%2Ftasks&run=seg-c9-3');
+    expect(search()).toBe('?from=%2Ftasks&tab=process&run=seg-c9-3');
     expect(view()).toBe('run');
     expect(panel()?.querySelector('[data-panel-run-title]')?.textContent).toBe('第 3 笔 · 动手');
     expect(await screen.findByText(/已提交 4c1d2ab/)).toBeTruthy();
     expect(within(panel() as HTMLElement).getByText(/FAIL scripts\/stamp.test.ts/)).toBeTruthy();
     fireEvent.click(panel()?.querySelector('[data-panel-back]') as HTMLElement);
-    await waitFor(() => expect(view()).toBe('process'));
-    expect(search()).toBe('?from=%2Ftasks');
+    await waitFor(() => expect(panel()).toBeNull());
+    expect(search()).toBe('?from=%2Ftasks&tab=process');
+    expect(document.querySelector('[data-task-process]')).toBeTruthy();
   });
 
-  test('浏览器后退：回到过程，面板不关', async () => {
-    open('/tasks/t-c9');
+  test('浏览器后退：抽屉收起，回到过程页签', async () => {
+    open(inProcess('/tasks/t-c9'));
     await ready();
     viewRun('seg-c9-3');
     expect(view()).toBe('run');
     fireEvent.click(screen.getByText('浏览器后退'));
-    await waitFor(() => expect(view()).toBe('process'));
-    expect(search()).toBe('');
+    await waitFor(() => expect(panel()).toBeNull());
+    expect(search()).toBe('?tab=process');
   });
 
-  test('直接打开带 ?run= 的链接：面板就开在那一笔；「‹ 过程」只去掉参数；关掉面板也去掉', async () => {
+  test('直接打开带 ?run= 的链接：抽屉就开在那一笔；「‹ 过程」只去掉参数；关掉抽屉也去掉', async () => {
     open('/tasks/t-c9?run=seg-c9-3');
     expect(await screen.findByText(/已提交 4c1d2ab/)).toBeTruthy();
     expect(view()).toBe('run');
     fireEvent.click(panel()?.querySelector('[data-panel-back]') as HTMLElement);
-    await waitFor(() => expect(view()).toBe('process'));
-    expect(search()).toBe('');
-    viewRun('seg-c9-2');
-    expect(search()).toBe('?run=seg-c9-2');
-    fireEvent.click(within(panel() as HTMLElement).getByRole('button', { name: '关掉面板（\\）' }));
     await waitFor(() => expect(panel()).toBeNull());
     expect(search()).toBe('');
+    // 回到过程页签再点另一笔
+    fireEvent.keyDown(window, { key: '\\' });
+    await ready();
+    viewRun('seg-c9-2');
+    expect(search()).toBe('?tab=process&run=seg-c9-2');
+    fireEvent.click(within(panel() as HTMLElement).getByRole('button', { name: '关掉面板（\\）' }));
+    await waitFor(() => expect(panel()).toBeNull());
+    expect(search()).toBe('?tab=process');
   });
 
   test('K / J 换上一笔、下一笔：替换地址不压历史，到头了按钮不能点', async () => {
-    open('/tasks/t-c9');
+    open(inProcess('/tasks/t-c9'));
     await ready();
     viewRun('seg-c9-3');
     fireEvent.keyDown(window, { key: 'j' });
-    expect(search()).toBe('?run=seg-c9-4');
-    expect(within(panel() as HTMLElement).getByRole('button', { name: '下一笔（J）' })).toHaveProperty(
-      'disabled',
-      true,
-    );
+    expect(search()).toBe('?tab=process&run=seg-c9-4');
+    // 到头了：置灰（aria-disabled），悬停写原因
+    const next = within(panel() as HTMLElement).getByRole('button', { name: '下一笔（J）' });
+    expect(next.getAttribute('aria-disabled')).toBe('true');
+    expect(next.getAttribute('title')).toBe('已经是最后一笔');
     fireEvent.keyDown(window, { key: 'k' });
     fireEvent.keyDown(window, { key: 'K' });
-    expect(search()).toBe('?run=seg-c9-2');
-    // 换笔没压历史：后退一步就回到过程
+    expect(search()).toBe('?tab=process&run=seg-c9-2');
+    // 换笔没压历史：后退一步抽屉就收起
     fireEvent.click(screen.getByText('浏览器后退'));
-    await waitFor(() => expect(view()).toBe('process'));
+    await waitFor(() => expect(panel()).toBeNull());
   });
 
   test('网址里的笔号对不上这张单的任何一笔：面板不开', async () => {
-    open('/tasks/t-c9?run=nope');
+    open(inProcess('/tasks/t-c9?run=nope'));
     await ready();
     expect(panel()).toBeNull();
   });
@@ -253,27 +254,26 @@ describe('弹出窗口', () => {
 });
 
 describe('手机端（#1802 点验补充）', () => {
-  test('四张统计卡（#2859 去掉了折算 token）手机上两列，宽屏四列并排', async () => {
-    open('/tasks/t-c9');
-    await ready();
-    const grid = document.querySelector('[data-segment-stats] > div') as HTMLElement;
+  test('四个指标（#2859 去掉了折算 token）一排摆着，手机上两个一行', async () => {
+    open('/tasks/t-c9?tab=usage');
+    await screen.findByText('输入当量');
+    const grid = document.querySelector('[data-segment-stats] [data-cols]') as HTMLElement;
     expect(grid.children.length).toBe(4);
-    expect(grid.className).toContain('grid-cols-2');
-    expect(grid.className).not.toContain('grid-cols-1');
-    expect(grid.className).toContain('xl:grid-cols-4');
   });
 
   test('「三段」每段手机上一行摘要：段、模型、次数、耗时、token、花费；表格只在 md 以上', async () => {
-    open('/tasks/t-c9');
-    await ready();
-    const manual = document.querySelector('[data-segment="manual"]') as HTMLElement;
-    const line = manual.querySelector('[data-segment-summary]') as HTMLElement;
-    expect(line.className).toContain('md:hidden');
+    viewport(390);
+    open('/tasks/t-c9?tab=usage');
+    await screen.findByText('输入当量');
+    const line = (await waitFor(() => {
+      const el = document.querySelector('[data-segment="manual"][data-segment-summary]');
+      if (!el) throw new Error('手机上没出每段一行摘要');
+      return el;
+    })) as HTMLElement;
     expect(line.textContent).toMatch(/^动手 · 2 个模型 · 2 次/);
     expect(line.textContent).toContain('token');
-    const table = manual.firstElementChild as HTMLElement;
-    expect(table.className).toContain('hidden');
-    expect(table.className).toContain('md:grid');
+    // 手机上不画八列的表
+    expect(document.querySelector('table[aria-label="三段用量"], tr[data-row-key="manual"]')).toBeNull();
     // 没读到的写没读到，不写 0
     expect(line.textContent).not.toMatch(/ 0 \/ 0 token/);
   });

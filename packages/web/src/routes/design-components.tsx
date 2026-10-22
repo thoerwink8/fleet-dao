@@ -5,27 +5,38 @@
 import { type ReactNode, useState } from 'react';
 import { Anchor } from '../components/layout/anchor';
 import { AuthCard } from '../components/layout/auth-card';
+import { Band } from '../components/layout/band';
+import { Breadcrumb } from '../components/layout/breadcrumb';
+import { Button } from '../components/layout/button';
 import { Chat, Composer } from '../components/layout/chat';
 import { Collapse } from '../components/layout/collapse';
 import { Descriptions } from '../components/layout/descriptions';
+import { DisclosureRow } from '../components/layout/disclosure';
 import { Form, FormItem } from '../components/layout/form';
 import { Grid } from '../components/layout/grid';
 import { InfoTip } from '../components/layout/info-tip';
+import { ListFooter } from '../components/layout/list-footer';
 import { NativeSelect } from '../components/layout/native-select';
+import { Nest } from '../components/layout/nest';
 import { PickList } from '../components/layout/pick-list';
 import { type ProbeCell, ProbeCells } from '../components/layout/probe-cells';
 import { Progress } from '../components/layout/progress';
 import { Section } from '../components/layout/section';
+import { SidePanel } from '../components/layout/side-panel';
 import { Stack } from '../components/layout/stack';
 import { StatusBadge } from '../components/layout/status-badge';
 import { Steps } from '../components/layout/steps';
+import { TabPanel } from '../components/layout/tab-panel';
 import { Table, type TableColumn } from '../components/layout/table';
 import { Tag } from '../components/layout/tag';
 import { Text } from '../components/layout/text';
+import { TextLink } from '../components/layout/text-link';
+import { TimeBar } from '../components/layout/time-bar';
 import { Timeline } from '../components/layout/timeline';
 import { DOMAINS, STATUS_DICT, type StatusKey } from '../theme/status-dict';
 import { ControlsSection } from './design-controls';
 import { ConversationSection } from './design-conversation';
+import { TranscriptSection } from './design-transcript';
 
 interface DemoRow {
   id: string;
@@ -498,6 +509,142 @@ function MiscSection({ overlays, input }: { overlays: ReactNode; input: DemoInpu
   );
 }
 
+/** 任务页过程用的件（#3533）：展开行、色带、缩进、时间条、侧面板。 */
+function ProcessPartsSection() {
+  const [open, setOpen] = useState<Record<string, boolean>>({ r2: true });
+  const [panelOpen, setPanelOpen] = useState(false);
+  const toggle = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+  return (
+    <Section
+      title="过程的件 Disclosure、Band、Nest、TimeBar、SidePanel"
+      description="展开行由页面管开合（有失败的自动展开，人点过就听人的）；色带夹在列表里写引擎做的事、为什么返工；时间条一段一个按钮；侧面板是右边盖上来的抽屉。"
+    >
+      <Stack gap="md">
+        <Block title="TimeBar" note="失败红、在跑蓝、其余灰">
+          <TimeBar
+            label="每一笔各占多久"
+            onPick={() => {}}
+            items={[
+              { id: 'a', weight: 4, state: 'fail', label: '动手第 1 次，用时 30 分钟' },
+              { id: 'b', weight: 1, label: '验收第 1 次，用时 3 分钟' },
+              { id: 'c', weight: 3, state: 'run', label: '动手第 2 次，用时 12 分钟' },
+            ]}
+          />
+        </Block>
+        <Block title="DisclosureRow、Band" note="回合头：结局放右边；返工回合下面一条淡红色带">
+          <Stack gap="sm">
+            <DisclosureRow
+              open={!!open.r1}
+              onToggle={() => toggle('r1')}
+              header={
+                <Stack direction="horizontal" gap="sm" align="baseline">
+                  <Text strong>第 1 回合</Text>
+                  <Text size="meta" tone="muted">
+                    10:02–10:40 · 38 分钟 · 1 笔
+                  </Text>
+                </Stack>
+              }
+              trailing={<StatusBadge status="task:round:timeout" />}
+            />
+            <DisclosureRow
+              open={!!open.r2}
+              onToggle={() => toggle('r2')}
+              header={<Text strong>第 2 回合</Text>}
+              trailing={<StatusBadge status="task:round:open" />}
+              actions={
+                <Button variant="text" size="xs">
+                  看会话
+                </Button>
+              }
+            />
+            <Band tone="danger">
+              <Text size="meta" tone="danger" strong>
+                为什么返工
+              </Text>{' '}
+              <Text size="meta" tone="secondary">
+                上一回合超时——30 分钟没交活
+              </Text>
+            </Band>
+            <Band>引擎 自测 → 推分支 → 开 PR → 等 CI</Band>
+          </Stack>
+        </Block>
+        <Block title="Nest" note="子代理说的话、它的调用缩进一级">
+          <Nest>
+            <Text size="meta" tone="muted">
+              子代理：我先看一下 README 里这一行怎么生成的。
+            </Text>
+          </Nest>
+        </Block>
+        <Block title="SidePanel" note="右边盖上来的抽屉，手机从底下整屏">
+          <Button size="sm" onClick={() => setPanelOpen(true)}>
+            打开侧面板
+          </Button>
+          <SidePanel
+            open={panelOpen}
+            onOpenChange={setPanelOpen}
+            title="过程"
+            header={
+              <Stack direction="horizontal" gap="sm" align="center" justify="between">
+                <Text size="heading" strong>
+                  过程
+                </Text>
+                <Button size="sm" variant="text" onClick={() => setPanelOpen(false)}>
+                  关闭
+                </Button>
+              </Stack>
+            }
+          >
+            <Band>面板里的内容</Band>
+          </SidePanel>
+        </Block>
+      </Stack>
+    </Section>
+  );
+}
+
+/** 任务详情页用的件（#3533）：面包屑、文字链接、页签面板。 */
+function TaskPageParts() {
+  return (
+    <Section
+      title="面包屑 Breadcrumb、文字链接 TextLink、页签面板 TabPanel"
+      description="面包屑最后一项是当前页（不是链接）；文字链接站内走路由、external 开新窗口；页签面板配 FilterTabs 的 idPrefix。"
+    >
+      <Stack gap="md">
+        <Block title="Breadcrumb">
+          <Breadcrumb
+            items={[{ label: '驾驶舱', href: '/' }, { label: '任务', href: '/tasks' }, { label: '#3491' }]}
+          />
+        </Block>
+        <Block title="TextLink" note="站内 / 外部 / 等宽">
+          <Stack direction="horizontal" gap="md" align="baseline">
+            <TextLink href="/tasks">站内链接</TextLink>
+            <TextLink href="https://example.com" external>
+              外部链接
+            </TextLink>
+            <TextLink href="/tasks/t-c9" mono>
+              #3491
+            </TextLink>
+          </Stack>
+        </Block>
+        <Block title="ListFooter" note="任务列表底栏：到底了 / 加载更多">
+          <ListFooter>
+            <Text size="meta" tone="muted">
+              已经到底，共 12 张
+            </Text>
+          </ListFooter>
+        </Block>
+        <Block title="TabPanel">
+          <TabPanel idPrefix="demo" id="latest">
+            <Text size="meta" tone="muted">
+              选中页签对应的内容
+            </Text>
+          </TabPanel>
+        </Block>
+      </Stack>
+    </Section>
+  );
+}
+
 /** 「组件」一节。overlays 是确认框、抽屉的触发键，input 是输入框：它们只有基础件有，业务层摆不了，由陈列页自己传进来。 */
 export function ComponentsGallery({ overlays, input }: { overlays: ReactNode; input: DemoInput }) {
   return (
@@ -516,6 +663,9 @@ export function ComponentsGallery({ overlays, input }: { overlays: ReactNode; in
       <ProbeSection />
       <TimelineSection />
       <PickSection />
+      <ProcessPartsSection />
+      <TaskPageParts />
+      <TranscriptSection />
       <MiscSection overlays={overlays} input={input} />
     </Stack>
   );

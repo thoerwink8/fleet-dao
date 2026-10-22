@@ -82,7 +82,7 @@ const FULL = [
 ];
 
 const kinds = () => [...document.querySelectorAll('[data-kind]')].map((e) => e.getAttribute('data-kind'));
-const filter = (name: RegExp | string) => screen.getByRole('radio', { name });
+const filter = (name: RegExp | string) => screen.getByRole('button', { name });
 
 describe('会话内容：各种条目', () => {
   test('会话头：第几笔、段、模型、成败、时长、花费；打开才读一次接口', async () => {
@@ -111,10 +111,21 @@ describe('会话内容：各种条目', () => {
     ]);
     expect(kinds()).toEqual(['prompt', 'assistant', 'error', 'truncated', 'result']);
     expect(screen.getByRole('alert').textContent).toContain('测试没过');
-    // 结论卡：过了是绿框
+    // 结论卡：过了只写「结论」，没标「没成」
     const result = document.querySelector('[data-kind="result"]') as HTMLElement;
-    expect(result.className).toContain('border-st-done-line');
     expect(result.textContent).toContain('结论');
+    expect(result.textContent).not.toContain('没成');
+  });
+
+  test('没成的结论卡标「没成」', async () => {
+    show(async () => page([entry(0, 'result', '超时没收到结论', { ok: false })]));
+    const result = await waitFor(() => {
+      const el = document.querySelector('[data-kind="result"]');
+      if (!el) throw new Error('还没出来');
+      return el as HTMLElement;
+    });
+    expect(result.textContent).toContain('结论');
+    expect(result.textContent).toContain('没成');
   });
 
   test('步骤分隔线：序号、起始时刻；开头是一句话的写「第 N 步」（话就在下面），先调工具的写「动词 对象」', async () => {
@@ -141,7 +152,7 @@ describe('会话内容：各种条目', () => {
     show(async () => page(FULL.slice(0, 3), { done: false }), true);
     await screen.findByText(/先看一下/, { selector: 'p' });
     const d = document.querySelector('[data-step-divider]') as HTMLElement;
-    expect(d.className).toContain('text-ink-run');
+    expect(d.dataset.tone).toBe('processing');
     expect(d.textContent).toContain('在跑');
   });
 
@@ -163,11 +174,11 @@ describe('会话内容：各种条目', () => {
     show(async () => page(FULL), true);
     await screen.findByText('已提交 abc123');
     const prompt = document.querySelector('[data-kind="prompt"] p') as HTMLElement;
-    expect(prompt.className).toContain('line-clamp-2');
+    expect(prompt.dataset.clamped).toBe('2');
     fireEvent.click(screen.getByRole('button', { name: '看全文' }));
-    expect(prompt.className).not.toContain('line-clamp-2');
+    expect(prompt.dataset.clamped).toBeUndefined();
     fireEvent.click(screen.getByRole('button', { name: '收起' }));
-    expect(prompt.className).toContain('line-clamp-2');
+    expect(prompt.dataset.clamped).toBe('2');
   });
 
   test('连着的调用并成一行摘要；有失败的组默认展开，失败的调用自动展开输出，成功的折着', async () => {
@@ -175,7 +186,7 @@ describe('会话内容：各种条目', () => {
     await screen.findByText('已提交 abc123');
     const group = document.querySelector('[data-tool-group="2"]') as HTMLElement;
     const head = within(group).getAllByRole('button')[0] as HTMLElement;
-    expect(head.textContent).toBe('已运行 2 个命令· 1 个失败');
+    expect(head.textContent).toBe('已运行 2 个命令1 个失败');
     expect(head.getAttribute('aria-expanded')).toBe('true');
     const calls = group.querySelectorAll('[data-call]');
     expect(calls).toHaveLength(2);
@@ -212,9 +223,9 @@ describe('会话内容：各种条目', () => {
     show(async () => page(FULL), true);
     await screen.findByText('已提交 abc123');
     const only = filter(/只看出错/);
-    expect(only.textContent).toBe('只看出错 2');
+    expect(only.textContent).toBe('只看出错2');
     fireEvent.click(only);
-    expect(only.getAttribute('aria-checked')).toBe('true');
+    expect(only.getAttribute('aria-pressed')).toBe('true');
     const shown = [...document.querySelectorAll('[data-seq]')].map((e) => e.getAttribute('data-seq'));
     expect(shown).toEqual(['4', '6']);
     expect(screen.queryByText('先看一下。', { exact: false })).toBeNull();
@@ -396,8 +407,14 @@ describe('会话内容：没记录、读失败', () => {
     }, true);
     await screen.findByText(/先看一下/, { selector: 'p' });
     await act(() => vi.advanceTimersByTimeAsync(3000));
-    expect((await screen.findByRole('alert')).textContent).toContain('这台没接上会话记录');
+    // 读成过、这次刷新没成：是「刷新没成，下面是上一次读到的」，不是「没读成」，旧条目照旧画
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('刷新没成');
+    expect(alert.textContent).toContain('这台没接上会话记录');
+    expect(alert.textContent).not.toContain('没读成');
     expect(screen.getByText(/先看一下/, { selector: 'p' })).toBeTruthy();
+    // 在跑的底栏刷新没成时不显示
+    expect(document.querySelector('[data-live]')).toBeNull();
     // 失败后不再自动刷
     const seen = calls;
     await act(() => vi.advanceTimersByTimeAsync(9000));

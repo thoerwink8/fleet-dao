@@ -10,7 +10,7 @@ test.describe('单子详情', () => {
     stack,
     shot,
   }) => {
-    // 四个数、三段、每一笔在「用量和模型」里，默认收起（#3228）：地址带 ?usage=open 打开
+    // 四个数、三段、每一笔在「用量与模型」页签里（#3509）：地址带 ?usage=open（等于 ?tab=usage）打开
     await page.goto(`/tasks/${stack.facts.tasks.done}?usage=open`);
     await expect(page.getByRole('heading', { name: /#13 README 加一行当前时间/ })).toBeVisible();
     await expect(page.getByText('已完成').first()).toBeVisible();
@@ -18,7 +18,7 @@ test.describe('单子详情', () => {
     // 顶上四个数：流水是 7+30+25+8 = 70 分钟，开单到最后一段收场 86 分钟
     await expect(page.getByText('1 小时 26 分').first()).toBeVisible();
     await expect(page.getByText('1 小时 10 分').first()).toBeVisible();
-    await expect(page.getByText('折合 $2.28').first()).toBeVisible();
+    await expect(page.getByText(/套餐内折合：\$2\.28/).first()).toBeVisible();
 
     // 三段表：每段耗时
     const table = page.locator('main');
@@ -60,8 +60,9 @@ test.describe('单子详情', () => {
   }) => {
     const taskId = stack.facts.tasks.running;
     await page.goto(`/tasks/${taskId}?usage=open`);
-    const pins = page.locator('section').filter({ has: page.getByRole('heading', { name: '用哪个模型' }) });
-    await expect(pins).toBeVisible();
+    // 「用哪个模型」是「用量与模型」页签里的一块；每一行用 data-pin-segment 找
+    await expect(page.getByRole('heading', { name: '用哪个模型' })).toBeVisible();
+    const pins = page.locator('main');
     // 对题在对话里做，指定不了；动手、验收没指定过是自动
     await expect(pins.locator('[data-pin-segment="scope"]')).toContainText('没有模型可指定');
     await expect(pins.locator('[data-pin-segment="manual"]')).toContainText('自动');

@@ -8,6 +8,12 @@ import { type DataAttrs, pickData } from './data-attrs';
 
 export type MessageRole = 'me' | 'other' | 'tool';
 
+/** 写 `role={ROLE.other}`：Message 的 role 是消息的角色，不是 ARIA role，字面量会被 a11y 检查误报。 */
+export const ROLE = { me: 'me', other: 'other', tool: 'tool' } as const satisfies Record<
+  MessageRole,
+  MessageRole
+>;
+
 export interface ChatMessage {
   role: MessageRole;
   /** 气泡上面的灰字：谁说的、几点。 */
@@ -18,17 +24,21 @@ export interface ChatMessage {
 export function Message({
   role,
   meta,
+  kind,
   children,
   ...data
 }: DataAttrs & {
   role: MessageRole;
   meta?: ReactNode;
+  /** 这条是什么（会话记录里的 prompt、result）：只写在 data-kind 上，给测试和脚本找，不影响样子。 */
+  kind?: string;
   children: ReactNode;
 }) {
   return (
     <div
       {...pickData(data)}
       data-role={role}
+      {...(kind !== undefined ? { 'data-kind': kind } : {})}
       className={cn('flex max-w-180 min-w-0 flex-col gap-1', role === 'me' && 'items-end self-end')}
     >
       {meta ? <span className="text-meta text-ink-3">{meta}</span> : null}

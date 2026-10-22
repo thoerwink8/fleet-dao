@@ -22,6 +22,7 @@ import {
 } from 'react';
 import { brand } from '#brand';
 import type { HomeData, HomeState } from '../components/home/types';
+import { viewOf } from '../lib/query-view';
 import { retryUnlessGateway, wrapRefetchInterval } from './poll-backoff';
 import type {
   AddPurposeModelBody,
@@ -994,11 +995,17 @@ function homeStateOf(query: {
   isPending: boolean;
   error: unknown;
   data: HomeResponse | undefined;
+  dataUpdatedAt: number;
   refetch: () => unknown;
 }): HomeState {
-  if (query.error) return { status: 'error', error: query.error, retry: () => void query.refetch() };
-  if (query.isPending || !query.data) return { status: 'loading' };
-  return { status: 'data', data: homeDataOf(query.data) };
+  // 读成过、这次刷新没成：照旧给上一次的数据，带 stale（不当 error，页面顶上写「刷新没成」）
+  const view = viewOf(query);
+  if (view.status === 'data') {
+    return view.stale
+      ? { status: 'data', data: homeDataOf(view.data), stale: view.stale }
+      : { status: 'data', data: homeDataOf(view.data) };
+  }
+  return view;
 }
 
 /**
@@ -1058,6 +1065,7 @@ export function useNodeHome(nodeId: string | null): {
       isPending: query.isPending,
       error: query.error,
       data: query.data?.home,
+      dataUpdatedAt: query.dataUpdatedAt,
       refetch: query.refetch,
     }),
     node: query.data,

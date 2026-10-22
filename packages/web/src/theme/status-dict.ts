@@ -36,6 +36,31 @@ export const STATUS_DICT = {
     'segment:admission_blocked': { label: '内存满没放行', level: 'warning' },
     'segment:failed': { label: '失败', level: 'error' },
     'segment:org_switch': { label: '切号停下，切完重跑', level: 'default' },
+    // 这一笔的结局读不到（库里没记 / 老记录）：不当完成也不当失败
+    'segment:unread': { label: '结局没读到', level: 'warning' },
+    // 被人暂停着的单（任务另有 paused 字段，state 仍是 running）
+    paused: { label: '已暂停', level: 'default' },
+    // 这一笔还在跑
+    'segment:running': { label: '在跑', level: 'processing' },
+    // 单子关联的 PR 在 GitHub 上的状态（任务页 PR 列表）
+    'pr:merged': { label: '已合并', level: 'success' },
+    'pr:open': { label: '开着', level: 'success' },
+    'pr:failed': { label: '开着但 CI 红', level: 'error' },
+    'pr:closed': { label: '已关闭', level: 'default' },
+    'pr:unknown': { label: '没读到状态', level: 'warning' },
+    // 一个回合怎么收场的（引擎的 RoundOutcome）；open 是还没收场，unrecorded 是回合表读到了却没记结局
+    'round:merged': { label: '做成了', level: 'success' },
+    'round:verify_rejected': { label: '验收没过', level: 'error' },
+    'round:ci_red': { label: 'CI 红了', level: 'error' },
+    'round:leftover': { label: '交活有剩', level: 'warning' },
+    'round:no_commit': { label: '没提交', level: 'error' },
+    'round:push_conflict': { label: '推分支时冲突', level: 'error' },
+    'round:merge_conflict': { label: '等合并时冲突', level: 'error' },
+    'round:timeout': { label: '超时', level: 'error' },
+    'round:stopped': { label: '被叫停', level: 'default' },
+    'round:other': { label: '别的原因收场', level: 'warning' },
+    'round:open': { label: '进行中', level: 'processing' },
+    'round:unrecorded': { label: '结局没记', level: 'warning' },
   },
   tone: {
     run: { label: '在跑', level: 'processing' },

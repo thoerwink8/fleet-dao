@@ -3,46 +3,44 @@
 // 主页「在跑的」卡片、「要你拍的」都链到这里。读 runs 表的三段流水（segmentRuns、usage.bySegment）。
 // 读不到的写「没读到」和原因，不写 0。
 //
-// 层级照路由页样板（#1914，本页 #1920）：标题下先是一句结论块（这张单现在怎么样 + 一个状态，下面一行灰字：仓#单号、开单、PR），
-// 再是四个数，然后才是明细（用哪个模型、三段、每一笔）。各块的长说明收进页头 ⓘ，块头只留一句。
-
-import { errMessage } from '@fleet-dao/shared/util';
+// 层级照 Arco Pro 详情页（#3509，样稿 canvas/Task.dc.html）：页头标题和操作；一张卡写这张单现在怎么样（状态、一句结论、
+// 仓#单号、PR）；一张卡是这一回合走到哪（五步）；一张卡是页签：最新汇报 / 用量与模型 / 改动文件 / 过程。
+// 页只拼 components/layout 的件，不写样式类。每一笔的会话盖在右边的抽屉里（?run=）。
 import { ListChecks, SearchX } from 'lucide-react';
-import { Fragment, type ReactNode } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { isNotFound, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
 import { FlowModeTag } from '../components/flow-mode-tag';
+import { Breadcrumb } from '../components/layout/breadcrumb';
+import { Button } from '../components/layout/button';
+import { Descriptions, type DescriptionsItem } from '../components/layout/descriptions';
 import { EmptyState } from '../components/layout/empty-state';
-import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { FilterTabs } from '../components/layout/filter-tabs';
+import { LoadError, LoadingRows, LoadStale } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
+import { Stack } from '../components/layout/stack';
 import { StatusBadge } from '../components/layout/status-badge';
+import { TabPanel } from '../components/layout/tab-panel';
+import { Text } from '../components/layout/text';
 import type { LayoutTone } from '../components/layout/tone';
 import { RepoLink } from '../components/repo-link';
 import { RoundProgressStrip } from '../components/round-progress';
-import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { ActionButtons } from '../components/task-actions';
 import { TaskModelPins } from '../components/task-model-pins';
-import {
-  PanelLauncher,
-  PanelToggle,
-  type TaskPanel,
-  TaskPanelView,
-  usePanelKeys,
-  useTaskPanel,
-} from '../components/task-panel';
-import { TaskSummary } from '../components/task-summary';
-import { Button } from '../components/ui/button';
-import { UsageFold, usageFoldSummary } from '../components/usage-fold';
+import { type TaskPanel, TaskPanelView, usePanelKeys, useTaskPanel } from '../components/task-panel';
+import { processSummaryOf, TaskProcess } from '../components/task-process';
+import { TaskChangedFiles, TaskPrs, TaskSummary } from '../components/task-summary';
+import { canPinModels, USAGE_PARAM, UsageTab } from '../components/usage-fold';
 import { formatAgo, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { viewOf } from '../lib/query-view';
 import { liveMs, segmentLabel, UNKNOWN_SEGMENT } from '../lib/segments';
 import { useShownError } from '../lib/shown-error';
-import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
+import { taskStateLabel, taskTone } from '../lib/status';
 import { backToList, FROM_PARAM } from '../lib/task-list';
-import { cn } from '../lib/utils';
+import type { StatusKey } from '../theme/status-dict';
 
 export function meta() {
   return [{ title: brand.title('任务') }];
@@ -50,39 +48,39 @@ export function meta() {
 
 /** 页头 ⓘ：各块是什么、怎么读（原来摊在每一块的块头，一块两三行）。 */
 const DETAIL = (
-  <div className="space-y-2">
-    <p>一张单走了哪几段、每段每个模型花了多久、多少 token 和钱；读不到的写明没读到，不当成 0。</p>
-    <ul className="list-disc space-y-1 pl-4">
-      <li>顶上一句是这张单现在怎么样；灰字行是仓和单号（点开去 GitHub）、开单时间、最新的 PR。</li>
-      <li>
-        页头下面一条是这一回合走到哪：动手 → 自测 → 推分支 · CI → 验收 →
-        合并，每格下面一行写用了多久、第几笔在跑或还没到；蓝的在做、红的没成；返工的回合带上一回合怎么收场。没有回合记录的老单不画。
-      </li>
-      <li>
-        最新汇报：最新一笔的结论（标题后面写第几笔、模型、多久前）、命令完成和失败的数、关联的
-        PR（紫条，带状态）、改了哪些文件（每个文件的 +/-）。 文件和行数来自推分支时按 PR 头记的
-        numstat，不是把每次编辑加起来；读不到的写没读到和原因，不当成 0。
-      </li>
-      <li>
-        过程在右侧面板里，页头「过程」或按 \
-        开关，开没开记在这台浏览器；从右边盖上来、不占正文，左边沿能拉宽，手机整屏。回合 → 笔 → 步骤 →
-        调用。前面收场的回合收成一行，点开看；每一笔写第几笔、为什么起、是新会话还是接上一笔的会话、结局和用时，笔之间一行是引擎在会话外连着做的事
-        （自测 → 推分支 → 开 PR → 等 CI → 验收 → 合并）；返工的回合顶上红框写为什么返工。一步 = Agent
-        说一句要做什么，加上它接着做的那串调用，点开才是单个调用；有失败的、在跑的自动展开。
-      </li>
-      <li>用量和模型：下面几块默认收成一行，点开才看。</li>
-      <li>
-        用哪个模型：给动手、验收指定模型，下一次选路起照它，在跑的这一轮不打断；动手这一轮想当场换，点「现在就换」。
-        指定的派不出时引擎停下等你，不悄悄换别的。
-      </li>
-      <li>三段：对题 → 动手 → 验收，每段再按模型分。没读到的格子留 —，不是 0；段名悬停看这一段做什么。</li>
-      <li>
-        每一笔：三段每跑一次一笔，按起跑先后。没记 task_id、按单号对上的标「按单号兜底」；没读到的写明为什么。
-        点「看会话」面板换成那一笔的会话，网址带着这一笔，能发给别人；「‹ 过程」或后退回到过程，K / J
-        换上一笔、下一笔；「弹出到新窗口」单开一个不带侧栏的窗口看长会话。
-      </li>
-    </ul>
-  </div>
+  <Stack gap="sm">
+    <Text as="p">
+      一张单走了哪几段、每段每个模型花了多久、多少 token 和钱；读不到的写明没读到，不当成 0。
+    </Text>
+    <Text as="p" size="meta" tone="secondary">
+      顶上一卡是这张单现在怎么样：状态、一句结论、仓和单号（点开去 GitHub）、开单时间、关联的 PR
+      和它们的状态。
+    </Text>
+    <Text as="p" size="meta" tone="secondary">
+      下面一卡是这一回合走到哪：动手 → 自测 → 推分支 · CI → 验收 →
+      合并，每格下面一行写用了多久、第几笔在跑或还没到；蓝的在做、红的没成；返工的回合带上一回合怎么收场。没有回合记录的老单不画。
+    </Text>
+    <Text as="p" size="meta" tone="secondary">
+      最新汇报：最新一笔的结论（后面写第几笔、模型、多久前）、命令完成和失败的数。改动文件：每个 PR
+      改了哪些文件、每个文件的增删；文件和行数来自推分支时按 PR 头记的
+      numstat，不是把每次编辑加起来；读不到的写没读到和原因，不当成 0。
+    </Text>
+    <Text as="p" size="meta" tone="secondary">
+      过程：回合 → 笔 → 步骤 →
+      调用。前面收场的回合收成一行，点开看；每一笔写第几笔、为什么起、是新会话还是接上一笔的会话、结局和用时，笔之间一行是引擎在会话外连着做的事
+      （自测 → 推分支 → 开 PR → 等 CI → 验收 → 合并）；返工的回合顶上写为什么返工。按 \ 切到这个页签。
+    </Text>
+    <Text as="p" size="meta" tone="secondary">
+      用量与模型：几个数、三段（对题 → 动手 → 验收，每段再按模型分，没读到的格子留 —，不是 0）、每一笔（没记
+      task_id、按单号对上的标「按单号兜底」；
+      没读到的写明为什么）、用哪个模型（给动手、验收指定模型，下一次选路起照它，在跑的这一轮不打断；动手这一轮想当场换，点「现在就换」；
+      指定的派不出时引擎停下等你，不悄悄换别的）。选中的页签记在网址里，能发给别人。
+    </Text>
+    <Text as="p" size="meta" tone="secondary">
+      点「看会话」右边盖上来这一笔的会话，网址带着这一笔（?run=），K / J
+      换上一笔、下一笔；「弹出到新窗口」单开一个不带侧栏的窗口看长会话。
+    </Text>
+  </Stack>
 );
 
 /** 从任务列表点进来的（链接带 ?from=/tasks?…）回列表并带回筛选；别处进来的照旧回主页。 */
@@ -90,31 +88,27 @@ function Crumbs({ d }: { d: TaskDetail | undefined }) {
   const [params] = useSearchParams();
   const list = backToList(params.get(FROM_PARAM));
   return (
-    <ol className="flex flex-wrap items-center gap-1" data-breadcrumb>
-      <li>
-        <Link
-          to={list ?? '/'}
-          aria-label={list ? '回任务列表' : '回主页'}
-          className="inline-flex underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10 max-md:items-center"
-        >
-          {list ? '任务列表' : '主页'}
-        </Link>
-      </li>
-      <li aria-hidden>/</li>
-      <li aria-current="page" className="num">
-        {d ? `#${d.task.issueNumber}` : '任务'}
-      </li>
-    </ol>
+    <Breadcrumb
+      items={[
+        {
+          label: list ? '任务列表' : '主页',
+          href: list ?? '/',
+          ariaLabel: list ? '回任务列表' : '回主页',
+        },
+        { label: d ? `#${d.task.issueNumber}` : '任务' },
+      ]}
+    />
   );
 }
 
 /**
  * 暂停、继续、叫停、重做（#820 片 3 已接到这一页，#856 第 1 处核对后仍用这一份 ActionButtons）。
- * 点了发 POST /api/tasks/:taskId/actions。做完、失败的不画。已叫停的只画「重做」。
+ * 点了发 POST /api/tasks/:taskId/actions。做完、失败的不画。已叫停的只画「重做」；停滞时「重做」收进「更多」。
  */
 function TaskActionBar({ d }: { d: TaskDetail }) {
   return (
     <ActionButtons
+      moreRedo
       target={{
         taskId: d.task.id,
         issueNumber: d.task.issueNumber,
@@ -125,12 +119,6 @@ function TaskActionBar({ d }: { d: TaskDetail }) {
       }}
     />
   );
-}
-
-/** 「用哪个模型」：结束了的单从没指定过，也没什么可看的，不画。 */
-function Pins({ d, now }: { d: TaskDetail; now: number }) {
-  if (isTaskFinished(d.task) && !d.routePins.pins.length && !d.routePins.unavailable) return null;
-  return <TaskModelPins d={d} now={now} />;
 }
 
 /** 最新的 PR：段流水里最后一个带 PR 的，没有再看子任务。 */
@@ -201,111 +189,167 @@ export function taskConclusion(
 }
 
 /**
- * 首屏结论块（照路由页样板的标题块；#1751 起首屏先给状态、已跑多久、PR 号）：
- * 第一行结论短话加一个状态；第二行灰字：仓#单号（去 GitHub）、开单多久、最新的 PR、暂停的原因。两行都不折。
+ * 首屏结论卡（照 Arco Pro 详情页；#1751 起首屏先给状态、已跑多久、PR 号）：
+ * 第一行状态加一句结论（放不下截断，整句在悬停里）；下面是键值：仓和单号（去 GitHub）加开单多久、PR 和它们的状态。
  */
 function TaskHero({ d, now }: { d: TaskDetail; now: number }) {
   const c = taskConclusion(d, now);
   const pr = latestPr(d);
-  // 手机上灰字行里的链接要 40 高好点；桌面照常
-  const link =
-    'num underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center';
-  const meta: { key: string; node: ReactNode }[] = [
+  const status: StatusKey = d.task.paused === undefined ? `task:${d.task.state}` : 'task:paused';
+  const prs = d.overview?.prs ?? [];
+  const items: DescriptionsItem[] = [
     {
-      key: 'repo',
-      node: (
-        <RepoLink repo={d.repo} kind="issues" n={d.task.issueNumber} className={link}>
-          {d.repo.owner}/{d.repo.name}#{d.task.issueNumber}
-        </RepoLink>
+      label: '仓和单号',
+      value: (
+        <Stack direction="horizontal" gap="md" align="baseline" wrap>
+          <RepoLink repo={d.repo} kind="issues" n={d.task.issueNumber}>
+            {d.repo.owner}/{d.repo.name}#{d.task.issueNumber}
+          </RepoLink>
+          <Text tone="muted">开单 {formatAgo(d.task.createdAt, now)}</Text>
+        </Stack>
       ),
     },
-    { key: 'opened', node: <span className="num">开单 {formatAgo(d.task.createdAt, now)}</span> },
-    ...(pr === undefined
-      ? []
-      : [
-          {
-            key: 'pr',
-            node: (
-              <RepoLink repo={d.repo} kind="pull" n={pr} className={link}>
-                PR #{pr}
-              </RepoLink>
-            ),
-          },
-        ]),
+    ...(prs.length > 0
+      ? [{ label: 'PR', value: <TaskPrs d={d} /> }]
+      : pr === undefined
+        ? []
+        : [
+            {
+              label: 'PR',
+              value: (
+                <RepoLink repo={d.repo} kind="pull" n={pr}>
+                  PR #{pr}
+                </RepoLink>
+              ),
+            },
+          ]),
   ];
   return (
-    <header data-now-banner className="mb-6 flex min-w-0 flex-col max-md:mb-4">
-      <p
-        data-hero-line
-        title={c.text}
-        className="flex min-w-0 items-center gap-2.5 whitespace-nowrap text-heading font-normal"
-      >
-        <span data-hero-text className="min-w-0 truncate">
-          {d.task.paused === undefined ? c.text : <span data-paused-note>{c.text}</span>}
-        </span>
-        <span className="flex shrink-0 items-center gap-1.5">
-          <FlowModeTag mode={d.task.flowMode} fallback={d.task.flowFallback} />
-          <StatusBadge tone={c.tone} label={c.label} />
-        </span>
-      </p>
-      <p
-        data-hero-notes
-        className="mt-1.5 flex min-w-0 items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-meta text-muted-foreground"
-      >
-        {meta.map((m, i) => (
-          <Fragment key={m.key}>
-            {i > 0 ? (
-              <span aria-hidden className="shrink-0">
-                ·
-              </span>
-            ) : null}
-            <span className={cn('min-w-0', i === 0 ? 'truncate' : 'shrink-0')}>{m.node}</span>
-          </Fragment>
-        ))}
-      </p>
-    </header>
+    <Section aria-label="这张单现在怎么样" data-now-banner>
+      <Stack gap="lg">
+        <div data-hero-line title={c.text}>
+          <Stack direction="horizontal" gap="md" align="center">
+            <StatusBadge status={status} />
+            <FlowModeTag mode={d.task.flowMode} fallback={d.task.flowFallback} />
+            <span data-hero-text>
+              {d.task.paused === undefined ? (
+                <Text tone="secondary" truncate>
+                  {c.text}
+                </Text>
+              ) : (
+                <span data-paused-note>
+                  <Text tone="secondary" truncate>
+                    {c.text}
+                  </Text>
+                </span>
+              )}
+            </span>
+          </Stack>
+        </div>
+        <Descriptions columns={1} items={items} />
+      </Stack>
+    </Section>
   );
 }
 
+type TabId = 'report' | 'usage' | 'files' | 'process';
+
+const TAB_PARAM = 'tab';
+const TAB_PREFIX = 'task-tab';
+const TABS: readonly { id: TabId; label: string }[] = [
+  { id: 'report', label: '最新汇报' },
+  { id: 'usage', label: '用量与模型' },
+  { id: 'files', label: '改动文件' },
+  { id: 'process', label: '过程' },
+];
+
+/** 现在选中的页签：地址里的 ?tab=；旧链接 ?usage=open 等于「用量与模型」；都没有是「最新汇报」。 */
+function useTab(): [TabId, (next: TabId) => void] {
+  const [params, setParams] = useSearchParams();
+  const raw = params.get(TAB_PARAM);
+  const tab: TabId =
+    TABS.find((t) => t.id === raw)?.id ?? (params.get(USAGE_PARAM) === 'open' ? 'usage' : 'report');
+  const select = (next: TabId) =>
+    setParams(
+      (p) => {
+        const n = new URLSearchParams(p);
+        n.delete(USAGE_PARAM);
+        if (next === 'report') n.delete(TAB_PARAM);
+        else n.set(TAB_PARAM, next);
+        return n;
+      },
+      { replace: true },
+    );
+  return [tab, select];
+}
+
 /**
- * 结论块下面：这一回合走到哪、最新汇报（#3140），用量明细收成一行；「过程」和每一笔的会话在右侧面板里（#3277，
- * components/task-panel.tsx），关着时正文末尾一行点开。
+ * 结论卡下面：这一回合走到哪、四个页签；每一笔的会话在右侧抽屉里（#3277，components/task-panel.tsx）。
  */
-function Body({ d, now, panel }: { d: TaskDetail; now: number; panel: TaskPanel }) {
+function Body({
+  d,
+  now,
+  panel,
+  tab,
+  selectTab,
+}: {
+  d: TaskDetail;
+  now: number;
+  panel: TaskPanel;
+  tab: TabId;
+  selectTab: (next: TabId) => void;
+}) {
   if (!d.segmentRuns.length) {
     return (
-      <>
+      <Stack>
         <TaskHero d={d} now={now} />
-        <div className="flex flex-col gap-4 lg:gap-6">
+        <Section>
+          <EmptyState
+            icon={ListChecks}
+            title="这张单还没跑过"
+            hint="三段（对题、动手、验收）跑起来以后，每一笔都记在这里。"
+          />
+        </Section>
+        {canPinModels(d) ? (
           <Section>
-            <EmptyState
-              icon={ListChecks}
-              title="这张单还没跑过"
-              hint="三段（对题、动手、验收）跑起来以后，每一笔都记在这里。"
-            />
+            <TaskModelPins d={d} now={now} />
           </Section>
-          <Pins d={d} now={now} />
-        </div>
-      </>
+        ) : null}
+      </Stack>
     );
   }
-  // 正文一栏；面板是盖在右边的抽屉，不占正文的位置（#3277）
   return (
-    <>
-      <div className="flex min-w-0 flex-col gap-4 lg:gap-6">
-        <TaskHero d={d} now={now} />
-        <RoundProgressStrip d={d} now={now} />
-        <TaskSummary d={d} now={now} onShowProcess={panel.run ? panel.back : panel.show} />
-        <UsageFold summary={usageFoldSummary(d, now)}>
-          <SegmentStats d={d} now={now} />
-          <Pins d={d} now={now} />
-          <SegmentBreakdown d={d} now={now} />
-          <SegmentRunList d={d} now={now} onViewTranscript={panel.openRun} />
-        </UsageFold>
-        <PanelLauncher d={d} now={now} panel={panel} />
-      </div>
-      <TaskPanelView d={d} now={now} panel={panel} />
-    </>
+    <Stack>
+      <TaskHero d={d} now={now} />
+      <RoundProgressStrip d={d} now={now} />
+      <Section aria-label="任务内容">
+        <Stack gap="lg">
+          <FilterTabs
+            aria-label="任务内容"
+            idPrefix={TAB_PREFIX}
+            items={TABS.map((t) => ({ id: t.id, label: t.label }))}
+            value={tab}
+            onChange={selectTab}
+          />
+          <TabPanel idPrefix={TAB_PREFIX} id={tab}>
+            {tab === 'report' ? (
+              <TaskSummary d={d} now={now} onShowProcess={() => selectTab('process')} />
+            ) : tab === 'usage' ? (
+              <UsageTab d={d} now={now} onViewTranscript={panel.openRun} />
+            ) : tab === 'files' ? (
+              <TaskChangedFiles d={d} />
+            ) : (
+              <Stack gap="md">
+                <Text size="meta" tone="muted">
+                  {processSummaryOf(d, now)}
+                </Text>
+                <TaskProcess d={d} now={now} onViewTranscript={panel.openRun} inPanel />
+              </Stack>
+            )}
+          </TabPanel>
+        </Stack>
+      </Section>
+    </Stack>
   );
 }
 
@@ -326,16 +370,22 @@ function Missing({ taskId }: { taskId: string | undefined }) {
           icon={SearchX}
           title="没有这张单"
           hint={
-            <>
-              <span className="block">
-                库里没有编号为「<span className="num">{taskId ?? ''}</span>
+            <Stack gap="sm">
+              <Text as="p" tone="muted">
+                库里没有编号为「<Text mono>{taskId ?? ''}</Text>
                 」的单：可能链接里的编号写错了，或这张单已经不在了。
-              </span>
-              {looksLikeIssueNumber(taskId) ? <span className="mt-2 block">{GITHUB_ISSUE_HINT}</span> : null}
-              <Button asChild size="sm" variant="outline" className="mt-3">
-                <Link to="/">回主页</Link>
-              </Button>
-            </>
+              </Text>
+              {looksLikeIssueNumber(taskId) ? (
+                <Text as="p" tone="muted">
+                  {GITHUB_ISSUE_HINT}
+                </Text>
+              ) : null}
+            </Stack>
+          }
+          action={
+            <Button variant="primary" href="/">
+              回主页
+            </Button>
           }
         />
       </div>
@@ -354,15 +404,22 @@ export default function TaskPage() {
   // 推送重读会把从没读成过的查询退回骨架：显示记住的那次失败（lib/shown-error.ts）
   const error = useShownError(taskId, detail);
   const now = useNow();
-  const d = detail.data;
+  const view = viewOf(detail);
+  const d = view.status === 'data' ? view.data : undefined;
   const panel = useTaskPanel(d?.segmentRuns ?? NO_RUNS);
-  usePanelKeys(panel);
+  const [tab, selectTab] = useTab();
+  // 过程在页签里；右边的抽屉只给某一笔的会话（?run=）。`\` 切到「过程」页签。
+  const drawer: TaskPanel = { ...panel, shown: panel.run !== undefined, toggle: () => selectTab('process') };
+  usePanelKeys(drawer);
   return (
     <Page
       title={
         d ? (
           <>
-            <span className="num text-muted-foreground">#{d.task.issueNumber}</span> {d.task.title}
+            <Text tone="muted" mono>
+              #{d.task.issueNumber}
+            </Text>{' '}
+            {d.task.title}
           </>
         ) : (
           '任务'
@@ -376,35 +433,27 @@ export default function TaskPage() {
         staleAfterMs: TASK_STALE_AFTER_MS,
       }}
       breadcrumb={<Crumbs d={d} />}
-      actions={
-        d ? (
-          <>
-            {d.segmentRuns.length ? <PanelToggle panel={panel} /> : null}
-            <TaskActionBar d={d} />
-          </>
-        ) : undefined
-      }
+      actions={d ? <TaskActionBar d={d} /> : undefined}
     >
-      {error && isNotFound(error) ? (
+      {error && isNotFound(error) && !d ? (
         <Missing taskId={taskId} />
-      ) : error && !d ? (
-        <LoadError what="这张单" error={error} onRetry={() => void detail.refetch()} />
+      ) : view.status === 'error' || (error && !d) ? (
+        <LoadError
+          what="这张单"
+          error={error ?? (view.status === 'error' ? view.error : undefined)}
+          onRetry={() => void detail.refetch()}
+        />
       ) : !d ? (
         <LoadingRows rows={6} />
       ) : (
-        <>
-          {/* 读成过、这次刷新没读成：照旧画上一次读到的，顶上一条横幅带重试（不把看得到的清空） */}
-          {error ? (
-            <div className="mb-4">
-              <LoadError
-                text={`这张单刷新没读成，下面是上一次读到的：${errMessage(error)}`}
-                error={error}
-                onRetry={() => void detail.refetch()}
-              />
-            </div>
+        <Stack>
+          {/* 读成过、这次刷新没读成：照旧画上一次读到的，顶上一条橙色提示带重试（不把看得到的清空） */}
+          {view.status === 'data' && view.stale ? (
+            <LoadStale what="这张单" stale={view.stale} staleAfterMs={TASK_STALE_AFTER_MS} />
           ) : null}
-          <Body d={d} now={now} panel={panel} />
-        </>
+          <Body d={d} now={now} panel={drawer} tab={tab} selectTab={selectTab} />
+          <TaskPanelView d={d} now={now} panel={drawer} />
+        </Stack>
       )}
     </Page>
   );

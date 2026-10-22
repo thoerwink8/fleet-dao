@@ -5,7 +5,7 @@
 // - 悬停条和右键 home/board/nodes.tsx、手机列表 home/board/board-tree.tsx：useTargetActions
 // - 选中卡片后的快捷键 home/board/board-canvas.tsx：shortcutAction
 // 没有「换模型」：任务工作流没有中途换路由，后端对 reroute 固定回 409 action_not_supported
-// （api/src/cockpit.ts）。要换这张单用的模型，在任务页「用哪个模型」里指定（task-model-pins.tsx）。
+// （api/src/cockpit.ts）。要换这张单用的模型，在任务页「用量与模型」的「用哪个模型」里指定（task-model-pins.tsx）。
 // 没有「回答追问」：v3 没有 AI 追问这一环（#928）。
 import { continueExhausted } from '@fleet-dao/shared';
 import type { LucideIcon } from 'lucide-react';
@@ -15,18 +15,10 @@ import { toast } from 'sonner';
 import { errorText, useTaskAction } from '../api/client';
 import type { Activity, BoardSubtask, BoardTask, TaskActionBody, TaskState } from '../api/types';
 import { isTaskFinished, letterOf } from '../lib/status';
-import { cn } from '../lib/utils';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from './ui/alert-dialog';
-import { Button } from './ui/button';
+import { Button } from './layout/button';
+import { ConfirmDialog } from './layout/confirm-dialog';
+import { RowMenu, RowMenuItem } from './layout/row-menu';
+import { Stack } from './layout/stack';
 
 /** 一个操作对着谁：需求，或需求下的某个子任务。 */
 export interface ActionTarget {
@@ -190,83 +182,48 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
     () => ({ trigger, pending: (taskId: string, action: UiAction) => inFlight.has(`${taskId}:${action}`) }),
     [trigger, inFlight],
   );
-  const close = () => setDialog(null);
+  const close = (open: boolean) => {
+    if (!open) setDialog(null);
+  };
 
   return (
     <Ctx value={api}>
       {children}
-      <AlertDialog open={dialog?.kind === 'pause'} onOpenChange={(o) => !o && close()}>
-        <AlertDialogContent>
-          {dialog?.kind === 'pause' ? (
-            <>
-              <AlertDialogHeader>
-                <AlertDialogTitle>暂停 {targetName(dialog.target)}？</AlertDialogTitle>
-                <AlertDialogDescription>
-                  只停这一张单，别的单照常；点「继续」接着走（和「叫停」不同，叫停不能恢复）。
-                  「做完这一段再停」会等手上这一段做完；「立刻停下」会把在跑的动手会话叫停，继续后在原分支原树上重跑。
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>先不</AlertDialogCancel>
-                <AlertDialogAction
-                  variant="outline"
-                  onConfirm={() => send(dialog.target, { action: 'pause', mode: 'hard' }, '暂停')}
-                >
-                  立刻停下
-                </AlertDialogAction>
-                <AlertDialogAction
-                  onConfirm={() => send(dialog.target, { action: 'pause', mode: 'soft' }, '暂停')}
-                >
-                  做完这一段再停
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </>
-          ) : null}
-        </AlertDialogContent>
-      </AlertDialog>
-      <AlertDialog open={dialog?.kind === 'stop'} onOpenChange={(o) => !o && close()}>
-        <AlertDialogContent>
-          {dialog?.kind === 'stop' ? (
-            <>
-              <AlertDialogHeader>
-                <AlertDialogTitle>叫停 {targetName(dialog.target)}？</AlertDialogTitle>
-                <AlertDialogDescription>
-                  在跑的会话停在干净的点，做完的已提交；之后这个需求不再往下走，不能恢复（只想先停一停请用「暂停」）。要再做，等它停下来后点「重做」。
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>先不</AlertDialogCancel>
-                <AlertDialogAction
-                  variant="destructive"
-                  onConfirm={() => send(dialog.target, { action: 'stop' }, '叫停')}
-                >
-                  叫停
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </>
-          ) : null}
-        </AlertDialogContent>
-      </AlertDialog>
-      <AlertDialog open={dialog?.kind === 'redo'} onOpenChange={(o) => !o && close()}>
-        <AlertDialogContent>
-          {dialog?.kind === 'redo' ? (
-            <>
-              <AlertDialogHeader>
-                <AlertDialogTitle>重做 {targetName(dialog.target)}？</AlertDialogTitle>
-                <AlertDialogDescription>
-                  会给这张单再起一代，旧的记录留着。旧工作树里没推上去的东西会丢掉；已经推上去的分支还在。
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>先不</AlertDialogCancel>
-                <AlertDialogAction onConfirm={() => send(dialog.target, { action: 'redo' }, '重做')}>
-                  重做
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </>
-          ) : null}
-        </AlertDialogContent>
-      </AlertDialog>
+      {dialog?.kind === 'pause' ? (
+        <ConfirmDialog
+          open
+          onOpenChange={close}
+          title={`暂停 ${targetName(dialog.target)}？`}
+          description="只停这一张单，别的单照常；点「继续」接着走（和「叫停」不同，叫停不能恢复）。「做完这一段再停」会等手上这一段做完；「立刻停下」会把在跑的动手会话叫停，继续后在原分支原树上重跑。"
+          confirmText="做完这一段再停"
+          onConfirm={() => send(dialog.target, { action: 'pause', mode: 'soft' }, '暂停')}
+          secondary={{
+            text: '立刻停下',
+            onConfirm: () => send(dialog.target, { action: 'pause', mode: 'hard' }, '暂停'),
+          }}
+        />
+      ) : null}
+      {dialog?.kind === 'stop' ? (
+        <ConfirmDialog
+          open
+          onOpenChange={close}
+          danger
+          title={`叫停 ${targetName(dialog.target)}？`}
+          description="在跑的会话停在干净的点，做完的已提交；之后这个需求不再往下走，不能恢复（只想先停一停请用「暂停」）。要再做，等它停下来后点「重做」。"
+          confirmText="叫停"
+          onConfirm={() => send(dialog.target, { action: 'stop' }, '叫停')}
+        />
+      ) : null}
+      {dialog?.kind === 'redo' ? (
+        <ConfirmDialog
+          open
+          onOpenChange={close}
+          title={`重做 ${targetName(dialog.target)}？`}
+          description="会给这张单再起一代，旧的记录留着。旧工作树里没推上去的东西会丢掉；已经推上去的分支还在。"
+          confirmText="重做"
+          onConfirm={() => send(dialog.target, { action: 'redo' }, '重做')}
+        />
+      ) : null}
     </Ctx>
   );
 }
@@ -294,57 +251,64 @@ export function useTargetActions(target: ActionTarget | undefined): RunnableActi
   }));
 }
 
-/** 任务页和看板侧边详情上的一排字按钮。没有该画的动作时什么都不画。置灰的悬停写明原因。 */
-export function ActionButtons({ target, className }: { target: ActionTarget; className?: string }) {
+/**
+ * 任务页和看板侧边详情上的一排字按钮。没有该画的动作时什么都不画。置灰的悬停写明原因。
+ * 灰底次按钮，叫停是红的、和前面的拉开一段（降低误点，#1751）；页头里没有主按钮。
+ * moreRedo：「重做」是低频操作，收进「更多」菜单（任务页用）；不传就和别的操作一样摆在外面（看板侧边详情）。
+ */
+export function ActionButtons({
+  target,
+  moreRedo,
+}: {
+  target: ActionTarget;
+  moreRedo?: boolean;
+  /** @deprecated 样式交给组件；画布页侧边详情还在传，随 /board 一起删。 */
+  className?: string;
+}) {
   const { trigger, pending } = useTaskActions();
   const offers = taskActionButtons(target);
   if (!offers.length) return null;
-  // 叫停与暂停、右侧「回主页」之间加竖线/间距，降低误点（#1751）
-  const hasStop = offers.some((o) => o.action === 'stop');
+  const inMenu = (action: UiAction) => moreRedo === true && action === 'redo' && offers.length > 1;
+  const shown = offers.filter((o) => !inMenu(o.action));
+  const redoInMenu = offers.some((o) => inMenu(o.action));
+  const btn = ({ action, disabledReason }: TaskActionButton) => {
+    const def = ACTIONS[action];
+    return (
+      <Button
+        key={action}
+        size="sm"
+        variant={def.danger ? 'danger' : 'secondary'}
+        // 正在发这一个操作（继续是直接发的；暂停、叫停、重做在确认框里等）：这颗转圈、点不动
+        loading={pending(target.taskId, action)}
+        {...(disabledReason !== undefined ? { disabledReason } : {})}
+        onClick={() => trigger(action, target)}
+      >
+        {action === 'resume' && disabledReason ? disabledReason : def.label}
+      </Button>
+    );
+  };
+  // 前一组：暂停、继续；拉开一段后：叫停、重做（红的叫停和前面隔开，降低误点）
+  const front = shown.filter((o) => o.action === 'pause' || o.action === 'resume');
+  const stop = shown.filter((o) => o.action === 'stop' || o.action === 'redo');
   return (
-    <div
-      className={cn(
-        'flex flex-wrap items-center gap-1.5',
-        hasStop && 'mr-2 border-r border-border pr-3',
-        className,
-      )}
-      data-task-actions
-    >
-      {offers.map(({ action, disabledReason }) => {
-        const def = ACTIONS[action];
-        const Icon = def.icon;
-        const button = (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={disabledReason !== undefined}
-            // 正在发这一个操作（继续是直接发的；暂停、叫停、重做在确认框里等）：这颗转圈、点不动
-            loading={pending(target.taskId, action)}
-            title={disabledReason}
-            className={cn('h-8', def.danger && 'text-ink-fail')}
-            onClick={() => {
-              if (disabledReason !== undefined) return;
-              trigger(action, target);
-            }}
-          >
-            <Icon />
-            {action === 'resume' && disabledReason ? disabledReason : def.label}
-          </Button>
-        );
-        // 置灰按钮自己不收悬停（disabled 关掉了指针），原因写在包着它的这一层上，鼠标停上去才看得到。
-        return (
-          <span key={action} className="inline-flex items-center gap-1.5" title={disabledReason}>
-            {action === 'stop' && offers.length > 1 ? (
-              <span
-                className="mx-0.5 h-5 w-px shrink-0 bg-border"
-                aria-hidden
-                data-action-sep="before-stop"
-              />
+    <div data-task-actions>
+      <Stack direction="horizontal" gap="xl" align="center" wrap>
+        {front.length > 0 ? (
+          <Stack direction="horizontal" gap="sm" align="center">
+            {front.map(btn)}
+          </Stack>
+        ) : null}
+        {stop.length > 0 || redoInMenu ? (
+          <Stack direction="horizontal" gap="sm" align="center">
+            {stop.map(btn)}
+            {redoInMenu ? (
+              <RowMenu label="更多操作" title="重做" reveal={false}>
+                <RowMenuItem onSelect={() => trigger('redo', target)}>重做</RowMenuItem>
+              </RowMenu>
             ) : null}
-            {button}
-          </span>
-        );
-      })}
+          </Stack>
+        ) : null}
+      </Stack>
     </div>
   );
 }
