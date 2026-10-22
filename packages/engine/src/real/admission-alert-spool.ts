@@ -38,6 +38,39 @@ export const ALERT_SPOOL_LIMITS = Object.freeze({
   // 无 spill/savepoint/ATTACH：一份原页像，每页4字节页号+4字节校验；保留两份最大扇区余量。
   journalBytes: 1024 * (4096 + 8) + 2 * 65536,
 });
+// 阶段计时只在内存里用单调时钟打点，不做任何IO；是否输出由调用方在测试超时/失败时决定。
+export type SpoolPhase = 'open' | 'begin' | 'write' | 'commit' | 'close';
+const timing: {
+  last?: SpoolPhase | undefined;
+  running?: SpoolPhase | undefined;
+  at: number;
+  ms: Partial<Record<SpoolPhase, number>>;
+} = { at: 0, ms: {} };
+function spoolEnter(phase: SpoolPhase): void {
+  const now = performance.now();
+  if (timing.running) timing.ms[timing.running] = (timing.ms[timing.running] ?? 0) + now - timing.at;
+  timing.last = timing.running = phase;
+  timing.at = now;
+}
+function spoolLeave(): void {
+  if (timing.running)
+    timing.ms[timing.running] = (timing.ms[timing.running] ?? 0) + performance.now() - timing.at;
+  timing.running = undefined;
+}
+function spoolReset(): void {
+  timing.last = timing.running = undefined;
+  timing.ms = {};
+  spoolEnter('open');
+}
+export function formatSpoolCommitTiming(): string | undefined {
+  if (!timing.last) return undefined;
+  const ms = { ...timing.ms };
+  if (timing.running) ms[timing.running] = (ms[timing.running] ?? 0) + performance.now() - timing.at;
+  const spans = Object.entries(ms);
+  // phase 是耗时最长的一段（慢在哪），last 是最后进入的阶段（走到哪）；成功收尾总会走到 close。
+  const slowest = spans.reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+  return `SPOOL_COMMIT_TIMING phase=${slowest} last=${timing.last} ${spans.map(([k, v]) => `${k}=${v.toFixed(1)}ms`).join(' ')}`;
+}
 const NAME = 'pending.sqlite';
 const APP_ID = 0x46444131;
 const TABLE_SQL =
@@ -326,13 +359,16 @@ class Spool {
     const o = AlertObservationSchema.parse(input);
     const key = admissionAlertKey(o.identity);
     const d = this.db as DatabaseSync;
+    spoolEnter('begin');
     d.exec('BEGIN IMMEDIATE');
+    spoolEnter('write');
     try {
       this.validate();
       const row = d.prepare('SELECT key,payload,record_hash FROM pending WHERE key=?').get(key);
       if (row) {
         if (admissionAlertIdentityJson(this.decode(row).identity) !== admissionAlertIdentityJson(o.identity))
           fail('corrupt');
+        spoolEnter('commit');
         d.exec('COMMIT');
         this.path.check();
         return { kind: 'spooled', key, recordHash: row.record_hash as string };
@@ -349,6 +385,7 @@ class Spool {
       )
         fail('capacity');
       d.prepare('INSERT INTO pending(key,payload,record_hash) VALUES(?,?,?)').run(key, payload, recordHash);
+      spoolEnter('commit');
       d.exec('COMMIT');
       this.path.check();
       return { kind: 'spooled', key, recordHash };
@@ -364,13 +401,16 @@ class Spool {
   peek(): { key: string; recordHash: string; observation: AdmissionAlertObservation } | undefined {
     const d = this.db as DatabaseSync;
     // 读事务在PG连接前结束，不跨网络持写事务/读锁。
+    spoolEnter('begin');
     d.exec('BEGIN');
+    spoolEnter('write');
     try {
       this.validate();
       const row = d.prepare('SELECT key,payload,record_hash FROM pending ORDER BY key LIMIT 1').get();
       const result = row
         ? { key: row.key as string, recordHash: row.record_hash as string, observation: this.decode(row) }
         : undefined;
+      spoolEnter('commit');
       d.exec('COMMIT');
       return result;
     } catch (e) {
@@ -408,10 +448,13 @@ class Spool {
     if (persisted.kind === 'unknown') return persisted;
     if (performance.now() >= deadlineAt) return { kind: 'unknown', code: 'deadline' };
     const d = this.db as DatabaseSync;
+    spoolEnter('begin');
     d.exec('BEGIN IMMEDIATE');
+    spoolEnter('write');
     try {
       this.validate();
       d.prepare('DELETE FROM pending WHERE key=? AND record_hash=?').run(row.key, row.recordHash);
+      spoolEnter('commit');
       d.exec('COMMIT');
       this.path.check();
     } catch (e) {
@@ -430,6 +473,7 @@ class Spool {
     };
   }
   close(): void {
+    spoolEnter('close');
     try {
       this.db?.close();
     } finally {
@@ -441,6 +485,7 @@ class Spool {
 
 export function recordAdmissionAlert(path: string, input: AdmissionAlertObservation): AlertOutcome {
   let spool: Spool | undefined;
+  spoolReset();
   try {
     spool = new Spool(path);
     return spool.record(input);
@@ -448,6 +493,7 @@ export function recordAdmissionAlert(path: string, input: AdmissionAlertObservat
     return { kind: 'unknown', code: errorCode(e) };
   } finally {
     spool?.close();
+    spoolLeave();
   }
 }
 export async function transferOneAdmissionAlert(
@@ -456,6 +502,7 @@ export async function transferOneAdmissionAlert(
   deadlineAt: number,
 ): Promise<AlertOutcome> {
   let spool: Spool | undefined;
+  spoolReset();
   try {
     spool = new Spool(path);
     return await spool.transfer(databaseUrl, deadlineAt);
@@ -463,5 +510,6 @@ export async function transferOneAdmissionAlert(
     return { kind: 'unknown', code: errorCode(e) };
   } finally {
     spool?.close();
+    spoolLeave();
   }
 }
