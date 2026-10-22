@@ -2,6 +2,7 @@
 // Timeline、PickList、Anchor、Collapse、Form、ConfirmDialog、Drawer、InfoTip、AuthCard、Chat）和改过的 StatusBadge，
 // 每个都摆出常见状态，包括读失败（error）、没有数据（empty）、读到一部分（partial）的样子。
 // 这个文件是业务层：一个样式类也不写，只拼组件（lint-design R13–R20 对它是 0）。
+import { Clock } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Anchor } from '../components/layout/anchor';
 import { AuthCard } from '../components/layout/auth-card';
@@ -14,6 +15,7 @@ import { Descriptions } from '../components/layout/descriptions';
 import { Dialog } from '../components/layout/dialog';
 import { DisclosureRow } from '../components/layout/disclosure';
 import { DragHandle } from '../components/layout/drag-handle';
+import { Entry, EntryGrid } from '../components/layout/entry';
 import { Form, FormItem } from '../components/layout/form';
 import { Grid } from '../components/layout/grid';
 import { InfoTip } from '../components/layout/info-tip';
@@ -37,6 +39,7 @@ import { TabPanel } from '../components/layout/tab-panel';
 import { Table, type TableColumn } from '../components/layout/table';
 import { Tag } from '../components/layout/tag';
 import { Text } from '../components/layout/text';
+import { TextArea } from '../components/layout/text-area';
 import { TextInput } from '../components/layout/text-input';
 import { TextLink } from '../components/layout/text-link';
 import { TimeBar } from '../components/layout/time-bar';
@@ -368,6 +371,29 @@ function DescriptionsSection() {
   );
 }
 
+function EntrySection() {
+  const [open, setOpen] = useState(false);
+  return (
+    <Section
+      title="入口格 Entry"
+      description="法国页「更多」那种：链接或按钮，标题加灰字，可带一个标签（只给异常）。"
+    >
+      <EntryGrid>
+        <Entry icon={Clock} title="定时任务" tag="失败 1" tagTone="error" href="/schedules" />
+        <Entry icon={Clock} title="资源" meta="每个项目占多少，机器的内存、CPU、磁盘" href="/resources" />
+        <Entry icon={Clock} title="发布记录" href="/changelog" />
+        <Entry
+          icon={Clock}
+          title="命令行工具"
+          meta={open ? '收起' : '3 个，1 个落后'}
+          expanded={open}
+          onClick={() => setOpen((o) => !o)}
+        />
+      </EntryGrid>
+    </Section>
+  );
+}
+
 function ProbeSection() {
   const [sel, setSel] = useState<number | null>(16);
   return (
@@ -450,6 +476,7 @@ function MiscSection({ overlays, input }: { overlays: ReactNode; input: DemoInpu
     { role: 'other', meta: '指挥官 10:01', body: '开好了，单号 #3521。派给法国引擎去做，做完我来验收。' },
   ]);
   const [draft, setDraft] = useState('');
+  const [reason, setReason] = useState('');
   return (
     <Stack gap="xl">
       <Section
@@ -492,6 +519,17 @@ function MiscSection({ overlays, input }: { overlays: ReactNode; input: DemoInpu
           <Form>
             <FormItem label="竖排的标签" layout="vertical" help="layout=vertical：标签永远在上">
               {input({ placeholder: '随便写点' })}
+            </FormItem>
+          </Form>
+          <Form>
+            <FormItem
+              label="原因"
+              required
+              layout="vertical"
+              htmlFor="demo-reason"
+              help="TextArea：多行输入，最少三行"
+            >
+              <TextArea id="demo-reason" value={reason} onChange={setReason} placeholder="写一句为什么改" />
             </FormItem>
           </Form>
         </Stack>
@@ -831,6 +869,7 @@ export function ComponentsGallery({ overlays, input }: { overlays: ReactNode; in
       <StepsSection />
       <DescriptionsSection />
       <ProbeSection />
+      <EntrySection />
       <TimelineSection />
       <PickSection />
       <ProcessPartsSection />

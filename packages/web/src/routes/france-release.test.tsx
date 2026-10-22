@@ -108,10 +108,10 @@ function deferred<T>() {
 describe('/france 页发版一键卡', () => {
   test('没在走 + 点「发版预检」能发：状态写没在走、写进程内读事实、退出码 0 标能发', async () => {
     renderWith({ release: idleRelease, preflight: donePreflight() });
-    // Panel 标题和 Read 标签都叫「发版一键」，至少一个出现即可
-    expect((await screen.findAllByText('发版一键')).length).toBeGreaterThanOrEqual(1);
+    // 版本卡的描述列表里有一项「发版进度」（release-train 此刻的状态）
+    expect(await screen.findByText('发版进度')).toBeTruthy();
     expect(await screen.findByText('没在走')).toBeTruthy();
-    expect(await screen.findByText(/真发版点上面「在用版本」里的「发布到法国」/)).toBeTruthy();
+    expect(await screen.findByText(/真发版点上面的「发布到法国」/)).toBeTruthy();
     const btn = await screen.findByRole('button', { name: '发版预检' });
     fireEvent.click(btn);
     expect(await screen.findByText('能发')).toBeTruthy();
@@ -146,7 +146,7 @@ describe('/france 页发版一键卡', () => {
     });
     expect(await screen.findByText('暂停标记没人收')).toBeTruthy();
     expect(await screen.findByText(/暂停标记在、但一趟的记录不在/)).toBeTruthy();
-    expect(await screen.findByText(/真发版点上面「在用版本」里的「发布到法国」/)).toBeTruthy();
+    expect(await screen.findByText(/真发版点上面的「发布到法国」/)).toBeTruthy();
   });
 
   test('读不到状态：写「没查成 + 原因」，不拿「没在走」顶', async () => {
@@ -159,9 +159,11 @@ describe('/france 页发版一键卡', () => {
       preflight: donePreflight(),
     });
     expect(await screen.findByText(/没接上 release-train 状态文件的读取/)).toBeTruthy();
-    const panel = screen.getByRole('heading', { name: '发版一键' }).closest('section');
-    if (!(panel instanceof HTMLElement)) throw new Error('找不到发版一键');
-    expect(within(panel).getByText('没查成')).toBeTruthy();
+    const panel = screen.getByRole('heading', { name: '版本' }).closest('section');
+    if (!(panel instanceof HTMLElement)) throw new Error('找不到版本卡');
+    const dd = within(panel).getByText('发版进度').nextElementSibling as HTMLElement;
+    expect(within(dd).getByText('没读到')).toBeTruthy();
+    expect(within(dd).queryByText('没在走')).toBeNull();
   });
 
   test('不能发（退出码 2）：标不能发，卡住写在那一行；另有报错时进报错块', async () => {

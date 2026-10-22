@@ -224,9 +224,12 @@ describe('九步时间线：每一步状态对应的文案', () => {
     const tl = await screen.findByText(/走到第 3 步「等收尾」/);
     const box = tl.closest('[data-release-timeline]');
     expect(box?.getAttribute('data-release-timeline')).toBe('running');
-    const steps = box?.querySelectorAll('[data-step]') ?? [];
+    const steps = box?.querySelectorAll('li[data-status]') ?? [];
     expect(steps).toHaveLength(9);
-    expect(steps[3]?.getAttribute('data-step-state')).toBe('current');
+    // 当前那步是「在走」（processing），走过的是 success，没到的是 default
+    expect(steps[3]?.getAttribute('data-status')).toBe('processing');
+    expect(steps[2]?.getAttribute('data-status')).toBe('success');
+    expect(steps[4]?.getAttribute('data-status')).toBe('default');
     expect(steps[3]?.textContent).toContain('在等：等法国在跑的 1 个会话收尾');
   });
 });

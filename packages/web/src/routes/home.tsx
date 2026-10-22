@@ -4,7 +4,7 @@
 // 1. 左列：要你拍的（人闸，选项就是按钮）、在跑的任务（法国引擎的单和本机会话，卡住、等你的在前）。
 // 2. 右列：卡住报警（看门狗的卡，谁在修、开了多久，没人接就写没人接）、最近上线、系统状态（流水线、中转、引擎进程）。
 // 3. 项目：一个仓一行（老后端没给写明没给）。
-// 原来的思维导图画布挪到 /board（routes/board.tsx），和别的页一起收进侧栏「更多」。
+// 原来的思维导图画布（/board）已删（创始人拍，#3533）；页头的「三段 / 全程」开关挪到了法国页的引擎卡（派单方式）。
 // 数据全用现成接口：/home、/notifications、/nodes/sessions、/france/released-commits（components/home/today.ts 文件头）。
 // 选了远程环境（?node=）读那台推来的快照：要你拍的只读、在跑的只列那台的引擎单；卡住报警、本机会话和上线记录是本台的，不顶着远程的名字列。
 // 页面只拼 components/layout 的件，不写样式类（design 第三节、lint-design R13–R20）。
@@ -17,7 +17,6 @@ import {
   useLocalSessions,
   useNodeHome,
 } from '../api/client';
-import { FlowModeToggle } from '../components/flow-mode-toggle';
 import { MissingEnv } from '../components/home/missing-env';
 import { Overview } from '../components/home/overview';
 import { ProjectCards } from '../components/home/project-cards';
@@ -91,8 +90,6 @@ export default function Home() {
   return (
     <Page
       title={nodeId === null ? '工作台' : `工作台 · ${machine}`}
-      stackActions
-      actions={<FlowModeToggle />}
       refresh={{
         variant: 'dot',
         onRefresh: () => void main.refetch(),

@@ -88,14 +88,13 @@ test('最后更新以最旧的一块为准', async () => {
   expect(screen.getByText('数据已过期')).toBeTruthy();
 });
 
-test('【故意造出的失败】定时任务没读成仍显示 LoadError', async () => {
+test('【故意造出的失败】定时任务没读成：「更多」里的入口写没读到和原因，不写成「一个都没有」', async () => {
   const api = createMockApi({ live: false });
   api.jobs = () => Promise.reject(new ApiError(500, 'internal', '后端出错了'));
   renderApp(<France />, { api, route: '/france' });
 
-  const alert = await screen.findByRole('alert');
-  expect(alert.textContent).toContain('定时任务没读成');
-  expect(alert.textContent).toContain('后端出错了');
-  expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
-  expect(screen.queryByText('这台环境一个定时任务都没有。')).toBeNull();
+  const entry = await screen.findByRole('link', { name: /定时任务/ });
+  await waitFor(() => expect(entry.textContent).toContain('没读到：'));
+  expect(entry.textContent).toContain('后端出错了');
+  expect(screen.queryByText('这台环境一个定时任务都没有')).toBeNull();
 });

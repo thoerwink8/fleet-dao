@@ -110,9 +110,9 @@ describe('法国页的远程列（原环境页，#1217 并进来）', () => {
       throw new ApiError(404, 'node_not_found', '没有这个环境');
     });
     const { qc } = open(<France />, '/france', api);
+    fireEvent.click(await screen.findByRole('button', { name: '展开' }));
     expect(await screen.findByText('没有这个环境')).toBeTruthy();
-    expect(await screen.findByRole('heading', { name: /假数据/ })).toBeTruthy();
-    const alert = screen.getByRole('alert');
+    const alert = screen.getByText('没有这个环境').closest('[role="alert"]') as HTMLElement;
     expect(alert.textContent).toContain('ghost');
     expect(within(alert).getByRole('link', { name: '回主页' }).getAttribute('href')).toBe('/');
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
@@ -136,13 +136,14 @@ describe('法国页的远程列（原环境页，#1217 并进来）', () => {
       return { ...detail, id, name: '幽灵环境' };
     });
     open(<France />, '/france', api);
+    fireEvent.click(await screen.findByRole('button', { name: '展开' }));
     expect(await screen.findByText(/幽灵环境的快照没读成：库连不上/)).toBeTruthy();
     expect(calls).toBe(2);
     expect(skeleton()).toBeNull();
     broken = false;
-    fireEvent.click(screen.getByRole('button', { name: '重试' }));
-    const column = document.querySelector('[data-env-column="ghost"]') as HTMLElement;
-    expect(await within(column).findByText('引擎')).toBeTruthy();
+    const detail = document.querySelector('[data-detail-for="ghost"]') as HTMLElement;
+    fireEvent.click(within(detail).getByRole('button', { name: '重试' }));
+    expect(await within(detail).findByText('引擎进程')).toBeTruthy();
     // 快照事实里本身有「没读成 0」这种计数，只认这次失败的那句。
     expect(screen.queryByText(/幽灵环境的快照没读成/)).toBeNull();
   });

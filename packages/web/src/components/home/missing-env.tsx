@@ -6,7 +6,16 @@ import { Section } from '../layout/section';
 import { Text } from '../layout/text';
 
 /** 没有这个环境（后端 404）：写明，给回主页的路；不转圈、不给「重试」（重试也不会有）。 */
-export function MissingEnv({ nodeId }: { nodeId: string }) {
+export function MissingEnv({
+  nodeId,
+  backTo = '/',
+  backLabel = '回主页',
+}: {
+  nodeId: string;
+  /** 给回哪一页的路（资源页回「本台」的资源页）。 */
+  backTo?: string;
+  backLabel?: string;
+}) {
   return (
     <Section>
       <div role="alert">
@@ -20,8 +29,8 @@ export function MissingEnv({ nodeId }: { nodeId: string }) {
             </Text>
           }
           action={
-            <Button size="sm" href="/">
-              回主页
+            <Button size="sm" href={backTo}>
+              {backLabel}
             </Button>
           }
         />

@@ -1,5 +1,5 @@
 // 主页三块（决定 0093）：要你拍的、在跑的、上线了的，从上到下；条数和后端对得上，都来自真库。
-// 画布（原来的主页）在 /board，见 02-home。
+// 画布（/board，原来的主页）和账单已删（创始人拍，#3533）。
 import { expect, test } from '../support/fixtures.ts';
 
 type Notifications = {
@@ -53,7 +53,7 @@ test.describe('主页三块', () => {
     await shot(page, '02b-主页三块');
   });
 
-  test('左菜单：八项常驻（工作台、通知、任务、提需求、法国、路由、额度、设置），没有「更多」和「画布」；画布在法国名下', async ({
+  test('左菜单：八项常驻（工作台、通知、任务、提需求、法国、路由、额度、设置），没有「更多」「画布」「账单」；零散页在法国名下', async ({
     page,
   }) => {
     test.skip((page.viewportSize()?.width ?? 1920) < 768, '手机走底部导航的「更多」菜单');
@@ -64,10 +64,10 @@ test.describe('主页三块', () => {
     }
     await expect(nav.getByRole('link', { name: '工作台' })).toHaveAttribute('aria-current', 'page');
     await expect(nav.getByRole('link', { name: '画布' })).toHaveCount(0);
+    await expect(nav.getByRole('link', { name: '账单' })).toHaveCount(0);
     await expect(nav.getByRole('button', { name: /更多/ })).toHaveCount(0);
-    // 画布不进菜单，地址还在：打开时菜单亮它挂靠的「法国」
-    await page.goto('/board');
-    await expect(page).toHaveURL(/\/board$/);
+    // 定时任务不进菜单：打开时菜单亮它挂靠的「法国」
+    await page.goto('/schedules');
     await expect(nav.getByRole('link', { name: '法国' })).toHaveAttribute('aria-current', 'page');
   });
 });

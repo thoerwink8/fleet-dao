@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
-// 引擎总开关（#1086）在页面上的三处：顶栏常驻「总开关 开着/关着」、环境页里能点的开关卡（二次确认、写设置 engine.master、
-// 带版本防覆盖、显示谁什么时候改的）、设置页「仓库」一节写清和按项目开关的关系。选了远程环境只读、写明去那台上操作；
-// 读不到、远程快照没有这一格都如实写，不画成开也不画成关。本台的状态读设置（/api/settings），顶栏不拉整份 /api/env。
+// 引擎总开关（#1086）在页面上的三处：顶栏常驻的引擎状态、法国页「引擎」卡里能点的开关（二次确认、写设置 engine.master、带版本防覆盖、
+// 显示谁什么时候改的）、设置页「仓库」一节写清和按项目开关的关系。选了远程环境只读、写明去那台上操作；读不到、远程快照没有这一格都如实写，
+// 不画成开也不画成关。本台的状态读设置（/api/settings），顶栏不拉整份 /api/env。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -13,7 +13,7 @@ vi.mock('sonner', () => ({ toast, Toaster: () => null }));
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { Setting } from '../api/types';
-import { EngineMasterBadge } from '../components/engine-master';
+import { EngineStatus } from '../components/shell/engine-status';
 import France from '../routes/france';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
@@ -34,67 +34,67 @@ const ON: Setting = {
 };
 const OFF: Setting = { ...ON, value: false, version: 4, updatedBy: 'ops:engine' };
 
-/** 假后端：只换掉 settings()（本台的总开关行由用例给，null = 从没设过）；没有远程环境；记下读过几次 env。 */
-function apiWith(row: Setting | null): MockApi & { envReads: number } {
+/** 假后端：只换掉 settings()（本台的总开关行由用例给，null = 从没设过）；没有远程环境。 */
+function apiWith(row: Setting | null): MockApi {
   const inner = createMockApi({ live: false });
   const out = {
-    envReads: 0,
     settings: async () => {
       const base = await inner.settings();
       const rest = base.settings.filter((s) => s.key !== 'engine.master');
       return { settings: row ? [...rest, row] : rest };
     },
-    env: async () => {
-      out.envReads += 1;
-      return inner.env();
-    },
     nodes: async () => ({ ...(await inner.nodes()), nodes: [] }),
   };
-  return { ...inner, ...out } as unknown as MockApi & { envReads: number };
+  return { ...inner, ...out } as unknown as MockApi;
 }
 
-describe('顶栏胶囊（EngineMasterBadge）', () => {
-  test('关着写「总开关 关着」、用等待色不是红；开着写「总开关 开着」、用完成色；从没设过按关', async () => {
-    renderApp(<EngineMasterBadge />, { api: apiWith(OFF) as unknown as FleetApi });
-    const off = await screen.findByRole('link', { name: /总开关 关着/ });
+describe('顶栏的引擎状态（EngineStatus）', () => {
+  test('关着写「总开关关着」、橙点；开着写「总开关开着」、绿点；从没设过按关', async () => {
+    renderApp(<EngineStatus />, { api: apiWith(OFF) as unknown as FleetApi });
+    const off = await screen.findByRole('button', { name: /总开关关着/ });
     expect(off.getAttribute('data-engine-master')).toBe('off');
-    expect(off.className).toContain('text-ink-stall');
-    expect(off.className).not.toContain('text-ink-fail');
-    // 按钮改叫总开关；悬停提示仍是原来那句（关着不派活，探针照跑）
-    expect(off.querySelector('span')?.textContent).toBe('总开关 关着');
+    expect(off.querySelector('.bg-warn')).not.toBeNull();
+    expect(off.textContent).toBe('总开关关着');
     cleanup();
-    renderApp(<EngineMasterBadge />, { api: apiWith(ON) as unknown as FleetApi });
-    const on = await screen.findByRole('link', { name: /总开关 开着/ });
+    renderApp(<EngineStatus />, { api: apiWith(ON) as unknown as FleetApi });
+    const on = await screen.findByRole('button', { name: /总开关开着/ });
     expect(on.getAttribute('data-engine-master')).toBe('on');
-    expect(on.className).toContain('text-ink-done');
-    expect(on.querySelector('span')?.textContent).toBe('总开关 开着');
+    expect(on.querySelector('.bg-success')).not.toBeNull();
     cleanup();
-    renderApp(<EngineMasterBadge />, { api: apiWith(NEVER) as unknown as FleetApi });
-    expect(await screen.findByRole('link', { name: /总开关 关着/ })).toBeTruthy();
+    renderApp(<EngineStatus />, { api: apiWith(NEVER) as unknown as FleetApi });
+    expect(await screen.findByRole('button', { name: /总开关关着/ })).toBeTruthy();
   });
 
   test('顶栏每一页都在，不能为它去拉整份 /api/env（每次要跑全套健康检查）：本台读设置', async () => {
     const api = apiWith(ON);
-    renderApp(<EngineMasterBadge />, { api: api as unknown as FleetApi });
-    await screen.findByRole('link', { name: /总开关 开着/ });
-    expect(api.envReads).toBe(0);
+    let envReads = 0;
+    const real = api.env.bind(api);
+    api.env = async () => {
+      envReads += 1;
+      return real();
+    };
+    renderApp(<EngineStatus />, { api: api as unknown as FleetApi });
+    await screen.findByRole('button', { name: /总开关开着/ });
+    expect(envReads).toBe(0);
   });
 
-  test('故意造出失败：设置读不到：写「总开关 没查成」，不画成开也不画成关', async () => {
+  test('故意造出失败：设置读不到：写「总开关没查成」，不画成开也不画成关', async () => {
     const api = apiWith(ON);
     api.settings = async () => {
       throw new ApiError(500, 'internal', '库连不上（测试故意造的）');
     };
-    renderApp(<EngineMasterBadge />, { api: api as unknown as FleetApi });
-    const badge = await screen.findByRole('link', { name: /总开关 没查成/ });
+    renderApp(<EngineStatus />, { api: api as unknown as FleetApi });
+    const badge = await screen.findByRole('button', { name: /总开关没查成/ });
     expect(badge.getAttribute('data-engine-master')).toBe('error');
     expect(badge.textContent).not.toContain('开着');
     expect(badge.textContent).not.toContain('关着');
   });
 });
 
-describe('环境页的开关卡（EngineMasterControl）', () => {
-  test('关着：写状态和一句话，点「开启」先弹二次确认，确认后按当前版本写设置 engine.master=true 并提示', async () => {
+const toggle = (card: HTMLElement) => within(card).getByRole('switch', { name: '引擎总开关' });
+
+describe('法国页的开关（EngineCard）', () => {
+  test('关着：写状态和一句话，拨开关先弹二次确认，确认后按当前版本写设置 engine.master=true 并提示', async () => {
     const api = apiWith(NEVER);
     const update = vi.spyOn(api, 'updateSetting').mockResolvedValue({
       key: 'engine.master',
@@ -105,7 +105,8 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
     const card = await screen.findByTestId('engine-master');
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('关着'));
     expect(within(card).getByTestId('engine-master-note').textContent).toContain('默认关');
-    fireEvent.click(within(card).getByRole('button', { name: '开启引擎总开关' }));
+    expect(toggle(card).getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(toggle(card));
     // 二次确认：没点确认之前不写
     expect(update).not.toHaveBeenCalled();
     const dialog = await screen.findByRole('alertdialog');
@@ -119,7 +120,7 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('已开启引擎总开关'));
   });
 
-  test('开着：显示谁什么时候改的，按钮是「关闭」，确认后带当前版本写 false', async () => {
+  test('开着：显示谁什么时候改的，开关是打开的，确认后带当前版本写 false', async () => {
     const api = apiWith(ON);
     const update = vi.spyOn(api, 'updateSetting').mockResolvedValue({
       key: 'engine.master',
@@ -131,7 +132,8 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('开着'));
     expect(within(card).getByTestId('engine-master-who').textContent).toContain('frank');
     expect(within(card).getByTestId('engine-master-who').textContent).toContain('打开');
-    fireEvent.click(within(card).getByRole('button', { name: '关闭引擎总开关' }));
+    expect(toggle(card).getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(toggle(card));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: '关闭' }));
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
@@ -145,7 +147,9 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
     const api = apiWith(NEVER);
     const update = vi.spyOn(api, 'updateSetting');
     renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
-    fireEvent.click(await screen.findByRole('button', { name: '开启引擎总开关' }));
+    const card = await screen.findByTestId('engine-master');
+    await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('关着'));
+    fireEvent.click(toggle(card));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
     expect(update).not.toHaveBeenCalled();
@@ -157,25 +161,29 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
       new ApiError(409, 'conflict', '这项设置刚被别人改过，刷新后再改'),
     );
     renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
-    fireEvent.click(await screen.findByRole('button', { name: '开启引擎总开关' }));
+    const card = await screen.findByTestId('engine-master');
+    await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('关着'));
+    fireEvent.click(toggle(card));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: '开启' }));
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
     expect(toast.error.mock.calls[0]?.[0]).toBe('没能开启');
     expect(JSON.stringify(toast.error.mock.calls[0])).toContain('刷新后再改');
+    // 框留着，里面也写着原因
+    expect((await within(dialog).findByRole('alert')).textContent).toContain('刷新后再改');
     expect(toast.success).not.toHaveBeenCalled();
   });
 
-  test('故意造出失败：设置读不到：写原因、不给按钮（不知道现在是开是关就不让人点）', async () => {
+  test('故意造出失败：设置读不到：写原因、不给开关（不知道现在是开是关就不让人拨）', async () => {
     const api = apiWith(ON);
     api.settings = async () => {
       throw new ApiError(500, 'internal', '库连不上（测试故意造的）');
     };
     renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
     const card = await screen.findByTestId('engine-master');
-    await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('没查成'));
+    await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('没读到'));
     expect(within(card).getByTestId('engine-master-note').textContent).toContain('库连不上');
-    expect(within(card).queryByRole('button', { name: /引擎总开关/ })).toBeNull();
+    expect(within(card).queryByRole('switch')).toBeNull();
   });
 });
 
@@ -200,11 +208,18 @@ describe('选了远程环境（?node=）：只读、写明去那台上操作', (
     value: { on, why: 'set' as const, detail: on ? '开着：引擎在接活' : '关着：不拉单' },
   });
 
-  test('远程环境的快照里总开关开着：显示状态、不给按钮，写明用 fleet-api engine on|off', async () => {
-    renderApp(<France />, { api: remoteWith(fact(true)) as unknown as FleetApi, route: '/france?node=wsl' });
+  test('远程环境的快照里总开关开着：显示状态、开关置灰点不动，写明用 fleet-api engine on|off', async () => {
+    const update = vi.fn();
+    const api = remoteWith(fact(true));
+    api.updateSetting = update;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france?node=wsl' });
     const card = await screen.findByTestId('engine-master');
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('开着'));
-    expect(within(card).queryByRole('button', { name: /引擎总开关/ })).toBeNull();
+    const sw = toggle(card) as HTMLButtonElement;
+    expect(sw.disabled).toBe(true);
+    fireEvent.click(sw);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(update).not.toHaveBeenCalled();
     expect(within(card).getByTestId('engine-master-remote-note').textContent).toContain('fleet-api engine');
   });
 
@@ -214,8 +229,8 @@ describe('选了远程环境（?node=）：只读、写明去那台上操作', (
     await waitFor(() =>
       expect(within(card).getByTestId('engine-master-note').textContent).toContain('还不带'),
     );
-    expect(within(card).getByTestId('engine-master-state').textContent).toBe('没查成');
-    expect(within(card).queryByRole('button', { name: /引擎总开关/ })).toBeNull();
+    expect(within(card).getByTestId('engine-master-state').textContent).toBe('没读到');
+    expect(within(card).queryByRole('switch')).toBeNull();
   });
 });
 

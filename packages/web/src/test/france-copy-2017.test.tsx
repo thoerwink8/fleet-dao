@@ -40,7 +40,7 @@ test('法国页说明同时写出快的和慢的刷新间隔，和钩子用的�
   const schedules = readFileSync(path.join(webSrc, 'routes/schedules.tsx'), 'utf8');
   const scheduleRow = readFileSync(path.join(webSrc, 'components/schedule-row.tsx'), 'utf8');
   expect(schedules).toContain('POLL_FAST_MS');
-  expect(scheduleRow).toContain('POLL_FAST_MS');
+  // 定时任务表（schedule-row）改版后不再自己写刷新说明（说明在 schedules 页头），这里只守它不写死 30 秒
   expect(schedules).not.toMatch(/每\s*30\s*秒自己刷新/);
   expect(scheduleRow).not.toMatch(/每\s*30\s*秒自己刷新/);
   renderApp(<France />);

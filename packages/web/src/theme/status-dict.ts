@@ -1,5 +1,6 @@
 // 状态字典（#3509，方案第三节）：全站的状态词和颜色等级只在这一份里写。
-// 内容从 understand/status-dict.json 来（153 条，9 个域，每条在源码里的出处见那份 JSON）。
+// 内容从 understand/status-dict.json 来（153 条，9 个域，每条在源码里的出处见那份 JSON）；各页迁到这套件时发现字典里缺的词，
+// 在对应域末尾补上（status-dict.test.ts 的条数跟着改，同一个中文仍只有一个 level）。
 //
 // 规矩：
 // - 只有异常才是 warning / error；正常是 success；进行中是 processing；排队、已关、等人、人为停用是 default。
@@ -173,6 +174,13 @@ export const STATUS_DICT = {
     'ci:unreadable': { label: 'CI 没读到', level: 'warning' },
     'check:pass': { label: '通过', level: 'success' },
     'check:fail': { label: '没过', level: 'error' },
+    // 法国页版本卡：release-train 此刻的状态（在走、卡住、没成沿用 step:*）和发版预检的结论（#3533）
+    'train:paused': { label: '暂停标记没人收', level: 'warning' },
+    'train:idle': { label: '没在走', level: 'default' },
+    'train:unread': { label: '没读到', level: 'warning' },
+    'preflight:go': { label: '能发', level: 'success' },
+    'preflight:stop': { label: '不能发', level: 'error' },
+    'preflight:info': { label: '留意', level: 'default' },
   },
   machine: {
     'engine:on': { label: '运行中', level: 'success' },
@@ -220,6 +228,25 @@ export const STATUS_DICT = {
     'notify:default': { label: '还没打开', level: 'default' },
     'notify:denied': { label: '已被拒绝', level: 'error' },
     'notify:unsupported': { label: '没读到', level: 'warning' },
+    'tree:running': { label: '任务在用', level: 'processing' },
+    'tree:session': { label: '会话在用', level: 'processing' },
+    'tree:leftover': { label: '有改动', level: 'warning' },
+    'tree:kept': { label: '留着', level: 'default' },
+    'tree:unchecked': { label: '没查成', level: 'warning' },
+    'tree:deferred': { label: '这轮没轮到', level: 'default' },
+    // 法国页六项事实里某一项读失败：橙「没读到」，原因写在旁边（#3533）
+    'fact:unread': { label: '没读到', level: 'warning' },
+    // 法国页「命令行工具」：版本对没对上，和上一次升级的结局（#3533）
+    'cli:current': { label: '最新', level: 'success' },
+    'cli:behind': { label: '落后', level: 'warning' },
+    'cli:behind-uncounted': { label: '落后（数不出几个）', level: 'warning' },
+    'cli:unread': { label: '读不到', level: 'error' },
+    'cli:unreadable': { label: '没查成', level: 'warning' },
+    'cli:upgraded': { label: '已升级', level: 'success' },
+    'cli:upgrade-current': { label: '已是这一版', level: 'success' },
+    'cli:upgrade-skipped': { label: '这轮不升', level: 'default' },
+    'cli:upgrade-rolled-back': { label: '已退回', level: 'error' },
+    'cli:upgrade-refused': { label: '没换', level: 'warning' },
   },
   quota: {
     'quota:use-first': { label: '该先用', level: 'success' },

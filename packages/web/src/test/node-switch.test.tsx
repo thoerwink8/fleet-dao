@@ -243,59 +243,54 @@ describe('选了远程环境：其余页', () => {
   });
 });
 
-describe('法国页：每个环境一列并排', () => {
-  test('本台一列、本机 WSL 一列；远程那列写「上报于」、新鲜；选中的那列描边', async () => {
+describe('法国页：机器表里每个环境一行', () => {
+  const rowOf = (id: string) =>
+    document.querySelector(`[data-machines] tr[data-row-key="${id}"]`) as HTMLElement;
+  const detailOf = (id: string) => document.querySelector(`[data-detail-for="${id}"]`) as HTMLElement | null;
+
+  test('本台一行、本机 WSL 一行；远程那行写「上报于」、在线；选中的那行亮着并默认展开，六项都在', async () => {
     await mount(apiFor('fresh'), '/france?node=wsl');
-    await screen.findByRole('heading', { name: /本机 WSL/ });
-    const cols = document.querySelectorAll('[data-env-column]');
-    expect(Array.from(cols).map((c) => c.getAttribute('data-env-column'))).toEqual(['local', 'wsl']);
-    const wsl = document.querySelector('[data-env-column="wsl"]') as HTMLElement;
-    expect(wsl.querySelector('[data-env-age]')?.textContent).toContain('上报于');
-    expect(wsl.getAttribute('data-env-column-state')).toBe('ok');
-    expect(wsl.getAttribute('data-env-selected')).toBe('true');
-    expect(document.querySelector('[data-env-column="local"]')?.getAttribute('data-env-selected')).toBe(
-      'false',
+    await waitFor(() => expect(rowOf('wsl')).toBeTruthy());
+    const ids = Array.from(document.querySelectorAll('[data-machines] tr[data-row-key]')).map((r) =>
+      r.getAttribute('data-row-key'),
     );
-    // 选中态只在列头（aria-current + 列头 data-selected），六行事实不带选中底色
+    expect(ids).toEqual(['local', 'wsl']);
+    const wsl = rowOf('wsl');
+    expect(within(wsl).getByText('在线')).toBeTruthy();
+    expect(wsl.textContent).toContain('上报于');
     expect(wsl.getAttribute('aria-current')).toBe('true');
-    expect(wsl.querySelector('[data-env-header]')?.getAttribute('data-selected')).toBe('true');
-    const localCol = document.querySelector('[data-env-column="local"]') as HTMLElement;
-    expect(localCol.hasAttribute('aria-current')).toBe(false);
-    expect(localCol.querySelector('[data-env-header]')?.getAttribute('data-selected')).toBe('false');
-    expect(wsl.className).not.toContain('bg-selected');
-    for (const fact of wsl.querySelectorAll('[data-env-fact]')) {
-      expect((fact as HTMLElement).className).not.toContain('bg-selected');
-    }
-    // 两列都有六格
-    for (const col of cols) {
-      for (const label of ['引擎', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {
-        expect(within(col as HTMLElement).getByText(label)).toBeTruthy();
-      }
+    expect(rowOf('local').hasAttribute('aria-current')).toBe(false);
+    await waitFor(() => expect(detailOf('wsl')?.querySelector('dl')).toBeTruthy());
+    for (const label of ['引擎进程', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {
+      expect(within(detailOf('wsl') as HTMLElement).getByText(label)).toBeTruthy();
     }
   });
 
-  test('失联的那一列写「失联 12 分钟」、标成失联色并说明是最后一次报的样子', async () => {
+  test('失联的那一行写「失联 12 分钟」；展开说明是最后一次报的样子', async () => {
     await mount(apiFor('stale'), '/france');
-    await screen.findByRole('heading', { name: /本机 WSL/ });
-    const wsl = document.querySelector('[data-env-column="wsl"]') as HTMLElement;
-    expect(wsl.getAttribute('data-env-column-state')).toBe('stale');
-    expect(wsl.querySelector('[data-env-age]')?.textContent).toContain('失联 12 分钟');
-    expect(wsl.textContent).toContain('最后一次报的样子');
+    await waitFor(() => expect(rowOf('wsl')).toBeTruthy());
+    expect(within(rowOf('wsl')).getByText('失联')).toBeTruthy();
+    expect(rowOf('wsl').textContent).toContain('失联 12 分钟');
+    fireEvent.click(within(rowOf('wsl')).getByRole('button', { name: '展开' }));
+    await waitFor(() => expect(detailOf('wsl')?.textContent).toContain('最后一次报的样子'));
   });
 
-  test('配了通行证、从没收到过的那一列明说没收到过，不画空格子', async () => {
+  test('配了通行证、从没收到过的那一行状态写没数据；展开明说没收到过，不画空格子', async () => {
     await mount(apiFor('never'), '/france');
-    await screen.findByRole('heading', { name: /wsl/ });
-    const wsl = document.querySelector('[data-env-column="wsl"]') as HTMLElement;
-    expect(wsl.querySelector('[data-env-never]')?.textContent).toContain('从没收到过');
-    expect(wsl.querySelector('[data-env-fact]')).toBeNull();
+    await waitFor(() => expect(rowOf('wsl')).toBeTruthy());
+    expect(within(rowOf('wsl')).getByText('没数据')).toBeTruthy();
+    fireEvent.click(within(rowOf('wsl')).getByRole('button', { name: '展开' }));
+    await waitFor(() =>
+      expect(detailOf('wsl')?.querySelector('[data-env-never]')?.textContent).toContain('从没收到过'),
+    );
+    expect(detailOf('wsl')?.querySelector('dl')).toBeNull();
   });
 
-  test('没有远程环境时不画对照列', async () => {
+  test('没有远程环境时表里只有本台一行，没有展开箭头', async () => {
     await mount(apiFor('off'), '/france');
     await screen.findByRole('heading', { name: '法国' });
-    expect(document.querySelector('[data-env-columns]')).toBeNull();
-    expect(document.querySelectorAll('[data-env-column]').length).toBe(0);
-    expect(document.querySelectorAll('[data-france-fact]').length).toBe(6);
+    await waitFor(() => expect(rowOf('local')).toBeTruthy());
+    expect(document.querySelectorAll('[data-machines] tr[data-row-key]').length).toBe(1);
+    expect(document.querySelector('[data-machines] button[aria-label="展开"]')).toBeNull();
   });
 });

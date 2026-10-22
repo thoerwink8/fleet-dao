@@ -65,9 +65,9 @@ test.describe('后端不可用', () => {
   });
 
   test('后端回 500：同样写明没读成、给重试', async ({ page, request, stack, shot }) => {
-    // 定时任务不进左菜单（#3509），站内入口是法国页「定时任务」区块的「全部定时任务」
+    // 定时任务不进左菜单（#3509），站内入口是法国页「更多」里的「定时任务」
     await page.goto('/france');
-    const all = page.getByRole('link', { name: /全部定时任务/ });
+    const all = page.getByRole('link', { name: /^定时任务/ });
     await expect(all).toBeVisible();
     await request.post(`${stack.controlOrigin}/mode/error`);
     await all.click();

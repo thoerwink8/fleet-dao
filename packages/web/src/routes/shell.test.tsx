@@ -88,7 +88,7 @@ describe('菜单高亮（nav.ts 的 activeMenu）', () => {
     expect(activeMenu('/tasks/t-12')).toBe('/tasks');
     expect(activeMenu('/routing')).toBe('/routing');
     expect(activeMenu('/routing/status')).toBe('/routing');
-    for (const p of ['/schedules', '/resources', '/changelog', '/audit', '/board', '/billing']) {
+    for (const p of ['/schedules', '/resources', '/changelog', '/audit']) {
       expect(activeMenu(p), p).toBe('/france');
     }
     expect(activeMenu('/no-such-page')).toBeNull();
@@ -144,25 +144,16 @@ describe('外壳按屏宽重排', () => {
     expect(within(nav()).getByRole('link', { name: '工作台' }).getAttribute('aria-current')).toBeNull();
   });
 
-  test('⌘K 面板里搜得到菜单外的页：定时任务、资源、发布记录、操作记录、渠道状态、画布、账单', async () => {
+  test('⌘K 面板里搜得到菜单外的页：定时任务、资源、发布记录、操作记录、渠道状态；画布、账单已删（#3533）', async () => {
     viewport(1440);
     renderShell();
     await settled();
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     const dialog = await screen.findByRole('dialog');
-    for (const name of [
-      '工作台',
-      '法国',
-      '定时任务',
-      '资源',
-      '发布记录',
-      '操作记录',
-      '渠道状态',
-      '画布',
-      '账单',
-    ]) {
+    for (const name of ['工作台', '法国', '定时任务', '资源', '发布记录', '操作记录', '渠道状态']) {
       expect(dialog.textContent, name).toContain(name);
     }
+    for (const gone of ['画布', '账单']) expect(dialog.textContent, gone).not.toContain(gone);
   });
 
   test('顶栏的搜索框点开就是 ⌘K 面板', async () => {

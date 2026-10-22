@@ -428,9 +428,15 @@ describe('资源页「清理没用的工作树」', () => {
       },
     } as unknown as MockApi;
     renderApp(<ResourcesPage />, { api: api as unknown as FleetApi });
+    // 清理收在「仓」区块头的「⋯」菜单里（#3509）
+    fireEvent.pointerDown(await screen.findByRole('button', { name: '仓的更多操作' }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: 'mouse',
+    });
     const button = await waitFor(() => {
-      const b = document.querySelector<HTMLButtonElement>('[data-cleanup-button]');
-      if (!b || b.disabled) throw new Error('按钮还没好');
+      const b = document.querySelector<HTMLElement>('[data-cleanup-button]');
+      if (!b || b.hasAttribute('data-disabled')) throw new Error('按钮还没好');
       return b;
     });
     fireEvent.click(button);

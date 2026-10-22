@@ -1,4 +1,4 @@
-// 第七步：其余页面逐个走一遍（路由、思考档位（路由页的页签）、定时任务、操作记录、更新日志、找不到的页面）。
+// 第七步：其余页面逐个走一遍（路由、思考档位（路由页的页签）、定时任务、操作记录、发布记录、找不到的页面）。
 // 创始人剧本里的「环境视图」：驾驶舱里没有叫这个名字的页面；最接近的是「路由」（每条路现在接得上吗、额度够吗、被禁了吗）
 // 和主页顶上的持续状态条，这里把路由页当它测，并在缺陷清单里记一笔。
 import { expect, onlyDesktop, test } from '../support/fixtures.ts';
@@ -131,9 +131,9 @@ test.describe('其余页面', () => {
   test('定时任务：额度读取跑成了、每小时对账上次没查全且已过期，分开显示', async ({ page, shot }) => {
     await page.goto('/schedules');
     await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible();
-    // 任务是默认收起的列表行（#1805），摘要行里就有名字、上次结果和「过期」
-    await expect(page.getByRole('listitem').filter({ hasText: '额度读取' })).toContainText('跑成了');
-    const reconcile = page.getByRole('listitem').filter({ hasText: '每小时对账' });
+    // 任务是表里默认收起的行（#1805，#3509 起是表），摘要行里就有名字、上次结果和「过期」
+    await expect(page.getByRole('row').filter({ hasText: '额度读取' })).toContainText('跑成了');
+    const reconcile = page.getByRole('row').filter({ hasText: '每小时对账' });
     await expect(reconcile).toContainText('没查成：GitHub 接口限流，一个仓都没扫到');
     await expect(reconcile).toContainText('过期');
     await shot(page, '07-定时任务');
@@ -156,7 +156,7 @@ test.describe('其余页面', () => {
     await shot(page, '07-操作记录');
   });
 
-  test('更新日志：已发布的提交读不到时明说原因，不是空白，也没有「发布 v」', async ({
+  test('发布记录：已发布的提交读不到时明说原因，不是空白，也没有「发布 v」', async ({
     page,
     shot,
     problems,
@@ -164,13 +164,13 @@ test.describe('其余页面', () => {
     problems.allow('/api/france/released-commits');
     problems.allow('status of 5');
     await page.goto('/changelog');
-    await expect(page.getByRole('heading', { name: '更新日志' })).toBeVisible();
-    // 区块里不再有自己的标题（#1902）：页头说明写着这页是法国已发布的提交
+    await expect(page.getByRole('heading', { level: 1, name: '发布记录' })).toBeVisible();
+    // 页头说明写着这页是法国已发布的提交
     await expect(page.getByText(/法国已发布的提交/).first()).toBeVisible();
     // 开发环境没有法国的发布历史：要么列出提交，要么明确说没查成
     await expect(page.getByText(/没查成|没读成|发于/).first()).toBeVisible();
     await expect(page.getByRole('button', { name: /发布 v/ })).toHaveCount(0);
-    await shot(page, '07-更新日志');
+    await shot(page, '07-发布记录');
   });
 
   test('不存在的页面：404 页给回工作台的路', async ({ page }) => {
@@ -178,7 +178,7 @@ test.describe('其余页面', () => {
     await expect(page.getByRole('link', { name: '回工作台' })).toBeVisible();
   });
 
-  test('没做的页不占侧栏：账单仍写「还没做」；模型目录在路由页', async ({ page }) => {
+  test('不占侧栏的页：账单已删（#3533），菜单里没有；模型目录在路由页', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: '主导航' });
     await expect(nav.getByRole('link', { name: '工作台' })).toBeVisible();
@@ -191,9 +191,10 @@ test.describe('其余页面', () => {
     await expect(page.getByRole('heading', { level: 1, name: '路由', exact: true })).toBeVisible();
     await expect(page.getByRole('tab', { name: '模型目录' })).toHaveAttribute('aria-selected', 'true');
     await expect(page.getByText('这一页还没做')).toHaveCount(0);
+    // 账单页没了：地址落到「找不到」页，不再有「还没做」的占位
     await page.goto('/billing');
-    await expect(page.getByText('这一页还没做')).toBeVisible();
-    await expect(page.getByRole('heading', { name: '账单' })).toBeVisible();
+    await expect(page.getByRole('link', { name: /主页/ }).first()).toBeVisible();
+    await expect(page.getByText('这一页还没做')).toHaveCount(0);
   });
 
   test('外壳尺寸生效：顶栏 60、侧栏 220（收起 48），根字号不放大（尺寸 token 放错命名空间时类名会静默失效）', async ({
@@ -201,7 +202,7 @@ test.describe('其余页面', () => {
   }) => {
     await page.goto('/schedules');
     await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible();
-    const header = await page.locator('main').evaluate((m) => {
+    const header = await page.locator('main').evaluate((_m) => {
       const top = document.querySelector('header')?.getBoundingClientRect().height; // 顶栏是文档里的第一个 header（页头在正文区里，在它后面）
       const side = document.querySelector('aside')?.getBoundingClientRect().width;
       const scale = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) / 16;
