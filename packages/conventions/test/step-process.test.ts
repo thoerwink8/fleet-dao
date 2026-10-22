@@ -425,7 +425,8 @@ setInterval(() => {}, 1000);
     // 孙进程已经 setsid，记账看得到，但它不在命令那一组里。
     expect(descendantProcs(cmd.pid as number).get(shownGrand)?.groupLeader).toBe(true);
     killProcessGroup(cmd.pid);
-    expect(procState(shownGrand)).toBe('S');
+    // 组信号够不着它。忙的时候它会从睡眠转成运行，只要还在（不是没了、也不是僵尸）就算组杀没收到。
+    expect(procState(shownGrand)).toMatch(/^[SRD]$/);
     killPid(shownGrand);
 
     const oldPid = join(dir, 'old.pid');
