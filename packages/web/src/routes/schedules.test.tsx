@@ -1,140 +1,157 @@
 // @vitest-environment happy-dom
-// 定时任务页顶部一条摘要，异常行置顶、结果写全（#1902）。
-// 「上次跑成」和「N 分钟前开始」合成一列（#1753）。
+// 定时任务页（#3509 改版：一张表，状态只一个，有问题筛选）。
+// 业务规则不变：异常行排最前、上次结果写明（「查了 0 个问题」和「没查成」分开）、读失败不画成 0、读成过刷新失败照旧画上一次的并写明。
 import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError } from '../api/client';
 import { createMockApi } from '../api/mock/server';
-import { rowTone } from '../components/job-row';
+import { jobStatusKey, rowTone } from '../components/schedule-row';
 import { renderApp } from '../test/harness';
 import SchedulesPage from './schedules';
 
 afterEach(cleanup);
 
-describe('定时任务摘要条（#1902）', () => {
-  test('统计压成一条摘要：只列不是 0 的项，不再有四张统计卡', async () => {
+/** 表里的数据行（不含表头和展开的明细行）。 */
+function jobRows(): HTMLElement[] {
+  return [...document.querySelectorAll('[data-job-list] tbody tr[data-row-key]')] as HTMLElement[];
+}
+
+const rowOf = (name: string) => screen.getByText(name).closest('tr') as HTMLElement;
+
+describe('定时任务表', () => {
+  test('一个区块一张表：区块头写总数和筛选，没有顶上的摘要块', async () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
     await screen.findByText('额度读取');
-    const summary = document.querySelector('[data-job-summary]') as HTMLElement;
-    // 改成页顶标题块（#1914 样板）：第一行「N 个定时任务」，原来摘要条开头的「共 N 个定时任务」
-    expect(summary.textContent).toMatch(/^\d+ 个定时任务/);
-    expect(summary.textContent).toContain('上次失败');
-    expect(summary.textContent).not.toMatch(/上次失败 0|没查全 0|过期 0/);
-    // 没有「定时任务 / 上次失败 / 上次没查全 / 过期」四张独立的统计卡
-    expect(screen.queryByText('上次没查全')).toBeNull();
+    expect(document.querySelector('table')).toBeTruthy();
+    expect(document.querySelector('[data-schedules-hero]')).toBeNull();
+    const group = screen.getByRole('group', { name: '筛选' });
+    expect(within(group).getByRole('button', { name: '全部' })).toBeTruthy();
+    expect(within(group).getByRole('button', { name: /^有问题 \d+$/ })).toBeTruthy();
   });
 
-  test('异常行排在最前，上次结果写全不截断；正常行仍截断', async () => {
+  test('异常行排在最前（失败第一），正常的在后面', async () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
     await screen.findByText('额度读取');
-    const rows = [...document.querySelectorAll('[data-job-list] > li')] as HTMLElement[];
-    const tones = rows.map((r) => (r.querySelector('[data-row-rail]') ? 'bad' : 'ok'));
-    const firstOk = tones.indexOf('ok');
-    expect(firstOk).toBeGreaterThan(0);
-    expect(tones.slice(firstOk)).not.toContain('bad');
-    const bad = rows[0] as HTMLElement;
-    // 原来是宽屏的「上次运行」列；改成两层行后，上次结果在名字下面那一行灰字（data-job-outcome），各宽度同一处
-    const column = (r: HTMLElement) => r.querySelector('[data-job-outcome]');
-    expect(column(bad)?.className).not.toContain('truncate');
-    const ok = rows[rows.length - 1] as HTMLElement;
-    expect(column(ok)?.className).toContain('truncate');
+    const names = jobRows().map((r) => r.querySelector('[data-job]')?.getAttribute('data-outcome'));
+    expect(names[0]).toBe('failed');
+    const statuses = jobRows().map((r) => r.querySelector('[data-status]')?.getAttribute('data-status'));
+    const firstFresh = statuses.indexOf('fresh');
+    expect(firstFresh).toBeGreaterThan(0);
+    // 第一个正常行之后没有失败、没查全的行
+    expect(names.slice(firstFresh)).not.toContain('failed');
   });
-});
 
-describe('定时任务可展开的列表行（#1805）', () => {
   test('默认全部收起，点一行才展开明细，再点收起', async () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
-    const name = await screen.findByText('额度读取');
-    const row = name.closest('li');
-    if (!(row instanceof HTMLElement)) throw new Error('找不到额度读取那一行');
+    const row = (await screen.findByText('额度读取')).closest('tr') as HTMLElement;
     const toggle = within(row).getByRole('button');
-    // 默认收起：明细（周期、上次跑成块）不在
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    expect(row.querySelector('[data-last-success]')).toBeNull();
-    expect(row.querySelector('dl')).toBeNull();
-    for (const li of document.querySelectorAll('[data-job-list] > li')) {
-      expect(li.querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
-    }
+    expect(document.querySelector('[data-job-detail]')).toBeNull();
     fireEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(row.querySelector('dl')).toBeTruthy();
+    const detail = document.querySelector('[data-job-detail]') as HTMLElement;
+    expect(detail.textContent).toContain('上次跑成');
+    expect(detail.textContent).toContain('开始于');
+    expect(detail.textContent).toContain('耗时');
+    expect(detail.textContent).toContain('过期线');
+    expect(detail.textContent).toContain('期望');
     fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    expect(row.querySelector('dl')).toBeNull();
+    expect(document.querySelector('[data-job-detail]')).toBeNull();
   });
 
-  test('一行就一行：状态点、名字、上次结果、上次跑成的相对时间；没有表格', async () => {
+  test('失败的那一行 data-outcome 是 failed，状态标红「失败，已过期」', async () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
-    const row = (await screen.findByText('额度读取')).closest('li') as HTMLElement;
-    expect(document.querySelector('table')).toBeNull();
-    expect(row.querySelector('[aria-hidden].rounded-full')).toBeTruthy();
-    expect(row.textContent).toContain('前');
+    await screen.findByText('夜间备份');
+    const row = rowOf('夜间备份');
+    expect(row.querySelector('[data-job]')?.getAttribute('data-outcome')).toBe('failed');
+    const badge = row.querySelector('[data-status="job:failed-overdue"]');
+    expect(badge?.textContent).toBe('失败，已过期');
+    expect(badge?.getAttribute('data-level')).toBe('error');
   });
 
-  test('上次跑成和开始时间在同一块（展开后）', async () => {
+  test('一行只放一个状态：过期叠在失败、没查全后面（「失败，已过期」），不另贴「过期」标签；过期线在展开里', async () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
-    const row = (await screen.findByText('额度读取')).closest('li') as HTMLElement;
-    fireEvent.click(within(row).getByRole('button'));
-    const block = row.querySelector('[data-last-success]');
-    expect(block).toBeTruthy();
-    expect(within(block as HTMLElement).getByText(/开始/)).toBeTruthy();
-  });
-
-  test('失败的那一行带红色竖线和 data-outcome', async () => {
-    renderApp(<SchedulesPage />, { route: '/schedules' });
-    const row = (await screen.findByText('夜间备份')).closest('li') as HTMLElement;
-    expect(row.dataset.outcome).toBe('failed');
-    expect(row.querySelector('.w-rail.bg-st-fail')).toBeTruthy();
-  });
-});
-
-describe('照路由页样板重做（标题块、一行一个状态）', () => {
-  test('标题块三行：几个定时任务、最要紧的一句加状态、异常计数；三行都不折', async () => {
-    renderApp(<SchedulesPage />, { route: '/schedules' });
-    await screen.findByText('额度读取');
-    const hero = document.querySelector('[data-schedules-hero]') as HTMLElement;
-    const line = hero.querySelector('[data-hero-line]') as HTMLElement;
-    // 假数据里夜间备份失败：结论写它和原因，状态「要处理」（红）
-    expect(line.textContent).toContain('夜间备份上次失败');
-    expect(line.querySelector('[data-tone="fail"]')?.textContent).toBe('要处理');
-    expect(line.className).toContain('whitespace-nowrap');
-    expect(hero.querySelector('[data-hero-text]')?.className).toContain('truncate');
-    expect(hero.querySelector('[data-hero-notes]')?.className).toContain('truncate');
-  });
-
-  test('都正常时结论写「全部按期跑成」，灰字写最近跑成的一个', async () => {
-    const api = createMockApi({ live: false });
-    const all = await api.jobs();
-    api.jobs = async () => ({ ...all, jobs: all.jobs.filter((j) => rowTone(j) === null) });
-    renderApp(<SchedulesPage />, { api, route: '/schedules' });
-    await screen.findByText('额度读取');
-    const hero = document.querySelector('[data-schedules-hero]') as HTMLElement;
-    expect(hero.querySelector('[data-hero-line]')?.textContent).toContain('全部按期跑成');
-    expect(hero.querySelector('[data-tone="done"]')?.textContent).toBe('都正常');
-    expect(hero.querySelector('[data-hero-notes]')?.textContent).toMatch(/^最近跑成：/);
-  });
-
-  test('一行只放一个状态：过期叠在失败、没查全后面，不另贴「过期」标签', async () => {
-    renderApp(<SchedulesPage />, { route: '/schedules' });
-    const backup = (await screen.findByText('夜间备份')).closest('li') as HTMLElement;
-    const line = backup.querySelector('[data-row-name-line]') as HTMLElement;
-    expect(line.querySelectorAll('[data-tone]').length).toBeGreaterThan(0);
-    expect(line.querySelector('[data-variant="dot"]')?.textContent).toBe('失败，已过期');
-    const quota = screen.getByText('额度读取').closest('li') as HTMLElement;
-    expect(quota.querySelector('[data-variant="dot"]')?.textContent).toBe('按期');
+    await screen.findByText('夜间备份');
+    const backup = rowOf('夜间备份');
+    expect(backup.querySelectorAll('[data-level]')).toHaveLength(1);
+    expect(backup.textContent).toContain('失败，已过期');
+    fireEvent.click(within(backup).getByRole('button'));
+    expect(document.querySelector('[data-job-detail]')?.textContent).toContain('现在已超过，算过期');
+    const quota = rowOf('额度读取');
+    expect(quota.querySelector('[data-status="job:fresh"]')?.textContent).toBe('按期');
     // 上次跑成的绝对时间在悬停里
     expect(quota.querySelector('[data-last-success-ago]')?.getAttribute('title')).toMatch(/^上次跑成：/);
   });
 
-  test('【故意造出的失败】读成过、刷新失败：照旧画上一次读到的，顶上一条横幅带重试', async () => {
+  test('状态判法：失败 > 没查全 > 过期 > 从没跑成 > 在跑 > 按期', async () => {
+    const api = createMockApi({ live: false });
+    const jobs = (await api.jobs()).jobs;
+    const base = jobs.find((j) => rowTone(j) === null);
+    if (!base?.lastRun) throw new Error('假数据里没有按期的任务');
+    const withRun = (
+      over: Partial<NonNullable<typeof base.lastRun>>,
+      status: typeof base.status = 'fresh',
+    ) => ({
+      ...base,
+      status,
+      lastRun: { ...base.lastRun, ...over } as NonNullable<typeof base.lastRun>,
+    });
+    expect(jobStatusKey(withRun({ outcome: 'failed' }, 'overdue'))).toBe('job:failed-overdue');
+    expect(jobStatusKey(withRun({ outcome: 'partial' }, 'overdue'))).toBe('job:partial-overdue');
+    expect(jobStatusKey(withRun({ outcome: 'unscanned' }))).toBe('job:partial');
+    expect(jobStatusKey(withRun({ outcome: 'ok' }, 'overdue'))).toBe('job:overdue');
+    expect(jobStatusKey({ ...base, status: 'never', lastRun: undefined })).toBe('job:never');
+    expect(jobStatusKey(withRun({ outcome: undefined, endedAt: undefined }))).toBe('job:running');
+    expect(jobStatusKey(withRun({ outcome: 'ok' }))).toBe('job:fresh');
+  });
+
+  test('「有问题」筛选：只留失败、没查全、过期的；在跑的不算', async () => {
+    renderApp(<SchedulesPage />, { route: '/schedules' });
+    await screen.findByText('额度读取');
+    const total = jobRows().length;
+    const group = screen.getByRole('group', { name: '筛选' });
+    fireEvent.click(within(group).getByRole('button', { name: /^有问题/ }));
+    const rows = jobRows();
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThan(total);
+    for (const r of rows) {
+      expect(r.querySelector('[data-status]')).toBeTruthy();
+      expect(r.querySelector('[data-status="job:fresh"]')).toBeNull();
+      expect(r.querySelector('[data-status="job:running"]')).toBeNull();
+    }
+    fireEvent.click(within(group).getByRole('button', { name: '全部' }));
+    expect(jobRows()).toHaveLength(total);
+  });
+
+  test('【故意造出的失败】读成过、刷新失败：照旧画上一次读到的，顶上一条提示带重试', async () => {
     const api = createMockApi({ live: false });
     renderApp(<SchedulesPage />, { api, route: '/schedules' });
     await screen.findByText('额度读取');
     api.jobs = () => Promise.reject(new ApiError(500, 'internal', '后端出错了'));
     fireEvent.click(screen.getByRole('button', { name: '刷新' }));
     const alert = await screen.findByRole('alert', {}, { timeout: 4000 });
-    expect(alert.textContent).toContain('定时任务刷新没读成，下面是上一次读到的');
+    expect(alert.textContent).toContain('定时任务刷新没成');
+    expect(alert.textContent).toContain('下面是');
+    expect(alert.textContent).toContain('后端出错了');
     expect(within(alert).getByRole('button', { name: '重试' })).toBeTruthy();
     expect(screen.getByText('额度读取')).toBeTruthy();
+  });
+
+  test('【故意造出的失败】从没读成：只写没读成和原因，不画表、不画 0', async () => {
+    const api = createMockApi({ live: false });
+    api.jobs = () => Promise.reject(new ApiError(500, 'internal', '后端出错了'));
+    renderApp(<SchedulesPage />, { api, route: '/schedules' });
+    const alert = await screen.findByRole('alert', {}, { timeout: 4000 });
+    expect(alert.textContent).toContain('定时任务没读成');
+    expect(document.querySelector('table')).toBeNull();
+  });
+
+  test('一个定时任务都没有：写「还没有定时任务」，不画表', async () => {
+    const api = createMockApi({ live: false });
+    const all = await api.jobs();
+    api.jobs = async () => ({ ...all, jobs: [] });
+    renderApp(<SchedulesPage />, { api, route: '/schedules' });
+    expect(await screen.findByText('还没有定时任务')).toBeTruthy();
+    expect(document.querySelector('table')).toBeNull();
   });
 });

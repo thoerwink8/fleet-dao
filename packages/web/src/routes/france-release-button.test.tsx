@@ -138,7 +138,8 @@ describe('/france 页「发布到法国」按钮', () => {
       card({ state: 'blocked', installed: false, reasons: ['法国还没装发版接活单元（缺 x）'] }),
     );
     const btn = await button();
-    expect((btn as HTMLButtonElement).disabled).toBe(true);
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.getAttribute('title')).toContain('法国还没装发版接活单元');
     expect(await screen.findByText(/法国还没装发版接活单元/)).toBeTruthy();
     fireEvent.click(btn);
     expect(screen.queryByRole('alertdialog')).toBeNull();
@@ -152,7 +153,7 @@ describe('/france 页「发布到法国」按钮', () => {
         reasons: ['主线 CI 不是绿的（红）：failure', '已有发版在走', '法国已经是最新，没有要发的'],
       }),
     );
-    expect(((await button()) as HTMLButtonElement).disabled).toBe(true);
+    expect((await button()).getAttribute('aria-disabled')).toBe('true');
     expect(await screen.findByText('主线 CI 不是绿的（红）：failure')).toBeTruthy();
     expect(await screen.findByText('已有发版在走')).toBeTruthy();
     expect(await screen.findByText('法国已经是最新，没有要发的')).toBeTruthy();
@@ -175,7 +176,7 @@ describe('/france 页「发布到法国」按钮', () => {
     expect(confirm.getAttribute('aria-busy')).toBeNull();
     fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
-    expect(((await button()) as HTMLButtonElement).disabled).toBe(false);
+    expect((await button()).getAttribute('aria-disabled')).toBeNull();
   });
 
   test('最近一次的结果：等法国接、被拒（带原因）、做完（写总开关恢复到发版前、接活开关发版不动，#2026）', async () => {
@@ -223,19 +224,13 @@ describe('/france 页「发布到法国」按钮', () => {
 
   test('入口在「在用版本」那一行：写落后 7 个提交、要发的主线头提交号和标题，按钮在这一行里、全页只有这一颗', async () => {
     setup(card());
-    const row = (await screen.findByText('在用版本')).closest('[data-france-fact],[data-env-fact]');
-    if (!(row instanceof HTMLElement)) throw new Error('找不到「在用版本」那一格');
-    const btn = await within(row).findByRole('button', { name: '发布到法国' });
-    expect((btn as HTMLButtonElement).disabled).toBe(false);
-    expect(within(row).getByText('落后主线 7 个提交')).toBeTruthy();
-    const head = row.querySelector('[data-entry-head]');
-    expect(head?.textContent).toContain(HEAD.slice(0, 12));
-    expect(head?.textContent).toContain('刷新耗时表 (#1230)');
+    const panel = (await screen.findByRole('heading', { name: '版本' })).closest('section') as HTMLElement;
+    const btn = await within(panel).findByRole('button', { name: '发布到法国' });
+    expect(btn.getAttribute('aria-disabled')).toBeNull();
+    expect(await within(panel).findByText('落后主线 7 个提交')).toBeTruthy();
+    expect(within(panel).getByText(HEAD.slice(0, 12))).toBeTruthy();
+    expect(within(panel).getByText('刷新耗时表 (#1230)')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: '发布到法国' })).toHaveLength(1);
-    // 发版卡（下面那块）只读：里面没有按钮
-    const panel = (await screen.findByRole('heading', { name: '发版' })).closest('section');
-    expect(panel).not.toBeNull();
-    expect(within(panel as HTMLElement).queryByRole('button')).toBeNull();
   });
 
   test('【故意造出的失败】发版卡读不到：「在用版本」那一行写没查成和原因，不画点不了的假按钮', async () => {
@@ -247,9 +242,8 @@ describe('/france 页「发布到法国」按钮', () => {
       franceReleaseCard: () => Promise.reject(new Error('后端 502')),
     } as MockApi;
     renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
-    const row = (await screen.findByText('在用版本')).closest('[data-france-fact],[data-env-fact]');
-    if (!(row instanceof HTMLElement)) throw new Error('找不到「在用版本」那一格');
-    expect(await within(row).findByText(/发布入口没查成：.*后端 502/)).toBeTruthy();
+    const panel = (await screen.findByRole('heading', { name: '版本' })).closest('section') as HTMLElement;
+    expect(await within(panel).findByText(/发版卡没读成：.*后端 502/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: '发布到法国' })).toBeNull();
   });
 
@@ -257,11 +251,10 @@ describe('/france 页「发布到法国」按钮', () => {
     const same = card({ state: 'blocked', reasons: ['法国已经是最新，没有要发的'] });
     same.gap = { state: 'same' };
     setup(same);
-    const row = (await screen.findByText('在用版本')).closest('[data-france-fact],[data-env-fact]');
-    if (!(row instanceof HTMLElement)) throw new Error('找不到「在用版本」那一格');
-    expect(await within(row).findByText('已是主线最新')).toBeTruthy();
-    expect(row.querySelector('[data-entry-gap="ahead"]')).toBeNull();
-    expect(((await button()) as HTMLButtonElement).disabled).toBe(true);
+    const panel = (await screen.findByRole('heading', { name: '版本' })).closest('section') as HTMLElement;
+    expect(await within(panel).findByText('和主线一样，没有要发的')).toBeTruthy();
+    expect(panel.querySelector('[data-entry-gap="ahead"]')).toBeNull();
+    expect((await button()).getAttribute('aria-disabled')).toBe('true');
   });
 
   test('页面上没有「版本里程碑发版」的说法，也没有指去发版卡或更新日志页发布的旧话', async () => {

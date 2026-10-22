@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 资源页（#1986）整页：假后端给什么画什么——三段都在；某个应用没在跑写「没在占用」；目录读不全写「不全」；
 // 磁盘读不到写「没读到」；老后端没有磁盘、上线项目、按目录的占用时写明没给。任何地方都不拿 0 顶。
-import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { afterEach, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import type { HomeResponse } from '../api/types';
@@ -94,33 +94,44 @@ function withResources(resources: HomeResources | undefined) {
 }
 
 const text = (sel: string) => document.querySelector(sel)?.textContent ?? '';
+/** 上线项目表里一个项目那一行的字（行是 <tr>，标记在第一格里）。 */
+const appRow = (id: string) => document.querySelector(`[data-app="${id}"]`)?.closest('tr')?.textContent ?? '';
+/** 点开一个项目那一行的展开键。 */
+const expandApp = (id: string) => {
+  const button = document.querySelector(`[data-app="${id}"]`)?.closest('tr')?.querySelector('button');
+  if (!button) throw new Error(`找不到 ${id} 的展开键`);
+  fireEvent.click(button);
+};
 
 test('三段都在：整机三格、每个项目一行、没有按目录的占用榜', async () => {
   renderApp(<ResourcesPage />, { api: withResources(FULL) });
   await waitFor(() => expect(document.querySelector('[data-resources-host]')).toBeTruthy());
   expect(text('[data-gauge="disk"]')).toContain('60.0G');
   expect(text('[data-gauge="disk"]')).toContain('/ 200.0G');
-  expect(text('[data-gauge="disk"]')).toContain('剩余 130.0G');
   expect(text('[data-gauge="disk"]')).toContain('30%');
-  expect(text('[data-app="cockpit"]')).toContain('驾驶舱');
-  expect(text('[data-app="cockpit"]')).toContain('/srv/fleet-dao-releases/current');
-  expect(text('[data-app="cockpit"]')).toContain('220M');
+  // 整机三格只写「已用 / 总量」和一根条：「可用 / 剩余」那一句删了（样稿减法）
+  expect(text('[data-gauge="disk"]')).not.toContain('剩余');
+  expect(appRow('cockpit')).toContain('驾驶舱');
+  expect(appRow('cockpit')).toContain('/srv/fleet-dao-releases/current');
+  expect(appRow('cockpit')).toContain('220M');
   // 没在跑：写没在占用，不写 0
-  expect(text('[data-app="release"]')).toContain('没在占用');
-  expect(text('[data-app="release"]')).not.toMatch(/\b0(\.0)? 核|\b0M/);
+  expect(appRow('release')).toContain('没在占用');
+  expect(appRow('release')).not.toMatch(/\b0(\.0)? 核|\b0M/);
   // 目录读不全：写不全，数前面带 ≥
-  expect(text('[data-app="sessions"]')).toContain('≥ 1.0G');
-  expect(text('[data-app="sessions"]')).toContain('不全');
-  // 没登记的服务：标「没登记」、提示去哪登记、有 CPU 内存、磁盘写没登记目录
-  expect(text('[data-app="unregistered:newcomer.service"]')).toContain('没登记');
-  expect(text('[data-app="unregistered:newcomer.service"]')).toContain('packages/api/src/vps-apps.ts');
-  expect(text('[data-app="unregistered:newcomer.service"]')).toContain('38M');
-  fireEvent.click(screen.getByRole('button', { name: /newcomer\.service/ }));
+  expect(appRow('sessions')).toContain('≥ 1.0G');
+  expect(appRow('sessions')).toContain('不全');
+  // 没登记的服务：标「没登记」、行里不写源码路径（展开才写怎么登记）、有 CPU 内存
+  expect(appRow('unregistered:newcomer.service')).toContain('没登记');
+  expect(appRow('unregistered:newcomer.service')).toContain('展开看怎么登记');
+  expect(appRow('unregistered:newcomer.service')).not.toContain('packages/api/src/vps-apps.ts');
+  expect(appRow('unregistered:newcomer.service')).toContain('38M');
+  expandApp('unregistered:newcomer.service');
   expect(text('[data-app-detail="unregistered:newcomer.service"]')).toContain('没登记目录');
+  expect(text('[data-app-detail="unregistered:newcomer.service"]')).toContain('packages/api/src/vps-apps.ts');
   // 按目录的占用榜收掉了（创始人 2026-10-13）：页上没有这一段
   expect(document.querySelector('[data-resources-board]')).toBeNull();
   // 点开一行看全文（手机上没有悬停）
-  fireEvent.click(screen.getByRole('button', { name: /AI 会话/ }));
+  expandApp('sessions');
   expect(text('[data-app-detail="sessions"]')).toContain('fleet-agents.slice');
   expect(text('[data-app-detail="sessions"]')).toContain('有 4 棵树没读到');
 });

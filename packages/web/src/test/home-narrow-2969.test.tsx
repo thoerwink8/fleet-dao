@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
-// 首页窄屏页头（#2969）：流程开关、状态、刷新原来和标题挤在一行，开关被压扁后盖住状态。
-// 手机上标题单独一行，开关占满下一行，状态和刷新靠右。happy-dom 没有版面，这里钉结构和交互；
-// 框有没有叠、有没有横滚，由 e2e 02c-home-narrow 量。
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+// 工作台窄屏页头（#2969，#3533 改）：原来流程开关、状态、刷新和标题挤在一行，开关被压扁后盖住状态。
+// 「三段 / 全程」开关已挪到法国页的引擎卡（test/flow-mode-picker.test.tsx），工作台页头只剩刷新：
+// 手机上标题单独一行，刷新在下面，不横向撑出屏幕。happy-dom 没有版面，这里钉结构和交互；框有没有叠、有没有横滚，由 e2e 02c-home-narrow 量。
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError, useHome } from '../api/client';
 import { createMockApi } from '../api/mock/server';
@@ -33,7 +33,6 @@ function viewport(width: number) {
 }
 
 const actions = () => document.querySelector('[data-page-actions]') as HTMLElement;
-const header = () => document.querySelector('[data-page-titlebar]')?.parentElement as HTMLElement;
 
 async function ready() {
   await waitFor(() =>
@@ -41,65 +40,28 @@ async function ready() {
   );
   // 系统状态读到了（健康条不再挤在页头，放进「系统状态」那一块）
   await waitFor(() => expect(screen.getByText('引擎进程')).toBeTruthy());
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: '三步法' }).getAttribute('aria-pressed')).toBe('true'),
-  );
 }
 
 describe('窄屏页头结构', () => {
-  for (const width of [320, 360, 390]) {
-    test(`${width}：标题和操作区分开，开关、状态、刷新都在操作区里`, async () => {
+  for (const width of [320, 360, 390, 1366]) {
+    test(`${width}：页头只有刷新，开关不在工作台（在法国页），标题和操作区分开`, async () => {
       viewport(width);
       renderApp(<HomePage />);
       await ready();
       const bar = actions();
-      expect(bar.getAttribute('data-actions-layout')).toBe('stack');
-      expect(bar.className).toContain('max-md:w-full');
-      expect(header().className).toContain('max-md:flex-col');
-      expect(header().className).not.toMatch(/(^|\s)flex-col(\s|$)/);
-      const sw = document.querySelector('[data-flow-mode-switch]') as HTMLElement;
       const refresh = document.querySelector('[data-refresh-bar]') as HTMLElement;
-      expect(bar.contains(sw)).toBe(true);
       expect(bar.contains(refresh)).toBe(true);
       expect(bar.contains(screen.getByRole('heading', { level: 1, name: '工作台' }))).toBe(false);
-      // 页头只剩开关和刷新：状态不再叠在页头里
+      // 页头不再叠状态，也没有派单方式开关（挪到了法国页的引擎卡）
       expect(bar.textContent).not.toContain('引擎进程');
-      // 两个选择和刷新都还在，名字没被收掉
-      expect(screen.getByRole('button', { name: '全程' })).toBeTruthy();
+      expect(document.querySelector('[data-flow-mode-switch]')).toBeNull();
+      expect(screen.queryByRole('button', { name: '全程' })).toBeNull();
       expect(screen.getByRole('button', { name: '刷新' })).toBeTruthy();
-      expect(document.querySelector('[data-flow-mode-current]')?.textContent).toMatch(/三步法/);
     });
   }
-
-  test('宽屏：操作区仍跟标题并排的那一套类，不改成始终上下堆', async () => {
-    viewport(1366);
-    renderApp(<HomePage />);
-    await ready();
-    const bar = header();
-    expect(bar.className).toContain('justify-between');
-    expect(bar.className).toContain('lg:flex-nowrap');
-    expect(bar.className).not.toMatch(/(^|\s)flex-col(\s|$)/);
-    expect(actions().getAttribute('data-actions-layout')).toBe('stack');
-  });
 });
 
-describe('窄屏上切换、刷新、读失败仍在', () => {
-  test('390：点全程先确认，先不关掉，不写设置', async () => {
-    viewport(390);
-    const api = createMockApi({ live: false });
-    const spy = vi.spyOn(api, 'updateSetting');
-    renderApp(<HomePage />, { api });
-    await ready();
-    fireEvent.click(screen.getByRole('button', { name: '全程' }));
-    const dialog = await screen.findByRole('alertdialog');
-    expect(dialog.textContent).toContain('已经在跑的');
-    expect(spy).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
-    expect(spy).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: '三步法' }).getAttribute('aria-pressed')).toBe('true');
-  });
-
+describe('窄屏上刷新、读失败仍在', () => {
   test('390：点刷新，调用主页主查询的 refetch', async () => {
     viewport(390);
     function Probe() {
@@ -122,10 +84,9 @@ describe('窄屏上切换、刷新、读失败仍在', () => {
     expect(refetch).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(home.mock.calls.length).toBe(before + 1));
     expect(screen.getByText('引擎进程')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '全程' })).toBeTruthy();
   });
 
-  test('390：【故意造出的失败】主页没读成仍显示原因，开关和刷新还在，不拿状态条冒充', async () => {
+  test('390：【故意造出的失败】主页没读成仍显示原因，刷新还在，不拿状态条冒充', async () => {
     viewport(390);
     const api = createMockApi({ live: false });
     api.home = () => Promise.reject(new ApiError(500, 'internal', '后端出错了'));
@@ -134,7 +95,6 @@ describe('窄屏上切换、刷新、读失败仍在', () => {
     const alert = alerts.find((a) => a.textContent?.includes('主页没读成'));
     expect(alert?.textContent).toContain('后端出错了');
     expect(screen.getAllByRole('button', { name: '重试' }).length).toBeGreaterThan(0);
-    expect(actions().contains(document.querySelector('[data-flow-mode-switch]'))).toBe(true);
     expect(actions().contains(document.querySelector('[data-refresh-bar]'))).toBe(true);
     // 没读到系统状态就不画「引擎进程 运行中」这类状态，也不画额度和估算的数
     expect(screen.queryByText('引擎进程')).toBeNull();

@@ -9,8 +9,6 @@ import {
   LayoutDashboard,
   ListChecks,
   MessageSquarePlus,
-  Network,
-  Receipt,
   Route,
   ScrollText,
   Server,
@@ -26,7 +24,7 @@ export interface NavItem {
 
 /**
  * 左菜单（#3509，照 Arco Pro）：上面四项常用的，「运维」一组三项，最底下设置。一共八项，别的页不进菜单。
- * 菜单只放做好了的页；还没做的账单地址还在，⌘K 搜得到，打开写明「还没做」（routes/soon.tsx）。
+ * 菜单只放做好了的页。
  */
 export const NAV_HOME: NavItem = {
   to: '/',
@@ -54,7 +52,7 @@ export const NAV_OPS: { group: string; items: NavItem[] } = {
       to: '/france',
       label: '法国',
       icon: Server,
-      hint: '本台六项事实、引擎总开关、命令行工具、定时任务、发版；多一台机器时按台并排',
+      hint: '运行概况、引擎总开关与派单方式、版本与发版、各台机器，零散页的入口在「更多」',
     },
     {
       to: '/routing',
@@ -107,20 +105,6 @@ export const NAV_HIDDEN: (NavItem & { under: string })[] = [
     hint: '每个渠道一张卡：近 60 次柱条、平均耗时、可用率，点开看 request/response 原文',
     under: '/routing',
   },
-  {
-    to: '/board',
-    label: '画布',
-    icon: Network,
-    hint: '原来的主页：思维导图看板，中心引擎 → 对题 / 动手 / 验收 → 每张单',
-    under: '/france',
-  },
-];
-
-/**
- * 还没做的页：不算导航（NAV_ITEMS 里没有，test/members-removed.test.ts 钉着），只在 ⌘K 的最后一组搜得到，打开写明「还没做」。
- */
-export const NAV_SOON: (NavItem & { under: string })[] = [
-  { to: '/billing', label: '账单', icon: Receipt, hint: '这一页还没做', under: '/france' },
 ];
 
 /** 菜单里的全部项，从上到下。 */
@@ -143,7 +127,7 @@ const within = (pathname: string, to: string) =>
  * 任务详情 /tasks/:id 亮「任务」。认不出（404 之类）返回 null，一项都不亮。
  */
 export function activeMenu(pathname: string): string | null {
-  const hidden = [...NAV_HIDDEN, ...NAV_SOON].find((h) => within(pathname, h.to));
+  const hidden = NAV_HIDDEN.find((h) => within(pathname, h.to));
   if (hidden) return hidden.under;
   return NAV_MENU.find((m) => within(pathname, m.to))?.to ?? null;
 }

@@ -21,7 +21,6 @@ type HeaderGeometry = {
   sameRow: boolean;
   actionsPastMain: boolean;
   hitRefresh: boolean;
-  hitFlow: boolean;
   titleText: string;
 };
 
@@ -59,7 +58,6 @@ const HEADER_JS = `(() => {
     const top = document.elementFromPoint(Math.min(r.left + r.width / 2, window.innerWidth - 1), r.top + r.height / 2);
     return top !== null && (el === top || el.contains(top));
   };
-  const flowButtons = [...document.querySelectorAll('[data-flow-mode-switch] button')];
   return {
     vw: window.innerWidth,
     titleLines: lh > 0 ? Math.round(titleBox.height / lh) : -1,
@@ -74,7 +72,6 @@ const HEADER_JS = `(() => {
     sameRow: tb.top < ab.bottom - 1 && ab.top < tb.bottom - 1 && tb.left < ab.left,
     actionsPastMain: ab.right > mb.right + 1 || ab.left < mb.left - 1,
     hitRefresh: hit(document.querySelector('[data-refresh-bar] button')),
-    hitFlow: flowButtons.length > 0 && flowButtons.every((el) => hit(el)),
     titleText: h1.textContent ?? '',
   };
 })()`;
@@ -166,37 +163,6 @@ test.describe('看板多机', () => {
     }
   });
 
-  test('切到远程：画布渲染它的快照，顶上写「报的，只读」；单子链接是 GitHub 链接，去答置灰；铃铛不露出来', async ({
-    page,
-    shot,
-  }) => {
-    await page.goto('/board?node=wsl');
-    await expect(page.getByRole('heading', { name: new RegExp(`画布 · ${WSL}`) })).toBeVisible();
-    const banner = page.locator('[data-snapshot-banner]');
-    await expect(banner).toHaveAttribute('data-snapshot-banner', 'fresh');
-    await expect(banner).toContainText(`${WSL}`);
-    await expect(banner).toContainText('报的，只读');
-    // 在跑的单子：整张卡片是指向 GitHub 的链接，不是站内详情。
-    // 1366 宽收进视野是远景（只剩单号、没有链接），先切到中景（同 02-home 的 midZoom）。
-    await expect(page.locator('.react-flow__node[data-id^="ticket:"]').first()).toBeVisible();
-    await page.getByRole('button', { name: /^中景/ }).click();
-    await expect(page.locator('[data-running-card] a').first()).toHaveAttribute(
-      'href',
-      /^https:\/\/github\.com\//,
-    );
-    expect(await page.locator('main a[href^="/tasks/"]').count()).toBe(0);
-    expect(await page.locator('main a[href^="/notifications"]').count()).toBe(0);
-    // 要你拍的在右上角抽屉里（≥1920 本来就开着，更窄要点开；已经开着的再点就收起了）：去答不是链接、置灰
-    if (!(await page.locator('[data-home-drawer]').count())) {
-      await page.getByRole('button', { name: /^要你拍的 \d+ 条/ }).click();
-    }
-    expect(await page.locator('[data-decision-card] a').count()).toBe(0);
-    for (const b of await page.locator('[data-remote-disabled]').all()) await expect(b).toBeDisabled();
-    // 提醒铃铛是本台（法国）的数据：看远程环境时不露出来
-    await expect(page.getByRole('button', { name: /^提醒/ })).toHaveCount(0);
-    await shot(page, '07c-远程主页');
-  });
-
   test('失联：浏览器的钟快进 10 分钟，横幅写「失联 10 分钟」、说不是现在的，顶栏标「失联」，下拉里那一项变灰', async ({
     page,
     shot,
@@ -221,7 +187,7 @@ test.describe('看板多机', () => {
     await expect(banner).toContainText('失联 10 分钟');
     await expect(banner).toContainText('不是现在的');
     await expect(trigger).toContainText('失联');
-    // 远程标题（「工作台 · 演练 WSL」）在桌面一行放完，操作区（流程开关、刷新）不盖住它。
+    // 远程标题（「工作台 · 演练 WSL」）在桌面一行放完，操作区（刷新）不盖住它。
     const g = await remoteHeaderLayout(page);
     expect(g.titleText, `${g.vw} 标题`).toContain(`工作台 · ${WSL}`);
     expect(
@@ -236,7 +202,6 @@ test.describe('看板多机', () => {
     expect(g.sameRow, `${g.vw} 标题和操作区不在同一行`).toBe(true);
     expect(g.actionsPastMain, `${g.vw} 操作区超出正文`).toBe(false);
     expect(g.hitRefresh, `${g.vw} 刷新点不着`).toBe(true);
-    expect(g.hitFlow, `${g.vw} 流程开关点不着`).toBe(true);
     // 健康条不在页头了：系统状态（流水线、中转、引擎进程）写在页里「系统状态」那一块，带着那台快照里的说明
     await expect(page.getByText('系统状态')).toBeVisible();
     await expect(page.getByText('引擎进程')).toBeVisible();
@@ -274,28 +239,33 @@ test.describe('看板多机', () => {
     await expect(page.locator('[data-only-local]')).toHaveCount(0);
   });
 
-  test('法国页：本台、演练 WSL、idle 三列并排；WSL 那列写上报于，idle 那列写从没收到过', async ({
+  test('法国页：机器表里本台、idle、演练 WSL 三行；WSL 那行写上报于，idle 那行展开写从没收到过', async ({
     page,
     shot,
   }) => {
     await page.goto('/france');
     await expect(page).toHaveURL(/\/france$/);
-    const cols = page.locator('[data-env-column]');
-    await expect(cols).toHaveCount(3);
-    expect(await cols.evaluateAll((els) => els.map((e) => e.getAttribute('data-env-column')))).toEqual([
+    const rows = page.locator('[data-machines] tr[data-row-key]');
+    await expect(rows).toHaveCount(3);
+    expect(await rows.evaluateAll((els) => els.map((e) => e.getAttribute('data-row-key')))).toEqual([
       'local',
       'idle',
       'wsl',
     ]);
-    const wsl = page.locator('[data-env-column="wsl"]');
-    await expect(wsl.getByRole('heading', { name: new RegExp(WSL) })).toBeVisible();
-    await expect(wsl.locator('[data-env-age]')).toContainText('上报于');
-    await expect(wsl).toHaveAttribute('data-env-column-state', 'ok');
-    for (const label of ['引擎', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {
-      await expect(wsl.getByText(label).first()).toBeVisible();
+    const wsl = page.locator('[data-machines] tr[data-row-key="wsl"]');
+    await expect(wsl).toContainText(WSL);
+    await expect(wsl).toContainText('上报于');
+    await wsl.getByRole('button', { name: '展开' }).click();
+    const detail = page.locator('[data-detail-for="wsl"]');
+    for (const label of ['引擎进程', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {
+      await expect(detail.getByText(label).first()).toBeVisible();
     }
-    await expect(page.locator('[data-env-column="idle"] [data-env-never]')).toContainText('从没收到过');
-    await shot(page, '07c-环境页并排');
+    await page
+      .locator('[data-machines] tr[data-row-key="idle"]')
+      .getByRole('button', { name: '展开' })
+      .click();
+    await expect(page.locator('[data-detail-for="idle"] [data-env-never]')).toContainText('从没收到过');
+    await shot(page, '07c-法国页机器表');
   });
 });
 

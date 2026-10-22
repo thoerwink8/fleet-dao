@@ -1,13 +1,12 @@
 // @vitest-environment happy-dom
-// 法国总览页（#618 第 1 版）：引擎、在用版本、健康、最近拉单 4 格 + 定时任务表。
-// 做完的标准：① 每一项读不到就写「没查成 + 原因」，不拿 0 或假 ok 顶；② 故意造一项失败，那一格变虚线灰框，别的格照常；
-// ③ 定时任务有失败亮红、没查全亮黄（判法照 schedules 页）。
+// 法国总览页（#618 第 1 版，#3533 照 Arco 改版）：运行概况（两个指标 + 描述列表）、引擎、版本、机器表、更多。
+// 做完的标准：① 每一项读不到就写「没读到 + 原因」，不拿 0 或假 ok 顶；② 故意造一项失败，那一项写没读到，别的项照常；
+// ③ 定时任务的入口带标签：有失败标红、没查全标橙（判法照 schedules 页）；④ 一台只画本台一行，多台时远程环境各一行，点箭头看快照。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { EnvResponse, Jobs, Setting } from '../api/types';
-import { HealthStrip } from '../components/home/health-strip';
 import France from '../routes/france';
 import { renderApp } from '../test/harness';
 
@@ -101,7 +100,7 @@ function apiWith(envD: EnvResponse, jobsD?: Jobs | { error: Error }): MockApi {
   return {
     ...inner,
     env: () => Promise.resolve(envD),
-    // 这些用例看的是只有一台：不画对照列。两台并排的在下面另写。
+    // 这些用例看的是只有一台：不画远程行。两台的在下面另写。
     nodes: async () => ({ ...(await inner.nodes()), nodes: [] }),
     jobs:
       jobsD && 'error' in jobsD
@@ -117,39 +116,43 @@ function renderFrance(envD: EnvResponse, jobsD?: Jobs | { error: Error }) {
   });
 }
 
-const tile = (name: string) => within(screen.getByText(name).closest('[data-france-fact]') as HTMLElement);
+/** 描述列表里一项：找到它的标签，取同一行的值。 */
+function factValue(label: string): HTMLElement {
+  const dt = screen.getAllByText(label).find((el) => el.tagName === 'DT');
+  const dd = dt?.nextElementSibling;
+  if (!(dd instanceof HTMLElement)) throw new Error(`「${label}」后面没有值`);
+  return dd;
+}
 
-describe('法国总览页', () => {
-  test('四格 + 定时任务表都在：引擎在跑、落后主线写明、健康没红的、最近拉单', async () => {
+/** 指标：标签文字在指标的第一行（描述列表里还有同名的标签，所以按指标容器找）。 */
+const stat = (label: string) => {
+  const el = Array.from(document.querySelectorAll<HTMLElement>('[data-stat]')).find((s) =>
+    s.textContent?.startsWith(label),
+  );
+  if (!el) throw new Error(`找不到指标「${label}」`);
+  return within(el);
+};
+
+describe('法国总览页：运行概况', () => {
+  test('两个指标 + 描述列表都在：引擎运行中、会话 2 个、池 3 块、健康没红的、最近拉单；定时任务在「更多」里', async () => {
     renderFrance(envData(), jobsData());
-    for (const label of ['引擎', '在用版本', '健康', '最近拉单']) {
-      expect(await screen.findByText(label)).toBeTruthy();
-    }
-    // 页面上多处提到「定时任务」（顶栏摘要、Panel 标题、页尾说明、链接），断言至少有一个
-    expect((await screen.findAllByText('定时任务')).length).toBeGreaterThanOrEqual(1);
-    expect(tile('引擎').getByText('在跑')).toBeTruthy();
-    expect(tile('在用版本').getAllByText(/abcdef123456/).length).toBeGreaterThanOrEqual(1);
-    expect(tile('在用版本').getAllByText(/落后主线 3 个提交/).length).toBeGreaterThanOrEqual(1);
-    expect(tile('健康').getByText('没红的')).toBeTruthy();
-    // 定时任务列表里那一行
-    expect(await screen.findByText('额度读取')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: '运行概况' })).toBeTruthy();
+    expect((await screen.findAllByText('在跑的会话')).length).toBeGreaterThanOrEqual(1);
+    expect(stat('在跑的会话').getByText('2')).toBeTruthy();
+    expect(stat('健康检查').getByText('9')).toBeTruthy();
+    expect(stat('健康检查').getByText('项通过')).toBeTruthy();
+    expect(within(factValue('引擎进程')).getByText('运行中')).toBeTruthy();
+    expect(factValue('在跑的会话').textContent).toContain('2 个');
+    expect(factValue('池占用').textContent).toContain('3 块');
+    expect(factValue('健康').textContent).toContain('没红的');
+    expect(factValue('最近拉单').textContent).toContain('按期');
+    // 「更多」里的定时任务入口
+    const entry = (await screen.findByRole('link', { name: /定时任务/ })) as HTMLAnchorElement;
+    expect(entry.getAttribute('href')).toBe('/schedules');
+    expect(entry.textContent).toContain('共 1 项');
   });
 
-  test('定时任务是可展开的列表行：默认收起，点一行展开明细，再点收起（#1805）', async () => {
-    renderFrance(envData(), jobsData());
-    const row = (await screen.findByText('额度读取')).closest('li') as HTMLElement;
-    const toggle = within(row).getByRole('button');
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    expect(row.querySelector('dl')).toBeNull();
-    expect(document.querySelector('[data-job-list] table')).toBeNull();
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(row.querySelector('dl')?.textContent).toContain('周期');
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  });
-
-  test('故意造版本一项读不到：那一格写「没查成 + 原因」，别的格照常显示数，不拿 0 冒充', async () => {
+  test('故意造版本一项读不到：版本卡写「没读到 + 原因」，别的项照常显示数，不拿 0 冒充', async () => {
     renderFrance(
       envData({
         version: { ok: false, reason: '假后端没有发布目录，读不到在用版本' },
@@ -157,14 +160,15 @@ describe('法国总览页', () => {
       jobsData(),
     );
     expect(await screen.findByText('假后端没有发布目录，读不到在用版本')).toBeTruthy();
-    // 那一格的「没查成」字样（虚线灰框里）
-    expect(tile('在用版本').getByText('没查成')).toBeTruthy();
-    // 别的格不受影响
-    expect(tile('引擎').getByText('在跑')).toBeTruthy();
-    expect(tile('健康').getByText('没红的')).toBeTruthy();
+    // 版本卡里那一项的「没读到」
+    const version = screen.getByRole('heading', { name: '版本' }).closest('section') as HTMLElement;
+    expect(within(version).getAllByText('没读到').length).toBeGreaterThanOrEqual(1);
+    // 别的项不受影响
+    expect(within(factValue('引擎进程')).getByText('运行中')).toBeTruthy();
+    expect(factValue('健康').textContent).toContain('没红的');
   });
 
-  test('引擎按配置没开用等待色、不是红；真 down 才红', async () => {
+  test('引擎按配置没开用灰点、不是红；真 down 才红', async () => {
     renderFrance(
       envData({
         engine: {
@@ -174,8 +178,10 @@ describe('法国总览页', () => {
       }),
       jobsData(),
     );
-    const off = (await screen.findByText('按配置没开')) as HTMLElement;
-    expect(off.dataset.tone).toBe('stall');
+    const off = (await within(await waitForValue('引擎进程')).findByText('按配置没开')).closest(
+      '[data-level]',
+    ) as HTMLElement;
+    expect(off.dataset.level).toBe('default');
     cleanup();
     renderFrance(
       envData({
@@ -186,11 +192,13 @@ describe('法国总览页', () => {
       }),
       jobsData(),
     );
-    const down = (await screen.findByText('没连上')) as HTMLElement;
-    expect(down.dataset.tone).toBe('fail');
+    const down = (await within(await waitForValue('引擎进程')).findByText('没连上')).closest(
+      '[data-level]',
+    ) as HTMLElement;
+    expect(down.dataset.level).toBe('error');
   });
 
-  test('定时任务里有一个失败的：那一行带 fail 的行 tone，结局红字', async () => {
+  test('定时任务里有一个失败的：「更多」里的入口带红标签「失败 1」，概况提示条也写出来', async () => {
     renderFrance(
       envData(),
       jobsData([
@@ -207,38 +215,120 @@ describe('法国总览页', () => {
         },
       ]),
     );
-    const row = (await screen.findByText('巡检')).closest('li');
-    expect(row?.dataset.outcome).toBe('failed');
+    const entry = await screen.findByRole('link', { name: /定时任务/ });
+    await waitFor(() => expect(within(entry).getByText('失败 1')).toBeTruthy());
+    expect(within(entry).getByText('失败 1').closest('[data-look]')?.getAttribute('data-look')).toBe('error');
+    const verdict = await waitFor(() => {
+      const el = document.querySelector('[data-france-verdict]');
+      if (!el) throw new Error('还没有提示条');
+      return el;
+    });
+    expect(verdict.textContent).toContain('定时任务失败 1 个');
   });
 
-  test('故意造定时任务接口读不到：表里写「没读成 + 原因」，别的格照常显示', async () => {
+  test('定时任务没查全或过期：入口带橙标签，不写失败', async () => {
+    renderFrance(envData(), jobsData([{ status: 'overdue' }]));
+    const entry = await screen.findByRole('link', { name: /定时任务/ });
+    await waitFor(() => expect(within(entry).getByText('没查全或过期 1')).toBeTruthy());
+    expect(within(entry).getByText('没查全或过期 1').closest('[data-look]')?.getAttribute('data-look')).toBe(
+      'warning',
+    );
+    expect(within(entry).queryByText(/失败/)).toBeNull();
+  });
+
+  test('故意造定时任务接口读不到：入口写「没读到 + 原因」，不拿 0 冒充「没有失败」；概况照常显示', async () => {
     renderFrance(envData(), {
       error: new Error('拉 /api/jobs 没成（测试故意造的）'),
     });
-    expect(await screen.findByText(/拉 \/api\/jobs 没成（测试故意造的）/)).toBeTruthy();
-    // 四格照常显示
-    expect(tile('引擎').getByText('在跑')).toBeTruthy();
-    expect(tile('健康').getByText('没红的')).toBeTruthy();
+    const entry = await screen.findByRole('link', { name: /定时任务/ });
+    await waitFor(() => expect(entry.textContent).toContain('没读到：拉 /api/jobs 没成（测试故意造的）'));
+    expect(entry.textContent).not.toContain('失败');
+    expect(within(factValue('引擎进程')).getByText('运行中')).toBeTruthy();
+    expect(factValue('健康').textContent).toContain('没红的');
+  });
+
+  test('一项一项如实读：会话那项没读到写原因、不拿 0 顶；池给数；健康红了就写红', async () => {
+    renderFrance(
+      envData({
+        sessions: { ok: false, reason: '读在跑的会话没成：库连不上（测试故意造的）' },
+        health: { ok: true, value: { ok: false, total: 9, failing: ['temporal', 'engine'], notWired: [] } },
+      }),
+      jobsData(),
+    );
+    expect(await screen.findByText(/读在跑的会话没成：库连不上（测试故意造的）/)).toBeTruthy();
+    expect(stat('在跑的会话').getByText('没读到')).toBeTruthy();
+    expect(within(factValue('在跑的会话')).getByText('没读到')).toBeTruthy();
+    expect(factValue('池占用').textContent).toContain('3 块');
+    expect(stat('健康检查').getByText('2')).toBeTruthy();
+    expect(stat('健康检查').getByText('项红')).toBeTruthy();
+    expect(factValue('健康').textContent).toContain('红：temporal、engine');
   });
 });
 
-describe('法国页：一台不画对照列，两台并排', () => {
-  test('只有一台：六项是卡片，不画对照列；总开关、定时任务、发版都在这一页', async () => {
+/** 描述列表要等数据回来才有：等到有那一项再取。 */
+async function waitForValue(label: string): Promise<HTMLElement> {
+  await screen.findAllByText(label);
+  return factValue(label);
+}
+
+describe('概况提示条（本台现在最该看的一件事）', () => {
+  const verdict = () => document.querySelector('[data-france-verdict]') as HTMLElement | null;
+
+  test('落后主线：橙提示条写落后几个提交', async () => {
+    renderFrance(envData(), jobsData());
+    await waitFor(() => expect(verdict()?.textContent).toMatch(/落后主线 \d+ 个提交/));
+    expect(verdict()?.querySelector('[data-look]')?.getAttribute('data-look')).toBe('warning');
+    // 名字不是标题元素：页标题「法国」只有一个
+    expect(screen.getAllByRole('heading', { name: '法国' })).toHaveLength(1);
+  });
+
+  test('【故意造出的失败】健康两项红：提示条红底，写健康几项红、哪几项，其余几件跟在后面', async () => {
+    renderFrance(
+      envData({
+        health: { ok: true, value: { ok: false, total: 9, failing: ['routes', 'quota'], notWired: [] } },
+        sessions: { ok: false, reason: '库连不上（测试故意造的）' },
+      }),
+      jobsData(),
+    );
+    await waitFor(() => expect(verdict()?.textContent).toContain('健康 2 项红：routes、quota'));
+    expect(verdict()?.querySelector('[data-look]')?.getAttribute('data-look')).toBe('error');
+    expect(verdict()?.textContent).toContain('1 项没读到');
+  });
+
+  test('一切正常（版本一样、健康没红、没有没读到的）：不画提示条', async () => {
+    renderFrance(
+      envData({
+        version: {
+          ok: true,
+          value: { current: 'abcdef1234567890', behind: 0, detail: '在用', problems: [] },
+        },
+      }),
+      jobsData(),
+    );
+    await waitForValue('引擎进程');
+    // 发版卡（mock）也说没落后之前，env 这边的 behind 是 0
+    await waitFor(() => expect(screen.queryByText(/落后主线 3 个提交/)).toBeNull());
+  });
+});
+
+describe('机器表：一台只有本台一行，多台时远程环境各一行', () => {
+  const rows = () => Array.from(document.querySelectorAll('[data-machines] tr[data-row-key]'));
+
+  test('只有一台：表里只有本台一行，没有展开箭头；总开关、版本、更多都在这一页', async () => {
     renderFrance(envData(), jobsData());
     expect(await screen.findByRole('heading', { name: '法国' })).toBeTruthy();
     expect(screen.getByTestId('engine-master')).toBeTruthy();
-    expect(screen.getByRole('heading', { name: /定时任务/ })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: '发版' })).toBeTruthy();
-    // 标题和总开关一渲染就在；六格要等本台数据和环境列表都回来，回来之前不画对照列。
-    await screen.findByText('引擎');
-    expect(document.querySelector('[data-env-columns]')).toBeNull();
-    expect(document.querySelectorAll('[data-env-column]').length).toBe(0);
-    expect(document.querySelectorAll('[data-france-fact]').length).toBe(6);
+    expect(screen.getByRole('heading', { name: '版本' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '更多' })).toBeTruthy();
+    await waitFor(() => expect(rows().map((r) => r.getAttribute('data-row-key'))).toEqual(['local']));
+    const machines = document.querySelector('[data-machines]') as HTMLElement;
+    expect(within(machines).getByText('就是这台，写操作在这里做', { exact: false })).toBeTruthy();
+    expect(machines.querySelector('button[aria-label="展开"]')).toBeNull();
   });
 
-  test('两台时并排：本台和远程各一列，六格都在，不画成单台卡片', async () => {
+  function twoNodes(over: { node?: MockApi['node'] } = {}) {
     const inner = createMockApi({ live: false });
-    const api = {
+    return {
       ...inner,
       env: () => Promise.resolve(envData()),
       nodes: async () => ({
@@ -254,122 +344,56 @@ describe('法国页：一台不画对照列，两台并排', () => {
         ],
       }),
       jobs: () => Promise.resolve(jobsData()),
+      ...over,
     } as MockApi;
-    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
-    await screen.findByRole('heading', { name: /本机 WSL/ });
-    const cols = document.querySelectorAll('[data-env-column]');
-    expect(Array.from(cols).map((c) => c.getAttribute('data-env-column'))).toEqual(['local', 'wsl']);
-    expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
-    expect(document.querySelector('[data-france-fact]')).toBeNull();
-    for (const col of cols) {
-      for (const label of ['引擎', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {
-        expect(within(col as HTMLElement).getByText(label)).toBeTruthy();
-      }
+  }
+
+  test('两台时：本台一行、本机 WSL 一行；点箭头才展开那一台的快照，六项都在', async () => {
+    renderApp(<France />, { api: twoNodes() as unknown as FleetApi, route: '/france' });
+    await waitFor(() => expect(rows().map((r) => r.getAttribute('data-row-key'))).toEqual(['local', 'wsl']));
+    const wsl = rows()[1] as HTMLElement;
+    expect(within(wsl).getByText('在线')).toBeTruthy();
+    expect(within(wsl).getByText('远程')).toBeTruthy();
+    expect(document.querySelector('[data-detail-for]')).toBeNull();
+    fireEvent.click(within(wsl).getByRole('button', { name: '展开' }));
+    const detail = (await waitFor(() => {
+      const el = document.querySelector('[data-detail-for="wsl"]');
+      if (!el) throw new Error('还没展开');
+      return el;
+    })) as HTMLElement;
+    for (const label of ['引擎进程', '在跑的会话', '池占用', '健康', '在用版本', '最近拉单']) {
+      await waitFor(() => expect(within(detail).getByText(label)).toBeTruthy());
     }
+    fireEvent.click(within(wsl).getByRole('button', { name: '收起' }));
+    await waitFor(() => expect(document.querySelector('[data-detail-for]')).toBeNull());
   });
 
-  test('【故意造出的失败】两台并排时远程快照没读成：那一列写原因、不画空格子，本台六格照常', async () => {
-    const inner = createMockApi({ live: false });
-    const api = {
-      ...inner,
-      env: () => Promise.resolve(envData()),
-      nodes: async () => ({
-        ...(await inner.nodes()),
-        nodes: [
-          {
-            id: 'wsl',
-            name: '本机 WSL',
-            freshness: 'fresh' as const,
-            receivedAt: new Date().toISOString(),
-            reportedAt: new Date().toISOString(),
-          },
-        ],
-      }),
+  test('【故意造出的失败】两台时远程快照没读成：展开写原因、不画空格子，本台概况照常', async () => {
+    const api = twoNodes({
       node: async () => {
         throw new Error('快照读不了（测试故意造的）');
       },
-      jobs: () => Promise.resolve(jobsData()),
-    } as MockApi;
+    });
     renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
-    const wsl = (await screen.findByRole('heading', { name: /本机 WSL/ })).closest(
-      '[data-env-column]',
-    ) as HTMLElement;
-    expect(await within(wsl).findByText(/快照读不了（测试故意造的）/)).toBeTruthy();
-    expect(wsl.querySelector('[data-env-fact]')).toBeNull();
-    const local = document.querySelector('[data-env-column="local"]') as HTMLElement;
-    expect(within(local).getByText('在跑')).toBeTruthy();
-    expect(local.querySelectorAll('[data-env-fact]').length).toBe(6);
-  });
-});
-
-describe('失联与在用版本小标题', () => {
-  test('失联环境整块置灰且不显示大号在跑', async () => {
-    const inner = createMockApi({ live: false });
-    const t = Date.now();
-    // 6 小时：失联但没到 24 小时，还在对照列里（超过 24 小时的收成一行，见下面 #1888）
-    const ago = 6 * 60 * 60_000;
-    const snapFacts = envData({
-      engine: { ok: true, value: { state: 'on', detail: '探到了在拉活的工人' } },
-      health: {
-        ok: true,
-        value: { ok: false, total: 9, failing: ['routes', 'deploy_lag'], notWired: [] },
-      },
-    }).facts;
-    const api = {
-      ...inner,
-      env: () => Promise.resolve(envData()),
-      nodes: async () => ({
-        ...(await inner.nodes()),
-        nodes: [
-          {
-            id: 'wsl',
-            name: '本机',
-            freshness: 'stale' as const,
-            receivedAt: new Date(t - ago).toISOString(),
-            reportedAt: new Date(t - ago - 1000).toISOString(),
-          },
-        ],
-      }),
-      node: async () => {
-        const detail = await inner.node('wsl');
-        return {
-          ...detail,
-          id: 'wsl',
-          name: '本机',
-          freshness: 'stale' as const,
-          receivedAt: new Date(t - ago).toISOString(),
-          reportedAt: new Date(t - ago - 1000).toISOString(),
-          env: {
-            ...detail.env,
-            name: { name: '本机' },
-            asOf: new Date(t - ago).toISOString(),
-            facts: snapFacts,
-          },
-        };
-      },
-      jobs: () => Promise.resolve(jobsData()),
-    } as unknown as MockApi;
-    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
-    const col = (await screen.findByRole('heading', { name: /本机/ })).closest(
-      '[data-env-column]',
-    ) as HTMLElement;
-    expect(col.getAttribute('data-env-column-state')).toBe('stale');
-    expect(col.textContent).toContain('失联，以下是旧数据');
-    // 失联列的状态值不带状态色（没有 data-tone），不让旧的「在跑」「N 项红」看起来像现在的状态
-    const running = within(col).getByText('在跑');
-    expect(running.dataset.tone).toBeUndefined();
-    expect(running.className).toContain('text-muted-foreground');
-    const red = within(col).getByText('2 项红');
-    expect(red.dataset.tone).toBeUndefined();
-    expect(red.className).toContain('text-muted-foreground');
+    await waitFor(() => expect(rows()).toHaveLength(2));
+    fireEvent.click(within(rows()[1] as HTMLElement).getByRole('button', { name: '展开' }));
+    expect(await screen.findByText(/快照读不了（测试故意造的）/)).toBeTruthy();
+    expect(document.querySelector('[data-detail-for="wsl"] dl')).toBeNull();
+    expect(within(factValue('引擎进程')).getByText('运行中')).toBeTruthy();
   });
 
-  describe('超过 24 小时没报的远程环境收成一行（#1888）', () => {
-    function renderWithRemote(agoMs: number, route = '/france') {
+  describe('失联与久没报的环境', () => {
+    function remote(agoMs: number, opts: { route?: string } = {}) {
       const inner = createMockApi({ live: false });
       const t = Date.now();
       const at = new Date(t - agoMs).toISOString();
       const state = agoMs > 5 * 60_000 ? ('stale' as const) : ('fresh' as const);
+      const snapFacts = envData({
+        health: {
+          ok: true,
+          value: { ok: false, total: 9, failing: ['routes', 'deploy_lag'], notWired: [] },
+        },
+      }).facts;
       const api = {
         ...inner,
         env: () => Promise.resolve(envData()),
@@ -386,171 +410,74 @@ describe('失联与在用版本小标题', () => {
             freshness: state,
             receivedAt: at,
             reportedAt: at,
-            env: { ...detail.env, name: { name: '本机' }, asOf: at, facts: envData().facts },
+            env: { ...detail.env, name: { name: '本机' }, asOf: at, facts: snapFacts },
           };
         },
         jobs: () => Promise.resolve(jobsData()),
       } as unknown as MockApi;
-      renderApp(<France />, { api: api as unknown as FleetApi, route });
+      renderApp(<France />, { api: api as unknown as FleetApi, route: opts.route ?? '/france' });
     }
-    const col = () => document.querySelector('[data-env-column="wsl"]') as HTMLElement;
+    const row = () => document.querySelector('[data-machines] tr[data-row-key="wsl"]') as HTMLElement;
+    const detail = () => document.querySelector('[data-detail-for="wsl"]') as HTMLElement | null;
 
-    const gone = () => document.querySelector('[data-env-gone="wsl"]') as HTMLElement;
-
-    test('25 小时没报：只有本台一张卡片（不画对照列）加一行说明；点开才出旧快照，标明旧数据，能再收起', async () => {
-      // 旧数据仍占一整列对照，这一条会红。
-      renderWithRemote(25 * 60 * 60_000);
-      await waitFor(() => expect(gone()).toBeTruthy());
-      expect(document.querySelector('[data-env-columns]')).toBeNull();
-      expect(document.querySelectorAll('[data-france-fact]').length).toBe(6);
-      expect(col()).toBeNull();
-      expect(gone().textContent).toContain('本机：1 天 1 小时没报（不跑引擎时正常），点开看最后一次的快照');
-      fireEvent.click(within(gone()).getByRole('button', { name: /点开看快照/ }));
-      await waitFor(() => expect(col().querySelector('[data-env-fact]')).toBeTruthy());
-      expect(col().textContent).toContain('1 天 1 小时前的旧数据');
-      expect(col().textContent).toContain('失联，以下是旧数据');
-      fireEvent.click(within(gone()).getByRole('button', { name: /收起/ }));
-      await waitFor(() => expect(col()).toBeNull());
+    test('失联（6 小时没报）：状态写失联，说明写失联多久；展开的快照整块灰字、不带状态色，并说明是旧数据', async () => {
+      remote(6 * 60 * 60_000);
+      await waitFor(() => expect(row()).toBeTruthy());
+      expect(within(row()).getByText('失联')).toBeTruthy();
+      expect(row().textContent).toContain('失联 6 小时');
+      fireEvent.click(within(row()).getByRole('button', { name: '展开' }));
+      await waitFor(() => expect(detail()?.textContent).toContain('失联，以下是旧数据'));
+      // 旧的「运行中」「2 项红」不带状态色，不让它们看起来像现在的状态
+      await waitFor(() => expect(within(detail() as HTMLElement).getByText('运行中')).toBeTruthy());
+      expect(within(detail() as HTMLElement).getByText('2 项红')).toBeTruthy();
+      expect(detail()?.querySelector('[data-status]')).toBeNull();
     });
 
-    test('选中的远程环境即使 5 天没报也不收起：画成并排列、不画收起的一行；同一台没选中时收成一行', async () => {
-      const ago = 5 * 24 * 60 * 60_000;
-      renderWithRemote(ago, '/france?node=wsl');
-      await waitFor(() => expect(col()).toBeTruthy());
-      expect(document.querySelector('[data-env-gone]')).toBeNull();
-      expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
-      expect(col().getAttribute('data-env-selected')).toBe('true');
-      await waitFor(() => expect(col().querySelector('[data-env-fact]')).toBeTruthy());
-      cleanup();
-      // 对照：同一台没选中
-      renderWithRemote(ago);
-      await waitFor(() => expect(gone()).toBeTruthy());
-      expect(col()).toBeNull();
+    test('25 小时没报：仍在表里一行，说明写「1 天 1 小时前的旧数据」；点开才出旧快照，能再收起', async () => {
+      remote(25 * 60 * 60_000);
+      await waitFor(() => expect(row()).toBeTruthy());
+      expect(within(row()).getByText('失联')).toBeTruthy();
+      expect(row().textContent).toContain('1 天 1 小时前的旧数据');
+      expect(detail()).toBeNull();
+      fireEvent.click(within(row()).getByRole('button', { name: '展开' }));
+      await waitFor(() => expect(detail()?.querySelector('dl')).toBeTruthy());
+      expect(detail()?.textContent).toContain('失联，以下是旧数据');
+      fireEvent.click(within(row()).getByRole('button', { name: '收起' }));
+      await waitFor(() => expect(detail()).toBeNull());
     });
 
-    test('5 天没报同样收成一行；1 小时前报过的照旧并排两列', async () => {
-      renderWithRemote(5 * 24 * 60 * 60_000 + 2 * 60 * 60_000);
-      await waitFor(() => expect(gone()).toBeTruthy());
-      expect(gone().textContent).toContain('本机：5 天 2 小时没报');
-      expect(col()).toBeNull();
-      cleanup();
-      renderWithRemote(60 * 60_000);
-      await screen.findByRole('heading', { name: /本机/ });
-      expect(document.querySelector('[data-env-gone]')).toBeNull();
-      expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
-      expect(
-        Array.from(document.querySelectorAll('[data-env-column]')).map((c) =>
-          c.getAttribute('data-env-column'),
-        ),
-      ).toEqual(['local', 'wsl']);
+    test('选中的远程环境（?node=wsl）默认展开，即使 5 天没报也一样', async () => {
+      remote(5 * 24 * 60 * 60_000, { route: '/france?node=wsl' });
+      await waitFor(() => expect(detail()).toBeTruthy());
+      expect(row().getAttribute('aria-current')).toBe('true');
+      await waitFor(() => expect(detail()?.querySelector('dl')).toBeTruthy());
     });
 
-    test('一台 25 小时没报、一台刚报过：对照里只有本台和刚报的，旧的在下面一行', async () => {
+    test('从没收到过快照的环境：状态写没数据，展开明说从没收到过，不画空格子', async () => {
       const inner = createMockApi({ live: false });
-      const t = Date.now();
-      const at = (ago: number) => new Date(t - ago).toISOString();
       const api = {
         ...inner,
         env: () => Promise.resolve(envData()),
         nodes: async () => ({
           ...(await inner.nodes()),
-          nodes: [
-            {
-              id: 'wsl',
-              name: '本机',
-              freshness: 'stale' as const,
-              receivedAt: at(25 * 3600_000),
-              reportedAt: at(25 * 3600_000),
-            },
-            {
-              id: 'lab',
-              name: '实验机',
-              freshness: 'fresh' as const,
-              receivedAt: at(60_000),
-              reportedAt: at(60_000),
-            },
-          ],
+          nodes: [{ id: 'wsl', name: 'wsl', freshness: 'never' as const }],
         }),
-        node: async (id: string) => {
-          const detail = await inner.node('wsl');
-          return {
-            ...detail,
-            id,
-            name: id === 'lab' ? '实验机' : '本机',
-            env: { ...detail.env, facts: envData().facts },
-          };
-        },
         jobs: () => Promise.resolve(jobsData()),
       } as unknown as MockApi;
       renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
-      await screen.findByRole('heading', { name: /实验机/ });
-      expect(
-        Array.from(document.querySelectorAll('[data-env-column]')).map((c) =>
-          c.getAttribute('data-env-column'),
-        ),
-      ).toEqual(['local', 'lab']);
-      expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
-      expect(gone().textContent).toContain('本机');
+      await waitFor(() => expect(row()).toBeTruthy());
+      expect(within(row()).getByText('没数据')).toBeTruthy();
+      fireEvent.click(within(row()).getByRole('button', { name: '展开' }));
+      await waitFor(() =>
+        expect(detail()?.querySelector('[data-env-never]')?.textContent).toContain('从没收到过'),
+      );
+      expect(detail()?.querySelector('dl')).toBeNull();
     });
-  });
-
-  test('在用版本小标题为落后主线几个提交', async () => {
-    renderFrance(envData(), jobsData());
-    await screen.findByText('在用版本');
-    expect(tile('在用版本').getByText(/落后主线几个提交/)).toBeTruthy();
-    expect(tile('在用版本').queryByText(/落后主线没有/)).toBeNull();
-  });
-});
-
-describe('本台标题块和一项一行（#1914 样板铺开）', () => {
-  const hero = () => document.querySelector('[data-france-hero]') as HTMLElement;
-
-  test('标题块三行：名字、结论带状态、灰字（读于何时）；落后主线时结论写落后几个、等待色', async () => {
-    renderFrance(envData(), jobsData());
-    await waitFor(() => expect(hero()).toBeTruthy());
-    expect(hero().querySelector('[data-machine-name]')?.textContent).toBe('法国');
-    // 发版卡的「差几个」读成了用它，没读成用本台版本那一项的 behind：都是「落后主线 N 个提交」
-    await waitFor(() =>
-      expect(hero().querySelector('[data-hero-text]')?.textContent).toMatch(/^落后主线 \d+ 个提交$/),
-    );
-    expect(hero().querySelector('[data-hero-line] [data-tone]')?.getAttribute('data-tone')).toBe('wait');
-    expect(hero().querySelector('[data-hero-notes]')?.textContent).toContain('读');
-    // 名字不是标题元素：页标题「法国」只有一个
-    expect(screen.getAllByRole('heading', { name: '法国' })).toHaveLength(1);
-  });
-
-  test('【故意造出的失败】健康两项红：结论先写健康几项红、红色「要处理」，其余几件进灰字行', async () => {
-    renderFrance(
-      envData({
-        health: { ok: true, value: { ok: false, total: 9, failing: ['routes', 'quota'], notWired: [] } },
-        sessions: { ok: false, reason: '库连不上（测试故意造的）' },
-      }),
-      jobsData(),
-    );
-    await waitFor(() => expect(hero()?.querySelector('[data-hero-text]')?.textContent).toBe('健康 2 项红'));
-    const badge = hero().querySelector('[data-hero-line] [data-tone]') as HTMLElement;
-    expect(badge.getAttribute('data-tone')).toBe('fail');
-    expect(badge.textContent).toBe('要处理');
-    expect(hero().querySelector('[data-hero-notes]')?.textContent).toContain('1 项没查成');
-  });
-
-  test('一项一行：小标题在名字的悬停和读屏里；状态是点加字；最近拉单的完整时刻在值的悬停里', async () => {
-    renderFrance(envData(), jobsData());
-    await screen.findByText('在用版本');
-    const label = screen.getByText('在用版本');
-    expect(label.getAttribute('title')).toBe('落后主线几个提交');
-    const engine = tile('引擎').getByText('在跑');
-    expect(engine.getAttribute('data-variant')).toBe('dot');
-    const value = screen
-      .getByText('最近拉单')
-      .closest('[data-france-fact]')
-      ?.querySelector('[data-fact-value]');
-    expect(value?.getAttribute('title')).toMatch(/^最近一次跑成：/);
   });
 });
 
 describe('总开关和引擎进程是两件事', () => {
-  test('总开关关、引擎在跑：开关和「在跑」那一格旁边都写明不派活、进程还在；健康条的名字含「引擎进程」', async () => {
+  test('总开关关、引擎在跑：引擎卡里写明不派活、进程还在；概况里「引擎进程」仍写运行中', async () => {
     const inner = apiWith(
       envData({
         engine: { ok: true, value: { state: 'on', detail: '探到了在拉活的工人' } },
@@ -579,19 +506,7 @@ describe('总开关和引擎进程是两件事', () => {
     const sentence = /总开关关着只是不派活，引擎进程还在跑/;
     const card = await screen.findByTestId('engine-master');
     expect(await within(card).findByText(sentence)).toBeTruthy();
-    await screen.findByText('在跑');
-    expect(tile('引擎').getByText(sentence)).toBeTruthy();
-
-    cleanup();
-    renderApp(
-      <HealthStrip
-        health={{
-          quota: { state: 'ok', detail: '够用' },
-          routes: { state: 'ok', detail: '都通' },
-          engine: { state: 'on' },
-        }}
-      />,
-    );
-    expect(screen.getByRole('status', { name: '持续状态' }).textContent).toContain('引擎进程');
+    expect(within(await waitForValue('引擎进程')).getByText('运行中')).toBeTruthy();
+    expect(screen.getAllByText(sentence)).toHaveLength(1);
   });
 });

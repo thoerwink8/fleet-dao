@@ -217,25 +217,14 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   // 登录页（01）。password-field 登录页和设置页「账密登录」共用
   { files: [`${W}routes/login.tsx`], specs: [spec('01-login')] },
   { files: [`${W}components/password-field.tsx`], specs: [spec('01-login'), spec('10-credentials')] },
-  // 主页三块（02b）、画布（02，原来的主页，决定 0093 挪到 /board）；
-  // 02c 量首页窄屏页头（#2969）不重叠；07c 在主页、画布上切环境，08 从别页点回主页
+  // 主页三块（02b）、画布（/board）已删，02-home 随之删（#3533）；
+  // 02c 量首页窄屏页头（#2969）不重叠；07c 在主页上切环境，08 从别页点回主页
   {
-    files: [
-      `${W}routes/home.tsx`,
-      `${W}routes/board.tsx`,
-      `${W}components/home/`,
-      `${W}components/not-built.tsx`,
-    ],
-    specs: [
-      spec('02-home'),
-      spec('02b-home-today'),
-      spec('02c-home-narrow'),
-      spec('07c-nodes'),
-      spec('08-backend-down'),
-    ],
+    files: [`${W}routes/home.tsx`, `${W}components/home/`, `${W}components/not-built.tsx`],
+    specs: [spec('02b-home-today'), spec('02c-home-narrow'), spec('07c-nodes'), spec('08-backend-down')],
   },
   // 主页和单子详情共用
-  { files: [`${W}lib/segments.ts`], specs: [spec('02-home'), spec('03-task')] },
+  { files: [`${W}lib/segments.ts`], specs: [spec('03-task')] },
   // 单子详情（03）
   {
     files: [
@@ -281,7 +270,7 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   },
   // 法国页（环境页并进来，#1217；07b、07c 看六项事实和并排看多机）
   {
-    files: [`${W}routes/france.tsx`, `${W}components/engine-master-card.tsx`],
+    files: [`${W}routes/france.tsx`, `${W}components/engine-card.tsx`],
     specs: [spec('07b-env'), spec('07c-nodes')],
   },
   // 其余页（07）：路由、思考档位、定时任务、操作记录、更新日志、找不到的页面；11 量手机宽不横滚
@@ -311,8 +300,6 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   },
   // 提需求页（12，#2062）：列表三处、对话、拍板卡、删除恢复、接着这条提
   { files: [`${W}routes/intake.tsx`, `${W}components/intake/`], specs: [spec('12-intake')] },
-  // 占位页：没有任何 spec 点它们（specs 里没有 goto），改它们不跑 e2e，靠每夜全量里别页的回归兜底
-  { files: [`${W}routes/soon.tsx`], specs: [] },
 ];
 
 /** 夹具、配置、备库：e2e 自己的地基，改了就是全套。 */

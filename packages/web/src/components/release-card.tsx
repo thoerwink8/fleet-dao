@@ -1,232 +1,57 @@
-// /france 页的「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个（最近合进去的 PR）、最近做完的一个任务。
-// 只读展示：每一行各自带「查成了 / 没查成 + 原因」，没查成的行写明原因，不拿空、0 或「已是最新」顶。
-// 发布入口（#1255）：「发布到法国」按钮和弹窗放在「在用版本」那一行（ReleaseEntry，env-facts 的 versionExtra 挂上去），发版卡本身只读。
-// 四行事实用 KeyValue（片 7，#1853）；提交号用 Tag，CI 状态用 StatusBadge。
+// 法国页的「版本」卡（#1231 发版卡、#1232/#1255 发布入口、#2026 一条龙、#2027 恢复按钮；#3509 起照 Arco 样稿 canvas/France.dc.html 并成一张）：
+// 卡头两个按钮——「发版预检」（只读，点了在卡里摆结果）和「发布到法国」（一页唯一的主按钮，不能发就置灰、原因写在旁边）；
+// 正文是一张描述列表：主线最新（提交号、CI）、法国在用、和主线差几个（PR 点开看）、最近做完的任务、release-train 此刻的状态、发后体检。
+// 发版在走、卡住、没成时下面画九步时间线，卡住、没成后出重试 / 恢复引擎开关 / 撤掉暂停三个按钮（每个点了先弹确认框写明后果）。
+// 每一项都带「查成了 / 没查成 + 原因」，没查成的写「没读到」和原因，不拿空、0 或「已是最新」顶。发版单位是主线提交（决定 0032）。
+// 页面只拼 components/layout 的件，不写样式类（lint-design R13–R20）。
 
 import type { ReleaseRecoverKind } from '@fleet-dao/shared';
-import { type ReactNode, useEffect, useState } from 'react';
+import type { UseQueryResult } from '@tanstack/react-query';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { SESSION_WAIT_MS } from '../../../../deploy/france/release-request/session-wait.mjs';
 import { errorText, useFrancePreflight, useFranceRelease, useFranceReleaseRecover } from '../api/client';
-import type { ReleaseCard } from '../api/types';
+import type { EnvFacts, FrancePreflightResponse, FranceReleaseState, ReleaseCard } from '../api/types';
 import { formatAgo } from '../lib/format';
 import { checkLine, lastLine, preflightItems, stepRows, timelineHead } from '../lib/release-timeline';
-import { cn } from '../lib/utils';
-import { KeyValue } from './layout/key-value';
+import type { Level, StatusKey } from '../theme/status-dict';
+import { UnreadValue, versionStatus } from './env-facts';
+import { Button } from './layout/button';
+import { Collapse } from './layout/collapse';
+import { ConfirmDialog } from './layout/confirm-dialog';
+import { Descriptions, type DescriptionsItem } from './layout/descriptions';
+import { LoadError, LoadingRows } from './layout/load-state';
+import { Notice } from './layout/notice';
+import { Section } from './layout/section';
+import { Stack } from './layout/stack';
 import { StatusBadge } from './layout/status-badge';
 import { Tag } from './layout/tag';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from './ui/alert-dialog';
-import { Button } from './ui/button';
-
-/** 一行没查成：黄字写原因。 */
-function Unread({ why }: { why: string }) {
-  return (
-    <p className="text-meta text-ink-stall" data-unreadable>
-      没查成：{why}
-    </p>
-  );
-}
+import { Text, type TextTone } from './layout/text';
+import { Timeline } from './layout/timeline';
 
 function Sha({ short }: { short: string }) {
-  return (
-    <Tag mono className="num">
-      {short}
-    </Tag>
-  );
+  return <Tag mono>{short}</Tag>;
 }
 
 type Ci = Extract<ReleaseCard['mainline'], { state: 'ok' }>['ci'];
 
 function CiBadge({ ci }: { ci: Ci }) {
-  const map = {
-    green: { text: 'CI 绿', tone: 'done' },
-    red: { text: 'CI 红', tone: 'fail' },
-    pending: { text: 'CI 在跑', tone: 'stall' },
-    unreadable: { text: 'CI 没查成', tone: 'stall' },
-  } as const;
-  const m = map[ci.state];
   return (
-    <span data-ci={ci.state} className="shrink-0">
-      <StatusBadge tone={m.tone} label={m.text} variant="outline" icon={false} />
+    <span data-ci={ci.state}>
+      <StatusBadge status={`release:ci:${ci.state}` satisfies StatusKey} />
     </span>
-  );
-}
-
-/** 「发版」卡的四行事实（只读）。发布入口不在这里，在「在用版本」那一行（ReleaseEntry，#1255）。 */
-export function ReleaseCardBody({ card, now }: { card: ReleaseCard; now: number }) {
-  return <ReleaseRows card={card} now={now} />;
-}
-
-/**
- * 「在用版本」那一行里的发布入口（#1255，决定 0032：发版单位是主线提交）：写明落后主线几个提交、要发的主线头提交号和标题，
- * 下面是「发布到法国」按钮和它的弹窗（ReleaseAction）。读不到的那一项写没查成和原因，不拿「已是最新」顶。
- */
-export function ReleaseEntry({ card, now }: { card: ReleaseCard; now: number }) {
-  const { gap, mainline } = card;
-  return (
-    // 挂在「在用版本」那一行的灰字下面、和名字对齐（#1914 样板铺开）：一行差几个，一行要发的主线头，再下面按钮
-    <div className="space-y-1.5" data-release-entry>
-      {gap.state === 'ahead' ? (
-        <p className="text-meta font-medium text-ink-stall" data-entry-gap="ahead">
-          落后主线 {gap.count} 个提交
-        </p>
-      ) : gap.state === 'same' ? (
-        <p className="text-meta font-medium text-ink-done" data-entry-gap="same">
-          已是主线最新
-        </p>
-      ) : (
-        <Unread why={gap.why} />
-      )}
-      {mainline.state === 'ok' ? (
-        <p
-          className="flex min-w-0 items-center gap-1.5 text-meta whitespace-nowrap"
-          data-entry-head
-          title={`要发的主线头 ${mainline.commit.short} ${mainline.commit.title}`}
-        >
-          <span className="shrink-0 text-muted-foreground">要发的主线头</span>
-          <Sha short={mainline.commit.short} />
-          <span className="min-w-0 truncate">{mainline.commit.title}</span>
-        </p>
-      ) : (
-        <Unread why={mainline.why} />
-      )}
-      <ReleaseAction card={card} now={now} />
-    </div>
-  );
-}
-
-function ReleaseRows({ card, now }: { card: ReleaseCard; now: number }) {
-  const { mainline, deployed, gap, lastDone } = card;
-  return (
-    <KeyValue
-      items={[
-        {
-          label: '主线最新',
-          value:
-            mainline.state === 'unreadable' ? (
-              <Unread why={mainline.why} />
-            ) : (
-              <>
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <Sha short={mainline.commit.short} />
-                  <CiBadge ci={mainline.ci} />
-                </div>
-                <p className="mt-1 break-words">{mainline.commit.title}</p>
-                <p className="num text-meta text-muted-foreground">
-                  {formatAgo(mainline.commit.at, now)}提交
-                </p>
-                {mainline.ci.state === 'red' || mainline.ci.state === 'pending' ? (
-                  <p className="text-meta text-ink-stall">{mainline.ci.detail}</p>
-                ) : null}
-                {mainline.ci.state === 'unreadable' ? <Unread why={mainline.ci.why} /> : null}
-              </>
-            ),
-        },
-        {
-          label: '法国在用',
-          value:
-            deployed.state === 'unreadable' ? (
-              <Unread why={deployed.why} />
-            ) : (
-              <>
-                <Sha short={deployed.short} />
-                {deployed.title !== null ? (
-                  <p className="mt-1 break-words">{deployed.title}</p>
-                ) : (
-                  <Unread why={deployed.titleWhy ?? '标题没读到'} />
-                )}
-                {deployed.deployedAt !== null ? (
-                  <p className="num text-meta text-muted-foreground">
-                    发于 {formatAgo(deployed.deployedAt, now)}
-                  </p>
-                ) : (
-                  <Unread why={deployed.deployedAtWhy ?? '发于何时没读到'} />
-                )}
-              </>
-            ),
-        },
-        {
-          label: '差几个',
-          value:
-            gap.state === 'unreadable' ? (
-              <Unread why={gap.why} />
-            ) : gap.state === 'same' ? (
-              <p className="font-medium text-ink-done" data-gap="same">
-                法国已经是最新
-              </p>
-            ) : (
-              <div data-gap="ahead">
-                <p className="font-medium text-ink-stall">法国落后 {gap.count} 个提交</p>
-                <ul className="mt-1 space-y-0.5 text-meta">
-                  {gap.prs.map((p) => (
-                    <li key={p.number} className="break-words">
-                      <span className="num text-muted-foreground">#{p.number}</span> {p.title}
-                    </li>
-                  ))}
-                </ul>
-                {gap.nonPr > 0 ? (
-                  <p className="mt-1 text-meta text-muted-foreground">
-                    另有 {gap.nonPr} 个提交不是 PR 合并的
-                  </p>
-                ) : null}
-              </div>
-            ),
-        },
-        {
-          label: '最近做完',
-          value:
-            lastDone.state === 'unreadable' ? (
-              <Unread why={lastDone.why} />
-            ) : (
-              <>
-                <p className="break-words">
-                  <span className="num text-muted-foreground">PR #{lastDone.pr.number}</span>{' '}
-                  {lastDone.pr.title}
-                </p>
-                <p className="num text-meta text-muted-foreground">
-                  {formatAgo(lastDone.pr.mergedAt, now)}合并
-                </p>
-                {lastDone.issue.state === 'ok' ? (
-                  <p className="mt-1 break-words text-meta">
-                    关了 <span className="num text-muted-foreground">#{lastDone.issue.number}</span>{' '}
-                    {lastDone.issue.title}
-                    {lastDone.issue.alsoCloses.length > 0
-                      ? `（还关了 ${lastDone.issue.alsoCloses.map((n) => `#${n}`).join('、')}）`
-                      : ''}
-                  </p>
-                ) : lastDone.issue.state === 'none' ? (
-                  <p className="mt-1 text-meta text-muted-foreground">这个 PR 没写关哪张单</p>
-                ) : (
-                  <p className="mt-1 text-meta text-ink-stall">
-                    关的单 #{lastDone.issue.number} 没查成：{lastDone.issue.why}
-                  </p>
-                )}
-              </>
-            ),
-        },
-      ]}
-    />
   );
 }
 
 type Last = ReleaseCard['action']['last'];
 
-const STEP_TONE = {
-  done: { tone: 'done', label: '走过' },
-  current: { tone: 'run', label: '在走' },
-  blocked: { tone: 'stall', label: '卡住' },
-  failed: { tone: 'fail', label: '没成' },
-  todo: { tone: 'stop', label: '没到' },
-} as const;
+const STEP_STATUS: Record<'done' | 'current' | 'blocked' | 'failed' | 'todo', Level> = {
+  done: 'success',
+  current: 'processing',
+  blocked: 'warning',
+  failed: 'error',
+  todo: 'default',
+};
 
 /** 九步时间线（#2026）：第几步、在等什么、已用多久；数据来自法国的 release-train.json。 */
 function ReleaseTimeline({ last, now }: { last: Last; now: number }) {
@@ -234,57 +59,58 @@ function ReleaseTimeline({ last, now }: { last: Last; now: number }) {
   if (!timeline) return null;
   const rows = stepRows(timeline, last.state, last.why, now);
   return (
-    <div className="space-y-1.5" data-release-timeline={last.state}>
-      <p className="num text-meta font-medium" data-timeline-head>
-        {timelineHead(timeline, last.state, now)}
-      </p>
-      <ol className="space-y-1 text-meta">
-        {rows.map((r) => (
-          <li
-            key={r.index}
-            data-step={r.index}
-            data-step-state={r.state}
-            className={cn('flex min-w-0 items-start gap-2', r.state === 'todo' && 'text-muted-foreground')}
-          >
-            <span className="w-14 shrink-0">
-              <StatusBadge tone={STEP_TONE[r.state].tone} label={STEP_TONE[r.state].label} variant="dot" />
-            </span>
-            <span className="num w-6 shrink-0 text-muted-foreground">{r.index}</span>
-            <span className="w-16 shrink-0 font-medium">{r.name}</span>
-            <span className="min-w-0 break-words">{r.text}</span>
-          </li>
-        ))}
-      </ol>
+    <div data-release-timeline={last.state}>
+      <Stack gap="md">
+        <span data-timeline-head>
+          <Text strong>{timelineHead(timeline, last.state, now)}</Text>
+        </span>
+        <Timeline
+          items={rows.map((r) => ({
+            title: `${r.index + 1}　${r.name}`,
+            description: r.text,
+            status: STEP_STATUS[r.state],
+          }))}
+        />
+      </Stack>
     </div>
   );
 }
 
-/** 发后体检（#2026）：「通过」或「没通过：哪几项」，下面每项一行。 */
+/** 发后体检（#2026）：「通过」或「没通过：哪几项」，每项一行（点开看）。 */
 function ReleaseCheck({ check }: { check: NonNullable<Last['check']> }) {
   const line = checkLine(check);
   return (
-    <div className="space-y-1" data-release-check={line.ok ? 'ok' : 'bad'}>
-      <p className={cn('text-meta font-medium', line.ok ? 'text-ink-done' : 'text-ink-fail')}>{line.text}</p>
-      <ul className="space-y-0.5 text-meta">
-        {check.items.map((x) => (
-          <li key={x.name} className="flex min-w-0 items-start gap-2" data-check-item={x.ok ? 'ok' : 'bad'}>
-            <span className="shrink-0">
-              <StatusBadge tone={x.ok ? 'done' : 'fail'} label={x.ok ? '通过' : '没过'} variant="dot" />
-            </span>
-            <span className="shrink-0 font-medium">{x.name}</span>
-            <span className="min-w-0 break-words text-muted-foreground">{x.text}</span>
-          </li>
-        ))}
-      </ul>
+    <div data-release-check={line.ok ? 'ok' : 'bad'}>
+      <Stack gap="sm">
+        <Stack direction="horizontal" gap="sm" align="center" wrap>
+          <StatusBadge status={line.ok ? 'release:check:pass' : 'release:check:fail'} />
+          <Text tone={line.ok ? 'secondary' : 'danger'}>{line.text}</Text>
+        </Stack>
+        <Collapse title={`${line.ok ? '展开' : '看'} ${check.items.length} 项`} defaultOpen={!line.ok}>
+          <Stack gap="sm">
+            {check.items.map((x) => (
+              <div key={x.name} data-check-item={x.ok ? 'ok' : 'bad'}>
+                <Stack direction="horizontal" gap="sm" align="baseline" wrap>
+                  <StatusBadge status={x.ok ? 'release:check:pass' : 'release:check:fail'} variant="dot" />
+                  <Text strong>{x.name}</Text>
+                  <Text size="meta" tone="muted">
+                    {x.text}
+                  </Text>
+                </Stack>
+              </div>
+            ))}
+          </Stack>
+        </Collapse>
+      </Stack>
     </div>
   );
 }
 
-const PREFLIGHT_TONE = {
-  ok: { tone: 'done', label: '通过' },
-  block: { tone: 'fail', label: '卡住' },
-  info: { tone: 'wait', label: '留意' },
-} as const;
+const PREFLIGHT_STATUS = {
+  ok: 'release:check:pass',
+  block: 'release:step:blocked',
+  info: 'release:preflight:info',
+} as const satisfies Record<'ok' | 'block' | 'info', StatusKey>;
 
 /** 确认框里的预检清单（#2026）：打开框时现读一遍；有卡住项、没读到、没跑成，确认键灰着并写哪项。 */
 function preflightView(preflight: ReturnType<typeof useFrancePreflight>): {
@@ -294,18 +120,36 @@ function preflightView(preflight: ReturnType<typeof useFrancePreflight>): {
   const result = preflight.data;
   if (preflight.isPending || (!result && !preflight.isError)) {
     return {
-      node: <p className="text-meta text-muted-foreground">预检在跑（只读，不暂停、不发版）…</p>,
+      node: (
+        <Text size="meta" tone="muted">
+          预检在跑（只读，不暂停、不发版）…
+        </Text>
+      ),
       blockedWhy: '预检还没跑完',
     };
   }
   if (preflight.isError) {
     const why = `预检没跑成：${errorText(preflight.error)}`;
-    return { node: <p className="text-meta text-ink-fail">{why}</p>, blockedWhy: why };
+    return {
+      node: (
+        <Text size="meta" tone="danger">
+          {why}
+        </Text>
+      ),
+      blockedWhy: why,
+    };
   }
   if (!result) return { node: null, blockedWhy: '预检还没跑完' };
   if (result.state === 'unreadable') {
     const why = `预检没查成：${result.why}`;
-    return { node: <p className="text-meta text-ink-stall">{why}</p>, blockedWhy: why };
+    return {
+      node: (
+        <Text size="meta" tone="warning">
+          {why}
+        </Text>
+      ),
+      blockedWhy: why,
+    };
   }
   const items = preflightItems(result.stdout);
   const blocks = items.filter((i) => i.kind === 'block');
@@ -317,20 +161,18 @@ function preflightView(preflight: ReturnType<typeof useFrancePreflight>): {
         : null;
   return {
     node: (
-      <ul className="space-y-1 text-meta" data-preflight-list>
-        {items.map((i) => (
-          <li key={i.text} className="flex min-w-0 items-start gap-2" data-preflight-item={i.kind}>
-            <span className="shrink-0">
-              <StatusBadge
-                tone={PREFLIGHT_TONE[i.kind].tone}
-                label={PREFLIGHT_TONE[i.kind].label}
-                variant="dot"
-              />
-            </span>
-            <span className="min-w-0 break-words">{i.text}</span>
-          </li>
-        ))}
-      </ul>
+      <div data-preflight-list>
+        <Stack gap="sm">
+          {items.map((i) => (
+            <div key={i.text} data-preflight-item={i.kind}>
+              <Stack direction="horizontal" gap="sm" align="baseline">
+                <StatusBadge status={PREFLIGHT_STATUS[i.kind]} variant="dot" />
+                <Text size="meta">{i.text}</Text>
+              </Stack>
+            </div>
+          ))}
+        </Stack>
+      </div>
     ),
     blockedWhy,
   };
@@ -340,13 +182,12 @@ type Recover = NonNullable<ReleaseCard['action']['recover']>;
 
 const RECOVER_COPY: Record<
   ReleaseRecoverKind,
-  { label: string; title: string; confirm: string; busy: string; done: string; fail: string }
+  { label: string; title: string; confirm: string; done: string; fail: string }
 > = {
   retry: {
     label: '重试',
     title: '重试：从卡住的这一步接着走？',
     confirm: '确认重试',
-    busy: '正在提交重试请求',
     done: '已提交重试请求',
     fail: '没能提交重试请求',
   },
@@ -354,7 +195,6 @@ const RECOVER_COPY: Record<
     label: '恢复引擎开关',
     title: '恢复引擎开关？',
     confirm: '确认恢复',
-    busy: '正在提交恢复请求',
     done: '已提交恢复引擎开关请求',
     fail: '没能提交恢复引擎开关请求',
   },
@@ -362,7 +202,6 @@ const RECOVER_COPY: Record<
     label: '撤掉暂停',
     title: '撤掉暂停？',
     confirm: '确认撤掉',
-    busy: '正在提交撤掉暂停请求',
     done: '已提交撤掉暂停请求',
     fail: '没能提交撤掉暂停请求',
   },
@@ -395,68 +234,67 @@ function ReleaseRecoverButtons({ recover }: { recover: Recover }) {
     const c = RECOVER_COPY[asking];
     try {
       await mut.mutateAsync(asking);
-      toast.success(c.done, { description: '法国接活后，发版卡显示进度；操作记录里有这一条。' });
+      toast.success(c.done, { description: '法国接活后，版本卡显示进度；操作记录里有这一条。' });
     } catch (e) {
       toast.error(c.fail, { description: errorText(e) });
       throw e;
     }
   };
   return (
-    <div className="space-y-1.5" data-release-recover>
-      <div className="flex flex-wrap gap-2">
-        {kinds.map((k) => (
-          <Button
-            key={k}
-            type="button"
-            size="sm"
-            variant={k === 'abort' ? 'outline' : 'default'}
-            loading={mut.isPending && mut.variables === k}
-            loadingLabel={RECOVER_COPY[k].busy}
-            onClick={() => setAsking(k)}
-            data-recover={k}
-          >
-            {RECOVER_COPY[k].label}
-          </Button>
-        ))}
-      </div>
-      <AlertDialog open={asking !== null} onOpenChange={(o) => (o ? undefined : setAsking(null))}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{copy?.title}</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2 text-body">
-                <p data-recover-body>{asking === null ? '' : recoverBody(asking, recover)}</p>
-                <p className="text-meta text-muted-foreground">
-                  点了会记一条操作记录（谁、什么时候点的），法国接活后这里显示进度。
-                </p>
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction onConfirm={confirm} {...(copy ? { loadingLabel: copy.busy } : {})}>
-              {copy?.confirm}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+    <div data-release-recover>
+      <Stack gap="sm">
+        <Stack direction="horizontal" gap="sm" wrap>
+          {kinds.map((k) => (
+            <Button
+              key={k}
+              size="sm"
+              variant="outline"
+              loading={mut.isPending && mut.variables === k}
+              onClick={() => setAsking(k)}
+            >
+              {RECOVER_COPY[k].label}
+            </Button>
+          ))}
+        </Stack>
+        <Text size="meta" tone="muted">
+          每个按钮点了先确认，后果写在确认框里，确认后记一条操作记录。
+        </Text>
+      </Stack>
+      <ConfirmDialog
+        open={asking !== null}
+        onOpenChange={(o) => (o ? undefined : setAsking(null))}
+        title={copy?.title}
+        description={<span data-recover-body>{asking === null ? '' : recoverBody(asking, recover)}</span>}
+        confirmText={copy?.confirm}
+        onConfirm={confirm}
+      >
+        <Text size="meta" tone="muted" block>
+          点了会记一条操作记录（谁、什么时候点的），法国接活后这里显示进度。
+        </Text>
+      </ConfirmDialog>
     </div>
   );
 }
 
+const LAST_TONE: Record<'ok' | 'warn' | 'fail' | 'plain', TextTone> = {
+  ok: 'secondary',
+  warn: 'warning',
+  fail: 'danger',
+  plain: 'muted',
+};
+
 /**
  * 「发布到法国」按钮（#1232）：点开弹窗先现跑一遍预检、清单摆在框里（#2026），写明要发的提交、会带上哪几个 PR、发完引擎总开关恢复到发版前；
  * 预检有卡住项时「确认发布」灰着并写哪项。点「确认发布」才发：后端核它等于此刻主线头、记操作记录、写请求文件，法国上 root 的单元接活。
- * 不能点（CI 不绿、已有发版在走、没装接活单元……）就置灰并写原因。发版在走、卡住、没成时下面画九步时间线；做完了写发后体检结论。
+ * 不能点（CI 不绿、已有发版在走、没装接活单元……）就置灰并写原因。
  */
-function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
+function PublishButton({ card }: { card: ReleaseCard }) {
   const release = useFranceRelease();
   const preflight = useFrancePreflight();
   const [asking, setAsking] = useState(false);
   const { action, mainline, gap } = card;
   const head = mainline.state === 'ok' ? mainline.commit : null;
   const ready = action.state === 'ready' && head !== null;
-  const last = lastLine(action.last, now);
   const pf = preflightView(preflight);
   const { mutate: runPreflight } = preflight;
   // 框一打开就现跑一遍预检（只读）：确认之前该看的都摆在框里
@@ -469,121 +307,455 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
     try {
       await release.mutateAsync(head.sha);
       toast.success(`已提交发布请求：${head.short}`, {
-        description: '法国接活后，这一行显示九步进度；发完引擎总开关恢复到发版前，再做发后体检。',
+        description: '法国接活后，版本卡显示九步进度；发完引擎总开关恢复到发版前，再做发后体检。',
       });
     } catch (e) {
       toast.error('没能提交发布请求', { description: errorText(e) });
       throw e;
     }
   };
+  const why =
+    action.state === 'blocked' && action.reasons.length > 0
+      ? action.reasons.join('；')
+      : head === null
+        ? '主线头没读到，不知道要发哪一个提交'
+        : '现在不能发';
   return (
-    <div className="space-y-2" data-release-action={action.state}>
+    <>
       <Button
-        type="button"
         size="sm"
-        disabled={!ready || release.isPending}
-        onClick={() => setAsking(true)}
+        variant="primary"
         aria-label="发布到法国"
+        {...(ready ? {} : { disabledReason: why })}
+        loading={release.isPending}
+        onClick={() => setAsking(true)}
       >
         {release.isPending ? '正在提交…' : '发布到法国'}
       </Button>
-      {action.state === 'blocked' ? (
-        <ul className="space-y-0.5 text-meta text-ink-stall" data-release-reasons>
-          {action.reasons.map((r) => (
-            <li key={r}>{r}</li>
-          ))}
-        </ul>
-      ) : null}
-      {last ? (
-        <p
-          data-release-last={action.last.state}
-          className={cn(
-            'text-meta',
-            last.tone === 'ok' && 'text-ink-done',
-            last.tone === 'warn' && 'text-ink-stall',
-            last.tone === 'fail' && 'text-ink-fail',
-            last.tone === 'plain' && 'text-muted-foreground',
+      <ConfirmDialog
+        open={asking && head !== null}
+        onOpenChange={setAsking}
+        title="发布到法国？"
+        description={
+          <>
+            要发的提交：<Tag mono>{head?.short}</Tag> {head?.title}
+          </>
+        }
+        confirmText="确认发布"
+        {...(pf.blockedWhy !== null ? { confirmDisabled: true } : {})}
+        onConfirm={confirm}
+      >
+        <div data-release-preflight>
+          <Stack gap="md">
+            <Stack direction="horizontal" gap="sm" align="center" justify="between">
+              <Text strong>预检（打开这个框时现读的）</Text>
+              <Button
+                size="xs"
+                variant="text"
+                loading={preflight.isPending}
+                onClick={() => preflight.mutate()}
+              >
+                重新预检
+              </Button>
+            </Stack>
+            {pf.node}
+            {pf.blockedWhy !== null && !preflight.isPending ? (
+              <span data-preflight-blocked>
+                <Text size="meta" tone="warning">
+                  {pf.blockedWhy}
+                </Text>
+              </span>
+            ) : null}
+            {gap.state === 'ahead' ? (
+              <Stack gap="sm">
+                <Text>会带上 {gap.count} 个提交，最近合进去的 PR：</Text>
+                {gap.prs.map((p) => (
+                  <Text key={p.number} size="meta">
+                    <Text size="meta" tone="muted">
+                      #{p.number}
+                    </Text>{' '}
+                    {p.title}
+                  </Text>
+                ))}
+              </Stack>
+            ) : null}
+            <Text size="meta" tone="muted" block>
+              点「确认发布」就是同意对外发布，并记一条操作记录。之后全自动：法国先暂停引擎总开关、等在跑的会话收尾（最多{' '}
+              {SESSION_WAIT_MS / 60_000}{' '}
+              分钟），再发版；发完把引擎总开关恢复到发版前（发前开着的开回，发前关着的保持关），各仓「让 AI
+              接活」开关发版不动；最后做发后体检。开始、成功、卡住、失败各推飞书一条。
+            </Text>
+          </Stack>
+        </div>
+      </ConfirmDialog>
+    </>
+  );
+}
+
+/** release-train 此刻的一个状态：在走（卡住、没成）/ 暂停标记没人收 / 没在走 / 没读到。 */
+function trainState(release: FranceReleaseState): { status: StatusKey; text: string } {
+  switch (release.state) {
+    case 'running':
+      return {
+        status:
+          release.status === 'blocked'
+            ? 'release:step:blocked'
+            : release.status === 'failed'
+              ? 'release:step:failed'
+              : 'release:step:current',
+        text: `${release.phase} · ${release.target}${release.marker ? ' · 派活已暂停' : ' · 暂停标记没写'}${release.why ? ` · ${release.why}` : ''}`,
+      };
+    case 'paused':
+      return {
+        status: 'release:train:paused',
+        text: '暂停标记在、但一趟的记录不在。这不是正在发的一趟。真发版点上面的「发布到法国」',
+      };
+    case 'idle':
+      return {
+        status: 'release:train:idle',
+        text: '发版前点「发版预检」看能不能发（只读，不暂停、不发版）。真发版点上面的「发布到法国」',
+      };
+    default:
+      return { status: 'release:train:unread', text: release.why };
+  }
+}
+
+/** 点「发版预检」后摆在卡里的结果：能发 / 不能发、命令和退出码、一项一行的输出；没接上写没读到和原因。 */
+function PreflightResult({ result }: { result: FrancePreflightResponse }) {
+  if (result.state === 'unreadable') {
+    return (
+      <Notice tone="stall" title="发版预检没查成">
+        {result.why}
+      </Notice>
+    );
+  }
+  const go = result.code === 0;
+  const caution = go && result.stdout.includes('：留意');
+  const lines = (text: string) => text.split(/\r?\n/).filter((l) => l.trim() !== '');
+  return (
+    <div data-preflight-result>
+      <Stack gap="md">
+        <Stack direction="horizontal" gap="sm" align="center" wrap>
+          <StatusBadge status={go ? 'release:preflight:go' : 'release:preflight:stop'} />
+          {caution ? (
+            <Text size="meta" tone="muted">
+              能发。有几项要留意，看下面
+            </Text>
+          ) : go ? null : (
+            <Text size="meta" tone="muted">
+              不能发，看下面哪一项卡住或读不到
+            </Text>
           )}
-        >
-          {last.text}
-        </p>
-      ) : null}
-      {action.last.state === 'running' ||
-      action.last.state === 'blocked' ||
-      action.last.state === 'failed' ? (
-        <ReleaseTimeline last={action.last} now={now} />
-      ) : null}
-      {action.last.check ? <ReleaseCheck check={action.last.check} /> : null}
-      {action.recover ? <ReleaseRecoverButtons recover={action.recover} /> : null}
-      <AlertDialog open={asking && head !== null} onOpenChange={setAsking}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>发布到法国？</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2 text-body">
-                <p>
-                  要发的提交：
-                  <Tag mono className="num">
-                    {head?.short}
-                  </Tag>{' '}
-                  {head?.title}
-                </p>
-                <div className="space-y-1.5" data-release-preflight>
-                  <div className="flex items-center gap-2">
-                    <p className="font-medium">预检（打开这个框时现读的）</p>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="ml-auto"
-                      loading={preflight.isPending}
-                      loadingText="预检在跑…"
-                      onClick={() => preflight.mutate()}
-                    >
-                      重新预检
-                    </Button>
-                  </div>
-                  {pf.node}
-                  {pf.blockedWhy !== null && !preflight.isPending ? (
-                    <p className="text-meta text-ink-stall" data-preflight-blocked>
-                      {pf.blockedWhy}
-                    </p>
-                  ) : null}
-                </div>
-                {gap.state === 'ahead' ? (
-                  <div>
-                    <p>会带上 {gap.count} 个提交，最近合进去的 PR：</p>
-                    <ul className="mt-1 space-y-0.5 text-meta">
-                      {gap.prs.map((p) => (
-                        <li key={p.number}>
-                          <span className="num text-muted-foreground">#{p.number}</span> {p.title}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-                <p className="text-meta text-muted-foreground">
-                  点「确认发布」就是同意对外发布，并记一条操作记录。之后全自动：法国先暂停引擎总开关、等在跑的会话收尾（最多{' '}
-                  {SESSION_WAIT_MS / 60_000}{' '}
-                  分钟），再发版；发完把引擎总开关恢复到发版前（发前开着的开回，发前关着的保持关），各仓「让
-                  AI 接活」开关发版不动；最后做发后体检。开始、成功、卡住、失败各推飞书一条。
-                </p>
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction
-              onConfirm={confirm}
-              loadingLabel="正在提交发布请求"
-              disabled={pf.blockedWhy !== null}
-              title={pf.blockedWhy ?? undefined}
-            >
-              确认发布
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        </Stack>
+        <Text size="meta" tone="muted" block>
+          <Text size="meta" tone="muted" mono>
+            {result.command}
+          </Text>
+          {' · '}退出码 {result.code ?? '（没给）'}
+          {result.signal ? `，信号 ${result.signal}` : ''}
+          {' · 用了 '}
+          {Math.round(result.durationMs / 100) / 10} 秒{result.timedOut ? '（读超时被停）' : ''}
+          {result.truncated ? '（输出超长已截断）' : ''}
+        </Text>
+        {result.stdout ? (
+          <Stack gap="sm">
+            {lines(result.stdout).map((l, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 输出的行没有身份，顺序就是它的身份。
+              <Text key={i} size="meta" mono>
+                {l}
+              </Text>
+            ))}
+          </Stack>
+        ) : null}
+        {result.stderr ? (
+          <Stack gap="sm">
+            <Text size="meta" tone="danger" strong>
+              报错：
+            </Text>
+            {lines(result.stderr).map((l, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: 输出的行没有身份，顺序就是它的身份。
+              <Text key={i} size="meta" mono>
+                {l}
+              </Text>
+            ))}
+          </Stack>
+        ) : null}
+        {!result.stdout && !result.stderr ? (
+          <Text size="meta" tone="muted">
+            这次没产出任何输出。
+          </Text>
+        ) : null}
+      </Stack>
     </div>
+  );
+}
+
+/** 描述列表里的四行事实 + 发版进度（只读）。 */
+function releaseItems(
+  card: ReleaseCard,
+  release: UseQueryResult<FranceReleaseState>,
+  now: number,
+): DescriptionsItem[] {
+  const { mainline, deployed, gap, lastDone, action } = card;
+  const train = release.data ? trainState(release.data) : null;
+  const items: DescriptionsItem[] = [
+    {
+      label: '主线最新',
+      value:
+        mainline.state === 'unreadable' ? (
+          <UnreadValue reason={mainline.why} />
+        ) : (
+          <Stack gap="sm">
+            <Stack direction="horizontal" gap="sm" align="center" wrap>
+              <Sha short={mainline.commit.short} />
+              <Text>{mainline.commit.title}</Text>
+              <CiBadge ci={mainline.ci} />
+            </Stack>
+            <Text size="meta" tone="muted">
+              {formatAgo(mainline.commit.at, now)}提交
+            </Text>
+            {mainline.ci.state === 'red' || mainline.ci.state === 'pending' ? (
+              <Text size="meta" tone="warning">
+                {mainline.ci.detail}
+              </Text>
+            ) : null}
+            {mainline.ci.state === 'unreadable' ? <UnreadValue reason={mainline.ci.why} /> : null}
+          </Stack>
+        ),
+    },
+    {
+      label: '法国在用',
+      value:
+        deployed.state === 'unreadable' ? (
+          <UnreadValue reason={deployed.why} />
+        ) : (
+          <Stack gap="sm">
+            <Stack direction="horizontal" gap="sm" align="center" wrap>
+              <Sha short={deployed.short} />
+              {deployed.title !== null ? (
+                <Text>{deployed.title}</Text>
+              ) : (
+                <UnreadValue reason={deployed.titleWhy ?? '标题没读到'} />
+              )}
+            </Stack>
+            {deployed.deployedAt !== null ? (
+              <Text size="meta" tone="muted">
+                发于 {formatAgo(deployed.deployedAt, now)}
+              </Text>
+            ) : (
+              <UnreadValue reason={deployed.deployedAtWhy ?? '发于何时没读到'} />
+            )}
+          </Stack>
+        ),
+    },
+    {
+      label: '和主线',
+      value:
+        gap.state === 'unreadable' ? (
+          <UnreadValue reason={gap.why} />
+        ) : gap.state === 'same' ? (
+          <span data-entry-gap="same">
+            <Stack direction="horizontal" gap="sm" align="center" wrap>
+              <StatusBadge status="machine:version:current" />
+              <Text>和主线一样，没有要发的</Text>
+            </Stack>
+          </span>
+        ) : (
+          <span data-entry-gap="ahead">
+            <Stack gap="sm">
+              <Tag tone="warning">落后主线 {gap.count} 个提交</Tag>
+              <Collapse title={`展开 ${gap.count} 个提交`}>
+                <Stack gap="sm">
+                  {gap.prs.map((p) => (
+                    <Text key={p.number} size="meta">
+                      <Text size="meta" tone="muted" mono>
+                        #{p.number}
+                      </Text>
+                      {'　'}
+                      {p.title}
+                    </Text>
+                  ))}
+                  {gap.nonPr > 0 ? (
+                    <Text size="meta" tone="muted">
+                      另有 {gap.nonPr} 个提交不是 PR 合并的
+                    </Text>
+                  ) : null}
+                </Stack>
+              </Collapse>
+            </Stack>
+          </span>
+        ),
+    },
+    {
+      label: '最近做完的任务',
+      value:
+        lastDone.state === 'unreadable' ? (
+          <UnreadValue reason={lastDone.why} />
+        ) : (
+          <Stack gap="sm">
+            <Text>
+              <Text tone="muted" mono>
+                PR #{lastDone.pr.number}
+              </Text>{' '}
+              {lastDone.pr.title}
+            </Text>
+            <Text size="meta" tone="muted">
+              {formatAgo(lastDone.pr.mergedAt, now)}合并
+            </Text>
+            {lastDone.issue.state === 'ok' ? (
+              <Text size="meta">
+                关了{' '}
+                <Text size="meta" tone="muted" mono>
+                  #{lastDone.issue.number}
+                </Text>{' '}
+                {lastDone.issue.title}
+                {lastDone.issue.alsoCloses.length > 0
+                  ? `（还关了 ${lastDone.issue.alsoCloses.map((n) => `#${n}`).join('、')}）`
+                  : ''}
+              </Text>
+            ) : lastDone.issue.state === 'none' ? (
+              <Text size="meta" tone="muted">
+                这个 PR 没写关哪张单
+              </Text>
+            ) : (
+              <Text size="meta" tone="warning">
+                关的单 #{lastDone.issue.number} 没查成：{lastDone.issue.why}
+              </Text>
+            )}
+          </Stack>
+        ),
+    },
+  ];
+  items.push({
+    label: '发版进度',
+    value: release.error ? (
+      <UnreadValue reason={errorText(release.error)} />
+    ) : train ? (
+      <Stack gap="sm">
+        <StatusBadge status={train.status} />
+        <Text size="meta" tone="muted">
+          {train.text}
+        </Text>
+      </Stack>
+    ) : (
+      <Text tone="muted">正在读…</Text>
+    ),
+    hint: 'release-train',
+  });
+  if (action.last.check) {
+    items.push({ label: '发布后检查', value: <ReleaseCheck check={action.last.check} /> });
+  }
+  return items;
+}
+
+/**
+ * 「版本」卡。card 是发版卡（主线、法国在用、差几个、能不能发、上次结果），release 是 release-train 此刻的状态，
+ * facts 是本台的六项事实（只用在用版本那一项：发版卡读不到时，这里仍写本台自己查到的版本）。
+ */
+export function VersionCard({
+  card,
+  release,
+  facts,
+  now,
+}: {
+  card: UseQueryResult<ReleaseCard>;
+  release: UseQueryResult<FranceReleaseState>;
+  facts: EnvFacts | undefined;
+  now: number;
+}) {
+  const preflight = useFrancePreflight();
+  // 同一帧里的第二下：isPending 还没画上去，只靠 loading 挡不住，这里先记一笔。
+  const preflightSent = useRef(false);
+  const data = card.data;
+  const blocked = data?.action.state === 'blocked' ? data.action.reasons : [];
+  const last = data ? lastLine(data.action.last, now) : null;
+  const envVersion = facts?.version;
+  const envProblems = envVersion?.ok ? envVersion.value.problems : [];
+  const envBehind = envVersion?.ok ? versionStatus(envVersion.value) : undefined;
+  return (
+    <Section
+      title="版本"
+      actions={
+        <>
+          <Button
+            size="sm"
+            variant="secondary"
+            aria-label="发版预检"
+            loading={preflight.isPending}
+            onClick={() => {
+              if (preflightSent.current || preflight.isPending) return;
+              preflightSent.current = true;
+              return preflight.mutate(undefined, {
+                onSettled: () => {
+                  preflightSent.current = false;
+                },
+              });
+            }}
+          >
+            发版预检
+          </Button>
+          {data ? <PublishButton card={data} /> : null}
+        </>
+      }
+    >
+      <Stack>
+        {card.error ? (
+          <LoadError what="发版卡" error={card.error} onRetry={() => void card.refetch()} />
+        ) : null}
+        {card.isLoading || (!card.data && !card.error) ? <LoadingRows rows={4} /> : null}
+        {blocked.length > 0 && data?.gap.state !== 'same' ? (
+          <div data-release-reasons>
+            <Notice tone="stall" title="现在不能发">
+              {blocked.map((r) => (
+                <div key={r}>{r}</div>
+              ))}
+            </Notice>
+          </div>
+        ) : blocked.length > 0 ? (
+          <div data-release-reasons>
+            {blocked.map((r) => (
+              <Text key={r} size="meta" tone="muted" block>
+                {r}
+              </Text>
+            ))}
+          </div>
+        ) : null}
+        {envVersion && !envVersion.ok ? (
+          <Descriptions
+            columns={1}
+            items={[{ label: '在用版本', value: <UnreadValue reason={envVersion.reason} /> }]}
+          />
+        ) : null}
+        {envProblems.length > 0 ? (
+          <Notice tone="stall" title="本台在用版本有问题">
+            {envProblems.map((p) => (
+              <div key={p}>{p}</div>
+            ))}
+          </Notice>
+        ) : null}
+        {data ? <Descriptions columns={1} items={releaseItems(data, release, now)} /> : null}
+        {!data && envBehind === 'machine:version:behind' && envVersion?.ok && envVersion.value.behind ? (
+          <Text tone="warning">落后主线 {envVersion.value.behind} 个提交</Text>
+        ) : null}
+        {last ? (
+          <span data-release-last={data?.action.last.state}>
+            <Text tone={LAST_TONE[last.tone]} block>
+              {last.text}
+            </Text>
+          </span>
+        ) : null}
+        {preflight.isError ? (
+          <Notice tone="fail">预检请求没发出去：{errorText(preflight.error)}</Notice>
+        ) : null}
+        {preflight.data ? <PreflightResult result={preflight.data} /> : null}
+        {data &&
+        (data.action.last.state === 'running' ||
+          data.action.last.state === 'blocked' ||
+          data.action.last.state === 'failed') ? (
+          <ReleaseTimeline last={data.action.last} now={now} />
+        ) : null}
+        {data?.action.recover ? <ReleaseRecoverButtons recover={data.action.recover} /> : null}
+      </Stack>
+    </Section>
   );
 }

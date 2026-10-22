@@ -1,18 +1,20 @@
 // 看板多机：选了远程环境（?node=）时页面上要说清的几句话。
-// - 能看远程快照的只有主页、画布、法国页和资源页（REMOTE_PAGES）；其余页的数据全是本台的，整页换成一句明说，不顶着远程环境的名字显示本台的数据。
+// - 能看远程快照的只有工作台、法国页和资源页（REMOTE_PAGES）；其余页的数据全是本台的，整页换成一句明说，不顶着远程环境的名字显示本台的数据。
 // - 看快照的页面顶上一条「<名字> <时间> 报的，只读」；失联、没收到过的换成醒目的一句，不拿旧数据当现在的。
 import { createContext, type ReactNode, useContext } from 'react';
 import { useMe, useNodes } from '../api/client';
 import { formatDateTime } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
+import { Button } from './layout/button';
 import { Notice } from './layout/notice';
-import { Button } from './ui/button';
+import { Page } from './layout/page';
+import { Text } from './layout/text';
 
 /**
  * 选了远程环境时还能看的页：主页（那个环境的快照）、法国页（各台并排）和资源页（那个环境快照里的资源读数，#1986）。
  */
-export const REMOTE_PAGES: readonly string[] = ['/', '/board', '/france', '/resources'];
+export const REMOTE_PAGES: readonly string[] = ['/', '/france', '/resources'];
 
 export const isRemotePage = (pathname: string): boolean => REMOTE_PAGES.includes(pathname);
 
@@ -49,19 +51,21 @@ export function OnlyLocalNotice() {
   const nodeName = useSelectedNodeName();
   const local = me?.env.name ?? '本台';
   return (
-    <div data-only-local className="mx-auto w-full max-w-xl px-4 py-16">
-      <Notice
-        tone="info"
-        title={`这一页只看得到${local}的数据`}
-        action={
-          <Button size="sm" onClick={() => select(null)}>
-            切回{local}
-          </Button>
-        }
-      >
-        现在选的是{nodeName}。额度、路由、定时任务、设置、操作记录、任务详情这些页面读的是{local}自己的库，
-        {nodeName}的请去那台上看；这一页只在本台有；能看{nodeName}的只有工作台、法国页和资源页。
-      </Notice>
+    <div data-only-local>
+      <Page title="只看得到本台">
+        <Notice
+          tone="info"
+          title={`这一页只看得到${local}的数据`}
+          action={
+            <Button size="sm" onClick={() => select(null)}>
+              切回{local}
+            </Button>
+          }
+        >
+          现在选的是{nodeName}。额度、路由、定时任务、设置、操作记录、任务详情这些页面读的是{local}自己的库，
+          {nodeName}的请去那台上看；这一页只在本台有；能看{nodeName}的只有工作台、法国页和资源页。
+        </Notice>
+      </Page>
     </div>
   );
 }
@@ -79,17 +83,22 @@ export function SnapshotBanner({
   const now = useNow();
   const f = freshnessNow({ receivedAt }, now);
   return (
-    <div data-snapshot-banner={f} className="mb-4">
+    <div data-snapshot-banner={f}>
       <Notice
         tone={f === 'fresh' ? 'info' : 'stall'}
         title={`${name} ${receivedAt ? formatDateTime(receivedAt) : ''} 报的，只读`}
       >
-        <span className="num">{nodeAgeText({ receivedAt }, now)}</span>{' '}
+        {nodeAgeText({ receivedAt }, now)}{' '}
         {f !== 'fresh'
           ? `下面是它最后一次报的样子，不是现在的；要看现在的请去${name}那台上看。`
           : `数据是它自己推来的快照，这里的按钮都不能用；要操作请去${name}那台上做。`}
         {reportedAt && f === 'fresh' ? (
-          <span className="ml-2 text-meta text-ink-3">它的钟 {formatDateTime(reportedAt)}</span>
+          <>
+            {' '}
+            <Text size="meta" tone="muted">
+              它的钟 {formatDateTime(reportedAt)}
+            </Text>
+          </>
         ) : null}
       </Notice>
     </div>

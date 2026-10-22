@@ -2,10 +2,9 @@
 // 兜底轮询（#1799）：推送只覆盖部分表、也可能悄悄断开，所以主页和几个读页自己按钟重拉。
 // 可见时主页 30 秒、读页 60 秒；推送不是 open 缩到 10 秒；页面在后台不拉；切回窗口重拉；卡片相对时间 30 秒走一次。
 import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, render, renderHook, screen } from '@testing-library/react';
+import { act, cleanup, renderHook } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { DoneCard } from '../components/home/done-card';
 import {
   ApiError,
   ApiProvider,
@@ -217,27 +216,5 @@ describe('网关错误时轮询退避', () => {
     expect(api.home.mock.calls.length).toBe(n);
     await advance(1);
     expect(api.home.mock.calls.length).toBe(n + 1);
-  });
-});
-
-describe('卡片相对时间跟着 30 秒钟走', () => {
-  test('做完的卡片：合于 1 分钟前，钟走 60 秒后变成 2 分钟前，不靠重拉', async () => {
-    render(
-      <DoneCard
-        item={
-          {
-            repo: 'o/r',
-            prNumber: 7,
-            title: '修一处',
-            mergedAt: new Date(T0 - 60_000).toISOString(),
-            link: undefined,
-          } as never
-        }
-      />,
-    );
-    expect(screen.getByText(/合于 1 分钟前/)).toBeTruthy();
-    await advance(60_000);
-    expect(screen.getByText(/合于 2 分钟前/)).toBeTruthy();
-    expect(api.home).not.toHaveBeenCalled();
   });
 });

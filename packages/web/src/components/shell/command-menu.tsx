@@ -1,6 +1,6 @@
 import { FolderGit2 } from 'lucide-react';
 import { useEffect } from 'react';
-import { useLocation, useNavigate } from 'react-router';
+import { useNavigate } from 'react-router';
 import { useRepo } from '../repo-context';
 import {
   CommandDialog,
@@ -11,12 +11,11 @@ import {
   CommandList,
   CommandSeparator,
 } from '../ui/command';
-import { NAV, NAV_SOON } from './nav';
+import { NAV } from './nav';
 
 /** ⌘K：跳页面（不进菜单的页也都在这里搜得到）、切仓。（主题只有一套、亮暗跟随系统，#3509 起没有切主题。） */
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
   const navigate = useNavigate();
-  const location = useLocation();
   const { repos, setRepoId } = useRepo();
 
   useEffect(() => {
@@ -40,8 +39,8 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
       <CommandInput placeholder="输入页面名、操作…" />
       <CommandList className="max-h-command-list">
         <CommandEmpty>没找到</CommandEmpty>
-        {/* 菜单里的八项和不进菜单的页（定时任务、资源、发布记录、操作记录、渠道状态、画布）都在这里，还没做的账单在最后 */}
-        {[...NAV, { group: '还没做', items: NAV_SOON }].map((g) => (
+        {/* 菜单里的八项和不进菜单的页（定时任务、资源、发布记录、操作记录、渠道状态）都在这里 */}
+        {NAV.map((g) => (
           <CommandGroup key={g.group} heading={g.group}>
             {g.items.map((item) => {
               const Icon = item.icon;
@@ -70,7 +69,7 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
                   onSelect={() =>
                     run(() => {
                       setRepoId(r.id);
-                      if (location.pathname !== '/board') navigate('/');
+                      navigate('/');
                     })
                   }
                 >

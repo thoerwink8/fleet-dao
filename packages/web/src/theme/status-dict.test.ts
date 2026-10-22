@@ -20,7 +20,7 @@ const all = DOMAINS.flatMap((d) =>
 );
 
 describe('状态字典', () => {
-  test('9 个域、198 条', () => {
+  test('9 个域、223 条', () => {
     expect(DOMAINS).toEqual([
       'task',
       'tone',
@@ -32,7 +32,7 @@ describe('状态字典', () => {
       'machine',
       'quota',
     ]);
-    expect(all).toHaveLength(198);
+    expect(all).toHaveLength(223);
   });
 
   test('每个 level 合法', () => {

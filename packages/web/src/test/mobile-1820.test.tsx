@@ -5,8 +5,9 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import type { EnvResponse, QuotaWindowView } from '../api/types';
-import { factCells } from '../components/env-facts';
+import type { QuotaWindowView } from '../api/types';
+import { UnreadValue } from '../components/env-facts';
+import { Descriptions } from '../components/layout/descriptions';
 import { Page } from '../components/layout/page';
 import { QuotaDetail, QuotaUsage } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
@@ -179,53 +180,23 @@ describe('通知操作和标题同一行', () => {
   });
 });
 
-describe('法国页本台六项事实：手机一行一项', () => {
-  const facts: EnvResponse['facts'] = {
-    engine: { ok: true, value: { state: 'on', detail: '探到了在拉活的工人' } },
-    version: {
-      ok: true,
-      value: { current: 'abcdef1234567890', behind: 3, detail: '落后主线 3 个提交', problems: [] },
-    },
-    sessions: { ok: true, value: { total: 2, byStage: {} } },
-    pools: { ok: true, value: { count: 3, running: 1, unread: 0, stale: 1 } },
-    health: { ok: false, reason: '健康接口超时' },
-    schedule: {
-      ok: true,
-      value: { status: 'fresh', lastSuccessAt: '2026-10-05T01:55:00.000Z', outcome: 'ok', scanned: 4 },
-    },
-  };
-  const cells = () => (
-    <div>{factCells({ facts, now: Date.parse('2026-10-05T02:00:00Z'), kind: 'france', look: 'tile' })}</div>
-  );
-
-  test('手机：六项各一行（名字、状态点、一句话），默认不展开，点开才见原来那一整格', () => {
+describe('法国页本台事实：手机一列', () => {
+  test('描述列表在窄屏一律一列（Descriptions 的 columns=2 只在 lg 以上并排）；没读到的那项一行里写明原因', () => {
     viewport(390);
-    render(cells());
-    const rows = document.querySelectorAll('[data-france-fact]');
-    expect(rows).toHaveLength(6);
-    for (const r of rows) {
-      expect(r.getAttribute('data-fact-folded')).toBe('closed');
-      expect(r.querySelector('[data-fact-summary]')).toBeTruthy();
-      expect(r.querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
-    }
-    // 没查成的那项一行里也写明原因
-    const health = rows[3] as HTMLElement;
-    expect(health.getAttribute('data-france-fact')).toBe('unread');
-    expect(health.textContent).toContain('没查成');
-    expect(health.textContent).toContain('健康接口超时');
-
-    const engine = rows[0] as HTMLElement;
-    expect(engine.textContent).not.toContain('在拉活的工人 ·');
-    fireEvent.click(within(engine).getByRole('button'));
-    expect(engine.getAttribute('data-fact-folded')).toBe('open');
-    expect(engine.querySelector('button')?.getAttribute('aria-expanded')).toBe('true');
-  });
-
-  test('电脑：还是六张整卡，没有折叠行', () => {
-    viewport(1366);
-    render(cells());
-    expect(document.querySelectorAll('[data-france-fact]')).toHaveLength(6);
-    expect(document.querySelector('[data-fact-folded]')).toBeNull();
+    render(
+      <Descriptions
+        columns={2}
+        items={[
+          { label: '引擎进程', value: '运行中' },
+          { label: '健康', value: <UnreadValue reason="健康接口超时" /> },
+        ]}
+      />,
+    );
+    const list = document.querySelector('dl') as HTMLElement;
+    expect(list.className).toContain('grid-cols-1');
+    expect(list.className).toContain('lg:grid-cols-2');
+    expect(list.textContent).toContain('没读到');
+    expect(list.textContent).toContain('健康接口超时');
   });
 });
 

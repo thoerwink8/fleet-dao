@@ -1,4 +1,4 @@
-// 工作台页头窄屏（#2969，#3509 改版后）：320 / 360 / 390 上流程开关和刷新不重叠、不裁切、不横滚，手机上在标题下面；宽屏仍和标题同一行。
+// 工作台页头窄屏（#2969，#3509 改版后，#3533 起流程开关挪到法国页的引擎卡）：320 / 360 / 390 上刷新不裁切、不横滚；宽屏同样不横滚。
 // 健康条不再挤在页头：额度在「数据概览」，流水线、中转、引擎进程在「系统状态」；手机上「要你拍的」「在跑的任务」行尾不被截断。
 // 组件测试没有版面，框在这里量。
 import type { Page } from '@playwright/test';
@@ -175,43 +175,29 @@ async function layout(page: Page): Promise<HeaderLayout> {
 test.describe('工作台页头窄屏', () => {
   test.beforeEach(async ({ login }) => login());
 
-  test('320、360、390：开关和刷新不重叠、不裁切、不横滚，都能点；开关在标题下面', async ({ page }) => {
+  test('320、360、390：刷新不裁切、不横滚，能点；页头没有派单方式开关（挪到了法国页）', async ({ page }) => {
     for (const width of [320, 360, 390]) {
       await page.setViewportSize({ width, height: 844 });
       await page.goto('/');
       await expect(page.getByRole('heading', { level: 1, name: '工作台' })).toBeVisible();
-      await expect(page.locator('[data-flow-mode-current]')).not.toHaveText('正在读流程模式');
       await expect(page.locator('[data-spend-line]')).toBeVisible();
       const m = await layout(page);
       expect(m.overflowDoc, `${width} 整页横滚`).toBeLessThanOrEqual(1);
       expect(m.overflowMain, `${width} 正文横滚`).toBeLessThanOrEqual(1);
-      expect(m.switchScroll, `${width} 开关被裁`).toBeLessThanOrEqual(1);
-      expect(m.insideSwitch, `${width} 开关在正文里`).toBe(true);
       expect(m.insideRefresh, `${width} 刷新在正文里`).toBe(true);
-      expect(m.overlapsSwitchRefresh, `${width} 开关和刷新重叠`).toBe(false);
-      expect(m.switchBelowTitle, `${width} 开关应在标题下面`).toBe(true);
+      expect(m.sw, `${width} 页头不该再有开关`).toBeNull();
       expect(m.hitRefresh, `${width} 刷新被挡住`).toBe(true);
-      expect(m.choices.length, `${width} 两个选择`).toBe(2);
-      for (const c of m.choices) {
-        expect(c.hit, `${width} ${c.name} 被挡住`).toBe(true);
-        expect(c.h, `${width} ${c.name} 高`).toBeGreaterThanOrEqual(40);
-        expect(c.w, `${width} ${c.name} 宽`).toBeGreaterThanOrEqual(40);
-      }
       expect(m.refreshH, `${width} 刷新高`).toBeGreaterThanOrEqual(40);
       // 手机上列表行尾（状态、按钮）整个落在屏幕里，不被挤出去、不被截断
       expect(m.clippedTrailing, `${width} 行尾超出屏幕`).toEqual([]);
     }
   });
 
-  test('宽屏：开关和标题同一行，也不和刷新重叠', async ({ page }) => {
+  test('宽屏：不横滚，刷新能点', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('[data-flow-mode-current]')).not.toHaveText('正在读流程模式');
     await expect(page.locator('[data-spend-line]')).toBeVisible();
     const m = await layout(page);
     expect(m.overflowMain, '正文横滚').toBeLessThanOrEqual(1);
-    expect(m.sameRow, '开关应和标题同一行').toBe(true);
-    expect(m.switchBelowTitle, '宽屏不应把开关整块挤到标题下面').toBe(false);
-    expect(m.overlapsSwitchRefresh, '开关和刷新重叠').toBe(false);
     expect(m.hitRefresh).toBe(true);
   });
 });

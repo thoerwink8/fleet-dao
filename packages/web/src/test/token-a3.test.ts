@@ -1,6 +1,8 @@
 // #1445：健康条 2、决定卡 2、定时任务 4、渠道状态 3、更新日志 1，共 12 处任意尺寸。
 // 同像素档位在 app.css（#1555 先落过一版）。这里钉住换上的 token 类名还在，
-// 原先的方括号写死值不在这五个文件里，并且 app.css 里对应档位的注释写了依据。
+// 原先的方括号写死值不在这几个文件里，并且 app.css 里对应档位的注释写了依据。
+// #3533：健康条、决定卡随 /board 的删除（home-drawer）没了，定时任务的行（job-row）和更新日志换成 layout 件、不再写类名，
+// 这几处的文件和钉的类名一起去掉；剩下渠道状态 3 处（lg:max-h-routing-pane、lg:grid-cols-routing、探针色点）和 list.tsx 的 w-rail。
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,10 +13,7 @@ const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 五个文件。路径相对 packages/web/src。 */
 const FILES = [
-  'components/home/health-strip.tsx',
-  'components/home/decision-card.tsx',
-  // #1805：定时任务的行挪进 job-row，展开行后来并进 layout/list（#1848），类名没变
-  'components/job-row.tsx',
+  // #1805：定时任务的展开行并进 layout/list（#1848），类名没变
   'components/layout/list.tsx',
   'routes/routing-status.tsx',
   'routes/changelog.tsx',
@@ -27,23 +26,8 @@ const FILES = [
  * health-strip 2、decision-card 2、schedules 4、routing-status 3、changelog 1。
  */
 const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
-  { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail' },
-  { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail truncate text-meta' },
-  {
-    file: 'components/home/decision-card.tsx',
-    snippet: '<Tag tone="human">',
-  },
-  {
-    file: 'components/home/decision-card.tsx',
-    snippet: 'num shrink-0 whitespace-nowrap text-meta text-muted-foreground',
-  },
   { file: 'components/layout/list.tsx', snippet: 'absolute inset-y-0 left-0 w-rail' },
-  { file: 'components/job-row.tsx', snippet: 'text-meta text-muted-foreground' },
-  { file: 'components/job-row.tsx', snippet: 'num text-meta text-muted-foreground' },
-  { file: 'components/job-row.tsx', snippet: 'text-meta text-ink-stall' },
-  // #3533：routing-status 的两处版式和 probe-log 的探针色点迁到 layout 层（Grid、ProbeCells），不再在业务层写类名，这三处不再钉。
-  // #1851：提交行迁到 ListRow；照路由页样板重做后一行不折（标题截断、时间不让位），钉标题列那一段
-  { file: 'routes/changelog.tsx', snippet: 'min-w-0 flex-1" data-commit-row' },
+  // 其余点位随文件迁到 layout 层、不再写类名（#3533）：job-row、routing-status、probe-log、changelog。
 ];
 
 /** 这 12 处用到的档位（健康条等的辅助字原来是 text-caption 11px，收口片 #1855 删了旧字号名，改用 text-meta，见 SPOTS）。why 必须出现在定义行往上 8 行里的注释中。 */
@@ -85,8 +69,8 @@ describe('#1445 五文件的尺寸 token', () => {
     }
   });
 
-  test('12 处写死值对应的 token 类名还在', () => {
-    expect(SPOTS).toHaveLength(9);
+  test('写死值对应的 token 类名还在', () => {
+    expect(SPOTS).toHaveLength(1);
     for (const spot of SPOTS) {
       expect(source(spot.file), `${spot.file} 缺少 ${spot.snippet}`).toContain(spot.snippet);
     }

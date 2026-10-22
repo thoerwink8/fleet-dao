@@ -20,7 +20,7 @@ describe('#556 delete-soon-members：成员占位已从驾驶舱撤下', () => {
     }
   });
 
-  test('路由表里不再注册 members；占位只剩账单，战绩、判断题记录和三个旧地址都不在', async () => {
+  test('路由表里不再注册 members；账单、画布也没了（#3533），战绩、判断题记录和三个旧地址都不在', async () => {
     const routesTs = await readFile(path.join(WEB_ROOT, 'src/routes.ts'), 'utf8');
     expect(routesTs).not.toMatch(/route\('members'/);
     expect(routesTs).not.toMatch(/route\('models'/);
@@ -28,14 +28,8 @@ describe('#556 delete-soon-members：成员占位已从驾驶舱撤下', () => {
     expect(routesTs).not.toMatch(/route\('judge'/);
     expect(routesTs).not.toMatch(/route\('efforts'/);
     expect(routesTs).not.toMatch(/route\('env'/);
-    expect(routesTs).toMatch(/route\('billing', 'routes\/soon\.tsx'/);
-
-    const soonTsx = await readFile(path.join(WEB_ROOT, 'src/routes/soon.tsx'), 'utf8');
-    expect(soonTsx).not.toMatch(/\/members/);
-    expect(soonTsx).not.toMatch(/成员与权限/);
-    expect(soonTsx).not.toMatch(/\/models/);
-    expect(soonTsx).not.toMatch(/\/record/);
-    expect(soonTsx).not.toMatch(/\/judge/);
-    expect(soonTsx).toMatch(/\/billing/);
+    expect(routesTs).not.toMatch(/route\('billing'/);
+    expect(routesTs).not.toMatch(/route\('board'/);
+    expect(routesTs).not.toMatch(/soon\.tsx/);
   });
 });

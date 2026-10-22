@@ -27,13 +27,13 @@ test.describe('法国页', () => {
     await expect(page).toHaveURL(/\/france$/);
     await expect(page.locator('aside').getByRole('link', { name: '法国', exact: true })).toBeVisible();
     await expect(page.locator('aside').getByRole('link', { name: '环境', exact: true })).toHaveCount(0);
-    // 这套配了远程通行证，所以是并排：这里只看本台那一列（别的环境的列在 07c）
-    const local = page.locator('[data-env-column="local"]');
-    // 标题就是这一台的名字（FLEET_MACHINE_NAME，e2e 这套起后端时写的「本机」）
+    // 这套配了远程通行证：「机器」表里本台一行、远程一行一台（远程在 07c）；本台的事实在运行概况和版本卡里
+    const local = page.locator('main');
+    // 这一台的名字（FLEET_MACHINE_NAME，e2e 这套起后端时写的「本机」）在机器表里
     expect(env.name.name).toBe('本机');
-    await expect(local.getByRole('heading', { name: /本机/ })).toBeVisible();
-    // 六格都在
-    for (const label of ['引擎', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {
+    await expect(page.locator('[data-machines]').getByText('本机').first()).toBeVisible();
+    // 六项都在
+    for (const label of ['引擎', '法国在用', '在跑的会话', '池占用', '健康', '最近拉单']) {
       await expect(local.getByText(label).first()).toBeVisible();
     }
     // 引擎开着（这套没关它）：不写「关着（临时调整）」
@@ -50,11 +50,11 @@ test.describe('法国页', () => {
   }) => {
     const env = (await api.get('/api/env')) as Env;
     await page.goto('/france');
-    const local = page.locator('[data-env-column="local"]');
-    // 这台后端不是法国的正式机器（FLEET_ENV=development）：版本那一项一定是「没查成」，页面照实写，不写 0
+    const local = page.locator('main');
+    // 这台后端不是法国的正式机器（FLEET_ENV=development）：版本那一项一定是「没读到」，页面照实写，不写 0
     expect(env.facts.version.ok).toBe(false);
     if (!env.facts.version.ok) await expect(local.getByText(env.facts.version.reason).first()).toBeVisible();
-    await expect(local.getByText('没查成').first()).toBeVisible();
+    await expect(local.getByText(/没读到|没查成/).first()).toBeVisible();
   });
 
   test('顶栏常驻环境切换器（本台的名字跟着 /api/me 来，不在别的页拉整份 /api/env），下拉里能进法国页', async ({
@@ -72,7 +72,7 @@ test.describe('法国页', () => {
     await switcher.click();
     await page.getByRole('menuitem', { name: /打开法国页/ }).click();
     await expect(page).toHaveURL(/\/france$/);
-    await expect(page.getByRole('heading', { name: /本机/ }).first()).toBeVisible();
+    await expect(page.locator('[data-machines]').getByText('本机').first()).toBeVisible();
   });
 
   test('引擎总开关（#1086）：顶栏常驻状态，法国页点开（二次确认）→ 落库、进操作记录、刷新还开着 → 再点关；默认是关', async ({
@@ -98,13 +98,13 @@ test.describe('法国页', () => {
     await shot(page, '07b-环境-引擎总开关-关着');
 
     // 点开启先弹确认；点「先不」什么都不改
-    await card.getByRole('button', { name: '开启引擎总开关' }).click();
+    await card.getByRole('switch', { name: '引擎总开关' }).click();
     const dialog = page.getByRole('alertdialog');
     await expect(dialog).toContainText('开启引擎总开关？');
     await dialog.getByRole('button', { name: '先不' }).click();
     expect((await read())?.value).toBeNull();
 
-    await card.getByRole('button', { name: '开启引擎总开关' }).click();
+    await card.getByRole('switch', { name: '引擎总开关' }).click();
     await page.getByRole('alertdialog').getByRole('button', { name: '开启', exact: true }).click();
     await expect(card.getByTestId('engine-master-state')).toHaveText('开着');
     await expect(page.getByRole('button', { name: /引擎总开关开着/ })).toBeVisible();
@@ -122,7 +122,7 @@ test.describe('法国页', () => {
     await expect(page.getByTestId('engine-master-relation')).toContainText('总开关关＝全停');
     await page.goto('/france');
     await expect(card.getByTestId('engine-master-state')).toHaveText('开着');
-    await card.getByRole('button', { name: '关闭引擎总开关' }).click();
+    await card.getByRole('switch', { name: '引擎总开关' }).click();
     await page.getByRole('alertdialog').getByRole('button', { name: '关闭', exact: true }).click();
     await expect(card.getByTestId('engine-master-state')).toHaveText('关着');
     await expect.poll(async () => (await read())?.value).toBe(false);

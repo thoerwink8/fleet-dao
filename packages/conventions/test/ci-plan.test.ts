@@ -1599,10 +1599,12 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     // 登录页只有登录那个 spec
     expect(pr('packages/web/src/routes/login.tsx').e2e).toEqual([`${SPECS}01-login.e2e.ts`]);
     // 页面私有的组件跟着它的页面走；目录前缀整个认
-    expect(pr('packages/web/src/components/home/flow-board.tsx').e2e).toContain(`${SPECS}02-home.e2e.ts`);
+    expect(pr('packages/web/src/components/home/today-blocks.tsx').e2e).toContain(
+      `${SPECS}02b-home-today.e2e.ts`,
+    );
     // 首页窄屏页头（#2969）挂在主页这条上：只落在 specs/ 里、没有页面指向，映射表自检会红
     expect(pr('packages/web/src/routes/home.tsx').e2e).toContain(`${SPECS}02c-home-narrow.e2e.ts`);
-    expect(pr('packages/web/src/components/home/flow-board.tsx').e2e).not.toContain(
+    expect(pr('packages/web/src/components/home/today-blocks.tsx').e2e).not.toContain(
       `${SPECS}06-notifications.e2e.ts`,
     );
     // 改到的 spec 文件自己：只跑它
@@ -1660,7 +1662,6 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
       'packages/web/src/lib/utils.test.ts',
       'packages/web/src/test/harness.tsx',
       'packages/web/e2e/README.md',
-      'packages/web/src/routes/soon.tsx',
     ]) {
       const p = pr(f);
       expect(p.e2e, f).toEqual([]);

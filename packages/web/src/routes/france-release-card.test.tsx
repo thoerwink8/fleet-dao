@@ -83,7 +83,11 @@ function renderCard(card: ReleaseCard | Error) {
   return renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
 }
 
-async function rowOf(label: string): Promise<HTMLElement> {
+/** 样稿改版后两行换了名字：差几个 → 和主线，最近做完 → 最近做完的任务。测试里仍按原来的说法找。 */
+const LABEL: Record<string, string> = { 差几个: '和主线', 最近做完: '最近做完的任务' };
+
+async function rowOf(name: string): Promise<HTMLElement> {
+  const label = LABEL[name] ?? name;
   const dt = await screen.findByText(label);
   const dd = dt.nextElementSibling;
   if (!(dd instanceof HTMLElement)) throw new Error(`「${label}」后面没有内容`);
@@ -100,7 +104,7 @@ describe('/france 页发版卡', () => {
     expect(within(live).getByText(LIVE.slice(0, 12))).toBeTruthy();
     expect(within(live).getByText('探针历史 (#1225)')).toBeTruthy();
     const gap = await rowOf('差几个');
-    expect(within(gap).getByText('法国落后 7 个提交')).toBeTruthy();
+    expect(within(gap).getByText('落后主线 7 个提交')).toBeTruthy();
     expect(within(gap).getByText('任务页暂停继续', { exact: false })).toBeTruthy();
     expect(within(gap).getByText(/另有 1 个提交不是 PR 合并的/)).toBeTruthy();
     const done = await rowOf('最近做完');
@@ -112,7 +116,7 @@ describe('/france 页发版卡', () => {
   test('相差 0 个：写「法国已经是最新」，不出现落后几个', async () => {
     renderCard({ ...baseCard(), gap: { state: 'same' } });
     const gap = await rowOf('差几个');
-    expect(within(gap).getByText('法国已经是最新')).toBeTruthy();
+    expect(within(gap).getByText('和主线一样，没有要发的')).toBeTruthy();
     expect(gap.textContent).not.toContain('落后');
   });
 
@@ -124,11 +128,11 @@ describe('/france 页发版卡', () => {
       gap: { state: 'unreadable', why: '主线头没读到，差几个算不出（不当成「已是最新」）' },
       lastDone: { state: 'unreadable', why: `读主线最近合并的 PR 失败：${why}` },
     });
-    expect(within(await rowOf('主线最新')).getByText(/没查成：读主线头失败/)).toBeTruthy();
+    expect(within(await rowOf('主线最新')).getByText(/读主线头失败/)).toBeTruthy();
     const gap = await rowOf('差几个');
-    expect(within(gap).getByText(/没查成：主线头没读到/)).toBeTruthy();
-    expect(gap.textContent).not.toContain('法国已经是最新');
-    expect(within(await rowOf('最近做完')).getByText(/没查成：读主线最近合并的 PR 失败/)).toBeTruthy();
+    expect(within(gap).getByText(/主线头没读到/)).toBeTruthy();
+    expect(gap.textContent).not.toContain('一样');
+    expect(within(await rowOf('最近做完')).getByText(/读主线最近合并的 PR 失败/)).toBeTruthy();
   });
 
   test('读不到法国在用的提交：那一行写没查成 + 原因，差几个也没查成', async () => {
@@ -137,8 +141,8 @@ describe('/france 页发版卡', () => {
       deployed: { state: 'unreadable', why: '读法国在用的提交失败：EACCES' },
       gap: { state: 'unreadable', why: '法国在用的提交没读到，差几个算不出（不当成「已是最新」）' },
     });
-    expect(within(await rowOf('法国在用')).getByText(/没查成：读法国在用的提交失败：EACCES/)).toBeTruthy();
-    expect(within(await rowOf('差几个')).getByText(/没查成：法国在用的提交没读到/)).toBeTruthy();
+    expect(within(await rowOf('法国在用')).getByText(/读法国在用的提交失败：EACCES/)).toBeTruthy();
+    expect(within(await rowOf('差几个')).getByText(/法国在用的提交没读到/)).toBeTruthy();
   });
 
   test('在用的提交号读到了、标题和发于何时各自没读到：各写原因，不拿空串顶', async () => {
@@ -155,8 +159,8 @@ describe('/france 页发版卡', () => {
       },
     });
     const live = await rowOf('法国在用');
-    expect(within(live).getByText(/没查成：读它的标题失败：403/)).toBeTruthy();
-    expect(within(live).getByText(/没查成：读发布历史失败：ENOENT/)).toBeTruthy();
+    expect(within(live).getByText(/读它的标题失败：403/)).toBeTruthy();
+    expect(within(live).getByText(/读发布历史失败：ENOENT/)).toBeTruthy();
   });
 
   test('CI 红：红标加原因；关的单读不到：写没查成 + 单号', async () => {
@@ -191,7 +195,7 @@ describe('/france 页发版卡', () => {
 
   test('接口整个读不到：卡位置写加载失败，不画假数据', async () => {
     renderCard(new Error('后端 502'));
-    expect(await screen.findByText(/发版卡/)).toBeTruthy();
-    expect(screen.queryByText('法国已经是最新')).toBeNull();
+    expect(await screen.findByText(/发版卡没读成/)).toBeTruthy();
+    expect(screen.queryByText('和主线一样，没有要发的')).toBeNull();
   });
 });

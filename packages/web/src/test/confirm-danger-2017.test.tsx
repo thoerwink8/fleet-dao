@@ -17,10 +17,16 @@ test('清理没用的工作树：不确认不发请求，确认后只发一次�
   const api = createMockApi({ live: false });
   const cleanupTrees = vi.spyOn(api, 'worktreeCleanup').mockImplementation(() => new Promise(() => {}));
   renderApp(<ResourcesPage />, { api });
+  // 清理收在「仓」区块头的「⋯」菜单里（#3509）
+  fireEvent.pointerDown(await screen.findByRole('button', { name: '仓的更多操作' }), {
+    button: 0,
+    ctrlKey: false,
+    pointerType: 'mouse',
+  });
   const open = await waitFor(() => {
-    const button = document.querySelector<HTMLButtonElement>('[data-cleanup-button]');
-    if (!button || button.disabled) throw new Error('清理按钮还没好');
-    return button;
+    const item = document.querySelector<HTMLElement>('[data-cleanup-button]');
+    if (!item || item.hasAttribute('data-disabled')) throw new Error('清理按钮还没好');
+    return item;
   });
   fireEvent.click(open);
   await Promise.resolve();

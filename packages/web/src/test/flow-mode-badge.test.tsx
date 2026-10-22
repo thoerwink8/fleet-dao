@@ -7,7 +7,6 @@ import type { FleetApi } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { TaskList, TaskListRow } from '../api/types';
 import { FlowModeTag } from '../components/flow-mode-tag';
-import { FarTicket } from '../components/home/board/nodes';
 import { RunningCard } from '../components/home/running-card';
 import { RunBlock } from '../components/home/today-blocks';
 import type { HomeRunning } from '../components/home/types';
@@ -188,22 +187,5 @@ describe('首页在跑卡片', () => {
     expect((await line('#2 三段单'))?.querySelector('[data-flow-mode="three"]')?.textContent).toBe('三段');
     expect((await line('#4 退回单'))?.querySelector('[data-flow-fallback]')?.textContent).toBe('退回三步');
     expect((await line('#3 老单'))?.querySelector('[data-flow-mode]')).toBeNull();
-  });
-
-  test('看板远档卡片：有值才标', () => {
-    const view = render(<FarTicket tone="run" id="#12" title="登录页" flowMode="full" />);
-    expect(tag('full')?.textContent).toBe('全程');
-    view.rerender(
-      <FarTicket
-        tone="run"
-        id="#14"
-        title="退回"
-        flowMode="three"
-        flowFallback="选中的路由是 grok-4，第一期全程只走 Claude 5.5（Sonnet 或 Opus）"
-      />,
-    );
-    expect(tag('three')?.textContent).toBe('退回三步');
-    view.rerender(<FarTicket tone="run" id="#13" title="老单" />);
-    expect(document.querySelector('[data-flow-mode]')).toBeNull();
   });
 });

@@ -65,19 +65,25 @@ test.describe('后端不可用', () => {
   });
 
   test('后端回 500：同样写明没读成、给重试', async ({ page, request, stack, shot }) => {
-    // 定时任务不进左菜单（#3509），站内入口是法国页「定时任务」区块的「全部定时任务」
+    // 定时任务不进左菜单（#3509），站内入口是法国页「更多」里的「定时任务」
     await page.goto('/france');
-    const all = page.getByRole('link', { name: /全部定时任务/ });
+    const all = page.getByRole('link', { name: /^定时任务/ });
     await expect(all).toBeVisible();
-    await request.post(`${stack.controlOrigin}/mode/error`);
     await all.click();
+    await expect(page.getByRole('heading', { level: 1, name: '定时任务' })).toBeVisible();
+    await expect(page.locator('[data-row-key]').first()).toBeVisible();
+    // 定时任务数据在法国页已读过、进页不会自己重读：后端回 500 以后点页头刷新才读到这次的错
+    await request.post(`${stack.controlOrigin}/mode/error`);
+    await page.getByRole('button', { name: /刷新/ }).first().click();
+    // 读成过、这次刷新没成：照旧画上一次的行，顶上一条提示写「刷新没成」和原因、给重试（不是空白、不是 0）
     const alert = page
-      .getByRole('alert')
-      .filter({ hasText: /没读成|没查成/ })
+      .locator('[role="alert"], [role="status"]')
+      .filter({ hasText: /没读成|没查成|刷新没成/ })
       .first();
     await expect(alert).toBeVisible({ timeout: 30_000 });
     await expect(alert).toContainText(/后端出错|出错|500/);
     await expect(alert.getByRole('button', { name: '重试' })).toBeVisible();
+    await expect(page.locator('[data-row-key]').first()).toBeVisible();
     await shot(page, '08-后端500');
   });
 
