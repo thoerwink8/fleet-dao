@@ -19,6 +19,8 @@
 //   resumeSessionId 起，提示词只补被打断的原因。续不上（没会话号、换了执行方式或会话用户或树、没查成）照原来开新会话带
 //   interrupted，原因写进任务进度。判一次就清掉：续起来没跑成的，下一次开新会话。切号、「现在就换」停下的这次不续。
 // - 跑成的这一段记进 rt.lastSession（纯状态）：返工轮由 task.ts 决定续不续它（决定 0093，patched('rework-resume')），续法同上。
+//   CI 红返工（cause=rework_ci，#3603，patched('ci-rework-prefer-route')）：第一次选路把上一段的 routeId 当 preferRouteId 点名，
+//   同一条路由 planSegmentResume 才判得成续（以前每轮返工从空开始重选，落到别的执行方式就开新会话）。这张单要避开的路由不点名。
 // - 单任务 token 预算（决定 0093，patched('task-token-budget')）：每次起会话之前查这张单花掉的 token，超了停下等人（rt.park），
 //   点「继续」再给一份。开工时解析的上限里没有这一项（老历史）就不查；查不成照旧起会话，不挡干活。
 //   只算当前这一代（patched('task-budget-this-generation')）：起算时间是这一代工作流的开工时刻，上一代烧掉的不算进去。
@@ -94,6 +96,7 @@ import {
   AUTO_REDISPATCH_CODES,
   type Avoid,
   afterDispatchProbe,
+  avoidHits,
   bump,
   dispatchProbeBlockedLine,
   dispatchProbeLine,
@@ -181,6 +184,18 @@ export async function writeSession(
     : undefined;
   let unrecognized = ui !== undefined && !ui.recognized ? `（${UI_UNRECOGNIZED_NOTE}）` : '';
   if (unrecognized) rt.set('implement', `动手第 ${rt.round} 轮${unrecognized}`);
+  // CI 红返工粘住上一段的路由（#3603，patched('ci-rework-prefer-route')）：第一次选路点名上一段跑成的那条，
+  // planSegmentResume 比得上执行方式、池、会话用户，才续得上原会话。点名的用不了照常选（选路自己退回）。
+  // 只管这一段的第一次选路：之后的重试、换路由按失败分流走。这张单记着要避开它（轮数用完自动换模型、没提交）的不点名。
+  // 标记只在 CI 红返工、有上一段路由、没被避开时才问，老历史重放为假。
+  const lastRoute = rt.lastImplementRoute;
+  let preferLast =
+    nextCause.cause === 'rework_ci' &&
+    lastRoute !== null &&
+    !avoidHits(rt.commitAvoid, lastRoute) &&
+    patched('ci-rework-prefer-route')
+      ? lastRoute.routeId
+      : undefined;
   for (;;) {
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
     await rt.refreshContract('新动手/续会话派前');
@@ -205,7 +220,9 @@ export async function writeSession(
       authOn ? bare401RouteId : undefined,
       mismatchModel,
       mismatchRoutesDown,
+      preferLast,
     );
+    preferLast = undefined;
     mismatchRoutesDown = false;
     bare401RouteId = undefined;
     failedChannel = undefined;
@@ -864,6 +881,8 @@ async function pickRoute(
    * 也不把刚证实会换模的那条再派出去。不给 = 照旧。新失败的同档重派不置这个标志。
    */
   mismatchRoutesDown = false,
+  /** CI 红返工点名上一段的路由（#3603）：用不了由选路照常选。不给 = 照旧。 */
+  preferRouteId?: string,
 ): Promise<{ route: RouteChoice; probeNote: string | null }> {
   const stage = uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual;
   // 老历史重放时这一支为假：选路参数和原来一样，不多选一次。要写在派前探测那个标记之前，已有历史里的标记顺序才对得上。
@@ -871,7 +890,7 @@ async function pickRoute(
   let round = EMPTY_DISPATCH_PROBE;
   let probeAvoid: string[] = [];
   let stickTo = stick;
-  let prefer: string | undefined;
+  let prefer: string | undefined = preferRouteId;
   let droppedDry = false;
   // 没提交的避让里整族避开的那一层已经去掉（别的族一条都派不出，或只剩等额度、等空位，#2261）：只避开模型再选
   let droppedFamilies = false;
