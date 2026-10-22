@@ -14,6 +14,8 @@ import type {
   DecideFlowModeResult,
   DeliveryRead,
   GuardedPaths,
+  HandBackLocalInput,
+  HandBackLocalResult,
   MergeNowInput,
   MergeNowResult,
   MergeReadyInput,
@@ -101,6 +103,8 @@ export interface Script {
   flow: (input: DecideFlowModeInput, n: number) => DecideFlowModeResult;
   /** 并主线冲突里机械可解的引擎自己解（#3428）。默认没解（declined、无原因）：老用例照旧交给会话。抛了＝活动没做成。 */
   resolveConflict: (input: ResolveConflictInput, n: number) => ResolveConflictResult;
+  /** 总轮数到顶交还本机（#3603）。默认留言、贴标签都成了。抛了＝没做成。 */
+  handBack: (input: HandBackLocalInput, n: number) => HandBackLocalResult;
 }
 
 export interface Calls {
@@ -139,6 +143,8 @@ export interface Calls {
   flow: DecideFlowModeInput[];
   /** 机械解冲突收到的入参。不进 order（老用例比 order 一字不差）。 */
   resolveConflict: ResolveConflictInput[];
+  /** 交还本机收到的入参（#3603）。不进 order（老用例比 order 一字不差）。 */
+  handBack: HandBackLocalInput[];
   /** 每次定模式时已经起过几段会话（第一段动手之前定＝0）。 */
   flowAfterSegments: number[];
 }
@@ -190,6 +196,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     settled: [],
     flow: [],
     resolveConflict: [],
+    handBack: [],
     flowAfterSegments: [],
   };
   const script: Script = {
@@ -213,6 +220,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     settled: () => ({ settled: true }),
     flow: () => ({ mode: 'three', source: 'ineligible', reason: '测试默认三段' }),
     resolveConflict: () => ({ state: 'declined', reason: '' }),
+    handBack: () => ({ commented: true }),
     ...over,
   };
   const bare401 = new Map<string, Bare401Stamp>();
@@ -315,6 +323,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     async resolveConflictMechanically(input) {
       calls.resolveConflict.push(input);
       return script.resolveConflict(input, calls.resolveConflict.length);
+    },
+    async handBackLocal(input) {
+      calls.handBack.push(input);
+      return script.handBack(input, calls.handBack.length);
     },
     async decideFlowMode(input) {
       calls.flowAfterSegments.push(calls.segment.length);

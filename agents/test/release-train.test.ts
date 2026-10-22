@@ -436,7 +436,8 @@ describe('薄壳：递请求、跟着法国进度', () => {
 
 describe('一键预检借 start：只读，发布锁被占着就拒', () => {
   const argv = () => ['start', '--sha', SHA, '--founder-ok', train.ONEKEY_PREFLIGHT_FOUNDER_OK];
-  function gate(opts: { lock: number; ci?: string }) {
+  /** heavy：读 heavy 检查时回什么——不给 = 绿；'none' = 这个提交上没有 heavy 检查；'in_progress' = 还在跑；别的值 = 已完成的结论。 */
+  function gate(opts: { lock: number; ci?: string; heavy?: string }) {
     const { w, io } = world({
       ssh: (cmd) => {
         if (cmd.startsWith('flock')) return { status: opts.lock, stdout: '', stderr: '' };
@@ -451,14 +452,16 @@ describe('一键预检借 start：只读，发布锁被占着就拒', () => {
       scriptsDir: 'scripts',
       run: (command, args) => {
         if (command === 'gh') {
-          return {
-            status: 0,
-            stdout: JSON.stringify({
-              total: 1,
-              runs: [{ status: 'completed', conclusion: opts.ci ?? 'success' }],
-            }),
-            stderr: '',
-          };
+          const isHeavy = args.some((a) => String(a).includes('check_name=heavy'));
+          const h = opts.heavy ?? 'success';
+          const runs = isHeavy
+            ? h === 'none'
+              ? []
+              : h === 'in_progress'
+                ? [{ status: 'in_progress', conclusion: null }]
+                : [{ status: 'completed', conclusion: h }]
+            : [{ status: 'completed', conclusion: opts.ci ?? 'success' }];
+          return { status: 0, stdout: JSON.stringify({ total: runs.length, runs }), stderr: '' };
         }
         if (String(args[0]).endsWith('france.mjs')) {
           return {
@@ -483,6 +486,32 @@ describe('一键预检借 start：只读，发布锁被占着就拒', () => {
     expect(w.out.join('\n')).not.toContain('—— 第 1 步');
     expect(w.out.join('\n')).not.toContain('预检过了');
     expect(w.sshCalls.some((c) => c.includes('request.json'))).toBe(false);
+  });
+
+  /** #3597：heavy（重型 / 不确定测试）不在合并闸里，但被发的提交上它必须是绿的：红了、没跑、还在跑都不发。 */
+  it('【故意造出的失败】check 绿但 heavy 红、没跑、还在跑：预检没过，不说预检过了，不写请求', async () => {
+    for (const [heavy, want] of [
+      ['failure', '重型测试（heavy）是红的'],
+      ['none', '还没有 heavy 检查的结果'],
+      ['in_progress', '重型测试（heavy）还在跑'],
+    ] as const) {
+      const { w, io } = gate({ lock: 0, heavy });
+      const code = await train.runTrain(argv(), io);
+      expect(code, heavy).toBe(2);
+      const text = `${w.out.join('\n')}\n${w.err.join('\n')}`;
+      expect(text, heavy).toContain('预检没过');
+      expect(text, heavy).toContain(want);
+      expect(w.out.join('\n'), heavy).not.toContain('—— 第 1 步');
+      expect(w.sshCalls.some((c) => c.includes('request.json'))).toBe(false);
+    }
+  });
+
+  it('check 红时先报 check 红（heavy 不抢着说）', async () => {
+    const { w, io } = gate({ lock: 0, ci: 'failure', heavy: 'failure' });
+    expect(await train.runTrain(argv(), io)).toBe(2);
+    const text = `${w.out.join('\n')}\n${w.err.join('\n')}`;
+    expect(text).toContain('CI是红的');
+    expect(text).not.toContain('重型测试');
   });
 
   it('锁空着、CI 绿、法国现状认得出：打出法国现状和第 1 步，不写请求', async () => {

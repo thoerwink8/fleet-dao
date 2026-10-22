@@ -526,7 +526,8 @@ describe('任务工作流 · 停下等人', { timeout: 180_000 }, () => {
         const s = await statusUntil(h, parked, '动手 3 轮都不过，停下');
         expect(s.waiting?.detail).toContain('动手 3 轮都没过');
         expect(calls.segment).toHaveLength(6);
-        await h.signal(taskContinueSignal, { by: 'frank' });
+        // 累计 6 轮到了总轮数上限（#3603）：「继续」要带原因才放行
+        await h.signal(taskContinueSignal, { by: 'frank', note: '再看一次 CI' });
         return h.result() as Promise<TaskRun>;
       },
       { tasks },
@@ -550,7 +551,8 @@ describe('任务工作流 · 停下等人', { timeout: 180_000 }, () => {
         expect(s.waiting?.detail).toContain('动手 3 轮都没过');
         expect(calls.segment).toHaveLength(ROUNDS);
         expect(world.count('waitCi')).toBe(ROUNDS);
-        await h.signal(taskContinueSignal, { by: 'frank' });
+        // 累计 6 轮到了总轮数上限（#3603）：「继续」要带原因才放行
+        await h.signal(taskContinueSignal, { by: 'frank', note: 'CI 台修好了' });
         return h.result() as Promise<TaskRun>;
       },
       { tasks },
@@ -2744,7 +2746,8 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
         expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 2);
         for (let time = 0; time < 2; time += 1) {
           const before = calls.segment.length;
-          await h.signal(taskContinueSignal, { by: 'frank' });
+          // 累计过了总轮数上限（#3603）：「继续」要带原因才放行
+          await h.signal(taskContinueSignal, { by: 'frank', note: '再给一段' });
           await waitUntil(
             () => calls.segment.length >= before + MAX_IMPLEMENT_ROUNDS,
             `第 ${time + 1} 次继续后再动手到上限`,
@@ -2759,7 +2762,7 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
           expect(calls.segment).toHaveLength(before + MAX_IMPLEMENT_ROUNDS);
         }
         expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 4);
-        await h.signal(taskContinueSignal, { by: 'frank' });
+        await h.signal(taskContinueSignal, { by: 'frank', note: '再给一段' });
         await waitUntil(
           () =>
             calls.segment.length > MAX_IMPLEMENT_ROUNDS * 4 ||
@@ -3198,7 +3201,8 @@ describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { ti
           true,
         );
         const seen = before.length;
-        await h.signal(taskContinueSignal, { by: 'frank' });
+        // 累计 6 轮到了总轮数上限（#3603）：「继续」要带原因才放行
+        await h.signal(taskContinueSignal, { by: 'frank', note: '避让清掉再试' });
         await waitUntil(() => routePicks(world, task.taskId).length > seen, '继续后再选路');
         const next = routePicks(world, task.taskId)[seen];
         expect(next?.avoidRouteIds).toEqual([]);

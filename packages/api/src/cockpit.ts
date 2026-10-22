@@ -10,6 +10,7 @@ import {
   acceptPoolHoldsWrite,
   BoardResponse,
   continueExhausted,
+  continueNeedsReason,
   DEFAULT_SESSION_EFFORT,
   EnvResponseSchema,
   flowFallbackReason,
@@ -558,6 +559,10 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       case 'resume': {
         const exhausted = continueExhausted(task.stalled?.why);
         if (exhausted) throw new ApiError(409, 'continue_exhausted', exhausted);
+        // 总轮数到顶交还本机（#3603）：不带原因的「继续」工作流不放行，这里先当场拒，不让信号白发
+        const reason = body.reason?.trim() ?? '';
+        const needsReason = continueNeedsReason(task.stalled?.why);
+        if (needsReason && reason === '') throw new ApiError(409, 'continue_needs_reason', needsReason);
         // 诊断型 / diff 外验收条的单不再续上，交回本机（#3602）
         const repo = await store.getRepo(task.repoId);
         if (repo) {
@@ -569,7 +574,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
           );
           if (held) throw new ApiError(409, 'off_diff_hold', held.why);
         }
-        const [cont, wake] = continueSignals(by);
+        const [cont, wake] = continueSignals(by, reason === '' ? undefined : reason);
         if (!cont || !wake) throw new ApiError(500, 'continue_signals', '继续信号没配全');
         signal = cont;
         routeWake = wake;

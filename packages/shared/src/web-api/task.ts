@@ -493,7 +493,11 @@ export const TaskActionRequest = z.discriminatedUnion('action', [
     /** soft（默认）＝手上这一段做完再停；hard＝动手的会话马上停下（继续后原树原分支接着干）。 */
     mode: z.enum(['soft', 'hard']).optional(),
   }),
-  z.object({ action: z.literal('resume') }),
+  z.object({
+    action: z.literal('resume'),
+    /** 为什么继续：总轮数到顶交还本机的停下（#3603）必填，别的停下可不填。随「继续」信号交给工作流。 */
+    reason: z.string().max(500).optional(),
+  }),
   z.object({ action: z.literal('stop'), reason: z.string().max(500).optional() }),
   z.object({ action: z.literal('redo') }),
   z.object({
