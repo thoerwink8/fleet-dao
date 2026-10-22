@@ -66,19 +66,22 @@ async function start(q: string, i: TaskWorkflowInput): Promise<WorkflowHandle> {
 
 const statusOf = (h: WorkflowHandle): Promise<TaskStatus> => h.query(taskStatusQuery);
 
+const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
+
+/**
+ * 单次轮询的上限。默认 20 秒在整套并行（引擎自测一次跑 api 和 engine）时会压线：
+ * 多轮工作流还在往前走，墙钟已经到了。这个文件里的等待用这一档；条件成立就返回，不把通过的用例拖满。
+ */
+const LONG_WAIT_MS = 90_000;
+
 const statusUntil = (
   h: WorkflowHandle,
   check: (s: TaskStatus) => boolean,
   what: string,
   timeoutMs?: number,
-) => pollQuery(() => statusOf(h), check, what, timeoutMs);
+) => pollQuery(() => statusOf(h), check, what, timeoutMs ?? LONG_WAIT_MS);
 
-const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
-
-/** 跑很多轮的用例里单次等待的上限（默认 20 秒在整套并行跑时会压线）。 */
-const LONG_WAIT_MS = 60_000;
-
-describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
+describe('任务工作流 · 走通', { timeout: 180_000 }, () => {
   it('一张单：选路、建树、动手、读交付、推分支、开 PR、等 CI、验收、挂自动合并、等合并、关单、收树', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted();
@@ -294,7 +297,7 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
   });
 });
 
-describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
+describe('任务工作流 · 停下等人', { timeout: 180_000 }, () => {
   it('交代不全：报警、停下，补齐后点「继续」从头再读', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
@@ -689,7 +692,7 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
   });
 });
 
-describe('任务工作流 · 放弃', { timeout: 60_000 }, () => {
+describe('任务工作流 · 放弃', { timeout: 180_000 }, () => {
   it('停着等人时点「放弃」：工作树存档后收，状态记成已叫停，结局是 abandoned', async () => {
     const world = createFakeWorld();
     const { tasks } = scripted({
@@ -788,7 +791,7 @@ describe('任务工作流 · 放弃', { timeout: 60_000 }, () => {
   });
 });
 
-describe('任务工作流 · 【故意造出的失败】不装作做过', { timeout: 60_000 }, () => {
+describe('任务工作流 · 【故意造出的失败】不装作做过', { timeout: 180_000 }, () => {
   it('这个引擎工人没装任务活动（假端口）：停下报警，不往下走、不开 PR', async () => {
     const world = createFakeWorld();
     const i = input();
@@ -828,7 +831,7 @@ describe('任务工作流 · 【故意造出的失败】不装作做过', { time
   });
 });
 
-describe('任务工作流 · 交付和合并的细节', { timeout: 60_000 }, () => {
+describe('任务工作流 · 交付和合并的细节', { timeout: 180_000 }, () => {
   it('提交了一部分、工作树里还留着没提交的改动：不推，意见写明是哪些文件，下一轮提交完再推', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
@@ -981,7 +984,7 @@ describe('任务工作流 · 交付和合并的细节', { timeout: 60_000 }, () 
   });
 });
 
-describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000 }, () => {
+describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 180_000 }, () => {
   it('这会儿验不了、过一会儿就行（没空位）：睡一会儿再验，不停下报人、不算一轮；验过了照常往下', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
@@ -1362,7 +1365,7 @@ function armBudgets(events: readonly unknown[]): { scheduleToClose: number; star
   return out;
 }
 
-describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gate）', { timeout: 120_000 }, () => {
+describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gate）', { timeout: 180_000 }, () => {
   const ORIGIN =
     'GitHub 说 PR 已经满足合并条件，直接合被拒（ci_not_green）：PR #3072 的 CI 在 c38530e 上不是全绿（没跑完：merge-gate）';
   const ARMED: ArmAutoMergeResult = { armed: true, merged: false };
@@ -1986,7 +1989,7 @@ describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gat
   });
 });
 
-describe('任务工作流 · 切号停下动手那一段（org_switch，#59）', { timeout: 60_000 }, () => {
+describe('任务工作流 · 切号停下动手那一段（org_switch，#59）', { timeout: 180_000 }, () => {
   const CAR: RouteChoice = {
     routeId: 'car',
     poolId: 'claude-carpool',
@@ -2136,7 +2139,7 @@ describe('任务工作流 · 切号停下动手那一段（org_switch，#59）',
   });
 });
 
-describe('任务工作流 · model_mismatch 自动换同模型路由，第二次才停下报人', { timeout: 60_000 }, () => {
+describe('任务工作流 · model_mismatch 自动换同模型路由，第二次才停下报人', { timeout: 180_000 }, () => {
   const via = (channelId: string): RouteChoice => ({
     routeId: `r-${channelId}`,
     poolId: `p-${channelId}`,
@@ -2246,7 +2249,7 @@ describe('任务工作流 · model_mismatch 自动换同模型路由，第二次
   });
 });
 
-describe('任务工作流 · 单任务暂停与继续（#820 片 3）', { timeout: 60_000 }, () => {
+describe('任务工作流 · 单任务暂停与继续（#820 片 3）', { timeout: 180_000 }, () => {
   const paused = (s: TaskStatus) => s.phase === 'paused';
   /** 第一次会话挂着，直到放行（或收到取消）；之后的会话直接跑成。 */
   const gated = () => {
@@ -2512,7 +2515,7 @@ describe('任务工作流 · 单任务暂停与继续（#820 片 3）', { timeou
   });
 });
 
-describe('任务工作流 · 现在就换模型（#1216，taskRepin）', { timeout: 60_000 }, () => {
+describe('任务工作流 · 现在就换模型（#1216，taskRepin）', { timeout: 180_000 }, () => {
   const paused = (s: TaskStatus) => s.phase === 'paused';
   /** 第一次会话挂着，直到放行（或收到取消）；之后的会话直接跑成。 */
   const gated = () => {
@@ -2666,7 +2669,7 @@ async function verifyStopDetail(env: TestWorkflowEnvironment, problem: string): 
   return world.alerts.find((alert) => alert.title.includes('验收'))?.detail ?? '';
 }
 
-describe('任务工作流 · 继续后轮数清零、验收停下写明原因（#1404）', { timeout: 60_000 }, () => {
+describe('任务工作流 · 继续后轮数清零、验收停下写明原因（#1404）', { timeout: 180_000 }, () => {
   it('点「继续」后动手和验收轮数从 0 再计，并真的再跑一轮；下一次验收读的是最新正文', async () => {
     expect(MAX_IMPLEMENT_ROUNDS).toBe(3);
     expect(MAX_VERIFY_ROUNDS).toBe(2);
@@ -2886,7 +2889,7 @@ function failingProbe(passAfter: string | null): {
   return { jobs: { routeProbe: () => deps }, probed: () => probed };
 }
 
-describe('任务工作流 · 派前探测（#1409）', { timeout: 60_000 }, () => {
+describe('任务工作流 · 派前探测（#1409）', { timeout: 180_000 }, () => {
   it('探不通就换下一条，会话的返工意见写明换到谁，并在再选之前放掉没派的那条预占', async () => {
     const world = createFakeWorld({ routes: PROBE_ROUTES });
     const { tasks, calls } = scripted();
@@ -3030,7 +3033,7 @@ function routePicks(world: ReturnType<typeof createFakeWorld>, taskId?: string):
     .filter((pick) => taskId === undefined || pick.taskId === taskId);
 }
 
-describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { timeout: 60_000 }, () => {
+describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { timeout: 180_000 }, () => {
   it('第 1 轮没有提交：第 2 轮选路避开那条路由，不避开模型；下一张单不受影响', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({ delivery: deliveryAfterMisses(1) });
@@ -3209,7 +3212,7 @@ describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { ti
   });
 });
 
-describe('任务工作流 · 验收责任（#3037）：合并不等于关单', { timeout: 60_000 }, () => {
+describe('任务工作流 · 验收责任（#3037）：合并不等于关单', { timeout: 180_000 }, () => {
   const FIELD = ['现场 add/check 五条', '线上数据核对'];
 
   it('验收过了、带「不归我验」：照常挂自动合并、合并；不关单，验收责任连 PR、头、合并回执记下，PR 说明改 Refs', async () => {
