@@ -403,10 +403,17 @@ describe('real/park-triage', () => {
       return { task, oldDuty, currentDuty };
     }
 
-    const liveAcceptance = (answer: string, sessions: { n: number }) => {
+    const liveAcceptance = (
+      answer: string,
+      sessions: { n: number },
+      pull?: { number: number; merged: boolean; headSha: string },
+    ) => {
       const base = parkTriageJob({
         db: t.db,
-        gh: { readIssueState: async () => ({ state: 'open' }) } as never,
+        gh: {
+          readIssueState: async () => ({ state: 'open' }),
+          claims: { readPull: async () => pull ?? Promise.reject(new Error('测试里没读到 PR')) },
+        } as never,
         trees: {} as never,
         exec: {} as never,
         tmpDir: '/tmp/none',
@@ -557,6 +564,15 @@ describe('real/park-triage', () => {
         ]),
         { n: 0 },
       );
+      // 真装配的读方暂时分不出义务来源（见下一条）；这里换成确定的可信读证，只测真实 CAS 结清
+      d.acceptanceTrustedRead = async (_task, duty) => ({
+        dutyId: duty.id,
+        generation: duty.generation,
+        prNumber: duty.prNumber,
+        head: duty.head,
+        mergedHead: duty.head,
+        items: duty.items.map((item) => ({ item, need: 'platform' as const, got: 'platform' as const })),
+      });
       const out = await triageParkedTasks(d);
       expect(out.acted).toEqual([
         { ref: `acme/app#7/duty-${currentDuty.id}`, action: 'continue', source: 'verdict' },
@@ -572,6 +588,36 @@ describe('real/park-triage', () => {
       expect(notice?.body).toMatch(new RegExp(`duty ${currentDuty.id}[^\\n]*已按裁决收口`));
       expect(notice?.body).toMatch(new RegExp(`duty ${oldDuty.id}[^\\n]*仍未收口`));
       expect(out.problems).toEqual([]);
+    });
+
+    it('真装配的读证：现读 GitHub 得到实际已合的头，但义务来源分不出，所以不结清（#3579）', async () => {
+      const { task, currentDuty } = await seedOldHeadOpen({ alsoOpenCurrent: true });
+      const answer = fence([
+        verdictOf(currentDuty, { action: 'settle', evidence: '责任行 mergeCommit 与 CI 全绿' }),
+      ]);
+      const d = liveAcceptance(answer, { n: 0 }, { number: 8, merged: true, headSha: HEAD });
+      const read = await d.acceptanceTrustedRead?.(
+        { owner: 'acme', name: 'app' } as never,
+        currentDuty as never,
+      );
+      expect(read).toMatchObject({ dutyId: currentDuty.id, head: HEAD, mergedHead: HEAD });
+      expect(read?.items).toEqual([{ item: '现场审计', need: 'unknown', got: 'unknown' }]);
+      // PR 没合：mergedHead 为 null
+      const open = liveAcceptance(answer, { n: 0 }, { number: 8, merged: false, headSha: HEAD });
+      expect(
+        (await open.acceptanceTrustedRead?.({ owner: 'acme', name: 'app' } as never, currentDuty as never))
+          ?.mergedHead,
+      ).toBeNull();
+      const out = await triageParkedTasks(d);
+      expect(out.acted).toEqual([]);
+      expect((await dutyOf(currentDuty.id))?.settledAt).toBeNull();
+      expect(out.retrying).toEqual([{ ref: 'acme/app#7', why: expect.stringContaining('读方分不出') }]);
+      expect((await noticeOf(task.id))?.level).toBe('alert');
+      // GitHub 读不到：同样不结清
+      const broken = liveAcceptance(answer, { n: 0 });
+      expect((await triageParkedTasks(broken)).retrying).toEqual([
+        { ref: 'acme/app#7', why: expect.stringContaining('可信读证读取失败') },
+      ]);
     });
 
     it('主线头读不到：认领被抵销、下一轮再看，不静默吞掉', async () => {

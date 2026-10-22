@@ -38,7 +38,9 @@ import { z } from 'zod';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../commander-contract.ts';
 import {
   type AcceptanceFounderFact,
+  type AcceptanceTrustedRead,
   type AcceptanceVerdictCheck,
+  acceptanceSettleTrustProblem,
   allowedActions,
   COMMANDER_ACTION_WORDS,
   type CommanderAction,
@@ -377,6 +379,14 @@ export interface ParkTriageDeps {
     ok: boolean;
     error?: string;
   }) => Promise<void>;
+  /**
+   * settle 的可信读证（#3579）：引擎自己只读核「这个 PR 实际已合的 head」和每条原文义务的来源/范围。
+   * 没装配或读不到＝不能 settle（机读缺口、走有界重试），模型自述不能代替它。
+   */
+  acceptanceTrustedRead?: (
+    task: CommanderAcceptanceTask,
+    duty: AcceptanceDutyRow,
+  ) => Promise<AcceptanceTrustedRead>;
   settleAcceptance?: (input: {
     task: CommanderAcceptanceTask;
     duty: AcceptanceDutyRow;
@@ -690,6 +700,7 @@ export function renderAcceptanceTriagePrompt(input: {
     'leave：证据仍缺（包括本会话自己读不到法国 journal、数据库、Temporal 等证据：你没有这些读取能力、也拿不到任何凭据），humanOnly 写清缺什么。',
     'leave 不会把责任转给创始人：是否只有创始人能提供证据，只由引擎自己的可信来源认定；你自述的说明不算。没有可信来源时引擎保留这条责任并下一轮重试，不要编造证据。',
     '单仍开着、PR 合并回执和责任代次都会由引擎复核；不要把 leave 当成结清。',
+    'settle 还要过引擎自己的只读读证：PR 实际已合的 head 必须就是这条责任的 head，每条验收项都要有来源一致的可信读证；你写的 evidence、责任行上的合并回执、PR 正文自述、CI 结果都不能代替。读证不足引擎会保留责任重试，不会结清。',
     '',
     '要处理的责任：',
     '',
@@ -1282,6 +1293,25 @@ async function triageAcceptanceRepo(
         continue;
       }
       const action = checked.action;
+      if (action === 'settle') {
+        // 结清只认引擎可信读方：实际已合的 head 要等于责任 head，每条原文义务都要有来源一致的读证。
+        // 模型 evidence、责任行 mergeCommit、PR 自述、CI 结果都不算；读不到/不全是机读缺口，不调结清口子。
+        let trust: AcceptanceTrustedRead | undefined;
+        let problem: string | undefined;
+        if (!deps.acceptanceTrustedRead) problem = '引擎没有可信读证来源（未装配），不能结清';
+        else {
+          try {
+            trust = await deps.acceptanceTrustedRead(task, duty);
+            problem = acceptanceSettleTrustProblem(duty, trust);
+          } catch (err) {
+            problem = `可信读证读取失败：${errMessage(err)}`;
+          }
+        }
+        if (problem !== undefined) {
+          unverified.push(`${ref} duty ${duty.id}：读证不足，未结清（${problem}）`);
+          continue;
+        }
+      }
       const reason = `${verdict.reason}（引擎核对放行「${action}」）`;
       try {
         await deps.acceptanceAudit?.({ task, duty, action, reason, ok: true });

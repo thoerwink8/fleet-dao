@@ -5,7 +5,12 @@
 import type { AcceptanceDutyRow, CommanderAcceptanceTask } from '@fleet-dao/db';
 import { describe, expect, it, vi } from 'vitest';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
-import { allowedActions, defaultAction } from '../src/decisions/park-triage.ts';
+import {
+  type AcceptanceTrustedRead,
+  acceptanceSettleTrustProblem,
+  allowedActions,
+  defaultAction,
+} from '../src/decisions/park-triage.ts';
 import type { SpinRound } from '../src/decisions/spin.ts';
 import type { GroomSessionOutcome } from '../src/jobs/groom.ts';
 import type { IntakeRepo } from '../src/jobs/intake.ts';
@@ -83,6 +88,21 @@ const acceptanceTask = (duties: AcceptanceDutyRow[] = [acceptanceDuty()]): Comma
   mergeCommit: ACCEPTANCE_MERGE,
   duties,
 });
+
+/** 可信读方的正例（#3579）：实际已合的 head 就是责任 head，每条原文义务都是 platform 来源且读到了。 */
+const trustedRead = (
+  duty: AcceptanceDutyRow,
+  over: Partial<AcceptanceTrustedRead> = {},
+): AcceptanceTrustedRead => ({
+  dutyId: duty.id,
+  generation: duty.generation,
+  prNumber: duty.prNumber,
+  head: duty.head,
+  mergedHead: duty.head,
+  items: duty.items.map((item) => ({ item, need: 'platform' as const, got: 'platform' as const })),
+  ...over,
+});
+const trustedReadOk = async (_task: CommanderAcceptanceTask, duty: AcceptanceDutyRow) => trustedRead(duty);
 
 const snap = (kind: ParkKind, over: Partial<NonNullable<ParkedSnapshot['park']>> = {}): ParkedSnapshot => ({
   phase: 'parked',
@@ -303,6 +323,7 @@ describe('合并后的验收责任交给指挥官', () => {
         acceptanceTasks: async () => [acceptanceTask()],
         claimAcceptance: vi.fn(async () => {}),
         acceptanceAudit: vi.fn(async () => {}),
+        acceptanceTrustedRead: trustedReadOk,
         ...over,
       },
     });
@@ -491,6 +512,7 @@ describe('合并后的验收责任交给指挥官', () => {
               ok,
             });
           },
+          acceptanceTrustedRead: trustedReadOk,
           settleAcceptance: vi.fn(async () => {}),
           supersedeAcceptance: vi.fn(async () => {}),
           closeAcceptanceTask: vi.fn(async () => {}),
@@ -2023,5 +2045,175 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
     const next = rig({ audits: r.audits, over: GONE });
     await triageParkedTasks(next.deps);
     expect(next.resumed).toEqual([{ phase: 'stop-requested', canStart: true }]);
+  });
+});
+
+// —— #3579：自动 settle 绑定实际已合的头和逐项可信读证 ——
+describe('自动结清要有可信读证（#3579）', () => {
+  const OLD_HEAD = 'c'.repeat(40);
+  const PLATFORM = '最终头平台检查全绿';
+  const HISTORY = '没有操作过历史工作树和运行会话';
+  const RANGE = { from: '2026-10-20T00:00:00Z', to: '2026-10-22T00:00:00Z' };
+  const platformOk = { item: PLATFORM, need: 'platform', got: 'platform' } as const;
+  const settleAnswer = (duty: AcceptanceDutyRow) =>
+    fence({
+      summary: '按证据核过',
+      acceptanceVerdicts: [
+        {
+          issue: 3296,
+          dutyId: duty.id,
+          generation: duty.generation,
+          prNumber: duty.prNumber,
+          head: duty.head,
+          action: 'settle',
+          reason: '逐条核对后的结论',
+          evidence: 'CI 全绿；PR 正文明说不触碰历史工作树和运行会话',
+        },
+      ],
+    });
+  type TrustedReader = NonNullable<ParkTriageDeps['acceptanceTrustedRead']>;
+  const setup = (duty: AcceptanceDutyRow, read: TrustedReader | 'unwired') => {
+    const settle = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+    const retry = vi.fn(async () => {});
+    const r = rig({
+      answer: settleAnswer(duty),
+      over: {
+        tasks: async () => [],
+        acceptanceTasks: async () => [acceptanceTask([duty])],
+        claimAcceptance: vi.fn(async () => {}),
+        acceptanceAudit: vi.fn(async () => {}),
+        acceptanceRetry: retry,
+        settleAcceptance: settle,
+        closeAcceptanceTask: close,
+        ...(read === 'unwired' ? {} : { acceptanceTrustedRead: read }),
+      },
+    });
+    return { r, settle, close, retry };
+  };
+  /** 修后：不调结清口子、不关单，责任保持 open，记一次 unverified 重试（复用既有有界预算），不转人。 */
+  const expectHeld = async (s: ReturnType<typeof setup>, why: RegExp) => {
+    const out = await triageParkedTasks(s.r.deps);
+    expect(s.settle).not.toHaveBeenCalled();
+    expect(s.close).not.toHaveBeenCalled();
+    expect(out.acted).toEqual([]);
+    expect(out.left).toEqual([]);
+    expect(out.retrying).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', why: expect.stringMatching(why) }]);
+    expect(s.retry).toHaveBeenCalledWith(expect.objectContaining({ cause: 'unverified' }));
+    expect(s.r.notices.filter((n) => n.level === 'decision')).toEqual([]);
+  };
+
+  it('旧责任 head + 被回填的最终 mergeCommit + 最终头 CI 齐绿：实际已合的是最终头，不结清', async () => {
+    const duty = acceptanceDuty({ head: OLD_HEAD, mergeCommit: ACCEPTANCE_MERGE, items: [PLATFORM] });
+    const s = setup(duty, async (_t, d) => trustedRead(d, { mergedHead: ACCEPTANCE_HEAD }));
+    await expectHeld(s, /实际已合的 head 是 a+，不是这条责任的 c+/);
+  });
+
+  it('可信读方没读到 PR 已合（mergedHead=null）：不结清', async () => {
+    const duty = acceptanceDuty({ items: [PLATFORM] });
+    await expectHeld(
+      setup(duty, async (_t, d) => trustedRead(d, { mergedHead: null })),
+      /没读到该 PR 已合并的 head/,
+    );
+  });
+
+  it('责任含平台与运行历史两个义务，读证只有平台事实：不结清', async () => {
+    const duty = acceptanceDuty({ items: [PLATFORM, HISTORY] });
+    // 读方只给了平台那一项；运行历史义务没有读证
+    await expectHeld(
+      setup(duty, async (_t, d) => trustedRead(d, { items: [platformOk] })),
+      /没有唯一的可信读证/,
+    );
+    // 两项都在，但运行历史义务只拿到平台来源（CI/PR 自述不能顶替）
+    await expectHeld(
+      setup(duty, async (_t, d) =>
+        trustedRead(d, { items: [platformOk, { item: HISTORY, need: 'run-history', got: 'platform' }] }),
+      ),
+      /需要 run-history 来源，读证只有 platform/,
+    );
+  });
+
+  it('运行记录来源读取失败、缺时间范围、范围无效、读方分不出类别：不结清', async () => {
+    const duty = acceptanceDuty({ items: [PLATFORM, HISTORY] });
+    const withHistory =
+      (history: AcceptanceTrustedRead['items'][number]): TrustedReader =>
+      async (_t, d) =>
+        trustedRead(d, { items: [platformOk, history] });
+    const cases: [TrustedReader, RegExp][] = [
+      [
+        async () => {
+          throw new Error('运行记录库连不上');
+        },
+        /可信读证读取失败：运行记录库连不上/,
+      ],
+      [withHistory({ item: HISTORY, need: 'run-history', got: 'unknown' }), /读取失败或没有/],
+      [withHistory({ item: HISTORY, need: 'run-history', got: 'run-history' }), /缺有效的时间范围/],
+      [
+        withHistory({
+          item: HISTORY,
+          need: 'run-history',
+          got: 'run-history',
+          range: { from: RANGE.to, to: RANGE.from },
+        }),
+        /缺有效的时间范围/,
+      ],
+      [
+        withHistory({ item: HISTORY, need: 'unknown', got: 'run-history', range: RANGE }),
+        /读方分不出需要哪类来源/,
+      ],
+    ];
+    for (const [read, why] of cases) await expectHeld(setup(duty, read), why);
+  });
+
+  it('可信读证没装配、绑定的身份对不上：不结清', async () => {
+    const duty = acceptanceDuty({ items: [PLATFORM] });
+    await expectHeld(setup(duty, 'unwired'), /未装配/);
+    await expectHeld(
+      setup(duty, async (_t, d) => trustedRead(d, { head: OLD_HEAD })),
+      /与现读不符/,
+    );
+    await expectHeld(
+      setup(duty, async (_t, d) => trustedRead(d, { generation: 2 })),
+      /与现读不符/,
+    );
+  });
+
+  it('正例：已合头就是责任头，平台与运行历史义务各有来源一致的读证且带范围：结清并关单', async () => {
+    const duty = acceptanceDuty({ items: [PLATFORM, HISTORY] });
+    const s = setup(duty, async (_t, d) =>
+      trustedRead(d, {
+        items: [platformOk, { item: HISTORY, need: 'run-history', got: 'run-history', range: RANGE }],
+      }),
+    );
+    const out = await triageParkedTasks(s.r.deps);
+    expect(s.settle).toHaveBeenCalledTimes(1);
+    expect(s.close).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 't-acceptance' }),
+      ACCEPTANCE_MERGE,
+    );
+    expect(out.acted).toHaveLength(1);
+    expect(s.retry).not.toHaveBeenCalled();
+  });
+
+  it('正例：只有平台义务的最终头责任，平台读证足够：结清', async () => {
+    const duty = acceptanceDuty({ items: [PLATFORM] });
+    const s = setup(duty, async (_t, d) => trustedRead(d));
+    await triageParkedTasks(s.r.deps);
+    expect(s.settle).toHaveBeenCalledTimes(1);
+  });
+
+  it('核对函数只看读证：没有读证、没有验收项、同义务重复读证都不放行', () => {
+    const duty = acceptanceDuty({ items: [PLATFORM, HISTORY] });
+    expect(acceptanceSettleTrustProblem(duty, undefined)).toMatch(/没有可信读证/);
+    const bare = acceptanceDuty({ items: [] });
+    expect(acceptanceSettleTrustProblem(bare, trustedRead(bare))).toMatch(/没有验收项/);
+    const dup = trustedRead(duty, {
+      items: [
+        platformOk,
+        platformOk,
+        { item: HISTORY, need: 'run-history', got: 'run-history', range: RANGE },
+      ],
+    });
+    expect(acceptanceSettleTrustProblem(duty, dup)).toMatch(/有 2 项/);
   });
 });
