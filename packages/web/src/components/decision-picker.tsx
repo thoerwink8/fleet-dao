@@ -1,20 +1,21 @@
-// 「要你拍」的选项区（#1915；#2353 起直接摆在卡上）：通知中心的「要你拍」和看门狗提醒里要本人拍的修复动作（#3034）共用这一份。
-import { ChevronRight, Send } from 'lucide-react';
+// 「要你拍」的选项区（#1915；#2353 起直接摆在详情里）：通知中心的「要你拍」和看门狗提醒里要本人拍的修复动作（#3034）共用这一份。
+// #3533 照样稿 Inbox.dc.html：一个选项一行——左边按钮（推荐的描边、别的灰底），中间一句真实效果和推荐理由，右边「推荐」「上次选的」标；
+// 下面是「都不合适？自己写一句」的多行框加「提交」，框下一行灰字写自己写的去向（effect）。没有选项的只给输入框。
+// 一块只有一个主按钮：这里没有主按钮，提交是灰底次按钮。页面只拼 components/layout 的件。
+import { Send } from 'lucide-react';
 import type { DecisionOption } from '../api/types';
+import { Button } from './layout/button';
+import { Form, FormItem } from './layout/form';
+import { Textarea } from './layout/input';
+import { List, ListRow } from './layout/list';
+import { Section } from './layout/section';
+import { Stack } from './layout/stack';
 import { Tag } from './layout/tag';
-import { Button } from './ui/button';
-import { Input } from './ui/input';
+import { Text } from './layout/text';
 
 /** 回答一条「要你拍」：点一个选项，或自己写一段。 */
 export type AnswerInput = { optionId: string } | { text: string };
 
-/**
- * 选一个或写一句，系统照着做。
- * 一个选项一行，整行就是按钮，点一下就是拍板；行里是选项的字（推荐的那项带「推荐」标，上次选过的带「上次选的」）
- * 和一句真实效果、推荐的写理由。md 起字和说明同一行、说明左对齐成一列；手机上整行占满、字在上说明在下，可点区至少 44 高。
- * 几项装在一个细框里、项间一根细线（系统设置的单选组），不一个个画框。下面是「自己写一句」的框加「提交」，
- * 框下一行灰字写自己写的去向（effect）。没有选项的只给输入框。
- */
 export function DecisionPicker({
   id,
   options,
@@ -30,7 +31,7 @@ export function DecisionPicker({
   /** 上次选的那项（带「上次选的」）。 */
   lastOptionId?: string | undefined;
   pending: boolean;
-  /** 自己写的草稿放在行上：答了没做成、再答时还在。 */
+  /** 自己写的草稿放在详情上：答了没做成、再答时还在。 */
   text: string;
   onText: (text: string) => void;
   onAnswer: (input: AnswerInput) => void;
@@ -38,65 +39,79 @@ export function DecisionPicker({
   effect: string;
 }) {
   const trimmed = text.trim();
+  const blocked = pending ? '正在提交，等它回话' : trimmed ? undefined : '先写一句再提交';
   return (
-    <div id={id} className="mt-3 space-y-2.5 md:max-w-3xl" data-testid="decision-picker">
-      {options.length > 0 ? (
-        <ul className="divide-y divide-border rounded-md border" aria-label="选一个">
-          {options.map((o) => (
-            <li key={o.id}>
-              <button
-                type="button"
-                aria-label={o.label}
-                aria-describedby={`${id}-${o.id}`}
-                disabled={pending}
-                onClick={() => onAnswer({ optionId: o.id })}
-                data-option={o.id}
-                className="group flex min-h-10 w-full flex-col gap-0.5 px-3 py-2 text-left outline-none first:rounded-t-md last:rounded-b-md hover:bg-st-human-soft focus-visible:ring-focus focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 max-md:min-h-11 md:flex-row md:items-baseline md:gap-4"
-              >
-                <span className="flex shrink-0 flex-wrap items-center gap-1.5 text-body font-medium md:w-56">
-                  {o.label}
-                  {o.recommended ? <Tag tone="brand">推荐</Tag> : null}
-                  {lastOptionId === o.id ? <Tag tone="stop">上次选的</Tag> : null}
-                </span>
-                <span id={`${id}-${o.id}`} className="min-w-0 flex-1 text-meta text-muted-foreground">
-                  {o.detail}
-                  {o.recommended ? <span className="text-foreground">。{o.recommended}</span> : null}
-                </span>
-                <ChevronRight
-                  className="hidden size-4 shrink-0 self-center text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 md:block"
-                  aria-hidden
-                />
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      <div>
-        <form
-          className="flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (trimmed) onAnswer({ text: trimmed });
+    <Section variant="plain" id={id} data-testid="decision-picker">
+      <Stack gap="md">
+        {options.length > 0 ? (
+          <List aria-label="选一个">
+            {options.map((o) => (
+              <ListRow
+                key={o.id}
+                summary={
+                  <Stack direction="horizontal" gap="md" align="start" wrap>
+                    <Button
+                      size="sm"
+                      variant={o.recommended ? 'outline' : 'secondary'}
+                      aria-label={o.label}
+                      aria-describedby={`${id}-${o.id}`}
+                      {...(pending ? { disabledReason: '正在提交，等它回话' } : {})}
+                      onClick={() => onAnswer({ optionId: o.id })}
+                    >
+                      {o.label}
+                    </Button>
+                    <Stack gap="sm">
+                      <Text id={`${id}-${o.id}`} size="meta" tone="muted">
+                        {o.detail}
+                      </Text>
+                      {o.recommended ? (
+                        <Text size="meta" tone="muted">
+                          推荐理由：{o.recommended}
+                        </Text>
+                      ) : null}
+                    </Stack>
+                    {o.recommended ? <Tag>推荐</Tag> : null}
+                    {lastOptionId === o.id ? <Tag>上次选的</Tag> : null}
+                  </Stack>
+                }
+              />
+            ))}
+          </List>
+        ) : null}
+        <Form
+          onSubmit={() => {
+            if (trimmed && !pending) onAnswer({ text: trimmed });
           }}
         >
-          <Input
-            aria-label="自己写一句"
-            placeholder={options.length > 0 ? '都不合适？自己写一句' : '写你的决定'}
-            value={text}
-            maxLength={2000}
-            disabled={pending}
-            onChange={(e) => onText(e.target.value)}
-            className="min-w-0 flex-1"
-          />
-          <Button type="submit" size="sm" variant="outline" disabled={pending || !trimmed}>
-            <Send aria-hidden />
-            提交
-          </Button>
-        </form>
-        <p className="mt-1.5 text-meta text-muted-foreground" data-testid="custom-effect">
-          {effect}
-        </p>
-      </div>
-    </div>
+          <FormItem
+            label={options.length > 0 ? '都不合适？自己写一句' : '写你的决定'}
+            layout="vertical"
+            htmlFor={`${id}-free`}
+            help={effect}
+          >
+            <Textarea
+              id={`${id}-free`}
+              aria-label="自己写一句"
+              placeholder="写一句，交给指挥官去办"
+              value={text}
+              maxLength={2000}
+              disabled={pending}
+              onChange={(e) => onText(e.target.value)}
+            />
+          </FormItem>
+          <Stack direction="horizontal" gap="sm">
+            <Button
+              type="submit"
+              size="sm"
+              {...(blocked ? { disabledReason: blocked } : {})}
+              loading={pending}
+            >
+              <Send aria-hidden />
+              提交
+            </Button>
+          </Stack>
+        </Form>
+      </Stack>
+    </Section>
   );
 }

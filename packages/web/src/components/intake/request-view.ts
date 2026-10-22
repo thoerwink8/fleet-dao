@@ -7,50 +7,45 @@ import {
   isIdleCloseReason,
   type RequestActions,
   type RequestRow,
-  type RequestStatus,
   type RequestWaiting,
 } from '@fleet-dao/shared';
 import type { RequestDetail } from '../../api/types';
-import type { LayoutTone } from '../layout/tone';
+import { type StatusKey, statusEntry } from '../../theme/status-dict';
 
 export interface StatusView {
-  tone: LayoutTone;
+  /** 状态字典的键（画状态点和字用 <StatusBadge status=…>）。 */
+  status: StatusKey;
   /** 完整说法（列表悬停、头部悬停）。 */
   label: string;
-  /** 头部小标签的短写。 */
-  short: string;
 }
-
-const SHORT: Record<RequestStatus, string> = {
-  discussing: '讨论中',
-  pending_decision: '待拍板',
-  closed_do: '已结案',
-  closed_drop: '已结案',
-};
 
 /** 状态：讨论中、待拍板、已结案·不做；已结案·做之后跟着开出的单子走（单子状态由 B 片从 GitHub 接）。收口和「不做」同一个状态，靠原因那句认。 */
 export function statusView(
   r: Pick<RequestRow, 'status' | 'issueRefs'> & { closeReason?: string | undefined },
 ): StatusView {
-  const short = SHORT[r.status];
-  if (r.status === 'discussing') return { tone: 'wait', label: '讨论中', short };
-  if (r.status === 'pending_decision') return { tone: 'human', label: '待拍板', short };
+  const pick = (status: StatusKey, label = statusEntry(status).label): StatusView => ({ status, label });
+  if (r.status === 'discussing') return pick('request:request:discussing');
+  if (r.status === 'pending_decision') return pick('request:request:pending_decision');
   if (r.status === 'closed_drop' && isIdleCloseReason(r.closeReason))
-    return { tone: 'stall', label: '收口', short: '收口' };
-  if (r.status === 'closed_drop') return { tone: 'stop', label: '已结案·不做', short };
+    return pick('request:request:idle_close');
+  if (r.status === 'closed_drop') return pick('request:request:closed_drop', '已结案·不做');
   const refs = r.issueRefs;
-  if (refs.length === 0) return { tone: 'run', label: '已结案·做 · 等开单', short };
-  if (refs.every((i) => i.state === 'deployed')) return { tone: 'done', label: '已结案·做 · 已上线', short };
+  const done = (status: StatusKey) => pick(status, `已结案·做 · ${statusEntry(status).label}`);
+  if (refs.length === 0) return done('request:request:awaiting_issue');
+  if (refs.every((i) => i.state === 'deployed')) return done('request:request:deployed');
   if (refs.every((i) => i.state === 'deployed' || i.state === 'merged'))
-    return { tone: 'done', label: '已结案·做 · 已合并', short };
-  if (refs.every((i) => i.state === 'closed')) return { tone: 'stop', label: '已结案·做 · 单子关了', short };
-  return { tone: 'run', label: '已结案·做 · 在做', short };
+    return done('request:request:merged');
+  if (refs.every((i) => i.state === 'closed')) return done('request:request:issues_closed');
+  return done('request:request:doing');
 }
 
-const ISSUE_STATE_WORDS = { open: '开着', merged: '已合并', deployed: '已上线', closed: '关了' } as const;
+/** 开出的单子在 GitHub 上的状态（字典里 request 域的 issue:*）。 */
+export function issueStatus(state: 'open' | 'merged' | 'deployed' | 'closed'): StatusKey {
+  return `request:issue:${state}`;
+}
 
-export function issueStateWord(state: keyof typeof ISSUE_STATE_WORDS): string {
-  return ISSUE_STATE_WORDS[state];
+export function issueStateWord(state: 'open' | 'merged' | 'deployed' | 'closed'): string {
+  return statusEntry(issueStatus(state)).label;
 }
 
 export function waitingLabel(w: RequestWaiting): string {

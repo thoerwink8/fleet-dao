@@ -82,7 +82,7 @@ describe('列表', () => {
     expect(row(41)?.textContent).toContain('搁置 16 天');
     expect(row(31)?.textContent).toContain('#12');
     expect(row(45)?.textContent).toContain('fxc188：跟着顶栏也行');
-    expect(row(31)?.querySelector('[aria-label="置顶"]')).not.toBeNull();
+    expect(row(31)?.textContent).toContain('置顶');
     // 已归档、最近删除的不在进行中
     expect(seqs).not.toContain(30);
     expect(seqs).not.toContain(28);

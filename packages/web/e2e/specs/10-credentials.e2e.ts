@@ -16,6 +16,9 @@ test.describe('设置页：账密登录', () => {
     await page.goto('/settings');
     await expect(page.getByRole('heading', { name: '账密登录' })).toBeVisible();
     await expect(page.getByText(/已设账密：用户名/)).toContainText(stack.facts.username);
+    // 设过账密时平时只写现状，点「改账密」才展开表单
+    await expect(page.getByRole('form', { name: '改账密' })).toHaveCount(0);
+    await page.getByRole('button', { name: '改账密' }).click();
     const form = page.getByRole('form', { name: '改账密' });
     await expect(form.getByLabel('当前密码', { exact: true })).toHaveAttribute(
       'autocomplete',
@@ -39,6 +42,7 @@ test.describe('设置页：账密登录', () => {
     // 后端回 401（bad_current_password）是预期里的
     for (const s of ['HTTP 401', 'status of 401']) problems.allow(s);
     await page.goto('/settings');
+    await page.getByRole('button', { name: '改账密' }).click();
     const form = page.getByRole('form', { name: '改账密' });
     await form.getByLabel('当前密码', { exact: true }).fill('definitely-not-it-1');
     await form.getByLabel(/^新密码/).fill(NEW_PASSWORD);
@@ -76,6 +80,7 @@ test.describe('设置页：账密登录', () => {
       // 在路上的读取一律 401——页面会用新 Cookie 再读一次（useUpdateCredentials），但这里会把那一下当成失败请求。
       // 真人不会在页面打开 0.4 秒内点保存。
       await page.waitForLoadState('networkidle');
+      await page.getByRole('button', { name: '改账密' }).click();
       const form = page.getByRole('form', { name: '改账密' });
       await form.getByLabel('当前密码', { exact: true }).fill(stack.facts.password);
       await form.getByLabel(/^新密码/).fill(NEW_PASSWORD);

@@ -45,4 +45,20 @@ describe('Grid', () => {
     expect(a?.className).toContain('lg:w-90');
     expect(b?.className).toContain('lg:flex-1');
   });
+
+  test('preset=side：左边一列页内导航（定宽、贴顶），右边各节撑满；窄屏叠起来', () => {
+    const { container } = render(
+      <Grid preset="side">
+        <p>导航</p>
+        <p>各节</p>
+      </Grid>,
+    );
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.dataset.preset).toBe('side');
+    expect(root.className).toContain('grid-cols-1');
+    expect(root.className).toContain('lg:grid-cols-settings-shell');
+    expect(root.className).toContain('items-start');
+    expect(screen.getByText('导航').parentElement?.parentElement).toBe(root);
+    expect(screen.getByText('各节').parentElement?.parentElement).toBe(root);
+  });
 });

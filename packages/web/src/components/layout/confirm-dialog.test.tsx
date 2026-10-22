@@ -87,4 +87,18 @@ describe('ConfirmDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '删除' }));
     expect(await screen.findByText('删掉它？')).toBeTruthy();
   });
+
+  test('children 摆在说明下面（原因输入框这类）；confirmDisabled 时确定键点不了', () => {
+    const onConfirm = vi.fn(async () => {});
+    render(
+      <ConfirmDialog open title="改成全程？" confirmDisabled onConfirm={onConfirm}>
+        <input aria-label="原因" />
+      </ConfirmDialog>,
+    );
+    expect(screen.getByLabelText('原因')).toBeTruthy();
+    const ok = screen.getByRole('button', { name: '确定' }) as HTMLButtonElement;
+    expect(ok.disabled).toBe(true);
+    fireEvent.click(ok);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
 });

@@ -13,20 +13,20 @@ test.describe('通知中心', () => {
   test('库里的提醒按级别分开数：要你拍 2、卡住报警 2、日报 1；未处理的在前', async ({ page, shot }) => {
     await page.goto('/notifications');
     await expect(page.getByRole('heading', { name: '通知中心' })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^全部 5$/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^要你拍 2$/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^卡住报警 2$/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^日报 1$/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^全部 5$/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^要你拍 2$/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^卡住报警 2$/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^日报 1$/ })).toBeVisible();
     await expect(page.getByText('任务 12 卡住了')).toBeVisible();
     await expect(page.getByText('额度读数 35 分钟没更新')).toBeVisible();
-    // 「谁在处理」：库里没有认领的，明说没人在修，不留空
+    // 「谁在处理」：库里没有认领的，明说没人在修，不留空（列表行尾一个状态，点开后详情里再写一遍）
     await expect(page.getByText('没人在修').first()).toBeVisible();
     await shot(page, '06-通知中心');
   });
 
   test('按级别筛选：点「卡住报警」只剩那两条', async ({ page }) => {
     await page.goto('/notifications');
-    await page.getByRole('button', { name: /^卡住报警 2$/ }).click();
+    await page.getByRole('tab', { name: /^卡住报警 2$/ }).click();
     await expect(page.getByText('任务 12 卡住了')).toBeVisible();
     await expect(page.getByText('等你回答：新模板的落款用谁的名字？')).toHaveCount(0);
   });
@@ -46,8 +46,13 @@ test.describe('通知中心', () => {
   }, info) => {
     test.skip(!onlyDesktop(info), '改库的用例只在 1920 那一遍跑');
     await page.goto('/notifications');
-    const item = page.getByRole('listitem').filter({ hasText: '额度读数 35 分钟没更新' });
-    await item.getByRole('button', { name: '处理了' }).click();
+    // 左列表右详情（#3533）：先点开那一条，「处理了」在右边详情里
+    await page
+      .locator('li[data-notice-row]')
+      .filter({ hasText: '额度读数 35 分钟没更新' })
+      .getByRole('button')
+      .click();
+    await page.getByRole('region', { name: '通知详情' }).getByRole('button', { name: '处理了' }).click();
     await expect(page.getByText('处理了', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('额度读数 35 分钟没更新')).toHaveCount(0);
 
@@ -58,8 +63,8 @@ test.describe('通知中心', () => {
     const audit = (await api.get('/api/audit?limit=50')) as Audit;
     expect(audit.items.some((a) => a.action === 'notification.resolve')).toBe(true);
 
-    await page.getByRole('tab', { name: '连已处理的一起看' }).click();
-    await expect(page.getByText(/我处理于/)).toBeVisible();
+    await page.getByRole('button', { name: '连已处理的一起看' }).click();
+    await expect(page.getByText(/我处理于/).first()).toBeVisible();
     // 处理一个不存在的：后端回 404 明确的话
     const gone = await api.send(
       'POST',
@@ -179,8 +184,16 @@ async function stage(
   });
 }
 
-const stalledCard = (page: Page) => page.locator('li[data-notice-row]').filter({ hasText: STALLED });
+// 通知中心是左列表右详情（#3533）：修复区在右边「通知详情」里，先点开列表里那一行
+const stalledCard = (page: Page) =>
+  page.getByRole('region', { name: '通知详情' }).filter({ hasText: STALLED });
 const phaseOf = (page: Page) => stalledCard(page).getByTestId('repair-record').first();
+/** 打开通知中心并点开那条看门狗的卡。 */
+async function openStalledPage(page: Page): Promise<void> {
+  await page.goto('/notifications');
+  await page.locator('li[data-notice-row]').filter({ hasText: STALLED }).getByRole('button').click();
+  await expect(stalledCard(page)).toBeVisible();
+}
 
 test.describe('通知中心：看门狗提醒的修复', () => {
   test.beforeEach(async ({ login }) => login());
@@ -203,11 +216,11 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       },
     };
     await stage(context, problems, scene);
-    await page.goto('/notifications');
+    await openStalledPage(page);
     const card = stalledCard(page);
     await expect(card.getByTestId('repair-actions')).toContainText(RECOVER.detail);
     await expect(card.getByTestId('repair-actions')).toContainText(HAND.detail);
-    await expect(card.getByRole('button', { name: '叫醒任务继续' })).toContainText('推荐：现有的恢复入口');
+    await expect(card.getByTestId('repair-actions')).toContainText('推荐：现有的恢复入口');
     await expect(card.getByText('等你拍板')).toHaveCount(0);
     await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-可点的动作');
@@ -263,8 +276,8 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       beforeReads.push(request);
       return oldView;
     });
-    await page.goto('/notifications');
-    await other.goto('/notifications');
+    await openStalledPage(page);
+    await openStalledPage(other);
     await expect(stalledCard(other).getByRole('button', { name: '叫醒任务继续' })).toBeVisible();
     await stalledCard(page).getByRole('button', { name: '叫醒任务继续' }).click();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
@@ -278,7 +291,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
           const button = event.target instanceof Element ? event.target.closest('button') : null;
           if (
             button?.getAttribute('aria-label') === '叫醒任务继续' &&
-            button.closest('li[data-notice-row]')?.textContent?.includes(title) === true
+            button.closest('[aria-label="通知详情"]')?.textContent?.includes(title) === true
           ) {
             clicked = (window as unknown as { e2eRepairClicked: () => Promise<void> }).e2eRepairClicked();
           }
@@ -332,8 +345,8 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     await stage(context, problems, scene);
     const other = await context.newPage();
     try {
-      await page.goto('/notifications');
-      await other.goto('/notifications');
+      await openStalledPage(page);
+      await openStalledPage(other);
       await expect(stalledCard(other).getByRole('button', { name: '叫醒任务继续' })).toBeVisible();
       await stalledCard(page).getByRole('button', { name: '叫醒任务继续' }).click();
       await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
@@ -373,7 +386,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       },
     };
     await stage(context, problems, scene);
-    await page.goto('/notifications');
+    await openStalledPage(page);
     const card = stalledCard(page);
     await card.getByRole('button', { name: '叫醒任务继续' }).click();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'no-receipt');
@@ -410,7 +423,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       },
     };
     await stage(context, problems, scene);
-    await page.goto('/notifications');
+    await openStalledPage(page);
     const card = stalledCard(page);
     await card.getByRole('button', { name: '叫醒任务继续' }).click();
     await expect(card.getByTestId('repair-note')).toContainText('已刷新，按现在能点的重选');
@@ -448,7 +461,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       },
     };
     await stage(context, problems, scene);
-    await page.goto('/notifications');
+    await openStalledPage(page);
     const card = stalledCard(page);
     await card.getByRole('button', { name: '恢复引擎开关' }).click();
     await expect(card.getByTestId('repair-why-you')).toContainText('会动引擎总开关');
@@ -472,11 +485,11 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       exec: async () => ({ status: 500, json: {} }),
     };
     await stage(context, problems, scene);
-    await page.goto('/notifications');
+    await openStalledPage(page);
     const card = stalledCard(page);
     await expect(card.getByTestId('repair-none')).toContainText('没接上任务现读');
     await expect(card.getByRole('link', { name: '到「提需求」写一句' })).toHaveAttribute('href', '/intake');
-    await expect(card.getByRole('button', { name: '打开' })).toBeVisible();
+    await expect(card.getByRole('link', { name: '打开' })).toBeVisible();
     await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-没有能点的');
     expect(scene.bodies).toHaveLength(0);
@@ -518,7 +531,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       exec: async () => ({ status: 500, json: {} }),
     };
     await stage(context, problems, scene);
-    await page.goto('/notifications');
+    await openStalledPage(page);
     const card = stalledCard(page);
     await expect(card.getByTestId('repair-linked')).toHaveAttribute('data-stage', 'worker-active');
     await expect(card.getByTestId('repair-linked')).toContainText('已关联 thoerwink8/fleet-dao#3183');
@@ -544,7 +557,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     };
     await page.reload();
     await expect(stalledCard(page).getByTestId('repair-linked')).toHaveAttribute('data-stage', 'pr-open');
-    await expect(stalledCard(page).getByText('PR #3184 开着').first()).toBeVisible();
+    await expect(stalledCard(page).getByText('PR 开着').first()).toBeVisible();
     await expect(stalledCard(page).getByText('没人在修')).toHaveCount(0);
     await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-已关联-PR开着');
@@ -592,7 +605,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       },
     };
     await stage(context, problems, scene);
-    await page.goto('/notifications');
+    await openStalledPage(page);
     const card = stalledCard(page);
     await card.getByRole('button', { name: '叫醒任务继续' }).click();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verified');
@@ -667,7 +680,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     };
     await stage(context, problems, scene);
     try {
-      await page.goto('/notifications');
+      await openStalledPage(page);
       const card = stalledCard(page);
       await card.getByRole('button', { name: '叫醒任务继续' }).click();
       await expect(card.getByTestId('repair-busy')).toHaveAttribute('data-step', 'sent');
@@ -762,7 +775,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       exec: async () => ({ status: 500, json: {} }),
     };
     await stage(context, problems, scene);
-    await page.goto('/notifications');
+    await openStalledPage(page);
     const card = stalledCard(page);
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'unknown');
     await expect(card.getByText('上一代结果未知')).toBeVisible();

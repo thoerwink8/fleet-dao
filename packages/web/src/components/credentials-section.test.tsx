@@ -50,7 +50,9 @@ describe('第一次设账密', () => {
     expect(spy).toHaveBeenCalledExactlyOnceWith({ username: 'founder', newPassword: GOOD });
     expect(screen.getByRole('status').textContent).toContain('别处');
     expect(screen.getByRole('status').textContent).toContain('作废');
-    // 换成改账密：要当前密码；密码没留在页面上
+    // 换成改账密：表单收起，点「改账密」展开后要当前密码；密码没留在页面上
+    expect(screen.queryByLabelText('当前密码')).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: '改账密' }));
     expect(await screen.findByLabelText('当前密码')).toBeTruthy();
     expect(document.body.textContent).not.toContain(GOOD);
     // 操作记录里有这一条（假后端照真后端记）
@@ -134,6 +136,9 @@ describe('改账密', () => {
     Object.assign(api, over);
     renderApp(<CredentialsSection />, { api });
     await screen.findByText(/已设账密：用户名/);
+    // 设过账密时平时只写现状，点「改账密」才展开表单（样稿 Settings.dc.html）
+    expect(screen.queryByRole('form', { name: '改账密' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '改账密' }));
     return api;
   }
 
@@ -256,6 +261,7 @@ describe('密码表单可访问性', () => {
     await api.updateCredentials({ username: 'founder', newPassword: GOOD });
     renderApp(<CredentialsSection />, { api });
     await screen.findByText(/已设账密：用户名/);
+    fireEvent.click(screen.getByRole('button', { name: '改账密' }));
     const f = form('改账密');
     const hidden = f.querySelector(
       'input[autocomplete="username"][hidden], input[autocomplete="username"].sr-only',

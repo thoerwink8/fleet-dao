@@ -22,6 +22,7 @@ import {
 } from '../lib/alert-repair';
 import NotificationsPage from '../routes/notifications';
 import { renderApp } from './harness';
+import { openNotice } from './notice-helpers';
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -120,10 +121,7 @@ function setup(opts: {
   return { api, bodies, reads: () => reads };
 }
 
-const card = async () => {
-  const t = await screen.findByText(TITLE);
-  return t.closest('li[data-notice-row]') as HTMLElement;
-};
+const card = () => openNotice(TITLE);
 
 describe('看门狗提醒：后端给的动作和后果、推荐、要不要你拍', () => {
   test('多个动作：每个写实际后果，推荐直接恢复的那个并写理由；不带 choice 的不写「要你拍」', async () => {
@@ -133,8 +131,9 @@ describe('看门狗提醒：后端给的动作和后果、推荐、要不要你�
     expect(within(list).getByText(RECOVER.detail, { exact: false })).toBeTruthy();
     expect(within(list).getByText(HAND.detail)).toBeTruthy();
     const first = within(list).getByRole('button', { name: '叫醒任务继续' });
-    expect(within(first).getByText('推荐')).toBeTruthy();
-    expect(first.textContent).toContain('推荐：现有的恢复入口');
+    const firstRow = first.closest('li') as HTMLElement;
+    expect(within(firstRow).getByText('推荐')).toBeTruthy();
+    expect(firstRow.textContent).toContain('推荐：现有的恢复入口');
     expect(within(list).queryByText('要你拍')).toBeNull();
     // 普通 alert 不借「等你拍板」
     expect(within(row).queryByText('等你拍板')).toBeNull();
@@ -145,8 +144,9 @@ describe('看门狗提醒：后端给的动作和后果、推荐、要不要你�
     setup({ view: () => ({ incident: INCIDENT, actions: [RESTORE], problems: [] }) });
     const row = await card();
     const btn = within(row).getByRole('button', { name: '恢复引擎开关' });
-    expect(within(btn).getByText('要你拍')).toBeTruthy();
-    expect(within(btn).queryByText('推荐')).toBeNull();
+    const btnRow = btn.closest('li') as HTMLElement;
+    expect(within(btnRow).getByText('要你拍')).toBeTruthy();
+    expect(within(btnRow).queryByText('推荐')).toBeNull();
     expect(within(row).queryByTestId('decision-picker')).toBeNull();
     fireEvent.click(btn);
     expect(within(row).getByTestId('repair-why-you').textContent).toContain('会动引擎总开关');
@@ -282,6 +282,8 @@ describe('点了以后原卡写到哪一步', () => {
     const detail = within(row).getByTestId('repair-detail');
     expect(detail.textContent).toContain('任务 #17（acme/orbit）');
     expect(detail.textContent).toContain('run run-1');
+    // 低频的「具体操作」收在折叠里，点开才在读屏树里
+    fireEvent.click(within(detail).getByRole('button', { name: '具体操作' }));
     expect(
       within(detail)
         .getByRole('link', { name: /查这条的操作记录/ })
@@ -366,7 +368,7 @@ describe('没有能点的、没接上、手动处理', () => {
     expect(within(none).getByRole('link', { name: '到「提需求」写一句' }).getAttribute('href')).toBe(
       '/intake',
     );
-    expect(within(row).getByRole('button', { name: '打开' })).toBeTruthy();
+    expect(within(row).getByRole('link', { name: '打开' })).toBeTruthy();
   });
 
   test('带了 repair 但没有动作：照实列后端给的原因', async () => {
@@ -387,7 +389,7 @@ describe('没有能点的、没接上、手动处理', () => {
       view: () => ({ incident: INCIDENT, actions: [], problems: [] }),
       patch: (n) => ({ ...n, resolvedAt: new Date().toISOString(), resolvedBy: 'founder' }),
     });
-    fireEvent.click(await screen.findByRole('tab', { name: '连已处理的一起看' }));
+    fireEvent.click(await screen.findByRole('button', { name: '连已处理的一起看' }));
     const row = await card();
     expect(within(row).getByTestId('repair-manual').textContent).toContain('没核实修好');
     expect(within(row).queryByText('已修复')).toBeNull();
@@ -464,7 +466,7 @@ describe('这次事故明确关联了已有单（repair.linked）', () => {
     live(link({ stage: 'pr-open', prNumber: 3184 }));
     const row = await card();
     expect(within(row).getByTestId('repair-linked').dataset.stage).toBe('pr-open');
-    expect(within(row).getAllByText('PR #3184 开着').length).toBeGreaterThan(0);
+    expect(within(row).getAllByText('PR 开着').length).toBeGreaterThan(0);
     const prLinks = within(row).getAllByRole('link', { name: /PR #3184/ });
     expect(prLinks.some((a) => a.getAttribute('href')?.endsWith('/thoerwink8/fleet-dao/pull/3184'))).toBe(
       true,
@@ -491,7 +493,9 @@ describe('这次事故明确关联了已有单（repair.linked）', () => {
     });
     const row = await card();
     const btn = within(row).getByRole('button', { name: '交给修复' });
-    expect(btn.textContent).toContain('已关联 thoerwink8/fleet-dao#3183：交给修复沿用这张单派工，不另开单');
+    expect((btn.closest('li') as HTMLElement).textContent).toContain(
+      '已关联 thoerwink8/fleet-dao#3183：交给修复沿用这张单派工，不另开单',
+    );
     fireEvent.click(btn);
     await waitFor(() => expect(within(row).getByTestId('repair-note').textContent).toContain('不再派工'));
     expect(bodies).toHaveLength(1);

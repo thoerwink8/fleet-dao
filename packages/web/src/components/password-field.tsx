@@ -1,14 +1,14 @@
 // 密码输入栏：带标签、「显示 / 隐藏」按钮、提示和错误（登录页和设置页「账密」一节共用）。
 // 浏览器和密码管理器靠 autocomplete 认栏：登录用 current-password，设新密码用 new-password（web.dev 登录表单指南）；
 // 不拦粘贴（密码管理器要粘贴，NIST SP 800-63B 3.1.1.2）。密码只活在这个组件的 value 里，不写日志、不进地址。
+// 页面只拼 components/layout 的件：登录页用 FormItem（标签在上），设置页用 FieldRow（标签左、控件右）。
 import { Eye, EyeOff } from 'lucide-react';
 import type { Ref } from 'react';
 import { useState } from 'react';
-import { cn } from '../lib/utils';
+import { Button } from './layout/button';
 import { FieldRow } from './layout/field-row';
-import { Button } from './ui/button';
-import { Input } from './ui/input';
-import { Label } from './ui/label';
+import { FormItem } from './layout/form';
+import { Input } from './layout/input';
 
 export interface PasswordFieldProps {
   id: string;
@@ -23,7 +23,6 @@ export interface PasswordFieldProps {
   hint?: string | undefined;
   readOnly?: boolean | undefined;
   inputRef?: Ref<HTMLInputElement> | undefined;
-  className?: string | undefined;
   /** stack：标签在上（登录页）；row：标签左、控件右一行（设置页，#1805）。 */
   layout?: 'stack' | 'row' | undefined;
 }
@@ -39,42 +38,40 @@ export function PasswordField({
   hint,
   readOnly,
   inputRef,
-  className,
   layout = 'stack',
 }: PasswordFieldProps) {
   const [shown, setShown] = useState(false);
   const describedBy = [hint ? `${id}-hint` : null, error ? `${id}-error` : null].filter(Boolean).join(' ');
   const box = (
-    <div className={cn('relative', layout === 'row' && 'w-full max-w-sm')}>
-      <Input
-        ref={inputRef}
-        id={id}
-        name={id}
-        type={shown ? 'text' : 'password'}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        autoComplete={autoComplete}
-        autoCapitalize="none"
-        autoCorrect="off"
-        spellCheck={false}
-        maxLength={maxLength}
-        readOnly={readOnly}
-        aria-invalid={error ? true : undefined}
-        aria-describedby={describedBy || undefined}
-        className="pr-10"
-      />
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label={`${shown ? '隐藏' : '显示'}${label}`}
-        aria-pressed={shown}
-        onClick={() => setShown((s) => !s)}
-        className="absolute top-0.5 right-0.5 size-8 text-muted-foreground"
-      >
-        {shown ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
-      </Button>
-    </div>
+    <Input
+      ref={inputRef}
+      id={id}
+      name={id}
+      type={shown ? 'text' : 'password'}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      autoComplete={autoComplete}
+      autoCapitalize="none"
+      autoCorrect="off"
+      spellCheck={false}
+      maxLength={maxLength}
+      readOnly={readOnly}
+      aria-invalid={error ? true : undefined}
+      aria-describedby={describedBy || undefined}
+      width={layout === 'row' ? 'search' : 'full'}
+      suffix={
+        <Button
+          iconOnly
+          size="sm"
+          variant="text"
+          aria-label={`${shown ? '隐藏' : '显示'}${label}`}
+          aria-pressed={shown}
+          onClick={() => setShown((s) => !s)}
+        >
+          {shown ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
+        </Button>
+      }
+    />
   );
   if (layout === 'row') {
     return (
@@ -85,26 +82,22 @@ export function PasswordField({
         hintId={`${id}-hint`}
         error={error}
         errorId={`${id}-error`}
-        className={className}
       >
         {box}
       </FieldRow>
     );
   }
   return (
-    <div className={cn('space-y-1.5', className)}>
-      <Label htmlFor={id}>{label}</Label>
+    <FormItem
+      label={label}
+      layout="vertical"
+      htmlFor={id}
+      help={hint}
+      helpId={`${id}-hint`}
+      error={error}
+      errorId={`${id}-error`}
+    >
       {box}
-      {hint ? (
-        <p id={`${id}-hint`} className="text-meta text-muted-foreground">
-          {hint}
-        </p>
-      ) : null}
-      {error ? (
-        <p id={`${id}-error`} role="alert" className="text-meta text-ink-fail">
-          {error}
-        </p>
-      ) : null}
-    </div>
+    </FormItem>
   );
 }

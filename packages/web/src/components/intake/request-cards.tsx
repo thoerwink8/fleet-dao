@@ -7,7 +7,7 @@
 // - 别家意见：每条能标采用或不用（电脑上）；
 // - 指挥官正在回话：流式显示写到哪了、「正在读代码……」，能停下。
 import { REQUEST_CHAT_PHASE_WORDS, REQUEST_DRAFT_FIELD_WORDS, REQUEST_DRAFT_FIELDS } from '@fleet-dao/shared';
-import { ChevronDown, CircleStop, ExternalLink, MessageSquareReply, RotateCcw, Sparkles } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -21,23 +21,20 @@ import {
   useUpdateRequestDraft,
 } from '../../api/client';
 import type { RequestCard, RequestDetail, RequestDraftField, RequestMessage } from '../../api/types';
-import { cn } from '../../lib/utils';
-import { StatusDot } from '../layout/status-badge';
-import type { LayoutTone } from '../layout/tone';
+import { statusEntry } from '../../theme/status-dict';
+import { Button } from '../layout/button';
+import { Textarea } from '../layout/input';
+import { Inset } from '../layout/inset';
+import { TextLink } from '../layout/link';
+import { MenuButton } from '../layout/menu-button';
+import { RowMenuLabel, RowMenuRadioGroup, RowMenuRadioItem } from '../layout/row-menu';
+import { Stack } from '../layout/stack';
+import { LevelDot } from '../layout/status-badge';
+import { Tag } from '../layout/tag';
+import { Text } from '../layout/text';
 import { MarkdownLite } from '../markdown-lite';
-import { Button } from '../ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from '../ui/dropdown-menu';
-import { Textarea } from '../ui/textarea';
 import { useOpenIssueAction } from './open-issue';
-import { BotAvatar } from './people';
-import { issueStateWord } from './request-view';
+import { issueStateWord, issueStatus } from './request-view';
 
 type Question = Extract<RequestCard, { type: 'question' }>;
 type Proposal = Extract<RequestCard, { type: 'proposal' }>;
@@ -62,41 +59,39 @@ export function QuestionCard({
     setBusy(null);
   };
   return (
-    <div className="mt-1.5" data-question-card>
-      <p className="text-body font-medium">{card.question}</p>
-      <div className="mt-1.5 flex flex-wrap gap-1.5">
-        {card.options.map((o) =>
-          live ? (
+    <div data-question-card="">
+      <Stack gap="sm">
+        <Text strong>{card.question}</Text>
+        <Stack direction="horizontal" gap="sm" wrap>
+          {card.options.map((o) =>
+            live ? (
+              <Button
+                key={o}
+                size="sm"
+                variant="outline"
+                loading={busy === o}
+                {...(busy !== null && busy !== o ? { disabledReason: '正在发另一个选项' } : {})}
+                onClick={() => void pick(o)}
+                data-option=""
+              >
+                {o}
+              </Button>
+            ) : (
+              <Tag key={o}>{o}</Tag>
+            ),
+          )}
+          {live ? (
             <Button
-              key={o}
               size="sm"
-              variant="outline"
-              className="max-md:h-11"
-              loading={busy === o}
-              disabled={busy !== null && busy !== o}
-              onClick={() => void pick(o)}
-              data-option
+              variant="text"
+              onClick={() => document.getElementById('intake-input')?.focus()}
+              data-option-own=""
             >
-              {o}
+              我自己说
             </Button>
-          ) : (
-            <span key={o} className="rounded-md border px-2 py-0.5 text-meta text-muted-foreground">
-              {o}
-            </span>
-          ),
-        )}
-        {live ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="max-md:h-11"
-            onClick={() => document.getElementById('intake-input')?.focus()}
-            data-option-own
-          >
-            我自己说
-          </Button>
-        ) : null}
-      </div>
+          ) : null}
+        </Stack>
+      </Stack>
     </div>
   );
 }
@@ -126,26 +121,27 @@ export function ProposalCard({
   const stale = card.draftVersion !== r.draftVersion;
   const go = () => act.run(r.seq, 'confirm', r.draftVersion);
   return (
-    <div className="mt-1.5 rounded-lg border px-3 py-2" data-proposal-card={card.draftVersion}>
-      <div className="text-meta text-muted-foreground">
+    <Inset data-proposal-card={String(card.draftVersion)}>
+      <Text size="meta" tone="muted">
         方案 · 草稿第 {card.draftVersion} 版
         {stale ? `（现在是第 ${r.draftVersion} 版，确认开的是这一版）` : ''}
-      </div>
-      <p className="mt-1 text-body whitespace-pre-wrap">{card.summary}</p>
-      <ul className="mt-2 space-y-1">
+      </Text>
+      <Text pre>{card.summary}</Text>
+      <Stack gap="sm">
         {REQUEST_DRAFT_FIELDS.map((f) => {
           const value = draftValue(d, f);
           return (
-            <li key={f} className="flex items-start gap-2 text-body" data-proposal-field={f}>
-              <span className="shrink-0 text-meta text-muted-foreground">{REQUEST_DRAFT_FIELD_WORDS[f]}</span>
-              <span className="min-w-0 flex-1 whitespace-pre-wrap text-muted-foreground">
+            <Stack key={f} direction="horizontal" gap="sm" align="start" data-proposal-field={f}>
+              <Text size="meta" tone="muted">
+                {REQUEST_DRAFT_FIELD_WORDS[f]}
+              </Text>
+              <Text tone="secondary" pre>
                 {value || '（还没写）'}
-              </span>
+              </Text>
               {live ? (
                 <Button
                   size="xs"
-                  variant="outline"
-                  className="shrink-0 max-md:h-11"
+                  variant="text"
                   onClick={() => onEdit(f)}
                   aria-label={`改${REQUEST_DRAFT_FIELD_WORDS[f]}`}
                   data-proposal-edit={f}
@@ -153,30 +149,32 @@ export function ProposalCard({
                   改
                 </Button>
               ) : null}
-            </li>
+            </Stack>
           );
         })}
-      </ul>
+      </Stack>
       {live ? (
-        <div className="mt-2">
+        <Stack gap="sm" align="start">
           <Button
             size="sm"
-            variant="brand"
-            className="max-md:h-11"
-            disabled={!verdict.allowed}
+            variant="outline"
             loading={act.isPending}
-            title={verdict.allowed ? `确定开单，开的是第 ${r.draftVersion} 版` : verdict.why}
+            {...(verdict.allowed
+              ? { title: `确定开单，开的是第 ${r.draftVersion} 版` }
+              : { disabledReason: verdict.why ?? '现在还不能确定开单' })}
             onClick={go}
-            data-proposal-confirm
+            data-proposal-confirm=""
           >
             确认开单
           </Button>
           {!verdict.allowed && verdict.why ? (
-            <p className="mt-1 text-meta text-ink-stall">{verdict.why}</p>
+            <Text size="meta" tone="warning">
+              {verdict.why}
+            </Text>
           ) : null}
-        </div>
+        </Stack>
       ) : null}
-    </div>
+    </Inset>
   );
 }
 
@@ -211,28 +209,25 @@ export function SuggestCard({
       },
     );
   return (
-    <div className="mt-1.5 rounded-lg border border-dashed px-3 py-2" data-suggest-card>
-      <div className="text-meta text-muted-foreground">
-        建议改「{label}」<span className="ml-1">（这一栏人改过，指挥官不直接动）</span>
-      </div>
-      <p className="mt-0.5 text-body whitespace-pre-wrap">{valueText(card.value)}</p>
+    <Inset look="dashed" data-suggest-card="">
+      <Text size="meta" tone="muted">
+        建议改「{label}」（这一栏人改过，指挥官不直接动）
+      </Text>
+      <Text pre>{valueText(card.value)}</Text>
       {same ? (
-        <p className="mt-1 text-meta text-ink-done">已经是这样了</p>
+        <Text size="meta" tone="secondary">
+          已经是这样了
+        </Text>
       ) : can ? (
-        <Button size="sm" variant="outline" className="mt-1.5" loading={update.isPending} onClick={adopt}>
-          采用
-        </Button>
+        <Stack align="start">
+          <Button size="sm" variant="outline" loading={update.isPending} onClick={adopt}>
+            采用
+          </Button>
+        </Stack>
       ) : null}
-    </div>
+    </Inset>
   );
 }
-
-const ISSUE_TONE = {
-  open: 'run',
-  merged: 'done',
-  deployed: 'done',
-  closed: 'stop',
-} as const satisfies Record<string, LayoutTone>;
 
 /** 进度卡（不是组件，没有钩子，直接调）：系统消息「#12 动手中 · ……」，配上单子在 GitHub 的链接和状态点。认不出是哪张单就返回 null（照普通系统消息画）。 */
 export function progressCard(m: RequestMessage, d: RequestDetail): ReactNode {
@@ -241,24 +236,24 @@ export function progressCard(m: RequestMessage, d: RequestDetail): ReactNode {
   if (!hit || !ref) return null;
   const url = `https://github.com/${ref.repo}/issues/${ref.number}`;
   return (
-    <div className="flex justify-center" data-message="progress">
-      <a
+    <Stack direction="horizontal" gap="sm" align="center" justify="center" data-message="progress">
+      <LevelDot level={statusEntry(issueStatus(ref.state)).level} />
+      <TextLink
         href={url}
-        target="_blank"
-        rel="noreferrer"
-        className="inline-flex max-w-full items-center gap-1.5 rounded-full border bg-background px-3 py-1 text-meta text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground"
         title={`在 GitHub 上看 ${ref.repo}#${ref.number}（现在${issueStateWord(ref.state)}）`}
       >
-        <StatusDot tone={ISSUE_TONE[ref.state]} />
-        <span className="font-mono">#{ref.number}</span>
-        <span className="min-w-0 truncate">{hit[2]}</span>
-        <ExternalLink className="size-3 shrink-0" aria-hidden />
-      </a>
-    </div>
+        #{ref.number} {hit[2]}
+      </TextLink>
+    </Stack>
   );
 }
 
-const ANSWER_WORDS = { pending: '待答', written: '已写回单子', failed: '写回失败' } as const;
+/** 答复写回单子的进度（待答、已写回、写回失败）。 */
+function answerWord(state: 'pending' | 'written' | 'failed'): string {
+  if (state === 'written') return '已写回单子';
+  if (state === 'failed') return '写回失败';
+  return '待答';
+}
 
 /** 引擎提问：发起人、拍板人能回答；答复写回那条 GitHub 评论。写回失败写原因，点「重试」再写一次（不用重打）。 */
 export function EngineAsk({ m, d, meId }: { m: RequestMessage; d: RequestDetail; meId: string | undefined }) {
@@ -281,69 +276,67 @@ export function EngineAsk({ m, d, meId }: { m: RequestMessage; d: RequestDetail;
       },
     );
   return (
-    <div className="mt-1.5 space-y-1.5" data-engine-ask={state}>
+    <div data-engine-ask={state}>
       {m.answer ? (
-        <div className="rounded-md bg-background px-3 py-2 text-body">
-          <div className="mb-0.5 text-meta text-muted-foreground">
-            {m.answer.by ? `${m.answer.by.name} 答` : '答复'} ·{' '}
-            <span
-              className={cn(state === 'failed' ? 'text-ink-fail' : state === 'written' && 'text-ink-done')}
-            >
-              {ANSWER_WORDS[state]}
-            </span>
-          </div>
-          <p className="whitespace-pre-wrap">{m.answer.text}</p>
+        <Stack gap="sm">
+          <Text size="meta" tone={state === 'failed' ? 'danger' : 'muted'}>
+            {m.answer.by ? `${m.answer.by.name} 答` : '答复'} · {answerWord(state)}
+          </Text>
+          <Text pre>{m.answer.text}</Text>
           {state === 'failed' ? (
-            <div className="mt-1 flex items-center gap-2">
-              <span className="min-w-0 flex-1 text-meta text-ink-fail" role="alert">
-                {m.answer.error ?? '后端没写原因'}
-              </span>
+            <Stack direction="horizontal" gap="sm" align="center">
+              <div role="alert">
+                <Text size="meta" tone="danger">
+                  {m.answer.error ?? '后端没写原因'}
+                </Text>
+              </div>
               {mayAnswer ? (
                 <Button
-                  size="sm"
+                  size="xs"
                   variant="outline"
                   loading={answer.isPending}
                   onClick={() => send(m.answer?.text ?? '')}
                 >
-                  <RotateCcw />
                   重试
                 </Button>
               ) : null}
-            </div>
+            </Stack>
           ) : null}
-        </div>
+        </Stack>
       ) : open ? (
-        <div className="space-y-1.5">
+        <Stack gap="sm">
           <Textarea
             rows={2}
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder="写给引擎的答复，会写回单子上那条评论下面……"
             aria-label="回答引擎的提问"
-            className="min-h-0 bg-background"
           />
-          <div className="flex gap-2">
+          <Stack direction="horizontal" gap="sm">
             <Button
               size="sm"
-              variant="brand"
-              disabled={!text.trim()}
+              variant="outline"
               loading={answer.isPending}
+              {...(text.trim() ? {} : { disabledReason: '先写答复' })}
               onClick={() => send(text.trim())}
             >
               写回单子
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
+            <Button size="sm" variant="text" onClick={() => setOpen(false)}>
               取消
             </Button>
-          </div>
-        </div>
+          </Stack>
+        </Stack>
       ) : mayAnswer ? (
-        <Button size="sm" variant="outline" className="max-md:h-11" onClick={() => setOpen(true)} data-answer>
-          <MessageSquareReply />
-          回答
-        </Button>
+        <Stack align="start">
+          <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-answer="">
+            回答
+          </Button>
+        </Stack>
       ) : (
-        <p className="text-meta text-muted-foreground">等发起人回答</p>
+        <Text size="meta" tone="muted">
+          等发起人回答
+        </Text>
       )}
     </div>
   );
@@ -373,53 +366,63 @@ export function ReviewCard({
       { onError: (err) => toast.error(`没标上：${errorText(err)}`) },
     );
   return (
-    <ol className="mt-1.5 space-y-1" data-review-card>
-      {card.items.map((it, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: 意见按条号存，标的时候也按条号
-        <li key={i} className="flex items-start gap-2 text-body" data-review-item={it.verdict ?? 'none'}>
-          <span className="shrink-0 text-meta text-muted-foreground tabular-nums">{i + 1}.</span>
-          <span
-            className={cn('min-w-0 flex-1', it.verdict === 'reject' && 'text-muted-foreground line-through')}
+    <div data-review-card="">
+      <Stack gap="sm">
+        {card.items.map((it, i) => (
+          <Stack
+            // biome-ignore lint/suspicious/noArrayIndexKey: 意见按条号存，标的时候也按条号
+            key={i}
+            direction="horizontal"
+            gap="sm"
+            align="start"
+            data-review-item={it.verdict ?? 'none'}
           >
-            {it.text}
-          </span>
-          {can ? (
-            <span className="flex shrink-0 gap-1">
-              <Button
-                size="xs"
-                variant={it.verdict === 'adopt' ? 'brand' : 'outline'}
-                aria-pressed={it.verdict === 'adopt'}
-                disabled={mark.isPending}
-                loading={busy(i, 'adopt')}
-                onClick={() => go(i, 'adopt')}
-              >
-                采用
-              </Button>
-              <Button
-                size="xs"
-                variant={it.verdict === 'reject' ? 'secondary' : 'ghost'}
-                aria-pressed={it.verdict === 'reject'}
-                disabled={mark.isPending}
-                loading={busy(i, 'reject')}
-                onClick={() => go(i, 'reject')}
-              >
-                不用
-              </Button>
-            </span>
-          ) : it.verdict ? (
-            <span className="shrink-0 text-meta text-muted-foreground">
-              {it.verdict === 'adopt' ? '采用' : '不用'}
-            </span>
-          ) : null}
-        </li>
-      ))}
-      <li className="text-meta text-muted-foreground">
-        {card.model} 挑的是第 {card.draftVersion} 版
-        {card.draftVersion !== r.draftVersion ? `（现在是第 ${r.draftVersion} 版）` : ''}
-      </li>
-    </ol>
+            <Text size="meta" tone="muted">
+              {i + 1}.
+            </Text>
+            <Text tone={it.verdict === 'reject' ? 'muted' : 'default'} pre>
+              {it.text}
+            </Text>
+            {can ? (
+              <Stack direction="horizontal" gap="sm">
+                <Button
+                  size="xs"
+                  variant={it.verdict === 'adopt' ? 'secondary' : 'outline'}
+                  aria-pressed={it.verdict === 'adopt'}
+                  loading={busy(i, 'adopt')}
+                  {...(mark.isPending ? { disabledReason: '正在标上一条' } : {})}
+                  onClick={() => go(i, 'adopt')}
+                >
+                  采用
+                </Button>
+                <Button
+                  size="xs"
+                  variant={it.verdict === 'reject' ? 'secondary' : 'text'}
+                  aria-pressed={it.verdict === 'reject'}
+                  loading={busy(i, 'reject')}
+                  {...(mark.isPending ? { disabledReason: '正在标上一条' } : {})}
+                  onClick={() => go(i, 'reject')}
+                >
+                  不用
+                </Button>
+              </Stack>
+            ) : it.verdict ? (
+              <Text size="meta" tone="muted">
+                {it.verdict === 'adopt' ? '采用' : '不用'}
+              </Text>
+            ) : null}
+          </Stack>
+        ))}
+        <Text size="meta" tone="muted">
+          {card.model} 挑的是第 {card.draftVersion} 版
+          {card.draftVersion !== r.draftVersion ? `（现在是第 ${r.draftVersion} 版）` : ''}
+        </Text>
+      </Stack>
+    </div>
   );
 }
+
+const DEFAULT_KEY = '__default__';
 
 /**
  * 输入框左下角的模型芯片（电脑上）：默认用「提需求」用途排第一的模型，可以只给这一条换；换了对话里出一条分隔线。
@@ -439,61 +442,52 @@ export function ModelChip({ d }: { d: RequestDetail }) {
     set.mutate({ seq: r.seq, modelId: next }, { onError: (err) => toast.error(`没换成：${errorText(err)}`) });
   };
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          disabled={locked}
-          title={why}
-          className="inline-flex h-6 max-w-48 items-center gap-1 rounded-md px-2 text-meta text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-60"
-          data-model-chip
-        >
-          <span className="truncate">{current?.name ?? '没配模型'}</span>
-          <ChevronDown className="size-3 shrink-0" aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-56">
-        {c.modelsUnavailable || c.models.length === 0 ? (
-          <DropdownMenuLabel className="font-normal text-ink-stall">
+    <MenuButton
+      label={current?.name ?? '没配模型'}
+      {...(locked ? { disabledReason: why } : { title: why })}
+      data-model-chip=""
+    >
+      {c.modelsUnavailable || c.models.length === 0 ? (
+        <RowMenuLabel>
+          <Text tone="warning">
             {c.modelsUnavailable ?? '「提需求」用途里一个模型都没配：到「路由」页给它配一个'}
-          </DropdownMenuLabel>
-        ) : (
-          <DropdownMenuRadioGroup value={c.model?.id ?? DEFAULT_KEY} onValueChange={pick}>
-            <DropdownMenuRadioItem value={DEFAULT_KEY}>
-              用默认{c.defaultModel ? `（${c.defaultModel.name}）` : ''}
-            </DropdownMenuRadioItem>
-            {c.models.map((m) => (
-              <DropdownMenuRadioItem key={m.id} value={m.id}>
-                {m.name}
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+          </Text>
+        </RowMenuLabel>
+      ) : (
+        <RowMenuRadioGroup value={c.model?.id ?? DEFAULT_KEY} onValueChange={pick}>
+          <RowMenuRadioItem value={DEFAULT_KEY}>
+            用默认{c.defaultModel ? `（${c.defaultModel.name}）` : ''}
+          </RowMenuRadioItem>
+          {c.models.map((m) => (
+            <RowMenuRadioItem key={m.id} value={m.id}>
+              {m.name}
+            </RowMenuRadioItem>
+          ))}
+        </RowMenuRadioGroup>
+      )}
+    </MenuButton>
   );
 }
 
-const DEFAULT_KEY = '__default__';
-
 /** 「让指挥官接着问」：两个人都说过话以后指挥官不 @ 不说话，点这个让它接着问。超了限额、引擎关着时写原因。 */
-export function NudgeButton({ d, phone }: { d: RequestDetail; phone: boolean }) {
+export function NudgeButton({ d }: { d: RequestDetail; phone?: boolean }) {
   const nudge = useNudgeCommander();
   const c = d.commander;
   if (d.request.participants.length === 0) return null;
   const full = c.turns >= c.maxTurns;
+  const blocked = c.running ? '指挥官正在回话' : full ? `这条已经聊满 ${c.maxTurns} 轮` : undefined;
   return (
     <Button
       size="xs"
-      variant="ghost"
-      className={cn(phone && 'h-11')}
-      disabled={c.running || full}
+      variant="text"
       loading={nudge.isPending}
-      title={full ? `这条已经聊满 ${c.maxTurns} 轮` : '两个人都说过话以后，指挥官只在被 @ 或点这里时说话'}
+      {...(blocked
+        ? { disabledReason: blocked }
+        : { title: '两个人都说过话以后，指挥官只在被 @ 或点这里时说话' })}
       onClick={() =>
         nudge.mutate(d.request.seq, { onError: (err) => toast.error(`没叫动：${errorText(err)}`) })
       }
-      data-nudge
+      data-nudge=""
     >
       <Sparkles />
       让指挥官接着问
@@ -509,9 +503,11 @@ export function CommanderLive({ d }: { d: RequestDetail }) {
   const stop = useStopCommander();
   if (!c.running) {
     return broken ? (
-      <p className="text-center text-meta text-ink-stall" data-commander-broken>
-        指挥官回话的流断了：{broken}（刷新后能看到回完的话）
-      </p>
+      <Stack align="center" data-commander-broken="">
+        <Text size="meta" tone="warning">
+          指挥官回话的流断了：{broken}（刷新后能看到回完的话）
+        </Text>
+      </Stack>
     ) : null;
   }
   const review = (live?.job ?? c.job) === 'review';
@@ -524,28 +520,23 @@ export function CommanderLive({ d }: { d: RequestDetail }) {
         ? '排着队，等引擎接手……'
         : '指挥官在想……');
   return (
-    <div className="flex gap-2" data-commander-live={phase ?? c.state}>
-      <BotAvatar who="commander" />
-      <div className="min-w-0 max-w-2xl flex-1">
-        <div className="mb-0.5 flex items-center gap-2 text-meta text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5">
-            <StatusDot tone="run" className="animate-pulse" />
-            {review ? '别家在挑错……' : words}
-          </span>
-          <Button
-            size="xs"
-            variant="ghost"
-            className="ml-auto"
-            loading={stop.isPending}
-            onClick={() => stop.mutate(r.seq, { onError: (err) => toast.error(`没停下：${errorText(err)}`) })}
-            data-commander-stop
-          >
-            <CircleStop />
-            停下
-          </Button>
-        </div>
-        {live?.text ? <MarkdownLite source={live.text} /> : null}
-      </div>
-    </div>
+    <Stack gap="sm" data-commander-live={phase ?? c.state}>
+      <Stack direction="horizontal" gap="sm" align="center">
+        <LevelDot level="processing" />
+        <Text size="meta" tone="secondary">
+          {review ? '别家在挑错……' : words}
+        </Text>
+        <Button
+          size="xs"
+          variant="text"
+          loading={stop.isPending}
+          onClick={() => stop.mutate(r.seq, { onError: (err) => toast.error(`没停下：${errorText(err)}`) })}
+          data-commander-stop=""
+        >
+          停下
+        </Button>
+      </Stack>
+      {live?.text ? <MarkdownLite source={live.text} /> : null}
+    </Stack>
   );
 }

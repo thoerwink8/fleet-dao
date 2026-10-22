@@ -34,10 +34,9 @@ test.describe('设置页', () => {
     await expect(reserve.getByTestId('reserve-source')).toContainText('来自种子');
     await expect(page.locator('#reserve-claude-solo-5h')).toHaveValue('80');
     await expect(page.locator('#reserve-claude-solo-7d')).toHaveValue('70');
-    // 没配的线（拼车池）是灰色占位「—」，点一下才变输入框
+    // 没配的线（拼车池）是空输入框、占位「—」（样稿：格子一直是输入框）
     const unset = page.locator('#reserve-claude-carpool-5h');
-    await expect(unset).toHaveAttribute('title', /未配置/);
-    await unset.click();
+    await expect(unset).toHaveAttribute('placeholder', '—');
     await expect(unset).toHaveValue('');
     await shot(page, '05-设置');
   });
@@ -90,9 +89,11 @@ test.describe('设置页', () => {
     expect(first.on, '种子里的仓「让 AI 接活」是关着的').toBe(false);
 
     await page.goto('/settings');
-    const row = page.getByTestId(`dispatch-${first.repoId}`);
-    await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('关着');
-    await expect(row).toContainText('fleet-api dispatch-issue');
+    // 仓库是一张表：这个仓一行，状态一格、开启/关闭在操作格里
+    const row = page.locator(`tr[data-row-key="${first.repoId}"]`);
+    const state = row.getByTestId(`dispatch-state-${first.repoId}`);
+    await expect(state).toContainText('关着');
+    await expect(state).toHaveAttribute('title', /fleet-api dispatch-issue/);
     await shot(page, '05-设置-仓库-关着');
 
     // 点开启先弹确认；点「先不」什么都不改
@@ -104,8 +105,8 @@ test.describe('设置页', () => {
 
     await row.getByRole('button', { name: /^开启 / }).click();
     await page.getByRole('alertdialog').getByRole('button', { name: '开启', exact: true }).click();
-    await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('接活中');
-    await expect(row).toContainText('开的');
+    await expect(state).toContainText('接活中');
+    await expect(state).toHaveAttribute('title', /开的/);
     await shot(page, '05-设置-仓库-已开启');
 
     // 落库了：读回是开着、有开的时刻；进了操作记录（谁、开启）
@@ -119,10 +120,10 @@ test.describe('设置页', () => {
 
     // 刷新后还开着；再点关闭回到关着，操作记录多一条关闭
     await page.reload();
-    await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('接活中');
+    await expect(state).toContainText('接活中');
     await row.getByRole('button', { name: /^关闭 / }).click();
     await page.getByRole('alertdialog').getByRole('button', { name: '关闭', exact: true }).click();
-    await expect(row.getByTestId(`dispatch-state-${first.repoId}`)).toHaveText('关着');
+    await expect(state).toContainText('关着');
     await expect.poll(async () => (await read())[0]).toMatchObject({ on: false });
     const after = (await api.get(`/api/audit?target=repo:${first.repoId}`)) as Audit;
     expect(after.items.map((a) => a.action)).toContain('repo.auto_dispatch.disable');
@@ -183,7 +184,7 @@ test.describe('设置页', () => {
     await page.goto('/settings');
     const reserve = page.locator('form', { hasText: '各渠道的额度留量线' });
     await page.locator('#reserve-claude-solo-5h').fill('50');
-    await reserve.getByRole('button', { name: '保存' }).click();
+    await reserve.getByRole('button', { name: '保存留量线' }).click();
     await expect
       .poll(async () => settingOf(api, 'engine.quotaReserve'))
       .toMatchObject({

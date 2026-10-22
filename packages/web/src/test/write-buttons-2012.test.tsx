@@ -57,7 +57,9 @@ describe('导入仓库（设置页）', () => {
       },
     } as unknown as MockApi;
     renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
-    const row = (await screen.findByText('thoerwink8/widgets')).closest('li') as HTMLElement;
+    // 导入仓库收在仓库卡头的入口里，点开才有这张表
+    fireEvent.click(await screen.findByRole('button', { name: '导入仓库' }));
+    const row = (await screen.findByText('thoerwink8/widgets')).closest('tr') as HTMLElement;
     const add = within(row).getByRole('button', { name: /加进驾驶舱/ });
     await busyOnce(add, calls);
     await act(async () => d.resolve({ created: true }));
@@ -77,6 +79,13 @@ describe('整理确认（设置页「指挥官整理待办」）', () => {
     });
     renderApp(<SettingsPage />, { api, route: '/settings' });
     const panel = await screen.findByTestId('groom-r-orbit');
+    await waitFor(() =>
+      expect(
+        within(panel)
+          .getByRole('button', { name: /让指挥官整理/ })
+          .getAttribute('aria-disabled'),
+      ).toBeNull(),
+    );
     fireEvent.click(within(panel).getByRole('button', { name: /让指挥官整理/ }));
     const dialog = await screen.findByRole('alertdialog');
     const ok = within(dialog).getByRole('button', { name: '确认整理' });
@@ -97,6 +106,13 @@ describe('整理确认（设置页「指挥官整理待办」）', () => {
     vi.spyOn(api, 'groomNow').mockRejectedValueOnce(new Error('整理待办的记录没读成：库连不上'));
     renderApp(<SettingsPage />, { api, route: '/settings' });
     const panel = await screen.findByTestId('groom-r-orbit');
+    await waitFor(() =>
+      expect(
+        within(panel)
+          .getByRole('button', { name: /让指挥官整理/ })
+          .getAttribute('aria-disabled'),
+      ).toBeNull(),
+    );
     fireEvent.click(within(panel).getByRole('button', { name: /让指挥官整理/ }));
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: '确认整理' }));

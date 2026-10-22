@@ -2,6 +2,7 @@
 // 依据 Temporal 消息与结果：发出去只代表收到，修好要另外查——所以「受理」「核验中」「已修复」三段分开，只有后端核验过的 verified 才写已修复。
 // 依据 AWS Automation 批准步骤：要人批的动作由人本人点准或拒，没批、拒了都不往下走——带 choice 的动作才写「要你本人拍」。
 import type { Notification } from '../api/types';
+import type { StatusKey } from '../theme/status-dict';
 import type { Tone } from './status';
 
 export type RepairView = NonNullable<Notification['repair']>;
@@ -19,6 +20,14 @@ export function linkPhase(link: RepairLink): { label: string; tone: Tone } {
     return { label: link.prNumber ? `PR #${link.prNumber} 开着` : 'PR 开着', tone: 'run' };
   if (link.stage === 'worker-active') return { label: '已有任务在做', tone: 'run' };
   return { label: '已关联，待处理', tone: 'wait' };
+}
+
+/** 关联这一段对应的状态字典键（颜色等级和字都在字典里，页面只传键）。 */
+export function linkStatus(link: RepairLink): StatusKey {
+  if (link.invalid) return 'notification:link:invalid';
+  if (link.stage === 'pr-open') return 'notification:link:pr-open';
+  if (link.stage === 'worker-active') return 'notification:link:worker-active';
+  return 'notification:link:linked';
 }
 
 /** 关联有效、且已有任务或 PR 在处理：交给修复后端会回 409 link_already_handled，不再摆它。 */

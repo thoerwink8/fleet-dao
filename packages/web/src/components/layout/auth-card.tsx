@@ -2,14 +2,18 @@
 // 用在外壳外面（登录页没有顶栏和左菜单）。不收 className 和 style。
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
+import { LogoMark } from '../logo';
 
 export function AuthCard({
   title,
   description,
   footer,
   embedded,
+  logo,
   children,
 }: {
+  /** 标题上面画品牌标志，标志和标题居中。 */
+  logo?: boolean;
   title: ReactNode;
   description?: ReactNode;
   /** 卡片下面的灰字：版本、帮助。 */
@@ -22,7 +26,8 @@ export function AuthCard({
     <main className={cn('flex items-center justify-center bg-page p-6', !embedded && 'min-h-screen')}>
       <div className="flex w-full max-w-100 flex-col gap-4">
         <section className="flex flex-col gap-6 rounded-md bg-card p-8">
-          <header className="flex flex-col gap-2">
+          <header className={cn('flex flex-col gap-2', logo && 'items-center text-center')}>
+            {logo ? <LogoMark className="size-10" /> : null}
             <h1 className="text-title text-ink">{title}</h1>
             {description ? <p className="text-body text-ink-3">{description}</p> : null}
           </header>

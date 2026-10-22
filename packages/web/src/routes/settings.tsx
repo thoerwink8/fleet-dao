@@ -1,7 +1,10 @@
+// 设置（/settings，#3533 照 Arco 改版，样稿 canvas/Settings.dc.html）：左边页内导航（Anchor），右边各节一张卡。
+// 从上到下：仓库（一行一个仓，让 AI 接活 / CI 模式 / 整理待办，导入仓库收在卡头入口）、运行设置、额度留量线、提醒、账密登录、关于。
+// 保存都带改之前看到的版本号，别人先改了后端回 409，提示刷新再改；改了都进操作记录。读失败写「没读到」，不画成 0 或「正常」。
+// 页面只拼 components/layout 的件，不写样式类（design 第三节、lint-design R13–R20）。
 import { type QuotaWindowKind, quotaWindowName, SETTING_SCHEMAS } from '@fleet-dao/shared';
-import type { LucideIcon } from 'lucide-react';
-import { BellRing, FolderGit2, Info, KeyRound, Palette, SlidersHorizontal } from 'lucide-react';
-import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
+import { FolderGit2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import type { z } from 'zod';
 import { brand } from '#brand';
@@ -17,30 +20,38 @@ import {
   useSettings,
   useUpdateSetting,
 } from '../api/client';
-import type { Me, Setting, SettingKey } from '../api/types';
+import type { Me, Repo, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
-import { EngineMasterRelation } from '../components/engine-master';
+import { useMasterView } from '../components/engine-master';
+import { EngineMasterRelation } from '../components/engine-master-relation';
 import { FlowModeSetting } from '../components/flow-mode-setting';
+import { Anchor } from '../components/layout/anchor';
+import { Button } from '../components/layout/button';
+import { Descriptions } from '../components/layout/descriptions';
 import { EmptyState } from '../components/layout/empty-state';
-import { FieldGroup, FieldRow } from '../components/layout/field-row';
-import { KeyValue } from '../components/layout/key-value';
-import { List, RowDetail } from '../components/layout/list';
-import { LoadError, LoadingRows } from '../components/layout/load-state';
-import { DescriptionHint, Page } from '../components/layout/page';
+import { Form, FormItem } from '../components/layout/form';
+import { Grid } from '../components/layout/grid';
+import { Input } from '../components/layout/input';
+import { TextLink } from '../components/layout/link';
+import { LoadError, LoadingRows, LoadStale } from '../components/layout/load-state';
+import { Notice } from '../components/layout/notice';
+import { Page } from '../components/layout/page';
 import { SaveButton } from '../components/layout/save-button';
 import { Section } from '../components/layout/section';
-import { PageNav } from '../components/page-nav';
+import { Stack } from '../components/layout/stack';
+import { Switch } from '../components/layout/switch';
+import { Table, type TableColumn } from '../components/layout/table';
+import { Tag } from '../components/layout/tag';
+import { Text } from '../components/layout/text';
 import { PwaStatus } from '../components/pwa-status';
-import { RepoCiPolicyControl } from '../components/repo-ci-policy';
+import { CiState, RepoCiPolicyControl } from '../components/repo-ci-policy';
 import { useRepo } from '../components/repo-context';
-import { RepoRow } from '../components/repo-groom';
+import { DispatchAction, DispatchState, dispatchNote } from '../components/repo-dispatch';
+import { GroomAction, GroomDetail, RepoNameCell } from '../components/repo-groom';
 import { RepoImportSection } from '../components/repo-import';
 import { useTheme } from '../components/theme-provider';
-import { Input } from '../components/ui/input';
-import { Label } from '../components/ui/label';
-import { Switch } from '../components/ui/switch';
 import { actorName, settingLabel } from '../lib/audit';
-import { poolTitle, windowLabel } from '../lib/catalog';
+import { poolTitle } from '../lib/catalog';
 import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import {
@@ -84,7 +95,8 @@ function useActorNames(): Map<string, string> {
   const audit = useAudit();
   return useMemo(() => {
     const m = new Map<string, string>();
-    for (const page of audit.data?.pages ?? []) {
+    // 操作记录没读到时就没有人名可对，「谁改的」退回缩短的编号（不是把读失败当成「没人改过」）
+    for (const page of audit.data ? audit.data.pages : []) {
       for (const e of page.items) {
         if (e.actor.kind !== 'user' || !e.actor.name) continue;
         m.set(e.actor.id, e.actor.name);
@@ -99,67 +111,29 @@ export function meta() {
   return [{ title: brand.title('设置') }];
 }
 
-/** 一节：标题下一句说明，下面是这一节的字段。页内导航按 id 跳到这里（吸顶条下面留出位置）。 */
-function SettingsSection({
-  id,
-  icon: Icon,
-  title,
-  description,
-  children,
-}: {
-  id: string;
-  icon: LucideIcon;
-  title: string;
-  description: string;
-  children: ReactNode;
-}) {
-  return (
-    <Section
-      id={id}
-      variant="plain"
-      title={
-        <span className="flex items-center gap-2">
-          <Icon className="size-4 text-muted-foreground" aria-hidden />
-          {title}
-        </span>
-      }
-      // 说明一行不折（#1917，照路由页样板）：放不下截断，整句在悬停里
-      description={
-        <span data-section-note className="block truncate whitespace-nowrap" title={description}>
-          {description}
-        </span>
-      }
-      className="scroll-mt-14 border-b py-6 first:pt-0 last:border-b-0 lg:scroll-mt-6"
-    >
-      {children}
-    </Section>
-  );
-}
-
 /** 这项设置是谁、什么时候改的；没设过就说用默认。 */
 function SettingMeta({ s }: { s: Setting | undefined }) {
   const now = useNow();
   const { data: me } = useMe();
   const names = useActorNames();
   if (!s || s.version === 0)
-    return <p className="mt-0.5 text-meta text-muted-foreground">还没设过，用的是默认值</p>;
+    return (
+      <Text size="meta" tone="muted" block>
+        还没设过，用的是默认值
+      </Text>
+    );
   const who = s.updatedBy ? whoChangedLabel(s.updatedBy, me, names) : null;
   return (
-    <p className="mt-0.5 text-meta text-muted-foreground">
-      第 <span className="num">{s.version}</span> 版
+    <Text size="meta" tone="muted" block>
+      第 {s.version} 版
       {who ? (
         <>
           {' '}
           · <span title={who.title}>{who.text}</span>
         </>
       ) : null}
-      {s.updatedAt ? (
-        <>
-          {' '}
-          · <span className="num">{formatAgo(s.updatedAt, now)}</span>改的
-        </>
-      ) : null}
-    </p>
+      {s.updatedAt ? <> · {formatAgo(s.updatedAt, now)}改的</> : null}
+    </Text>
   );
 }
 
@@ -222,35 +196,37 @@ function NumberSetting({
   // 服务端的值变了（自己保存成功、别人改了）就跟上。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 只跟版本号走，不跟着输入框重置。
   useEffect(() => setDraft(shown), [s?.version]);
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
+  const submit = () => {
     if (draft.trim() === '') return;
     save(k, Number(draft), s);
   };
   const id = `setting-${k}`;
   return (
-    <FieldRow
-      onSubmit={submit}
-      label={settingLabel[k]}
-      htmlFor={id}
-      hint={
-        <>
-          {hint}
-          <SettingMeta s={s} />
-        </>
-      }
-    >
-      <Input
-        id={id}
-        inputMode="numeric"
-        value={draft}
-        placeholder={placeholder}
-        onChange={(e) => setDraft(e.target.value.replace(/[^\d]/g, ''))}
-        className="num h-8 w-28"
-      />
-      <span className="text-body text-muted-foreground">{unit}</span>
-      <SaveButton canSave={draft !== shown && draft !== ''} pending={pending} />
-    </FieldRow>
+    <Form onSubmit={submit}>
+      <FormItem
+        label={settingLabel[k]}
+        htmlFor={id}
+        help={
+          <>
+            {hint}
+            <SettingMeta s={s} />
+          </>
+        }
+      >
+        <Stack direction="horizontal" gap="sm" align="center" wrap>
+          <Input
+            id={id}
+            inputMode="numeric"
+            value={draft}
+            placeholder={placeholder}
+            onChange={(e) => setDraft(e.target.value.replace(/[^\d]/g, ''))}
+            width="sm"
+          />
+          <Text tone="secondary">{unit}</Text>
+          <SaveButton variant="secondary" canSave={draft !== shown && draft !== ''} pending={pending} />
+        </Stack>
+      </FormItem>
+    </Form>
   );
 }
 
@@ -271,39 +247,39 @@ function QuietHours({ s }: { s: Setting | undefined }) {
   }, [s?.version]);
   const dirty = on !== Boolean(value) || (on && (start !== value?.start || end !== value?.end));
   return (
-    <FieldRow
-      onSubmit={(e) => {
-        e.preventDefault();
-        save('notify.quietHours', on ? { start, end } : null, s);
-      }}
-      label={settingLabel['notify.quietHours']}
-      hint={
-        <>
-          北京时间。免打扰时段里飞书不响；{brand.product}里照常能看到。
-          <SettingMeta s={s} />
-        </>
-      }
-    >
-      <Switch checked={on} onCheckedChange={setOn} aria-label="开免打扰时段" />
-      <Input
-        type="time"
-        value={start}
-        disabled={!on}
-        onChange={(e) => setStart(e.target.value)}
-        className="num h-8 w-28"
-        aria-label="免打扰开始"
-      />
-      <span className="text-muted-foreground">到</span>
-      <Input
-        type="time"
-        value={end}
-        disabled={!on}
-        onChange={(e) => setEnd(e.target.value)}
-        className="num h-8 w-28"
-        aria-label="免打扰结束"
-      />
-      <SaveButton canSave={dirty} pending={pending} />
-    </FieldRow>
+    <Form onSubmit={() => save('notify.quietHours', on ? { start, end } : null, s)}>
+      <FormItem
+        label={settingLabel['notify.quietHours']}
+        help={
+          <>
+            北京时间。免打扰时段里飞书不响；{brand.product}里照常能看到。
+            <SettingMeta s={s} />
+          </>
+        }
+      >
+        <Stack direction="horizontal" gap="sm" align="center" wrap>
+          <Switch checked={on} onCheckedChange={setOn} aria-label="开免打扰时段" />
+          <Input
+            type="time"
+            value={start}
+            disabled={!on}
+            onChange={(e) => setStart(e.target.value)}
+            width="sm"
+            aria-label="免打扰开始"
+          />
+          <Text tone={on ? 'secondary' : 'muted'}>到</Text>
+          <Input
+            type="time"
+            value={end}
+            disabled={!on}
+            onChange={(e) => setEnd(e.target.value)}
+            width="sm"
+            aria-label="免打扰结束"
+          />
+          <SaveButton variant="secondary" canSave={dirty} pending={pending} />
+        </Stack>
+      </FormItem>
+    </Form>
   );
 }
 
@@ -313,24 +289,27 @@ function SoloPaused({ s }: { s: Setting | undefined }) {
   const on = current.success ? current.data : false;
   const { save, pending } = useSaveSetting();
   return (
-    <FieldRow
-      onSubmit={(e) => e.preventDefault()}
-      formLabel={settingLabel['engine.soloPaused']}
-      label={settingLabel['engine.soloPaused']}
-      hint={
-        <>
-          {`开着时：${brand.terms.carpool}用不了（额度用满、整辆车被用光）也不自动切到${brand.terms.solo}，Claude 的活等${brand.terms.carpool}恢复或交给别家模型。已经挂着${brand.terms.solo}的不受影响，${brand.terms.carpool}恢复照常切回。`}
-          <SettingMeta s={s} />
-        </>
-      }
-    >
-      <Switch
-        checked={on}
-        disabled={pending}
-        onCheckedChange={(next) => save('engine.soloPaused', next, s)}
-        aria-label={settingLabel['engine.soloPaused']}
-      />
-    </FieldRow>
+    <Form aria-label={settingLabel['engine.soloPaused']}>
+      <FormItem
+        label={settingLabel['engine.soloPaused']}
+        help={
+          <>
+            {`开着时：${brand.terms.carpool}用不了（额度用满、整辆车被用光）也不自动切到${brand.terms.solo}，Claude 的活等${brand.terms.carpool}恢复或交给别家模型。已经挂着${brand.terms.solo}的不受影响，${brand.terms.carpool}恢复照常切回。拨一下就存。`}
+            <SettingMeta s={s} />
+          </>
+        }
+      >
+        <Stack direction="horizontal" gap="sm" align="center">
+          <Switch
+            checked={on}
+            disabled={pending}
+            onCheckedChange={(next) => save('engine.soloPaused', next, s)}
+            aria-label={settingLabel['engine.soloPaused']}
+          />
+          <Text tone="secondary">{on ? '开着' : '关着'}</Text>
+        </Stack>
+      </FormItem>
+    </Form>
   );
 }
 
@@ -343,38 +322,41 @@ function CommanderSwitch({ s }: { s: Setting | undefined }) {
   const on = current.success ? current.data : true;
   const { save, pending } = useSaveSetting();
   return (
-    <FieldRow
-      onSubmit={(e) => e.preventDefault()}
-      formLabel={settingLabel['engine.commander']}
-      label={settingLabel['engine.commander']}
-      hint={
-        <>
-          开着时：任务停下超过 15
-          分钟、引擎自己的规则没解开，就交给路由页「指挥官」一栏选出的模型看一眼；它只交裁决（继续、重做、拆单、停掉、留给人），
-          引擎按白名单核过才执行，改标准、没权限这类要人拍的只写诊断建议。每张单每次停下最多处理一次，每天有总次数上限。
-          <SettingMeta s={s} />
-        </>
-      }
-    >
-      <Switch
-        checked={on}
-        disabled={pending}
-        onCheckedChange={(next) => save('engine.commander', next, s)}
-        aria-label={settingLabel['engine.commander']}
-      />
-    </FieldRow>
+    <Form aria-label={settingLabel['engine.commander']}>
+      <FormItem
+        label={settingLabel['engine.commander']}
+        help={
+          <>
+            开着时：任务停下超过 15
+            分钟、引擎自己的规则没解开，就交给路由页「指挥官」一栏选出的模型看一眼；它只交裁决（继续、重做、拆单、停掉、留给人），
+            引擎按白名单核过才执行，改标准、没权限这类要人拍的只写诊断建议。每张单每次停下最多处理一次，每天有总次数上限。拨一下就存。
+            <SettingMeta s={s} />
+          </>
+        }
+      >
+        <Stack direction="horizontal" gap="sm" align="center">
+          <Switch
+            checked={on}
+            disabled={pending}
+            onCheckedChange={(next) => save('engine.commander', next, s)}
+            aria-label={settingLabel['engine.commander']}
+          />
+          <Text tone="secondary">{on ? '开着' : '关着'}</Text>
+        </Stack>
+      </FormItem>
+    </Form>
   );
 }
 
 /**
- * 留量线一行的窗口名。other →「其他窗口」；7d_model 没有组名时不要把字段名漏出来（「7d_model 周额度」），
- * 写成「单模型周额度」；这个池的读数带了组名就写在后面。别的窗口沿用 quotaWindowName，名字不变。
+ * 留量线一列的窗口名。other →「其他窗口」；7d_model 没有组名时不要把字段名漏出来（「7d_model 周额度」），
+ * 写成「单模型周额度」；读数带了组名就写在后面。别的窗口沿用 quotaWindowName，名字不变。
  */
 function reserveKindLabel(
   kind: QuotaWindowKind,
   windows: readonly { window: QuotaWindowKind; scope?: string | undefined }[],
 ): string {
-  if (kind === 'other') return windowLabel.other;
+  if (kind === 'other') return '其他窗口';
   if (kind !== '7d_model') return quotaWindowName({ window: kind, label: kind });
   const groups: string[] = [];
   for (const w of windows) {
@@ -398,13 +380,24 @@ function repoReadFailure(reposError: unknown, dispatchError: unknown): string | 
   return null;
 }
 
-const RESERVE_SHORT = '每个渠道每个额度窗「最多用到百分之几」，用到这条线引擎就不再往这个渠道派新活';
+const RESERVE_SHORT =
+  '每个渠道每个额度窗「最多用到百分之几」，用到这条线引擎就不再往这个渠道派新活（在跑的不动）';
+
+/** 留量线表里的一行：一个渠道（账号池）、存着的线、界面上列哪几种窗口。 */
+interface ReserveRow {
+  pool: NonNullable<ReturnType<typeof usePools>['data']>['pools'][number];
+  mine: Partial<Record<QuotaWindowKind, number | null | undefined>>;
+  kinds: QuotaWindowKind[];
+}
+
+/** 窗口列的固定顺序（和 lib/reserve 的 reserveKindsFor 同一个顺序）。 */
+const KIND_ORDER: QuotaWindowKind[] = ['5h', '7d', '7d_model', 'month_usd', 'period_usd', 'points', 'other'];
 
 /**
- * 各渠道的额度留量线（#194 方案 4.8）：每个渠道（账号池）每个额度窗一个「最多用到百分之几」，到了线引擎就不再往这个渠道派新活、
+ * 各渠道的额度留量线（#194 方案 4.8）：渠道 × 额度窗一张表，每格一个「最多用到百分之几」，到了线引擎就不再往这个渠道派新活、
  * 也不切过去（在跑的不动）。线只存在库里（起始值是发布时装载器从种子文件只补缺装进去的，不写死、驾驶舱可配置），
- * 这里没有任何默认值：留空 = 未配置（不限），写「不限」= 明确不限。存值认不出、库里没有这一项明确说出来，不当成不限；整份一起存，
- * 带版本号、进操作记录；顶上写这一项现在是种子装的还是人改过的。
+ * 这里没有任何默认值：格子空着 = 未配置（不限），写「不限」= 明确不限。存值认不出、库里没有这一项明确说出来，不当成不限；整份一起存，
+ * 带版本号、进操作记录；顶上写这一项现在是种子装的还是人改过的。这个渠道没有的窗写「无此窗」，和「未配置」分开。
  */
 function QuotaReserve({ s }: { s: Setting | undefined }) {
   const pools = usePools();
@@ -415,7 +408,8 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
   const saved = stored?.success ? stored.data : {};
   const problem = stored && !stored.success ? issueText(stored.error.issues[0]) : null;
   const source = reserveSource(s);
-  const rows = (pools.data?.pools ?? []).map((p) => {
+  // 渠道列表没读到时不画表（下面单独写读失败 / 在读），所以这里的空列表不会被当成「没有渠道」
+  const rows: ReserveRow[] = (pools.data ? pools.data.pools : []).map((p) => {
     const mine = saved[p.id] ?? {};
     return {
       pool: p,
@@ -423,35 +417,21 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
       kinds: reserveKindsFor([...new Set(p.windows.map((w) => w.window))], mine),
     };
   });
+  const columnKinds = KIND_ORDER.filter((k) => rows.some((r) => r.kinds.includes(k)));
+  const allWindows = rows.flatMap((r) => r.pool.windows);
   const initial = (): Record<string, string> =>
     Object.fromEntries(
       rows.flatMap((r) => r.kinds.map((k) => [`${r.pool.id}|${k}`, reserveInputText(r.mine[k])] as const)),
     );
   const [draft, setDraft] = useState<Record<string, string>>(initial);
-  // 「未配置」的格子默认是灰色占位「—」，点一下才变输入框；点开了但没填的，离开输入框就缩回占位。
-  const [editing, setEditing] = useState<ReadonlySet<string>>(new Set());
-  const [focusKey, setFocusKey] = useState<string | null>(null);
-  // 池数据带实时用量，后台每次重拉都换引用；只跟池与窗口的形状走，否则刚点开的格子、没保存的草稿会被打回（#1871）。
+  // 池数据带实时用量，后台每次重拉都换引用；只跟池与窗口的形状走，否则没保存的草稿会被打回（#1871）。
   const shape = rows.map((r) => `${r.pool.id}:${r.kinds.join(',')}`).join(';');
   // biome-ignore lint/correctness/useExhaustiveDependencies: 服务端版本变了、池与窗口的形状变了才重置，不跟着输入、用量重置。
   useEffect(() => {
     setDraft(initial());
-    setEditing(new Set());
   }, [s?.version, shape]);
-  useEffect(() => {
-    if (focusKey) document.getElementById(`reserve-${focusKey.replace('|', '-')}`)?.focus();
-  }, [focusKey]);
-  const stopEditing = (k: string) => {
-    setEditing((cur) => {
-      const next = new Set(cur);
-      next.delete(k);
-      return next;
-    });
-    setFocusKey(null);
-  };
   const dirty = Object.entries(initial()).some(([k, v]) => (draft[k] ?? v) !== v);
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
+  const submit = () => {
     const next: Record<string, Record<string, number | null>> = {};
     for (const [poolId, lines] of Object.entries(saved))
       next[poolId] = { ...lines } as Record<string, number | null>;
@@ -471,119 +451,103 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
     }
     save('engine.quotaReserve', next, s);
   };
+
+  const columns: TableColumn<ReserveRow>[] = [
+    {
+      key: 'pool',
+      title: '渠道',
+      // 拼车和独享两个池同属一个渠道：只写渠道名会出现两行一模一样的「Claude 订阅」，要带上池编号
+      render: (_v, r) => <Text strong>{poolTitle(r.pool)}</Text>,
+    },
+    ...columnKinds.map(
+      (k, i): TableColumn<ReserveRow> => ({
+        key: k,
+        title: reserveKindLabel(k, allWindows),
+        render: (_v, r) => {
+          if (r.kinds.length === 0)
+            return i === 0 ? <Text tone="muted">还没读到额度窗，读到以后在这里配。</Text> : null;
+          if (!r.kinds.includes(k)) return <Text tone="muted">无此窗</Text>;
+          const dk = `${r.pool.id}|${k}`;
+          return (
+            <Stack direction="horizontal" gap="sm" align="center">
+              <Input
+                id={`reserve-${r.pool.id}-${k}`}
+                aria-label={`${poolTitle(r.pool)} ${reserveKindLabel(k, r.pool.windows)}`}
+                value={draft[dk] ?? ''}
+                placeholder="—"
+                onChange={(e) => setDraft((d) => ({ ...d, [dk]: e.target.value }))}
+                width="xs"
+              />
+              <Text size="meta" tone="muted">
+                %
+              </Text>
+            </Stack>
+          );
+        },
+      }),
+    ),
+  ];
+
   return (
     // 表单包在区块外面：区块标题在表单里（e2e 和读屏都按「表单里有标题」找它）
-    <form onSubmit={submit}>
+    <Form onSubmit={submit}>
       <Section
+        id="reserve"
         title={settingLabel['engine.quotaReserve']}
-        // 卡头说明一行不折；「怎么填」原来是一个折叠，收进 ⓘ（#1917）
-        description={
-          <span className="block truncate whitespace-nowrap" title={RESERVE_SHORT}>
-            {RESERVE_SHORT}
-          </span>
-        }
         actions={
-          <DescriptionHint label="留量线怎么填">
-            <p>{RESERVE_SHORT}。</p>
-            <p className="mt-2">
-              {`${brand.terms.carpool}用不了时也不切过去（在跑的不动），剩下的留给自己用。灰色「—」= 未配置（不限；${brand.terms.carpool}用到被拒为止，一般不设线），点一下才能填；写「${UNLIMITED_WORD}」= 明确不限。`}
-            </p>
-          </DescriptionHint>
+          <SaveButton variant="secondary" canSave={dirty} pending={pending}>
+            保存留量线
+          </SaveButton>
         }
       >
-        <p className="mt-1 text-meta" data-testid="reserve-source">
-          {source.kind === 'missing' ? (
-            <span className="text-ink-fail" role="alert">
-              {`库里没有留量线：种子没装进库（发布时装载器没跑成？），引擎对所有渠道一律不派、不切，不当成不限。要现在恢复，在下面填好保存即可。`}
-            </span>
-          ) : source.kind === 'seed' ? (
-            <span className="text-muted-foreground">
-              {`现在的线来自种子（发布时装载器装的，还没人在${brand.product}改过）`}
-            </span>
-          ) : (
-            <span className="text-muted-foreground">
-              {`现在的线是人在${brand.product}改过的${
-                source.by ? `（${whoChangedLabel(source.by, meForReserve, namesForReserve).text}）` : ''
-              }，发布时的种子不会覆盖它`}
-            </span>
-          )}
-        </p>
-        {problem ? (
-          <p className="mt-2 text-meta text-ink-fail" role="alert">
-            {`存着的留量线认不出（${problem}），引擎对所有渠道一律不派、不切，不当成不限；保存会整份换掉。`}
-          </p>
-        ) : null}
-        {pools.error ? <LoadError what="渠道列表" error={pools.error} /> : null}
-        {!pools.data ? <LoadingRows rows={1} /> : null}
-        <div className="mt-2 divide-y">
-          {rows.map((r) => (
-            <div key={r.pool.id} className="grid gap-x-4 gap-y-1 py-2 md:grid-cols-field md:items-center">
-              {/* 拼车和独享两个池同属一个渠道：只写渠道名会出现两行一模一样的「Claude 订阅」，要带上池编号 */}
-              <div className="text-body">{poolTitle(r.pool)}</div>
-              {r.kinds.length === 0 ? (
-                <p className="text-meta text-muted-foreground">还没读到额度窗，读到以后在这里配。</p>
+        <Stack gap="md">
+          <div data-testid="reserve-source">
+            <Stack gap="sm">
+              <Text size="meta" tone="muted">
+                {RESERVE_SHORT}。{brand.terms.carpool}
+                用不了时也不切过去，剩下的留给自己用。格子空着 = 未配置（不限）；写「{UNLIMITED_WORD}」=
+                明确不限；写 0–100 = 用到这个百分比就停。
+              </Text>
+              {source.kind === 'missing' ? (
+                <Notice tone="fail">
+                  库里没有留量线：种子没装进库（发布时装载器没跑成？），引擎对所有渠道一律不派、不切，不当成不限。要现在恢复，在下面填好保存即可。
+                </Notice>
+              ) : source.kind === 'seed' ? (
+                <Text size="meta" tone="muted">
+                  {`现在的线来自种子（发布时装载器装的，还没人在${brand.product}改过）`}
+                </Text>
               ) : (
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                  {r.kinds.map((k) => {
-                    const dk = `${r.pool.id}|${k}`;
-                    const id = `reserve-${r.pool.id}-${k}`;
-                    const name = reserveKindLabel(k, r.pool.windows);
-                    const open = (draft[dk] ?? '') !== '' || editing.has(dk);
-                    return (
-                      <div key={k} className="flex items-center gap-1.5">
-                        <Label htmlFor={id} className="text-meta text-muted-foreground">
-                          {name}
-                        </Label>
-                        {open ? (
-                          <>
-                            <Input
-                              id={id}
-                              value={draft[dk] ?? ''}
-                              onChange={(e) => setDraft((d) => ({ ...d, [dk]: e.target.value }))}
-                              onBlur={() => {
-                                if ((draft[dk] ?? '') === '') stopEditing(dk);
-                              }}
-                              className="num h-7 w-20 max-md:min-h-10"
-                            />
-                            <span className="text-meta text-muted-foreground">%</span>
-                          </>
-                        ) : (
-                          <button
-                            type="button"
-                            id={id}
-                            title="未配置（不限），点一下填写"
-                            onClick={() => {
-                              setEditing((cur) => new Set(cur).add(dk));
-                              setFocusKey(dk);
-                            }}
-                            className="num h-7 w-20 max-md:min-h-10 rounded-md border border-dashed bg-muted text-meta text-muted-foreground outline-none hover:border-border-strong hover:text-muted-foreground focus-visible:ring-focus focus-visible:ring-ring"
-                          >
-                            —<span className="sr-only">未配置，点击填写</span>
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                <Text size="meta" tone="muted">
+                  {`现在的线是人在${brand.product}改过的${
+                    source.by ? `（${whoChangedLabel(source.by, meForReserve, namesForReserve).text}）` : ''
+                  }，发布时的种子不会覆盖它`}
+                </Text>
               )}
-            </div>
-          ))}
-        </div>
-        <div className="mt-2 flex items-end gap-3">
-          <div className="min-w-0 flex-1">{source.kind === 'missing' ? null : <SettingMeta s={s} />}</div>
-          <SaveButton canSave={dirty} pending={pending} />
-        </div>
+            </Stack>
+          </div>
+          {problem ? (
+            <Notice tone="fail">
+              {`存着的留量线认不出（${problem}），引擎对所有渠道一律不派、不切，不当成不限；保存会整份换掉。`}
+            </Notice>
+          ) : null}
+          {pools.error ? <LoadError what="渠道列表" error={pools.error} /> : null}
+          {!pools.data && !pools.error ? <LoadingRows rows={2} /> : null}
+          {pools.data ? (
+            <Table columns={columns} rows={rows} rowKey={(r) => r.pool.id} caption="各渠道额度留量线" />
+          ) : null}
+          {source.kind === 'missing' ? null : <SettingMeta s={s} />}
+        </Stack>
       </Section>
-    </form>
+    </Form>
   );
 }
 
 const SECTIONS = [
-  { id: 'repos', label: '仓库和接活' },
+  { id: 'repos', label: '仓库' },
   { id: 'run', label: '运行设置' },
+  { id: 'reserve', label: '额度留量线' },
   { id: 'notify', label: '提醒' },
   { id: 'account', label: '账密登录' },
-  { id: 'look', label: '外观' },
   { id: 'about', label: '关于' },
 ] as const;
 
@@ -594,29 +558,65 @@ export default function Settings() {
   const theme = useTheme();
   const api = useApi();
   const { data: me } = useMe();
+  const now = useNow();
   const { repos, loading: reposLoading, error: reposError } = useRepo();
   const settings = useSettings();
   const dispatch = useRepoDispatch();
   const ciPolicy = useRepoCiPolicy();
+  const { view: masterView } = useMasterView();
+  // 读到总开关关着才写「总开关关着，不会派」；读不到不冒充关着
+  const masterOff = masterView.kind === 'ok' && !masterView.master.on;
   const repoFailure = repoReadFailure(reposError, dispatch.error);
   const find = (k: SettingKey) => settings.data?.settings.find((s) => s.key === k);
+  const [importOpen, setImportOpen] = useState(false);
+  const staleSince = settings.dataUpdatedAt;
+
+  const columns: TableColumn<Repo>[] = [
+    {
+      key: 'name',
+      title: '仓库',
+      render: (_v, r) => <RepoNameCell repo={{ owner: r.owner, name: r.name }} branch={r.defaultBranch} />,
+    },
+    {
+      key: 'dispatch',
+      title: '让 AI 接活',
+      render: (_v, r) => (
+        <DispatchState
+          repoId={r.id}
+          row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+          masterOff={masterOff}
+        />
+      ),
+    },
+    {
+      key: 'ci',
+      title: 'CI 模式',
+      render: (_v, r) => <CiState repoId={r.id} row={ciPolicy.data?.repos.find((d) => d.repoId === r.id)} />,
+    },
+    {
+      key: 'actions',
+      title: '操作',
+      render: (_v, r) => (
+        <Stack direction="horizontal" gap="sm" align="center">
+          <DispatchAction
+            repoId={r.id}
+            name={`${r.owner}/${r.name}`}
+            row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+          />
+          <GroomAction repoId={r.id} repo={{ owner: r.owner, name: r.name }} />
+        </Stack>
+      ),
+    },
+  ];
 
   return (
     <Page
       title="设置"
-      description="仓库开关、运行设置、提醒、登录和外观。"
-      detail={
-        <div className="space-y-2">
-          <p>
-            仓库开关、运行设置、提醒存在后端：保存时带上你看到的版本号，别人先改了会提示你刷新再改；改了写进操作记录。
-          </p>
-          <p>外观只有「减少动效」一项，只存在这台浏览器里；亮暗跟随系统。</p>
-          <p>
-            仓库一行：「开启 / 关闭」管这个仓「让 AI
-            接活」，「整理」叫指挥官现在整理待办；点仓名展开整理记录。CI
-            模式在这一行下面，随时能在强制和不强制之间切。
-          </p>
-        </div>
+      description="保存带版本号，别人先改了会提示你刷新再改；改了都记进操作记录。"
+      actions={
+        <Button href="/audit" size="sm">
+          操作记录
+        </Button>
       }
       // 刷新在页头固定槽位（规范第三节「页头」），页面不自己摆
       refresh={{
@@ -626,175 +626,196 @@ export default function Settings() {
         staleAfterMs: SETTINGS_STALE_AFTER_MS,
       }}
     >
-      {/* 版式（#1805）：左侧页内导航（桌面吸在左边，手机吸顶成横向胶囊）+ 右边各节；每节标题下一句说明，字段标签左、控件右。
-          顺序按用得多少排——「让 AI 接活」是最常动的开关，放最前；外观放后面。 */}
-      <div className="lg:grid lg:grid-cols-settings-shell lg:gap-8">
-        <PageNav label="设置分节" items={SECTIONS} />
-        <div className="min-w-0">
-          <SettingsSection
+      <Grid preset="side">
+        <Anchor items={SECTIONS} />
+        <Stack>
+          {settings.data && settings.error ? (
+            <LoadStale
+              error={settings.error}
+              what="设置"
+              when={staleSince ? formatAgo(new Date(staleSince).toISOString(), now) : undefined}
+              expired={staleSince ? now - staleSince > SETTINGS_STALE_AFTER_MS : false}
+            />
+          ) : null}
+
+          <Section
             id="repos"
-            icon={FolderGit2}
-            title="仓库"
-            description="接进来的仓（测试能跑、有一页 AGENTS.md）。接活、整理在一行；CI 模式在下面。点仓名看整理记录。"
+            title={
+              <>
+                仓库
+                {repos.length > 0 && !reposError ? <Tag>{repos.length}</Tag> : null}
+              </>
+            }
+            actions={
+              <Button size="sm" onClick={() => setImportOpen((v) => !v)}>
+                导入仓库
+              </Button>
+            }
           >
-            {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
-            <EngineMasterRelation />
-            {repoFailure ? (
-              <div className="mb-3">
-                <LoadError text={repoFailure} error={reposError ?? dispatch.error} />
-                {reposError && repos.length ? (
-                  <p className="mt-1 text-meta text-muted-foreground">下面是上次读到的，可能不全。</p>
-                ) : null}
-              </div>
-            ) : null}
-            {reposLoading ? <LoadingRows rows={1} /> : null}
-            {repos.length > 0 || (!reposLoading && !reposError) ? (
-              <Section flush>
-                {/* 一行一个仓（#1917，照路由页样板）：仓名加一行小字、一个状态、「开启/关闭」和「整理」同一行同宽 */}
-                <List aria-label="仓库">
-                  {repos.map((r) => (
-                    <li key={r.id}>
-                      <RepoRow
-                        repoId={r.id}
-                        repo={{ owner: r.owner, name: r.name }}
-                        branch={r.defaultBranch}
-                        dispatch={dispatch.data?.repos.find((d) => d.repoId === r.id)}
-                      />
-                      <RowDetail indent={false} className="pb-3">
-                        <RepoCiPolicyControl
-                          repoId={r.id}
-                          name={`${r.owner}/${r.name}`}
-                          row={ciPolicy.data?.repos.find((d) => d.repoId === r.id)}
-                        />
-                      </RowDetail>
-                    </li>
-                  ))}
-                </List>
-                {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
-                {repos.length === 0 && !reposLoading && !reposError ? (
-                  <EmptyState size="inline" icon={FolderGit2} title="还没有仓" />
-                ) : null}
-              </Section>
-            ) : null}
+            <Stack gap="md">
+              {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
+              <EngineMasterRelation />
+              {repoFailure ? (
+                <Stack gap="sm">
+                  <LoadError text={repoFailure} error={reposError ?? dispatch.error} />
+                  {reposError && repos.length ? (
+                    <Text size="meta" tone="muted">
+                      下面是上次读到的，可能不全。
+                    </Text>
+                  ) : null}
+                </Stack>
+              ) : null}
+              {reposLoading ? <LoadingRows rows={2} /> : null}
+              {repos.length > 0 ? (
+                <Table
+                  columns={columns}
+                  rows={repos}
+                  rowKey="id"
+                  caption="仓库"
+                  expandable={{
+                    render: (r) => {
+                      const name = `${r.owner}/${r.name}`;
+                      const row = dispatch.data?.repos.find((d) => d.repoId === r.id);
+                      return (
+                        <Grid cols={3}>
+                          <Stack gap="sm">
+                            <Text strong>让 AI 接活</Text>
+                            <Text size="meta" tone="muted">
+                              开着：引擎每 5
+                              分钟自己挑单（老单要指挥官整理过），没单可挑会自动叫指挥官整理。关着：只有本机命令
+                              fleet-api dispatch-issue 点名派。
+                              {row ? `${dispatchNote(row)}。` : '开关没读到。'}
+                            </Text>
+                          </Stack>
+                          <RepoCiPolicyControl
+                            repoId={r.id}
+                            name={name}
+                            row={ciPolicy.data?.repos.find((d) => d.repoId === r.id)}
+                          />
+                          <GroomDetail repoId={r.id} repo={{ owner: r.owner, name: r.name }} />
+                        </Grid>
+                      );
+                    },
+                  }}
+                />
+              ) : null}
+              {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
+              {repos.length === 0 && !reposLoading && !reposError ? (
+                <EmptyState
+                  icon={FolderGit2}
+                  title="还没有仓库"
+                  hint="接进来的仓库默认不让 AI 接活，要另外打开。先「导入仓库」把机器人已经装上的仓接进来。"
+                  action={<Button onClick={() => setImportOpen(true)}>导入仓库</Button>}
+                />
+              ) : null}
+            </Stack>
+          </Section>
 
-            {/* 两个机器人已经装上的仓：接进或移出驾驶舱。新项目走本机 pnpm project add。 */}
-            <div className="mt-4 border-t pt-4">
-              <h3 className="text-heading">导入仓库</h3>
-              <p className="mt-1 mb-3 text-meta text-muted-foreground">
-                这里只列两个机器人已经装上的仓。新项目在本机跑 pnpm project add 做到底；接进来的仓「让 AI
-                接活」默认关着，要另外打开。
-              </p>
-              <RepoImportSection />
-            </div>
-          </SettingsSection>
+          {importOpen ? <RepoImportSection onClose={() => setImportOpen(false)} /> : null}
 
-          <SettingsSection
-            id="run"
-            icon={SlidersHorizontal}
-            title="运行设置"
-            description="存在后端。保存时带上你看到的版本号：别人先改了会提示你刷新再改，不会悄悄盖掉。"
-          >
+          <Section id="run" title="运行设置">
             {/* 读失败后再重拉会先清掉 error、回到 pending。已经读过就不再画骨架。 */}
             {settings.data ? (
-              <div className="space-y-3">
-                {/* 单栏：项数不多，分两栏会有一边空着（#1910 第 11 条） */}
-                <FieldGroup>
-                  <NumberSetting
-                    k="sessions.maxConcurrent"
-                    s={find('sessions.maxConcurrent')}
-                    hint="整台机器同时跑的 AI 会话最多几个（1–32）。各账号池自己的并发上限另算。"
-                    unit="个会话"
-                    placeholder="默认 6"
-                  />
-                  <NumberSetting
-                    k="judge.dailyCallLimit"
-                    s={find('judge.dailyCallLimit')}
-                    hint="判断题小模型每天最多调用多少次（0 = 不用它）。"
-                    unit="次 / 天"
-                    placeholder="没设"
-                  />
-                  <SoloPaused s={find('engine.soloPaused')} />
-                  <CommanderSwitch s={find('engine.commander')} />
-                  <FlowModeSetting s={find('engine.flowMode')} />
-                </FieldGroup>
-                <QuotaReserve s={find('engine.quotaReserve')} />
-              </div>
-            ) : settings.error ? (
-              <LoadError error={settings.error} />
-            ) : settings.isFetched ? null : (
-              <LoadingRows rows={2} />
-            )}
-          </SettingsSection>
-
-          <SettingsSection
-            id="notify"
-            icon={BellRing}
-            title="提醒"
-            description={`飞书和${brand.product}只推三类：要你拍、卡住报警、日报。进度不主动推，问了才给。`}
-          >
-            {/* 和运行设置同一条：出错只留报错横幅，读过之后的重拉也不画骨架。 */}
-            {settings.data ? (
-              <FieldGroup>
-                <QuietHours s={find('notify.quietHours')} />
-              </FieldGroup>
-            ) : settings.error ? (
-              <LoadError error={settings.error} />
-            ) : settings.isFetched ? null : (
-              <LoadingRows rows={1} />
-            )}
-            {/* 装成 APP、系统通知、角标（#2050）：三样都是浏览器现读的，不依赖后端设置 */}
-            <div className="mt-3">
-              <PwaStatus />
-            </div>
-          </SettingsSection>
-
-          <SettingsSection
-            id="account"
-            icon={KeyRound}
-            title="账密登录"
-            description={`设一个用户名和密码，飞书登录出问题时也进得去${brand.product}。`}
-          >
-            <CredentialsSection />
-          </SettingsSection>
-
-          <SettingsSection
-            id="look"
-            icon={Palette}
-            title="外观"
-            description="主题只有一套，亮暗跟随系统。这里只剩减少动效，存在这台浏览器里。"
-          >
-            <FieldGroup>
-              <FieldRow label="减少动效" hint="在跑的卡片不再呼吸、进度条不再扫光">
-                <Switch
-                  checked={theme.pref.motion === 'reduced'}
-                  onCheckedChange={(on) => theme.setMotion(on ? 'reduced' : 'system')}
-                  aria-label="减少动效"
+              <Stack gap="lg">
+                <NumberSetting
+                  k="sessions.maxConcurrent"
+                  s={find('sessions.maxConcurrent')}
+                  hint="整台机器同时跑的 AI 会话最多几个（1–32）。各账号池自己的并发上限另算。"
+                  unit="个会话"
+                  placeholder="默认 6"
                 />
-              </FieldRow>
-            </FieldGroup>
-          </SettingsSection>
+                <NumberSetting
+                  k="judge.dailyCallLimit"
+                  s={find('judge.dailyCallLimit')}
+                  hint="判断题小模型每天最多调用多少次（0 = 不用它），留空 = 没设。"
+                  unit="次 / 天"
+                  placeholder="没设"
+                />
+                <SoloPaused s={find('engine.soloPaused')} />
+                <CommanderSwitch s={find('engine.commander')} />
+                <FlowModeSetting s={find('engine.flowMode')} />
+              </Stack>
+            ) : settings.error ? (
+              <LoadError error={settings.error} />
+            ) : settings.isFetched ? null : (
+              <LoadingRows rows={3} />
+            )}
+          </Section>
 
-          <SettingsSection id="about" icon={Info} title="关于" description={`${brand.product}的前端。`}>
-            <KeyValue
-              className="max-w-xl"
-              items={[
-                {
-                  label: '数据',
-                  value:
-                    api.source === 'http'
-                      ? `${brand.product}后端（/api），推送走 /api/events`
-                      : '假数据（编的，会自己动；页面上的操作只改这份假数据）',
-                },
-                {
-                  label: '登录',
-                  value: me ? `${me.user.displayName}（飞书或账密，只放行创始人）` : '—',
-                },
-                { label: '接口约定', value: 'packages/shared/src/web-api.ts', mono: true },
-              ]}
-            />
-          </SettingsSection>
-        </div>
-      </div>
+          {settings.data ? (
+            <QuotaReserve s={find('engine.quotaReserve')} />
+          ) : (
+            <Section id="reserve" title={settingLabel['engine.quotaReserve']}>
+              {settings.error ? (
+                <LoadError error={settings.error} />
+              ) : settings.isFetched ? null : (
+                <LoadingRows rows={2} />
+              )}
+            </Section>
+          )}
+
+          <Section id="notify" title="提醒">
+            <Stack gap="lg">
+              {/* 和运行设置同一条：出错只留报错横幅，读过之后的重拉也不画骨架。 */}
+              {settings.data ? (
+                <QuietHours s={find('notify.quietHours')} />
+              ) : settings.error ? (
+                <LoadError error={settings.error} />
+              ) : settings.isFetched ? null : (
+                <LoadingRows rows={1} />
+              )}
+              {/* 装成 APP、系统通知、角标（#2050）：都是浏览器现读的，不依赖后端设置 */}
+              <PwaStatus />
+            </Stack>
+          </Section>
+
+          <Section id="account" title="账密登录">
+            <CredentialsSection />
+          </Section>
+
+          <Section id="about" title="关于">
+            <Stack gap="md">
+              {api.source === 'http' ? null : (
+                <Notice tone="stall" role="status">
+                  假数据（编的，会自己动；页面上的操作只改这份假数据）。
+                </Notice>
+              )}
+              <Form aria-label="外观">
+                <FormItem
+                  label="减少动效"
+                  help="在跑的卡片不再呼吸、进度条不再扫光。只存在这台浏览器里；亮暗跟随系统。"
+                >
+                  <Switch
+                    checked={theme.pref.motion === 'reduced'}
+                    onCheckedChange={(on) => theme.setMotion(on ? 'reduced' : 'system')}
+                    aria-label="减少动效"
+                  />
+                </FormItem>
+              </Form>
+              <Descriptions
+                columns={1}
+                items={[
+                  {
+                    label: '数据',
+                    value: api.source === 'http' ? `${brand.product}后端` : '假数据',
+                  },
+                  {
+                    label: '登录',
+                    value: me ? (
+                      `${me.user.displayName}（飞书或账密，只放行创始人）`
+                    ) : (
+                      <Text tone="muted">没读到</Text>
+                    ),
+                  },
+                ]}
+              />
+              <Text size="meta" tone="muted">
+                操作记录里能看到每项设置是谁、什么时候改的：<TextLink to="/audit">去看操作记录</TextLink>。
+              </Text>
+            </Stack>
+          </Section>
+        </Stack>
+      </Grid>
     </Page>
   );
 }

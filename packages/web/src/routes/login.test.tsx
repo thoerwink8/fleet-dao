@@ -140,9 +140,9 @@ describe('开发环境免登', () => {
     const devLogin = vi.fn(() => Promise.resolve(ME));
     renderApp(<App />, { api: loggedOut({ devLogin: true }, { devLogin }), route: '/login' });
     await screen.findByLabelText(/用户编号/);
-    expect(screen.getByRole('button', { name: '免登' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: '免登' }).getAttribute('aria-disabled')).toBe('true');
     type('   ');
-    expect(screen.getByRole('button', { name: '免登' })).toHaveProperty('disabled', true);
+    expect(screen.getByRole('button', { name: '免登' }).getAttribute('aria-disabled')).toBe('true');
     fireEvent.submit(screen.getByLabelText(/用户编号/).closest('form') as HTMLFormElement);
     expect(devLogin).not.toHaveBeenCalled();
   });
@@ -157,7 +157,7 @@ describe('开发环境免登', () => {
     expect(screen.queryByRole('link', { name: /状态页/ })).toBeNull();
     expect(screen.queryByTestId('landed')).toBeNull();
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: '免登' })).toHaveProperty('disabled', false),
+      expect(screen.getByRole('button', { name: '免登' }).getAttribute('aria-disabled')).toBeNull(),
     );
     expect(devLogin).toHaveBeenCalledTimes(1);
   });
@@ -236,7 +236,8 @@ describe('账密登录', () => {
     fill('founder', 'correct horse battery');
     fireEvent.submit(form());
     const btn = await screen.findByRole('button', { name: /登录中/ });
-    expect(btn).toHaveProperty('disabled', true);
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.getAttribute('aria-busy')).toBe('true');
     expect(username().readOnly).toBe(true);
     fireEvent.submit(form());
     expect(passwordLogin).toHaveBeenCalledTimes(1);
@@ -259,7 +260,7 @@ describe('账密登录', () => {
     expect(password().value).toBe('');
     expect(username().value).toBe('founder');
     await waitFor(() => expect(document.activeElement).toBe(password()));
-    expect(screen.getByRole('button', { name: '登录' })).toHaveProperty('disabled', false);
+    expect(screen.getByRole('button', { name: '登录' }).getAttribute('aria-disabled')).toBeNull();
     expect(screen.queryByTestId('landed')).toBeNull();
   });
 

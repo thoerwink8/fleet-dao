@@ -3,18 +3,10 @@ import { toast } from 'sonner';
 import { errorText, useUpdateRepoCiPolicy } from '../api/client';
 import type { RepoCiPolicy } from '../api/types';
 import { formatDateTime } from '../lib/format';
-import { StatusDot } from './layout/status-badge';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from './ui/alert-dialog';
-import { Button } from './ui/button';
+import { Button } from './layout/button';
+import { ConfirmDialog } from './layout/confirm-dialog';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 
 const FLEET_DAO_WARNING =
   'fleet-dao 推的是各仓各机器的规矩。关掉强制 CI 之后，引擎不再等检查、也不做冷验收，开完 PR 就直接合并。';
@@ -29,10 +21,23 @@ function repoNameOf(full: string): string {
   return i === -1 ? full : full.slice(i + 1);
 }
 
+/** 表里的「CI 模式」格：强制是正常的灰阶字，不强制是橙字（颜色只给异常）；读不到写「没读到」。 */
+export function CiState({ repoId, row }: { repoId: string; row: RepoCiPolicy | undefined }) {
+  return (
+    <span data-testid={`ci-policy-state-${repoId}`}>
+      {row ? (
+        <Text tone={row.mode === 'force' ? 'default' : 'warning'}>{modeText(row.mode)}</Text>
+      ) : (
+        <Text tone="muted">没读到</Text>
+      )}
+    </span>
+  );
+}
+
 /**
- * 设置页「仓库」一节里每个项目的 CI 模式：现在强制还是不强制、最近几次谁切的、切换按钮。
+ * 仓库展开区里的 CI 模式：说明、切换按钮、最近几次谁切的。
  * 点了先二次确认。fleet-dao 改成不强制时写明它推的是各仓各机器的规矩。
- * row 是 undefined 时（还在读、读不成）不画按钮。
+ * row 是 undefined 时（还在读、读不成）不画按钮，写「CI 模式没读到」。
  */
 export function RepoCiPolicyControl({
   repoId,
@@ -46,7 +51,12 @@ export function RepoCiPolicyControl({
   const update = useUpdateRepoCiPolicy();
   const [asking, setAsking] = useState(false);
 
-  if (!row) return <span className="text-meta text-muted-foreground">CI 模式没读到</span>;
+  if (!row)
+    return (
+      <span data-testid={`ci-policy-${repoId}`}>
+        <Text tone="muted">CI 模式没读到</Text>
+      </span>
+    );
 
   const target = row.mode === 'force' ? 'off' : 'force';
   const verb = target === 'off' ? '改成不强制' : '改成强制';
@@ -63,52 +73,47 @@ export function RepoCiPolicyControl({
   };
 
   return (
-    <div className="flex flex-col gap-1" data-testid={`ci-policy-${repoId}`}>
-      <div className="flex items-center gap-x-2">
-        <div className="flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
-          <StatusDot tone={row.mode === 'force' ? 'done' : 'doubt'} />
-          <span className="font-medium text-foreground" data-testid={`ci-policy-state-${repoId}`}>
-            {modeText(row.mode)}
-          </span>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={update.isPending}
-          onClick={() => setAsking(true)}
-          aria-label={`${verb} ${name} 的 CI`}
-        >
-          {verb}
-        </Button>
-        <AlertDialog open={asking} onOpenChange={setAsking}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>
-                把 {name} {verb} CI？
-              </AlertDialogTitle>
-              <AlertDialogDescription>
-                {target === 'off'
-                  ? '开完 PR 引擎直接合并，不等 CI、不做冷验收。改标准的路径仍要人点头。'
-                  : '恢复现在的流程：CI 全绿、冷验收通过之后才合并。'}
-                {fleetDao ? ` ${FLEET_DAO_WARNING}` : ''}
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>先不</AlertDialogCancel>
-              <AlertDialogAction onConfirm={confirm}>{verb}</AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      </div>
-      {row.recent.length > 0 ? (
-        <ul className="text-meta text-muted-foreground">
-          {row.recent.map((s) => (
-            <li key={`${s.at}-${s.from}-${s.to}`}>
-              {formatDateTime(s.at)} {s.actor}：{modeText(s.from)} → {modeText(s.to)}
-            </li>
-          ))}
-        </ul>
-      ) : null}
+    <div data-testid={`ci-policy-${repoId}`}>
+      <Stack gap="sm">
+        <Text strong>CI 模式</Text>
+        <Text size="meta" tone="muted">
+          强制：CI 全绿、冷验收通过之后才合并。不强制：开完 PR 直接合并，不等 CI、不做冷验收。现在是
+          {modeText(row.mode)}。
+        </Text>
+        <Stack direction="horizontal" gap="sm" align="center">
+          <Button
+            size="sm"
+            loading={update.isPending}
+            onClick={() => setAsking(true)}
+            aria-label={`${verb} ${name} 的 CI`}
+          >
+            {verb}
+          </Button>
+        </Stack>
+        {row.recent.length > 0 ? (
+          <ul aria-label="最近的切换">
+            {row.recent.map((s) => (
+              <li key={`${s.at}-${s.from}-${s.to}`}>
+                <Text size="meta" tone="muted">
+                  {formatDateTime(s.at)} {s.actor}：{modeText(s.from)} → {modeText(s.to)}
+                </Text>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </Stack>
+      <ConfirmDialog
+        open={asking}
+        onOpenChange={setAsking}
+        title={`把 ${name} ${verb} CI？`}
+        description={`${
+          target === 'off'
+            ? '开完 PR 引擎直接合并，不等 CI、不做冷验收。改标准的路径仍要人点头。'
+            : '恢复现在的流程：CI 全绿、冷验收通过之后才合并。'
+        }${fleetDao ? ` ${FLEET_DAO_WARNING}` : ''}`}
+        confirmText={verb}
+        onConfirm={confirm}
+      />
     </div>
   );
 }

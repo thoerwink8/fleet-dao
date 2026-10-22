@@ -16,6 +16,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
+import { type DataAttrs, pickData } from './data-attrs';
 
 /** 悬停、焦点、菜单开着才露出：只在有精确指针（鼠标、触控板）的设备上藏，触屏一直显示。 */
 export const revealOnRowHover =
@@ -32,8 +33,14 @@ export function RowMenu({
   label,
   title,
   reveal = true,
+  open,
+  onOpenChange,
   children,
-}: {
+  ...data
+}: DataAttrs & {
+  /** 受控：外面管开关（手机上长按一行打开）。不传＝自己管。 */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   /** 按钮的无障碍名字，写清是哪一行的（「更多操作：Opus 5.5」）。 */
   label: string;
   /** 悬停提示：菜单里有什么。 */
@@ -43,12 +50,13 @@ export function RowMenu({
   children: ReactNode;
 }) {
   return (
-    <DropdownMenu>
+    <DropdownMenu {...(open !== undefined ? { open } : {})} {...(onOpenChange ? { onOpenChange } : {})}>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
           variant="ghost"
           size="icon-sm"
+          {...pickData(data)}
           data-row-menu
           className={cn('shrink-0 text-ink-3', reveal && faintUntilRowHover)}
           aria-label={label}

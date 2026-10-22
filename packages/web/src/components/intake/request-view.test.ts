@@ -97,14 +97,19 @@ describe('批量操作', () => {
 describe('列表一行的字', () => {
   test('状态：结案·做之后跟着单子走', () => {
     expect(statusView(row(1)).label).toBe('讨论中');
-    expect(statusView(row(1, { status: 'pending_decision' })).tone).toBe('human');
+    expect(statusView(row(1, { status: 'pending_decision' })).status).toBe(
+      'request:request:pending_decision',
+    );
     const shipped = row(1, {
       status: 'closed_do',
       issueRefs: [{ repo: 'a/b', number: 8, state: 'deployed', stateAt: '2026-10-01T00:00:00.000Z' }],
     });
-    expect(statusView(shipped)).toMatchObject({ tone: 'done', label: '已结案·做 · 已上线', short: '已结案' });
+    expect(statusView(shipped)).toMatchObject({
+      status: 'request:request:deployed',
+      label: '已结案·做 · 已上线',
+    });
     expect(statusView(row(1, { status: 'closed_do' })).label).toBe('已结案·做 · 等开单');
-    expect(statusView(row(1, { status: 'closed_drop' })).tone).toBe('stop');
+    expect(statusView(row(1, { status: 'closed_drop' })).label).toBe('已结案·不做');
   });
 
   test('预览前面写是谁说的；等我的写在等什么', () => {

@@ -3,6 +3,7 @@
 // 颜色只给异常：warning、danger 是橙、红的字（*-ink），不是填充色；正常的字只用 default、secondary、muted 三档灰阶。
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
+import type { DataAttrs } from './data-attrs';
 
 const SIZE = { meta: 'text-meta', body: 'text-body', heading: 'text-heading' } as const;
 const TONE = {
@@ -23,10 +24,15 @@ export function Text({
   mono,
   truncate,
   block,
+  pre,
   as: Tag = 'span',
   title,
+  id,
   children,
-}: {
+  ...data
+}: DataAttrs & {
+  /** 给 aria-describedby 指过来的元素 id。 */
+  id?: string;
   /** meta 12（时间戳、表头、计数）、body 14（默认）、heading 16（小标题）。 */
   size?: TextSize;
   /** default 正文黑、secondary 次要、muted 灰字说明；warning、danger 只给异常。 */
@@ -39,6 +45,8 @@ export function Text({
   truncate?: boolean;
   /** 独占一行。 */
   block?: boolean;
+  /** 保留原文的换行，长词也折行（通知正文这类多行原文）。 */
+  pre?: boolean;
   as?: 'span' | 'p' | 'div';
   /** 悬停给全文（truncate 时用）。 */
   title?: string;
@@ -47,12 +55,15 @@ export function Text({
   return (
     <Tag
       {...(title !== undefined ? { title } : {})}
+      {...(id !== undefined ? { id } : {})}
+      {...data}
       className={cn(
         mono ? 'font-mono text-mono' : SIZE[size],
         TONE[tone],
         strong && 'font-medium',
         truncate ? 'block min-w-0 truncate' : block && 'block',
         Tag !== 'span' && !truncate && 'block',
+        pre && 'block whitespace-pre-wrap break-words',
       )}
     >
       {children}

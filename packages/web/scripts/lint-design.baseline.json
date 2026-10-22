@@ -1,12 +1,6 @@
 {
   "version": 1,
   "files": {
-    "src/components/alert-repair.tsx": {
-      "R13": 96,
-      "R14": 1,
-      "R17": 1,
-      "R20": 4
-    },
     "src/components/call-row.tsx": {
       "R13": 33,
       "R14": 1,
@@ -20,15 +14,6 @@
       "R17": 3,
       "R20": 2
     },
-    "src/components/credentials-section.tsx": {
-      "R13": 28,
-      "R14": 1
-    },
-    "src/components/decision-picker.tsx": {
-      "R13": 31,
-      "R14": 2,
-      "R17": 1
-    },
     "src/components/diff-stat.tsx": {
       "R13": 5
     },
@@ -39,7 +24,7 @@
       "R20": 2
     },
     "src/components/engine-master.tsx": {
-      "R13": 43,
+      "R13": 34,
       "R14": 2,
       "R17": 1
     },
@@ -47,13 +32,6 @@
       "R13": 41,
       "R17": 1,
       "R20": 2
-    },
-    "src/components/flow-mode-setting.tsx": {
-      "R13": 1,
-      "R14": 3
-    },
-    "src/components/gateway-health-link.tsx": {
-      "R13": 4
     },
     "src/components/home/board/board-canvas.tsx": {
       "R13": 142,
@@ -125,53 +103,6 @@
       "R13": 28,
       "R20": 4
     },
-    "src/components/intake/draft-panel.tsx": {
-      "R13": 94,
-      "R14": 3,
-      "R17": 1
-    },
-    "src/components/intake/new-request.tsx": {
-      "R13": 23,
-      "R14": 1,
-      "R17": 1
-    },
-    "src/components/intake/people.tsx": {
-      "R13": 21
-    },
-    "src/components/intake/request-cards.tsx": {
-      "R13": 114,
-      "R14": 3,
-      "R17": 1,
-      "R20": 1
-    },
-    "src/components/intake/request-chat.tsx": {
-      "R13": 50,
-      "R14": 3,
-      "R17": 3,
-      "R20": 4
-    },
-    "src/components/intake/request-composer.tsx": {
-      "R13": 50,
-      "R14": 3,
-      "R17": 1
-    },
-    "src/components/intake/request-list.tsx": {
-      "R13": 83,
-      "R14": 2,
-      "R17": 4
-    },
-    "src/components/intake/request-menu.tsx": {
-      "R13": 11,
-      "R14": 5
-    },
-    "src/components/intake/request-stream.tsx": {
-      "R13": 142,
-      "R14": 2,
-      "R17": 1
-    },
-    "src/components/intake/request-view.ts": {
-      "R20": 1
-    },
     "src/components/job-row.tsx": {
       "R13": 32,
       "R14": 1
@@ -197,13 +128,6 @@
     "src/components/org-switch.tsx": {
       "R13": 14
     },
-    "src/components/page-nav.tsx": {
-      "R13": 19
-    },
-    "src/components/password-field.tsx": {
-      "R13": 7,
-      "R14": 3
-    },
     "src/components/pool-problem.tsx": {
       "R13": 6
     },
@@ -216,10 +140,6 @@
       "R13": 89,
       "R17": 3,
       "R20": 4
-    },
-    "src/components/pwa-status.tsx": {
-      "R14": 1,
-      "R20": 6
     },
     "src/components/quota-notice.tsx": {
       "R13": 5
@@ -245,28 +165,8 @@
       "R14": 2,
       "R20": 11
     },
-    "src/components/repo-ci-policy.tsx": {
-      "R13": 11,
-      "R14": 2
-    },
     "src/components/repo-context.tsx": {
       "R19": 1
-    },
-    "src/components/repo-dispatch.tsx": {
-      "R13": 2,
-      "R14": 2,
-      "R20": 2
-    },
-    "src/components/repo-groom.tsx": {
-      "R13": 61,
-      "R14": 4,
-      "R17": 3,
-      "R20": 1
-    },
-    "src/components/repo-import.tsx": {
-      "R13": 22,
-      "R14": 2,
-      "R20": 6
     },
     "src/components/resources/repos-section.tsx": {
       "R13": 71,
@@ -368,13 +268,6 @@
       "R13": 16,
       "R17": 1
     },
-    "src/routes/audit.tsx": {
-      "R13": 64,
-      "R14": 1,
-      "R17": 1,
-      "R19": 2,
-      "R20": 2
-    },
     "src/routes/bare.tsx": {
       "R13": 1
     },
@@ -399,25 +292,6 @@
       "R17": 1,
       "R19": 1,
       "R20": 10
-    },
-    "src/routes/intake.tsx": {
-      "R13": 5,
-      "R14": 1
-    },
-    "src/routes/login.tsx": {
-      "R13": 45,
-      "R14": 3,
-      "R17": 1
-    },
-    "src/routes/not-found.tsx": {
-      "R14": 1
-    },
-    "src/routes/notifications.tsx": {
-      "R13": 100,
-      "R14": 2,
-      "R17": 4,
-      "R19": 2,
-      "R20": 11
     },
     "src/routes/quota.tsx": {
       "R13": 81,
@@ -447,12 +321,6 @@
     },
     "src/routes/schedules.tsx": {
       "R13": 2
-    },
-    "src/routes/settings.tsx": {
-      "R13": 69,
-      "R14": 3,
-      "R17": 2,
-      "R19": 2
     },
     "src/routes/shell.tsx": {
       "R14": 1

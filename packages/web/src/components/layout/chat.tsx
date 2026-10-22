@@ -4,6 +4,7 @@
 import type { KeyboardEvent, ReactNode } from 'react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
+import { type DataAttrs, pickData } from './data-attrs';
 
 export type MessageRole = 'me' | 'other' | 'tool';
 
@@ -18,13 +19,15 @@ export function Message({
   role,
   meta,
   children,
-}: {
+  ...data
+}: DataAttrs & {
   role: MessageRole;
   meta?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <div
+      {...pickData(data)}
       data-role={role}
       className={cn('flex max-w-180 min-w-0 flex-col gap-1', role === 'me' && 'items-end self-end')}
     >
@@ -43,8 +46,17 @@ export function Message({
   );
 }
 
-export function Chat({ messages, empty }: { messages: readonly ChatMessage[]; empty?: ReactNode }) {
-  if (messages.length === 0 && empty) return <div>{empty}</div>;
+export function Chat({
+  messages = [],
+  empty,
+  children,
+}: {
+  messages?: readonly ChatMessage[];
+  empty?: ReactNode;
+  /** 排在 messages 后面的内容（自己拼的消息、分隔线、卡片），业务页的对话流从这里放。 */
+  children?: ReactNode;
+}) {
+  if (messages.length === 0 && !children && empty) return <div>{empty}</div>;
   return (
     <div role="log" aria-live="polite" className="flex flex-col gap-4">
       {messages.map((m, i) => (
@@ -53,6 +65,7 @@ export function Chat({ messages, empty }: { messages: readonly ChatMessage[]; em
           {m.body}
         </Message>
       ))}
+      {children}
     </div>
   );
 }
@@ -67,7 +80,24 @@ export function Composer({
   sending,
   disabled,
   disabledReason,
-}: {
+  label,
+  inputId,
+  enterToSend,
+  tools,
+  suggestions = [],
+  onPickSuggestion,
+  ...data
+}: DataAttrs & {
+  /** 输入框的无障碍名字；不传就取 placeholder。 */
+  label?: string;
+  inputId?: string;
+  /** 按 Enter 就发（Shift+Enter 换行）；默认是 ⌘/Ctrl+Enter 才发。手机上不传：Enter 是换行。 */
+  enterToSend?: boolean;
+  /** 底栏左边的小按钮（模型、@、让指挥官接着问）。 */
+  tools?: ReactNode;
+  /** 输入框上方弹出的候选（打 @ 的人名）；选中调 onPickSuggestion。 */
+  suggestions?: readonly string[];
+  onPickSuggestion?: (item: string) => void;
   value: string;
   onChange: (value: string) => void;
   /** 点发送或按 ⌘/Ctrl+Enter。空白不会触发。可返回 Promise，等的时候发送键转圈。 */
@@ -88,25 +118,46 @@ export function Composer({
     if (!blocked) void onSend();
   };
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    const plain = enterToSend && !e.shiftKey && !e.nativeEvent.isComposing;
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || plain)) {
       e.preventDefault();
       send();
     }
   };
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-line bg-card p-3 focus-within:border-brand">
+    <div
+      {...pickData(data)}
+      className="relative flex flex-col gap-2 rounded-md border border-line bg-card p-3 focus-within:border-brand"
+    >
+      {suggestions.length > 0 ? (
+        <ul className="absolute bottom-full left-0 z-10 mb-1 min-w-40 rounded-sm bg-card p-1 shadow-pop">
+          {suggestions.map((c) => (
+            <li key={c}>
+              <button
+                type="button"
+                className="flex w-full items-center rounded-sm px-2 py-1.5 text-left text-body text-ink hover:bg-fill-1 max-md:min-h-11"
+                onClick={() => onPickSuggestion?.(c)}
+              >
+                {c}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <textarea
+        {...(inputId ? { id: inputId } : {})}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={onKey}
         placeholder={placeholder}
         disabled={disabled}
         rows={2}
-        aria-label={placeholder ?? '输入消息'}
+        aria-label={label ?? placeholder ?? '输入消息'}
         className="field-sizing-content max-h-40 min-h-14 w-full resize-none bg-transparent text-body text-ink outline-none placeholder:text-ink-3 disabled:cursor-not-allowed"
       />
       <div className="flex items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-meta text-ink-3">
+        {tools ? <div className="flex shrink-0 items-center gap-1">{tools}</div> : null}
+        <span className="min-w-0 flex-1 truncate text-meta text-ink-3">
           {disabled && disabledReason ? disabledReason : hint}
         </span>
         <Button
