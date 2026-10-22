@@ -275,4 +275,11 @@ export {
   TIMINGS_RUN_EVENT,
   timingsSource,
 } from './test-timings.ts';
+export {
+  implementRoundsDone,
+  type RoundRunFact,
+  type TotalRoundsHold,
+  type TotalRoundsHoldAction,
+  totalRoundsHoldOf,
+} from './total-rounds-hold.ts';
 export { addDays } from './version-cut.ts';

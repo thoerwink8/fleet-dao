@@ -2,7 +2,7 @@
 // 假依赖测任务本身：选哪些单、护栏（每次停下一次、每天上限、开关、没配模型报警）、白名单放行/拒绝、诊断文字带进提醒；
 // 真装配的开关、操作记录名下在 real/park-triage.test.ts。
 
-import { offDiffHoldOf } from '@fleet-dao/conventions';
+import { implementRoundsDone, offDiffHoldOf, totalRoundsHoldOf } from '@fleet-dao/conventions';
 import type { AcceptanceDutyRow, CommanderAcceptanceTask } from '@fleet-dao/db';
 import { describe, expect, it, vi } from 'vitest';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
@@ -35,7 +35,13 @@ import {
 } from '../src/jobs/park-triage.ts';
 import type { ParkedRetryRow, ParkedSnapshot } from '../src/jobs/parked-retry.ts';
 import { stamp } from '../src/jobs/reconcile-common.ts';
-import { type ContinueCommand, PARK_CODE_ROUTE_SWITCH, type ParkKind } from '../src/task-contract.ts';
+import {
+  type ContinueCommand,
+  MAX_TOTAL_ROUNDS,
+  PARK_CODE_ROUTE_SWITCH,
+  PARK_CODE_TOTAL_ROUNDS,
+  type ParkKind,
+} from '../src/task-contract.ts';
 
 const NOW = new Date('2026-10-19T12:00:00Z');
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
@@ -1400,6 +1406,80 @@ describe('裁决：引擎白名单核过才执行', () => {
     await triageParkedTasks(plain.deps);
     expect(plain.redone).toEqual([WF]);
     expect(handed).toHaveLength(1);
+  });
+
+  it('轮数用尽·重做按历代累计动手轮数封顶（#3625）：累计到 6 不另起新一代，留言并贴「本机做」；没到照常重做', async () => {
+    const handed: { issue: number; key: string; comment: string }[] = [];
+    const wired = (done: number) => ({
+      totalRoundsHold: {
+        check: async () =>
+          totalRoundsHoldOf(
+            implementRoundsDone(Array.from({ length: done }, () => ({ segment: 'manual', outcome: 'done' }))),
+            'commander.redo',
+            MAX_TOTAL_ROUNDS,
+          ),
+        handBack: async (_repo: IntakeRepo, issue: number, hold: { key: string; comment: string }) => {
+          handed.push({ issue, key: hold.key, comment: hold.comment });
+        },
+      },
+    });
+    const full = rig({ answer: verdict('redo'), over: wired(MAX_TOTAL_ROUNDS) });
+    const out = await triageParkedTasks(full.deps);
+    expect(full.redone).toEqual([]);
+    expect(full.sent).toHaveLength(0);
+    expect(out.acted).toEqual([]);
+    expect(out.left).toEqual([
+      expect.objectContaining({ why: expect.stringContaining('历代累计动手 6 轮') }),
+    ]);
+    expect(handed).toHaveLength(1);
+    expect(handed[0]?.issue).toBe(ROW.issueNumber);
+    expect(handed[0]?.comment).toContain('另起一代会把轮数清零');
+
+    const under = rig({ answer: verdict('redo'), over: wired(MAX_TOTAL_ROUNDS - 1) });
+    await triageParkedTasks(under.deps);
+    expect(under.redone).toEqual([WF]);
+    expect(handed).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】数不了历代动手轮数（读库失败）：不重做，记失败，不当成没到上限', async () => {
+    const r = rig({
+      answer: verdict('redo'),
+      over: {
+        totalRoundsHold: {
+          check: async () => {
+            throw new Error('库连不上');
+          },
+          handBack: async () => {},
+        },
+      },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(r.redone).toEqual([]);
+    expect(out.acted).toEqual([]);
+    expect(r.acts.at(-1)).toMatchObject({ action: 'redo', ok: false });
+  });
+
+  it('总轮数到顶、已交回本机的停下（total_rounds）：指挥官不接——不起会话、不认领、不写任何通知（尤其没有 decision 级拍板卡）（#3625）', async () => {
+    const r = rig({
+      snap: snap('other', { title: '动手累计 6 轮仍没合，交还本机', code: PARK_CODE_TOTAL_ROUNDS }),
+      answer: verdict('leave'),
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.candidates).toBe(0);
+    expect(out.acted).toEqual([]);
+    expect(r.notices).toEqual([]);
+    expect(r.acts).toEqual([]);
+    expect(r.redone).toEqual([]);
+    expect(r.sent).toHaveLength(0);
+    // 对照：同一种停法（别的）换成没权限那类的码，照旧交指挥官，说明上面的空是因为码，不是夹具没装好
+    const other = rig({ snap: snap('other', { title: '没权限', code: 'workflows_permission' }) });
+    const seen = await triageParkedTasks(other.deps);
+    expect(seen.candidates).toBe(1);
+  });
+
+  it('对照：other 停法的默认动作是留给人并写「只有人能做」的卡，所以 total_rounds 必须在选单时就跳过，不能指望后面的裁决', async () => {
+    const d = defaultAction({ kind: 'other', handoff: false, continuedBefore: false }, null);
+    expect(d).toMatchObject({ action: 'leave', leaveReason: 'human-only' });
   });
 
   it('【故意造出的失败】判不了验收条（读库失败）：不重做，记失败，不当成没命中', async () => {
