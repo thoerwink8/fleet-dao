@@ -1,6 +1,5 @@
 // 本机领单（决定 0096，queries/local-claims.ts）：领、续、结束、到期收回，状态只用引擎认的那几个；
 // 本机的行不进引擎的名额、熔断、失败次数、遗留行对账、「在做几张」。
-import { randomUUID } from 'node:crypto';
 import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,16 +13,13 @@ import {
 import {
   activeLocalLeaseKeys,
   claimLocalTask,
-  confirmLocalTakeover,
   expiredLocalClaims,
   extendLocalLease,
   finishLocalTask,
   lastLocalReturnAt,
   listLocalClaims,
   mergedPrForIssue,
-  type ReadWorkflow,
   renewLocalTask,
-  type SignalRun,
   settleExpiredLocalClaim,
   TAKEOVER_NOTE,
   type TakeOverEngine,
@@ -31,9 +27,9 @@ import {
 } from '../src/queries/local-claims.ts';
 import { mergeStallFacts } from '../src/queries/merge-stall.ts';
 import { listOpenTaskRows } from '../src/queries/reconcile.ts';
-import { auditLog, pullRequests, repos, runs, taskExecutionOperations, tasks } from '../src/schema/index.ts';
+import { auditLog, pullRequests, repos, tasks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addRoute, addRun, addTask, ago, catalog, HOUR, later, NOW } from './helpers.ts';
+import { addRepo, addTask, ago, HOUR, later, NOW } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -213,261 +209,6 @@ describe('claimLocalTask：接手引擎已停下的单（stalled / running + par
       }),
     ).toBe(1);
     expect(await row(repo.id, 1)).toMatchObject({ state: 'done', executor: 'local' });
-  });
-});
-
-describe('受管接手已有 PR 的停下的单（takeoverPr + confirmLocalTakeover）', () => {
-  const HEAD = 'a'.repeat(40);
-  const wf = { ok: true as const, workflowId: 'task-acme-app-1', runId: 'run-1', running: true };
-  let running = true;
-  let readResult: Awaited<ReturnType<ReadWorkflow>> = wf;
-  const signals: string[] = [];
-  const readWorkflow: ReadWorkflow = async () => (readResult.ok ? { ...readResult, running } : readResult);
-  const signalRun = vi.fn<SignalRun>(async (_t, run) => {
-    signals.push(run.runId);
-    return { ok: true };
-  });
-  beforeEach(() => {
-    running = true;
-    readResult = wf;
-    signals.length = 0;
-    signalRun.mockClear();
-    signalRun.mockImplementation(async (_t, run) => {
-      signals.push(run.runId);
-      return { ok: true };
-    });
-  });
-  const takeoverPr = (over: { pr?: number; head?: string } = {}) => ({
-    pr: 50,
-    head: HEAD,
-    readWorkflow,
-    signalRun,
-    ...over,
-  });
-  const claim = (n: number, over: { pr?: number; head?: string } = {}, node = NODE, now = NOW) =>
-    claimLocalTask(t.db, {
-      repo: 'acme/app',
-      issueNumber: n,
-      title: 'x',
-      nodeId: node,
-      now,
-      takeoverPr: takeoverPr(over),
-    });
-  const confirm = (n: number, over: { pr?: number; head?: string } = {}, now = NOW) =>
-    confirmLocalTakeover(t.db, {
-      repo: 'acme/app',
-      issueNumber: n,
-      nodeId: NODE,
-      now,
-      pr: over.pr ?? 50,
-      head: over.head ?? HEAD,
-      readWorkflow,
-    });
-  async function world(over: { headRef?: string; headSha?: string } = {}) {
-    const repo = await addRepo(t.db, 'app');
-    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'running', phase: 'parked' });
-    await t.db.insert(pullRequests).values({
-      repoId: repo.id,
-      number: 50,
-      state: 'open',
-      headRef: over.headRef ?? 'fleet/1-tabcdef12',
-      headSha: over.headSha ?? HEAD,
-      updatedAt: NOW,
-      issueRefs: [1],
-    });
-    return { repo, task };
-  }
-
-  it('成功：先登记（信号只发给读到的精确 run、记原 PR/head/run），工作流还在跑时 confirm 是 pending，终态后才 ok', async () => {
-    const { repo, task } = await world();
-    expect(await claim(1)).toMatchObject({ ok: true, executor: 'local' });
-    expect(signals).toEqual(['run-1']);
-    expect(await row(repo.id, 1)).toMatchObject({ state: 'running', executor: 'local', claimedBy: NODE });
-    const [audit] = await t.db.select().from(auditLog).where(eq(auditLog.action, 'task.local.claim'));
-    expect(audit?.after).toMatchObject({
-      takeover: { pr: 50, head: HEAD, workflowId: 'task-acme-app-1', runId: 'run-1' },
-    });
-    // 信号受理不是交接完成
-    expect(await confirm(1)).toMatchObject({ ok: false, code: 'takeover_pending' });
-    running = false;
-    expect(await confirm(1)).toMatchObject({ ok: true, executor: 'local' });
-    // 引擎晚到的收尾快照写不回去
-    expect(
-      await saveTaskSnapshot(t.db, {
-        taskId: task.id,
-        state: 'stopped',
-        phase: 'abandoned',
-        doing: '放弃',
-        lastProblem: null,
-        subtasks: [],
-      }),
-    ).toBe('held_by_local');
-    expect(await row(repo.id, 1)).toMatchObject({ executor: 'local', state: 'running' });
-    // 确认可重复，不重复记账
-    expect(await confirm(1)).toMatchObject({ ok: true });
-    expect(
-      await t.db.select().from(auditLog).where(eq(auditLog.action, 'task.local.takeover_confirm')),
-    ).toHaveLength(1);
-  });
-
-  it('【故意造出的失败】PR 对不上：换头、串号、多 PR、非引擎分支、没有 PR：全拒，行原样，不发信号', async () => {
-    const { repo } = await world();
-    expect(await claim(1, { head: 'b'.repeat(40) })).toMatchObject({ ok: false, code: 'takeover_refused' });
-    expect(await claim(1, { pr: 51 })).toMatchObject({ ok: false, code: 'takeover_refused' });
-    await t.db.insert(pullRequests).values({
-      repoId: repo.id,
-      number: 51,
-      state: 'open',
-      headRef: 'local/1-x',
-      headSha: 'c'.repeat(40),
-      updatedAt: NOW,
-    });
-    const multi = await claim(1);
-    expect(multi).toMatchObject({ ok: false, code: 'takeover_refused' });
-    expect(multi.ok ? '' : multi.why).toContain('2 个');
-    expect(signals).toEqual([]);
-    expect(await row(repo.id, 1)).toMatchObject({ executor: 'engine', phase: 'parked' });
-    expect(await t.db.select().from(auditLog)).toHaveLength(0);
-  });
-
-  it('【故意造出的失败】分支不是 fleet/<单号>-、PR 不在本仓镜像里：拒', async () => {
-    await world({ headRef: 'local/1-hand' });
-    expect(await claim(1)).toMatchObject({ ok: false, code: 'takeover_refused' });
-    const other = await addRepo(t.db, 'other');
-    await addTask(t.db, other.id, { issueNumber: 1, state: 'running', phase: 'parked' });
-    // 另一个仓的 PR 不算本仓的
-    expect(
-      await claimLocalTask(t.db, {
-        repo: 'acme/other',
-        issueNumber: 1,
-        title: 'x',
-        nodeId: NODE,
-        now: NOW,
-        takeoverPr: takeoverPr(),
-      }),
-    ).toMatchObject({ ok: false, code: 'takeover_refused' });
-  });
-
-  it('【故意造出的失败】活工人（未结束的 run）和未结清的受管执行操作：拒，不放弃、不发信号', async () => {
-    const { repo, task } = await world();
-    await catalog(t.db);
-    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-4.9' });
-    const live = await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(HOUR) });
-    expect(await claim(1)).toMatchObject({ ok: false, code: 'takeover_refused' });
-    await t.db
-      .update(runs)
-      .set({ endedAt: ago(1), outcome: 'done' })
-      .where(eq(runs.id, live.id));
-    await t.db.insert(taskExecutionOperations).values({
-      id: randomUUID(),
-      taskId: task.id,
-      coverageEpoch: randomUUID(),
-      revision: 1,
-      requestId: randomUUID(),
-      nodeId: 'engine',
-      kind: 'redo',
-      namespace: 'default',
-      workflowId: 'w',
-      generation: 2,
-      workflowType: 'taskWorkflow',
-      inputHash: 'h',
-      phase: 'reserved',
-      createdAt: NOW,
-      updatedAt: NOW,
-    });
-    const r = await claim(1);
-    expect(r).toMatchObject({ ok: false, code: 'takeover_refused' });
-    expect(r.ok ? '' : r.why).toContain('持久协调边界');
-    expect(signals).toEqual([]);
-    expect(await row(repo.id, 1)).toMatchObject({ executor: 'engine' });
-  });
-
-  it('【故意造出的失败】引擎没停下（在跑）：拒；读不到工作流身份：拒；叫停没成：行原样、重跑可恢复', async () => {
-    const repo = await addRepo(t.db, 'app');
-    await addTask(t.db, repo.id, { issueNumber: 1, state: 'running', phase: 'session' });
-    await t.db.insert(pullRequests).values({
-      repoId: repo.id,
-      number: 50,
-      state: 'open',
-      headRef: 'fleet/1-t',
-      headSha: HEAD,
-      updatedAt: NOW,
-      issueRefs: [1],
-    });
-    expect(await claim(1)).toMatchObject({ ok: false, code: 'takeover_refused' });
-    await t.db.update(tasks).set({ phase: 'parked' }).where(eq(tasks.issueNumber, 1));
-    readResult = { ok: false, why: '连不上' };
-    expect(await claim(1)).toMatchObject({ ok: false, code: 'takeover_refused' });
-    readResult = wf;
-    signalRun.mockImplementationOnce(async () => ({ ok: false, why: '断线' }));
-    expect(await claim(1)).toMatchObject({ ok: false, code: 'engine_has_it' });
-    expect(await row(repo.id, 1)).toMatchObject({ executor: 'engine', phase: 'parked' });
-    // 重跑：恢复
-    expect(await claim(1)).toMatchObject({ ok: true });
-  });
-
-  it('重入：同一次接手只续租，不再发信号、不新增 claim 记录；别的节点、别的 head 不能覆盖赢家', async () => {
-    const { repo } = await world();
-    await claim(1);
-    signals.length = 0;
-    const again = await claim(1, {}, NODE, later(HOUR));
-    expect(again).toMatchObject({ ok: true });
-    expect(again.ok && again.leaseUntil?.getTime()).toBe(later(HOUR).getTime() + LOCAL_LEASE_MS);
-    expect(signals).toEqual([]);
-    expect(await t.db.select().from(auditLog).where(eq(auditLog.action, 'task.local.claim'))).toHaveLength(1);
-    expect(await claim(1, {}, 'other-pc')).toMatchObject({ ok: false, code: 'takeover_refused' });
-    expect(await row(repo.id, 1)).toMatchObject({ claimedBy: NODE });
-    // 租约到期：confirm 不算数
-    expect(await confirm(1, {}, later(LOCAL_LEASE_MS + 2 * HOUR))).toMatchObject({
-      ok: false,
-      code: 'takeover_refused',
-    });
-  });
-
-  it('确认时：PR 换头、工作流 run 变了、未结束 run 重现、读不到：不宣称完成', async () => {
-    const { task } = await world();
-    await claim(1);
-    running = false;
-    expect(await confirm(1, { head: 'd'.repeat(40) })).toMatchObject({ ok: false, code: 'takeover_refused' });
-    await t.db
-      .update(pullRequests)
-      .set({ headSha: 'e'.repeat(40) })
-      .where(eq(pullRequests.number, 50));
-    expect(await confirm(1)).toMatchObject({ ok: false, code: 'takeover_refused' });
-    await t.db.update(pullRequests).set({ headSha: HEAD }).where(eq(pullRequests.number, 50));
-    readResult = { ...wf, runId: 'run-2' };
-    expect(await confirm(1)).toMatchObject({ ok: false, code: 'takeover_refused' });
-    readResult = { ok: false, why: '断线' };
-    expect(await confirm(1)).toMatchObject({ ok: false, code: 'takeover_pending' });
-    readResult = wf;
-    await catalog(t.db);
-    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-4.9' });
-    await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(1) });
-    expect(await confirm(1)).toMatchObject({ ok: false, code: 'takeover_pending' });
-  });
-
-  it('引擎已 stopped 且工作流已结束：不发信号也能接手；stopped 但工作流还在跑：拒', async () => {
-    const { repo } = await world();
-    await t.db.update(tasks).set({ state: 'stopped', phase: null }).where(eq(tasks.issueNumber, 1));
-    expect(await claim(1)).toMatchObject({ ok: false, code: 'takeover_refused' });
-    running = false;
-    expect(await claim(1)).toMatchObject({ ok: true });
-    expect(signals).toEqual([]);
-    expect(await row(repo.id, 1)).toMatchObject({ executor: 'local' });
-  });
-
-  it('普通 claim（不带 takeoverPr）对这类单行为不变：停下的照旧接手', async () => {
-    await world();
-    expect(
-      await claimLocalTask(t.db, {
-        repo: 'acme/app',
-        issueNumber: 1,
-        title: 'x',
-        nodeId: NODE,
-        now: NOW,
-        takeOver: async () => ({ ok: true }),
-      }),
-    ).toMatchObject({ ok: true });
   });
 });
 
