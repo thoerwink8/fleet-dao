@@ -288,6 +288,7 @@ describe('开单限流（#2735）：超过 5 条只开一张汇总单，一次�
     const body = actions[0]?.kind === 'create' ? actions[0].body : '';
     for (const n of six) expect(body).toContain(`07c-nodes.e2e.ts › ${n}`);
     expect(checkIssueBody(body)).toMatchObject({ ok: true });
+    expect(checkIssueBody(body, { kind: '缺陷' })).toMatchObject({ ok: true });
   });
 
   test('刚好 5 条：照旧逐条开，但一次最多新开 3 张，另 2 张这次不开（deferred）', () => {
@@ -397,6 +398,8 @@ describe('单子和汇总', () => {
       brokenRoundBody(['https://ci/run/1']),
     ]) {
       expect(checkIssueBody(body)).toMatchObject({ ok: true });
+      // 自动开的单都贴「缺陷」，正文要带「影响」（母单 #3582）
+      expect(checkIssueBody(body, { kind: '缺陷' })).toMatchObject({ ok: true });
     }
   });
 

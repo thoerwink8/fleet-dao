@@ -419,6 +419,41 @@ describe('checkIssueBody：开单脚本和驾驶舱提需求开单共用的那�
     expect(checkIssueBody(OK).ok).toBe(true);
   });
 
+  describe('「缺陷」类必填「## 影响」', () => {
+    const withImpact = (text: string) => OK.replace('## 原话', `## 影响\n\n${text}\n\n## 原话`);
+
+    it('写了影响：通过', () => {
+      expect(checkIssueBody(withImpact('主线 CI 红：导出一直失败。'), { kind: '缺陷' }).ok).toBe(true);
+    });
+
+    it('【故意造出的失败】缺这一节：拒开，提示怎么写', () => {
+      const r = checkIssueBody(OK, { kind: '缺陷' });
+      expect(r).toMatchObject({ ok: false, field: '影响' });
+      if (!r.ok)
+        expect(r.why).toMatch(
+          /没有「## 影响」一节.*一轮做成率.*冷验收拒绝.*主线 CI 红.*创始人被打扰次数.*单没开/s,
+        );
+    });
+
+    it('【故意造出的失败】这一节空着（只有空白）：拒开', () => {
+      expect(checkIssueBody(withImpact('  '), { kind: '缺陷' })).toMatchObject({ ok: false, field: '影响' });
+    });
+
+    it('需求、杂项和没说类别的不要求（老单、老调用方不受影响）', () => {
+      expect(checkIssueBody(OK, { kind: '需求' }).ok).toBe(true);
+      expect(checkIssueBody(OK, { kind: '杂项' }).ok).toBe(true);
+    });
+
+    it('issue:new --kind 缺陷：缺影响不开单（一次 gh 都不发），有影响照开', async () => {
+      const bug = ['--kind', '缺陷', ...base.slice(2)];
+      const none = setup({ body: OK });
+      await expect(none.run(...bug)).rejects.toThrow('「缺陷」类的单正文里没有「## 影响」一节');
+      expect(none.calls).toEqual([]);
+      const ok = setup({ body: withImpact('创始人被打扰次数上升。') });
+      await expect(ok.run(...bug)).resolves.toMatchObject({ number: expect.any(Number) });
+    });
+  });
+
   it('【故意造出的失败】缺「怎么算做完」：不过，原因和开单脚本拒开时是同一句', async () => {
     const body = OK.replace(/## 怎么算做完[\s\S]*$/, '');
     const r = checkIssueBody(body);

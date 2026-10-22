@@ -52,6 +52,10 @@ const BODY = [
   '',
   '法国自动发版在第 0 步连败 3 趟。',
   '',
+  '## 影响',
+  '',
+  '自动发版停了，创始人要手动发布，被打扰次数上升。',
+  '',
   '## 原话',
   '',
   '无（AI 发现）。',
@@ -119,6 +123,14 @@ describe('fleet-api emergency-issue', () => {
     const down = setup({ openFails: 'GitHub 503' });
     expect(await main(['emergency-issue', '--key', 'k', '--title', 't'], down.deps(BODY))).toBe(1);
     expect(down.err.join('\n')).toMatch(/急修单没开成：GitHub 503/);
+  });
+
+  it('【故意造出的失败】急修单正文没写「影响」：退出 1、不开单', async () => {
+    const s = setup();
+    const body = BODY.replace(/## 影响[\s\S]*?(?=## 原话)/, '');
+    expect(await main(['emergency-issue', '--key', 'k', '--title', 't'], s.deps(body))).toBe(1);
+    expect(s.opened).toEqual([]);
+    expect(s.err.join('\n')).toMatch(/没有「## 影响」一节/);
   });
 
   it('自动发布拼的急修单正文（deploy/france/auto-release/lib.mjs 的 emergencyIssue）过得了开单的四节检查', async () => {
