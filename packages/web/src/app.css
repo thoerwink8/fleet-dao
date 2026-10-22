@@ -141,10 +141,11 @@
   --radius-*: initial;
   --shadow-*: initial;
 
-  /* 字体（canvas/fd3.css 的 --font、--mono）：Inter 加苹方 / 思源黑体 / 微软雅黑；等宽 JetBrains Mono。 */
+  /* 字体（#3584，Arco 原栈）：全是系统字体，不带网页字体；Windows 上中英文都落微软雅黑，Mac 落苹方；等宽 JetBrains Mono。
+   * 栈里的 Inter 只认本机已装的；"noto sans" 同 Arco 写法；思源黑体不再排在雅黑前面。 */
   --font-sans:
-    "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
-    "Noto Sans SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "noto sans",
+    "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", Consolas, "SF Mono", ui-monospace, monospace;
 
   /* 颜色：值在上面两块令牌里，类名 bg-fill-2、text-ink-3、border-line、text-brand-ink 这样用。 */
@@ -417,7 +418,6 @@
   }
   body {
     @apply bg-page text-body text-ink font-sans antialiased;
-    font-variant-numeric: tabular-nums;
   }
   ::selection {
     background: color-mix(in oklab, var(--brand) 28%, transparent);
@@ -432,7 +432,7 @@
 }
 
 /*
- * 数字、耗时、额度：无衬线字体的等宽数字（Inter 的 tabular-nums），中文和数字混排不再忽宽忽窄。
+ * 数字、耗时、额度：要对齐的数字加 num（等宽数字）；body 不再全局开（#3584），雅黑的数字本来就等宽。
  * 等宽字体（font-mono）只给编号、提交号、路由号、模型 id、代码，且只在 components/layout/code.tsx 里用。
  */
 @utility num {

@@ -9,11 +9,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { roomForAnother } from '../src/real/task-verify.ts';
+import { roomForAnother, suggestionsBody } from '../src/real/task-verify.ts';
 import { NoSlotError, type RunRecord, type RunStart, type RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnCommand, SpawnOutcome } from '../src/runner/one-shot.ts';
 import {
   BLOCKER_KINDS,
+  BLOCKING_KIND,
   type ChooseModelForFamily,
   FAMILY_ORDER,
   type FetchDiff,
@@ -253,7 +254,7 @@ describe('invokeVerifier：模型判 fail（三种能挡之一 → problems 必�
     expect(out.problems[0]).toContain(BLOCKER_KINDS[0]);
   });
 
-  it('有证据弄坏原有功能（BLOCKER_KINDS[1]）→ pass=false、problems 至少 1 条带这个 kind', async () => {
+  it('弄坏原有功能（BLOCKER_KINDS[1]）指出了具体文件 → 照旧挡：pass=false、problems 带它（决定 0115，#3624）', async () => {
     const { oneShot } = fakeOneShot({
       exitCode: 0,
       stdout: MODEL_STDOUT_FAIL_BREAKS,
@@ -268,8 +269,51 @@ describe('invokeVerifier：模型判 fail（三种能挡之一 → problems 必�
       cwd: 'C:/work/x',
     });
     expect(out.pass).toBe(false);
-    expect(out.problems.length).toBeGreaterThan(0);
+    expect(out.problems).toHaveLength(1);
     expect(out.problems[0]).toContain(BLOCKER_KINDS[1]);
+    expect(out.suggestions ?? []).toEqual([]);
+  });
+
+  it('安全或丢数据（BLOCKER_KINDS[2]）指出了具体位置、不带「第 N 条」 → 照旧挡，不算格式错', async () => {
+    const line = `${BLOCKER_KINDS[2]}：\`scripts/clean.sh\` 第 12 行 rm -rf 没加确认，会删掉用户数据`;
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', `- ${line}`, '', 'verdict: fail'].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(false);
+    expect(out.problems).toEqual([line]);
+  });
+
+  it('弄坏原有功能但没指出具体证据（只是推测）→ pass=true、进建议、不挡（决定 0115，#3624）', async () => {
+    const guess = `${BLOCKER_KINDS[1]}：第 1 条：这样改可能会影响别的调用方`;
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', `- ${guess}`, '', 'verdict: fail'].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.suggestions).toEqual([guess]);
+    expect(out.notes).toContain('按过算');
+  });
+
+  it('纯推测、验收条以外的边界意见（不带三类前缀）→ pass=true、进建议', async () => {
+    const note = '并发时可能会有竞态，最好再加个锁';
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', `- ${note}`, '', 'verdict: fail'].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.suggestions).toEqual([note]);
   });
 
   it('模型顺手写了风格意见（不是三种能挡的开头）→ 被丢掉，不进 problems', async () => {
@@ -503,7 +547,10 @@ describe('invokeVerifier：写过这张单的族不止一个、路由编号、�
     await invokeVerifier(BASE_INPUT, DEPS(oneShot));
     const prompt = commands[0]?.stdin ?? '';
     expect(prompt).not.toContain('${');
-    for (const kind of BLOCKER_KINDS) expect(prompt).toContain(`- ${kind}：`);
+    expect(prompt).toContain(`- ${BLOCKING_KIND}：`);
+    expect(prompt).toContain('只有三类');
+    expect(prompt).toContain(`- ${BLOCKER_KINDS[1]}：`);
+    expect(prompt).toContain(`- ${BLOCKER_KINDS[2]}：`);
     expect(prompt).toContain('你可以在 PR 头的完整检出里读文件');
     expect(prompt).toContain('verdict: pass');
   });
@@ -625,16 +672,29 @@ describe('invokeVerifier：结论不自相矛盾、不含糊（拿不准的一�
     expect(out.problems[0]).toContain('固定写法');
   });
 
+  it('安全或丢数据没指出具体位置 → 进建议、不挡', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', `- ${BLOCKER_KINDS[2]}：第 1 条：删库脚本没加确认`, '', 'verdict: fail'].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.suggestions).toEqual([`${BLOCKER_KINDS[2]}：第 1 条：删库脚本没加确认`]);
+  });
+
   it('写 pass 但问题清单里还有算挡的 → 不过（自相矛盾的结论不放行），问题原样带出', async () => {
     const { oneShot } = fakeOneShot({
       exitCode: 0,
-      stdout: ['## 问题', `- ${BLOCKER_KINDS[2]}：第 1 条：删库脚本没加确认`, '', 'verdict: pass'].join('\n'),
+      stdout: ['## 问题', `- ${BLOCKING_KIND}：第 1 条：单子要 A 没做`, '', 'verdict: pass'].join('\n'),
       stderr: '',
       killed: false,
     });
     const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
     expect(out.pass).toBe(false);
-    expect(out.problems).toEqual([`${BLOCKER_KINDS[2]}：第 1 条：删库脚本没加确认`]);
+    expect(out.problems).toEqual([`${BLOCKING_KIND}：第 1 条：单子要 A 没做`]);
     expect(out.notes).toContain('自相矛盾');
   });
 
@@ -657,7 +717,7 @@ describe('invokeVerifier：结论不自相矛盾、不含糊（拿不准的一�
     expect(out.problems).toEqual([`${BLOCKER_KINDS[0]}：第 1 条：单子要 A 代码里没有 A（续行）`]);
   });
 
-  it('写 fail 但「## 问题」里一条算挡的都没有（只有风格意见）→ 冷调用没跑成：要人看，不当成过，也不让写代码的会话白改', async () => {
+  it('写 fail 但「## 问题」里没有「没做到验收条」（只有验收条以外的意见）→ 按过算，意见进建议，不挡（#3604）', async () => {
     const { oneShot } = fakeOneShot({
       exitCode: 0,
       stdout: ['## 问题', '- 命名不好看', '- 函数太长', '', 'verdict: fail'].join('\n'),
@@ -665,10 +725,41 @@ describe('invokeVerifier：结论不自相矛盾、不含糊（拿不准的一�
       killed: false,
     });
     const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
-    expect(out.pass).toBe(false);
-    expect(out.problems).toHaveLength(1);
-    expect(out.problems[0]).toContain('冷调用没跑成');
-    expect(out.problems[0]).toContain('写了 2 条不算挡的意见');
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.suggestions).toEqual(['命名不好看', '函数太长']);
+  });
+
+  it('只有建议时的留言正文：写明通过、建议不挡合并，逐条列出（#3604）', () => {
+    const body = suggestionsBody({ prNumber: 7, headSha: 'a'.repeat(40) }, [
+      '并发边界没覆盖',
+      '命名可以更好',
+    ]);
+    expect(body).toContain('PR #7');
+    expect(body).toContain('通过');
+    expect(body).toContain('不挡合并');
+    expect(body).toContain('- 并发边界没覆盖');
+    expect(body).toContain('- 命名可以更好');
+  });
+
+  it('看不到 diff 外证据判不了：写进「不归我验」，pass=true、走转人（handedOver），不判不过', async () => {
+    const { oneShot } = fakeOneShot({
+      exitCode: 0,
+      stdout: [
+        '## 问题',
+        '',
+        '## 不归我验',
+        '- 第 2 条：要线上卡住的现场数据，diff 里看不出',
+        '',
+        'verdict: fail',
+      ].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const out = await invokeVerifier(BASE_INPUT, DEPS(oneShot));
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.outOfScope).toEqual(['第 2 条：要线上卡住的现场数据，diff 里看不出']);
   });
 
   it('写 fail 且「## 问题」整段都没写 → 同样是冷调用没跑成，写明它一条都没写', async () => {
@@ -1646,20 +1737,20 @@ describe('第 2 轮只复核上轮没过的条和增量', () => {
     expect(out.pass).toBe(false);
     expect(out.problems).toEqual([`${BLOCKER_KINDS[0]}：第 1 条：A 还是没有`]);
     expect(out.suggestions).toEqual([`${BLOCKER_KINDS[1]}：第 2 条：顺手发现 B 的名字不好`]);
-    expect(out.notes).toContain('只记备注、不拒');
+    expect(out.notes).toContain('不挡合并');
   });
 
   it('增量里新改坏的（正文写了增量）仍然拒', async () => {
     const stdout = [
       '## 问题',
-      `- ${BLOCKER_KINDS[1]}：第 2 条：增量文件：\`foo.ts\`，把 B 删了`,
+      `- ${BLOCKER_KINDS[0]}：第 2 条：增量文件：\`foo.ts\`，把 B 删了`,
       '',
       'verdict: fail',
     ].join('\n');
     const { oneShot } = fakeOneShot(done(stdout));
     const out = await invokeVerifier({ ...BASE_INPUT, round: 2, recheck }, DEPS(oneShot));
     expect(out.pass).toBe(false);
-    expect(out.problems).toEqual([`${BLOCKER_KINDS[1]}：第 2 条：增量文件：\`foo.ts\`，把 B 删了`]);
+    expect(out.problems).toEqual([`${BLOCKER_KINDS[0]}：第 2 条：增量文件：\`foo.ts\`，把 B 删了`]);
   });
 
   it('只写「增量」但没有对上本轮改动文件：只记备注、不拒', async () => {

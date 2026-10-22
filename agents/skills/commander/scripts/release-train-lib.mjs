@@ -517,31 +517,41 @@ async function readOnlyPreflight(io, sha) {
   return 0;
 }
 
+/**
+ * 发版前读被发的提交上的 CI：汇总检查 check，和独立的重型 / 不确定测试 heavy（#3597，名单在 packages/conventions/src/test-split.ts）。
+ * heavy 不在合并闸的必过清单里（红了不挡合并），但被发的这个提交上它必须是绿的：红了、没跑、还在跑、读不到都不发。
+ */
 async function preflightCi(io, ref) {
-  if (typeof io.run !== 'function') return { ok: false, why: '主线 CI 读不到' };
+  const main = await preflightCheck(io, ref, 'check', 'CI');
+  if (!main.ok) return main;
+  return preflightCheck(io, ref, 'heavy', '重型测试（heavy）');
+}
+
+async function preflightCheck(io, ref, name, what) {
+  if (typeof io.run !== 'function') return { ok: false, why: `${what}读不到` };
   const r = await io.run(
     'gh',
     [
       'api',
-      `repos/{owner}/{repo}/commits/${ref}/check-runs?check_name=check&per_page=100&page=1`,
+      `repos/{owner}/{repo}/commits/${ref}/check-runs?check_name=${name}&per_page=100&page=1`,
       '--jq',
-      '{total: .total_count, runs: [.check_runs[] | select(.name=="check") | {status,conclusion}]}',
+      `{total: .total_count, runs: [.check_runs[] | select(.name=="${name}") | {status,conclusion}]}`,
     ],
     { cwd: typeof io.cwd === 'function' ? io.cwd() : undefined, timeoutMs: 60_000 },
   );
-  if (didNotRun(r) || r.status !== 0) return { ok: false, why: `主线 CI 读不到：${tailOf(r)}` };
+  if (didNotRun(r) || r.status !== 0) return { ok: false, why: `${what}读不到：${tailOf(r)}` };
   let body;
   try {
     body = JSON.parse(String(r.stdout ?? '').trim() || 'null');
   } catch (e) {
-    return { ok: false, why: `主线 CI 的回话不是 JSON（${e instanceof Error ? e.message : String(e)}）` };
+    return { ok: false, why: `${what}的回话不是 JSON（${e instanceof Error ? e.message : String(e)}）` };
   }
   const runs = body && Array.isArray(body.runs) ? body.runs : null;
-  if (!runs) return { ok: false, why: '主线 CI 的回话认不出' };
-  if (runs.length === 0) return { ok: false, why: '还没有汇总检查（check）的结果' };
-  if (runs.some((x) => x.status !== 'completed')) return { ok: false, why: 'CI 还在跑' };
+  if (!runs) return { ok: false, why: `${what}的回话认不出` };
+  if (runs.length === 0) return { ok: false, why: `还没有 ${name} 检查的结果（${what}没跑，不当成绿）` };
+  if (runs.some((x) => x.status !== 'completed')) return { ok: false, why: `${what}还在跑` };
   if (runs.every((x) => x.conclusion === 'success')) return { ok: true, why: '' };
-  return { ok: false, why: `CI 是红的（${runs.map((x) => x.conclusion).join('、')}）` };
+  return { ok: false, why: `${what}是红的（${runs.map((x) => x.conclusion).join('、')}）` };
 }
 
 async function preflightLock(io) {

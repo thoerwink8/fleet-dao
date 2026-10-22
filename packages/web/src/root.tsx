@@ -1,5 +1,4 @@
 import { brand } from '#brand';
-import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import './app.css';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';

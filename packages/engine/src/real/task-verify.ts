@@ -1024,8 +1024,14 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       });
     }
     const outOfScope = verdict.outOfScope ?? [];
+    const suggestions = verdict.suggestions ?? [];
+    // 不归我验的转人；只有建议的（验收条以外的意见，决定 0094）也留言到单上，不挡合并
     const handoff =
-      outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? []) : undefined;
+      outOfScope.length > 0
+        ? await handOff(input, outOfScope, suggestions)
+        : suggestions.length > 0
+          ? await commentSuggestions(input, suggestions)
+          : undefined;
     const notes = [verdict.notes, handoff].filter((n): n is string => n !== undefined && n !== '').join('；');
     // 有结论了才读正式评审（#2991）：读在会话之后，会话跑着时新交的评审也赶得上这一次
     return withReviewChanges(
@@ -1052,6 +1058,28 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     suggestions: readonly string[],
   ): Promise<string> {
     return commentHandoff(input, items, suggestions);
+  }
+
+  /** 验收条以外的建议（不挡合并）留言到单上；同一个头只留一次。留不成不改结论。 */
+  async function commentSuggestions(input: ColdVerifyInput, suggestions: readonly string[]): Promise<string> {
+    const commentIssue = deps.gh.commentIssue;
+    if (commentIssue === undefined) return `验收方的 ${suggestions.length} 条建议没处留言（没接留言口）`;
+    try {
+      await commentIssue({
+        repo: refOf(input.repo),
+        issueNumber: input.issueNumber,
+        key: `cold-verify-suggestions:${input.prNumber}:${input.headSha}`,
+        body: suggestionsBody(input, suggestions),
+      });
+      return `验收方的 ${suggestions.length} 条建议已留言到单 #${input.issueNumber}（不挡合并）`;
+    } catch (error) {
+      log('验收建议没留成言（结论不改）', {
+        issueNumber: input.issueNumber,
+        prNumber: input.prNumber,
+        error: errMessage(error),
+      });
+      return `验收方的 ${suggestions.length} 条建议没留成言（${errMessage(error).slice(0, 200)}）`;
+    }
   }
 
   async function commentHandoff(
@@ -1182,6 +1210,18 @@ export function reviewChangesReader(w: {
     }
     return out;
   };
+}
+
+/** 只有建议时的留言正文：验收条都过了，下面是验收条以外的意见，不挡合并（决定 0094）。 */
+export function suggestionsBody(
+  input: Pick<ColdVerifyInput, 'prNumber' | 'headSha'>,
+  suggestions: readonly string[],
+): string {
+  return [
+    `冷验收建议：PR #${input.prNumber}（头 ${short(input.headSha)}）验收条都没有看得到没做到的，通过。验收方另有 ${suggestions.length} 条验收条以外的意见，只当建议、不挡合并：`,
+    '',
+    ...suggestions.map((x) => `- ${x}`),
+  ].join('\n');
 }
 
 /**

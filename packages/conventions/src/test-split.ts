@@ -9,7 +9,7 @@
 // - 环境类和能力是两回事：FLEET_TEST_PG_URL 一设，这个进程里所有 createTestDb 都连真 Postgres（packages/db/src/testing.ts）；
 //   db 以外的测试在 CI 上一直是 PGlite 跑的，所以 db 的测试单独装台（pg 台），不和别的混在一个 vitest 进程里。
 //   Temporal 命令行只是多装一个程序、不改别的测试的行为，哪台装进了要它的文件哪台就装（可以混）。
-// - 一条用例同时起几十个子进程的文件（HEAVY_FILES）单独占一台：同台别的文件并行跑时，它占满 CPU 会把别的文件的 5 秒用例饿超时（#3469）。
+// - 重型 / 不确定测试（HEAVY_TESTS，#3597）不装台：assignTests 先排除，它们在 ci.yml 独立的 heavy job 里串行、可重试地跑，不进必过检查。
 // - 枚举、选择、装箱都是纯函数、结果排好序：同一份检出、同一份改动，什么时候算都一样。
 import type { RepoView } from './repo.ts';
 
@@ -159,20 +159,100 @@ export function needsPg(file: string): boolean {
  */
 export const TEMPORAL_MARKER = /\bcreateRealEnv\s*\(/;
 
-/**
- * 重负载多进程文件（#3469）：一条用例同时起几十个子进程，把运行机的 CPU 占满。同台有别的文件并行时，别的文件里 5 秒默认时限的用例
- * 会被饿到超时（CI 上 6 次失败，红的文件每次都完整落在它的运行窗口里），所以这类文件单独占一台、台里不放别的文件。
- * 不加超时、不删断言、不跳用例：覆盖不变，只是不再和别的文件抢核。
- * 加新成员的条件：单个用例并发起的子进程数远超运行机核数（`packages/engine/test/admission-alert-crash.test.ts` 的 32 个）；
- * test/test-split.test.ts 钉着清单里的文件都在、而且装箱后各自独占一台。
- */
-export const HEAVY_FILES: ReadonlySet<string> = new Set([
-  'packages/engine/test/admission-alert-crash.test.ts',
-]);
+/** 重型 / 不确定测试名单里的一条：为什么进、凭哪些真实超时记录。 */
+export interface HeavyEntry {
+  /** 进名单的理由（一句话，写清是哪种超时或压力）。 */
+  why: string;
+  /** 真实超时记录（至少一条；没有记录就不许进名单）：`#单号`（单里记着这个文件自己的超时），或 `run 运行号`（ci.yml 那一轮的日志里这个文件独自超时红）。 */
+  records: readonly string[];
+}
 
-/** 是不是要单独占台的重负载多进程文件。 */
+/** 一条记录的写法：`#3414`、`run 39766286164`。 */
+export const HEAVY_RECORD = /^(?:#[1-9]\d*|run [1-9]\d{8,})$/;
+
+/**
+ * 重型 / 不确定测试名单（#3597）：只此一处。名单里的文件不进必过的 test 台（assignTests 排除、ciVerdict 的 testsProblem 拦住），
+ * 改进 ci.yml 里独立的 `heavy` job：每个 PR 和主线推送都跑、串行（--no-file-parallelism）、可重试（--retry=2），
+ * 但不在汇总检查 check 的 needs 里：它红只让这个 job 红，不挡合并、不自动开单、不更新任何汇总单。
+ * 它仍是发版的前提：发版车预检（release-train-lib.mjs 的 preflightCi）要求被发的提交上 `heavy` 也是绿的，红了或没跑就不发。
+ * 为什么不是「挪到夜间」：发版只认那个提交自己的 CI（docs/goals.md 七之附第 6 条），夜间的结果进不了发版门；
+ * 其中有防崩的测试（admission-alert-crash），不能不测。覆盖不变，只是不再让必过检查被它们的超时拖红（必过检查必须确定，goals.md 第四节 H）。
+ * 进名单的条件：这个文件自己有过真实超时或超过限时的记录（2026-10-08～10-22 近 14 天 ci.yml 失败日志扫出来的，和下面这些单），记录写进 records；
+ * 不凭「看着重」，也不收只是被同台邻居拖超时的受害者（tree-cleanup #3450、task-panel、release-recover-2027、notifications-1950 的 5 秒超时
+ * 都落在 admission-alert-crash 的运行窗口里，#3469 排台之后没再出现）。
+ * 永远不许进名单：NEVER_HEAVY（test/test-split.test.ts 钉着）。
+ */
+export const HEAVY_TESTS: Readonly<Record<string, HeavyEntry>> = {
+  // 一条用例同时起 32 个子进程占满运行机，同台 5 秒用例被饿超时（#3469 记 6 次）；它自己的 256 条 COMMIT 用例也在完整 CI 超过原 15000ms（#3414；run 39390033280、39422958327）。
+  'packages/engine/test/admission-alert-crash.test.ts': {
+    why: '32 个子进程压满 CPU，同台 5 秒用例被饿超时；256 条 COMMIT 用例在完整 CI 超过 15000ms',
+    records: ['#3469', '#3414'],
+  },
+  // 循环 255 次走产品路径、每次重开 SQLite 再提交，在 CI 上超过 120 秒被 SIGTERM（#3555）。
+  'packages/engine/test/admission-alert-spool.test.ts': {
+    why: '255 次重开 SQLite 再提交的用例超过 120 秒被杀',
+    records: ['#3555'],
+  },
+  // worker 替换后的权限交还用例原 60 秒超时（#3413），首次停点等待原 20 秒超时（#3455）。真 Temporal 服务端，完整 CI 负载下等停点不稳。
+  'packages/engine/test/push-handback.test.ts': {
+    why: '真 Temporal 下等权限停点：worker 替换后原 60 秒、首次停点原 20 秒超时',
+    records: ['#3413', '#3455'],
+  },
+  // 预算守卫用例原 60 秒超时（#3561，run 39727875560）；同一用例 10-22 又在 180 秒上限上超时（run 39805248345），10-19～10-22 的 ci.yml 失败日志里至少 34 轮红里带它，超时值 5/60/120/180 秒都有。
+  'packages/engine/test/push-handback-contract.test.ts': {
+    why: '真 Temporal 下的契约快照用例：预算守卫用例反复在 60/180 秒上限上超时',
+    records: ['#3561', 'run 39727875560', 'run 39805248345'],
+  },
+  // 跨工人接停点用例在 180 秒上限上超时，该轮唯一红的文件（run 39656719771、39766286164）。
+  'packages/engine/test/task-budget-remeasure.test.ts': {
+    why: '真 Temporal 下跨工人接停点用例在 180 秒上限上超时，两轮都是唯一失败',
+    records: ['run 39656719771', 'run 39766286164'],
+  },
+};
+
+/** 永远不许进名单的文件：重放、任务工作流是引擎确定性的底，必过检查必须每个 PR 都挡住它们。 */
+export const NEVER_HEAVY: readonly string[] = [
+  'packages/engine/test/replay.test.ts',
+  'packages/engine/test/task-workflow.test.ts',
+];
+
+/** 名单里的文件。 */
+export const HEAVY_FILES: ReadonlySet<string> = new Set(Object.keys(HEAVY_TESTS));
+
+/** 是不是重型 / 不确定测试（不进必过的 test 台，进独立的 heavy job）。 */
 export function isHeavy(file: string): boolean {
   return HEAVY_FILES.has(file);
+}
+
+/**
+ * heavy job 跑的那一份（和 test 台同一个形状，好复用 ci-box.ts 的写清单、核对「实际跑的 == 该跑的」）。
+ * heavy job 装了时间跳跃服务和 Temporal 命令行（和 test 台同一份写法），没起 Postgres。
+ * 名单里的文件不在仓里、要真 Postgres、会被 vitest 的子串过滤拉上别的文件、在 NEVER_HEAVY 里、没有真实超时记录或记录写法不对：
+ * 返回一句为什么，调用方判红，不静默少跑。
+ */
+export function heavyBox(
+  all: readonly string[],
+  read: (rel: string) => string | undefined,
+): TestBox | string {
+  const files = [...HEAVY_FILES].sort();
+  if (files.length === 0) return '重型 / 不确定测试名单是空的（heavy job 没有东西可跑）';
+  let temporal = false;
+  for (const f of files) {
+    if (NEVER_HEAVY.includes(f)) return `${f} 永远不许进重型 / 不确定测试名单`;
+    const records = HEAVY_TESTS[f]?.records ?? [];
+    if (records.length === 0) return `名单里的 ${f} 没有真实超时记录`;
+    const badRecord = records.find((r) => !HEAVY_RECORD.test(r));
+    if (badRecord !== undefined) return `名单里的 ${f} 的记录「${badRecord}」写法不对（#单号 或 run 运行号）`;
+    if (!all.includes(f)) return `名单里的 ${f} 不在仓里（挪了名或删了，名单跟着改）`;
+    if (needsPg(f)) return `名单里的 ${f} 要真 Postgres，heavy job 没起库`;
+    const text = read(f);
+    if (text === undefined) return `读不到名单里的 ${f}`;
+    if (TEMPORAL_MARKER.test(text)) temporal = true;
+    const pulled = siblingsOf(f, all).filter((g) => !HEAVY_FILES.has(g));
+    if (pulled.length > 0)
+      return `${f} 当过滤条件会把 ${pulled.join('、')} 一起拉上（vitest 子串过滤），先改名`;
+  }
+  return { label: 'heavy', files, estMs: 0, pg: false, temporal };
 }
 
 // ---- 耗时表
@@ -227,7 +307,7 @@ export const MAX_BOXES = 8;
 export const FALLBACK_FILE_MS = 2_000;
 
 export interface TestBox {
-  /** job 名里显示的：第几台/共几台；pg 台带「· pg」，装了要 Temporal 的带「· temporal」，重负载多进程文件独占的带「· heavy」。 */
+  /** job 名里显示的：第几台/共几台；pg 台带「· pg」，装了要 Temporal 的带「· temporal」。 */
   label: string;
   /** 这台跑的测试文件（仓内相对路径、排好序）。 */
   files: string[];
@@ -325,8 +405,8 @@ function lpt(items: readonly Item[], bins: number): Item[][] {
 /**
  * 装箱。返回空清单表示没有要跑的；有文件该放哪一类认不出（子串过滤把 db 和别的包的文件绑在了一起）返回一句为什么。
  * 台数先按总工作量定（boxCount），再在 pg、普通两类之间分：每类至少一台，其余一台一台给「平均每台最重」的那类。
- * 重负载多进程文件（HEAVY_FILES）是第三类：一件一台，占的台数从总台数里扣，不参与上面的分配。
- * 几类都有、而总量只够一台时，实际是几台（各类不能同一个进程）。
+ * 两类都有、而总量只够一台时，实际是两台（两类不能同一个进程）。
+ * 重型 / 不确定测试（HEAVY_FILES）不在这里装：调用方（assignTests）先把它们排除，它们去独立的 heavy job。
  */
 export function packTests(input: PackInput): Packed | string {
   const notes: string[] = [];
@@ -369,7 +449,6 @@ export function packTests(input: PackInput): Packed | string {
     groups.set(r, [...(groups.get(r) ?? []), f]);
   }
   const pgItems: Item[] = [];
-  const heavyItems: Item[] = [];
   const plainItems: Item[] = [];
   for (const files of groups.values()) {
     // 按名字绑在一起的才记这一句。只因为都要 Temporal 命令行才并到一组的，上面已经另记过。
@@ -379,36 +458,27 @@ export function packTests(input: PackInput): Packed | string {
     const pg = files.filter(needsPg).length;
     if (pg > 0 && pg < files.length)
       return `${files.join('、')} 按名字绑在一起，却一半要真 Postgres、一半不要：分不了台`;
-    const heavy = files.filter(isHeavy).length;
-    if (heavy > 0 && heavy < files.length)
-      return `${files.join('、')} 按名字（或都要 Temporal 命令行）绑在一起，却一半是重负载多进程文件、一半不是：重负载的要单独占台，分不了台`;
-    if (heavy > 0 && pg > 0) return `${files.join('、')} 既是重负载多进程文件又要真 Postgres：没有这样的台`;
-    (pg > 0 ? pgItems : heavy > 0 ? heavyItems : plainItems).push({
-      files,
-      ms: files.reduce((s, f) => s + ms(f), 0),
-    });
+    (pg > 0 ? pgItems : plainItems).push({ files, ms: files.reduce((s, f) => s + ms(f), 0) });
   }
 
-  // 重负载多进程的文件一件一台（台里不放别的文件，也不和另一个重负载的并在一起抢核）：台数不随工作量走，从总台数里扣。
   const classes = [
-    { pg: true, heavy: false, items: pgItems, bins: 0 },
-    { pg: false, heavy: true, items: heavyItems, bins: 0 },
-    { pg: false, heavy: false, items: plainItems, bins: 0 },
+    { pg: true, items: pgItems, bins: 0 },
+    { pg: false, items: plainItems, bins: 0 },
   ].filter((c) => c.items.length > 0);
   const timingsGap = timings ? { missing: unknown.length, total: input.files.length } : undefined;
   if (classes.length === 0) return { boxes: [], notes };
   const total = classes.reduce((s, c) => s + c.items.reduce((t, i) => t + i.ms, 0), 0);
   const k = boxCount(total);
-  for (const c of classes) c.bins = c.heavy ? c.items.length : 1;
+  for (const c of classes) c.bins = 1;
   const loadOf = (c: (typeof classes)[number]) => c.items.reduce((t, i) => t + i.ms, 0) / c.bins;
-  for (let given = classes.reduce((s, c) => s + c.bins, 0); given < k; given++) {
-    const open = classes.filter((c) => !c.heavy && c.bins < c.items.length);
+  for (let given = classes.length; given < k; given++) {
+    const open = classes.filter((c) => c.bins < c.items.length);
     if (open.length === 0) break;
     const heaviest = open.reduce((a, b) => (loadOf(b) > loadOf(a) ? b : a));
     heaviest.bins++;
   }
 
-  const raw: (Omit<TestBox, 'label'> & { heavy: boolean })[] = [];
+  const raw: Omit<TestBox, 'label'>[] = [];
   for (const c of classes) {
     for (const bin of lpt(c.items, c.bins)) {
       const files = bin.flatMap((i) => i.files).sort();
@@ -417,13 +487,12 @@ export function packTests(input: PackInput): Packed | string {
         estMs: bin.reduce((t, i) => t + i.ms, 0),
         pg: c.pg,
         temporal: files.some((f) => input.temporal.has(f)),
-        heavy: c.heavy,
       });
     }
   }
   const n = raw.length;
-  const boxes = raw.map(({ heavy, ...b }, i) => ({
-    label: `${i + 1}/${n}${b.pg ? ' · pg' : ''}${b.temporal ? ' · temporal' : ''}${heavy ? ' · heavy' : ''}`,
+  const boxes = raw.map((b, i) => ({
+    label: `${i + 1}/${n}${b.pg ? ' · pg' : ''}${b.temporal ? ' · temporal' : ''}`,
     ...b,
   }));
   return { boxes, notes, ...(timingsGap ? { timingsGap } : { timingsProblem: input.timings as string }) };

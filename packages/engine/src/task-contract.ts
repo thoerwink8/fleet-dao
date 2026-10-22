@@ -29,6 +29,12 @@ export const MAX_VERIFY_ROUNDS = 2;
  */
 export const MAX_ROUND_RESETS = 3;
 /**
+ * 一张单（这一代任务工作流）动手最多累计几轮（#3603）：跨「继续」累计，继续不清零，自动续、人点继续都算在里面。
+ * 到了贴「本机做」交还本机、留言、停下；「继续」要带原因（ContinueCommand.note）才放行，放行一次再给 MAX_IMPLEMENT_ROUNDS 轮。
+ * 重做另起一代，不在这里数。
+ */
+export const MAX_TOTAL_ROUNDS = 6;
+/**
  * 全程模式（#2826）一张单最多交付几次：CI 红、冲突、冷验收被拒都续同一个会话、不算新的一轮，这个数兜底。
  * 每回到动手一次算一次（推上去的、交活没提交被打回的都算），到了停下等人。冷验收被拒的上限仍是 MAX_VERIFY_ROUNDS。
  */
@@ -166,6 +172,8 @@ export interface ParkCause {
 export const PARK_CODE_ROUTE_SWITCH = 'route_switch_stall';
 /** 没有可用的路由（选路一条都派不出）。 */
 export const PARK_CODE_NO_ROUTE = 'no_route';
+/** 动手累计到 MAX_TOTAL_ROUNDS（#3603）：已交还本机，「继续」要带原因。 */
+export const PARK_CODE_TOTAL_ROUNDS = 'total_rounds';
 
 export interface TaskStatus {
   /** 最近一次安全边界核实的正式合同；没有＝旧历史/尚未核实。 */
@@ -598,7 +606,7 @@ export interface ColdVerifyResult {
   contractChanged?: true;
   /** 验收有结论且通过。 */
   pass: boolean;
-  /** 只有三种能挡：没做到验收条、弄坏了原有功能、安全或丢数据。 */
+  /** 只有三类能挡（决定 0115）：没做到验收条；有具体证据弄坏了原有功能；有具体位置的安全或丢数据。推测和验收条以外的意见进建议、不在这里。 */
   problems: string[];
   notes?: string;
   round: 1 | 2;
@@ -748,6 +756,25 @@ export interface ArmAutoMergeResult {
     /** 现读的那个头。和 expectedHead 不是同一个就当头变了，不拿旧头的红或绿往下用。 */
     head: string;
   };
+}
+
+/**
+ * 总轮数到顶交还本机（#3603）：在单子上留一句话（key 幂等，只留一次），再贴「本机做」（幂等）。
+ * 先留言后贴标签：留言没成就不贴，整件事下次重来。哪一步没成都抛，不装作贴过。
+ */
+export interface HandBackLocalInput {
+  schemaVersion: 1;
+  taskId: string;
+  repo: Repo;
+  issueNumber: number;
+  /** 留言的幂等键：同一代同一个上限只留一次。 */
+  key: string;
+  body: string;
+}
+
+export interface HandBackLocalResult {
+  /** 这一次真留了新话（false＝同一个键早留过）。 */
+  commented: boolean;
 }
 
 /** 现读这个仓现在的 CI 模式。工作流每次走到等 CI 之前读，不在拉单那一刻定死。 */

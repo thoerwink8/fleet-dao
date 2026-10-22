@@ -14,6 +14,7 @@
 | 改标准的路径清单 | `standard-paths.json`（改它本身就是改标准） |
 | 测试分台耗时表 | `test-timings.json`，用 `pnpm ci:timings` 刷新，别手改 |
 | 方案索引 | `specs-index.ts`：`specs/README.md` 由各方案主文件头的 `- 状态：` / `- 被取代：` 生成，规则写在文件开头 |
+| 护栏库存（只报不挡） | `guard-inventory.ts`、`guards.json`；`bin/guard-inventory.ts` 由现有 audit 非阻断步骤写摘要，周一进 #1055。口径及限制见 `specs/3587-建议筛子/第一片落地.md`，细节看文件头 |
 | 其它入口（`machine.ts`、`issue-batch.ts`、`work*.ts`、`temporal-test-server.ts`、`test:isolated` 等） | 各自文件头注释 |
 
 ## 必须守的不变量
@@ -23,7 +24,7 @@
 - CI 里的检查必须确定、只看检出来的文件；看外部状态（GitHub）的放定时任务，只留言不挡 PR。只报不挡的（`debt.yml`、`e2e-quarantine.yml`）每天跑，不跟 push。
 - 改 CI：`ci-plan.ts` 与 `.github/workflows/ci.yml` 要对得上（汇总 job 逐个核对该跑的跑了）。
 - 测试读包外文件（别的包源码、`docs/ops.md`、`AGENTS.md`、`deploy/` 脚本）要登记进 `ci-plan.ts` 的 `PATH_RULES` / `TEST_READS`；`test/ci-plan.test.ts` 扫所有测试文件，漏记就红。
-- `test-split.ts` 的 `HEAVY_FILES`：一条用例同时起几十个子进程的文件单独占一台，不和别的文件同台（`ci-plan.ts` 的 `testsProblem` 拦）。同台并行的 5 秒用例会被它饿到超时——不靠加超时、删断言、跳用例解决；新增成员要在 `test/test-split.test.ts` 有覆盖。`needsPg` 只把明确列出的真实竞争测试放进 pg 台，不悄悄降成 PGlite。
+- `test-split.ts` 的 `HEAVY_TESTS`（#3597，接 #3469）：重型 / 不确定测试名单，只此一处，每条写理由和真实超时记录（`#单号` 或 `run 运行号`，没有记录不许进，被邻居拖超时的受害者不收）。名单里的文件不进必过的 test 台（`assignTests` 排除，`testsProblem` 拦），改在 `ci.yml` 独立的 `heavy` job 串行（`--no-file-parallelism`）、可重试（`--retry=2`）地跑，每个 PR 和主线推送都跑；它不在 `check` 的 needs 里（`NON_BLOCKING_JOBS`），红了只让这个 job 红，不挡合并、不自动开单。发版要它绿：`release-train-lib.mjs` 的 `preflightCi` 读被发提交上的 `heavy`，红了、没跑、还在跑都不发。`NEVER_HEAVY`（`replay.test.ts`、`task-workflow.test.ts`）永远不许进名单。不靠加超时、删断言、跳用例解决。`needsPg` 只把明确列出的真实竞争测试放进 pg 台，不悄悄降成 PGlite。
 - 测试槽 `src/test-slots.ts` 拿到槽就打印 `SLOT_ACQUIRED_LINE`（没排队也打印），引擎据此把等槽和执行分开计时；默认持槽上限 45 分钟，要盖住引擎 30 分钟测试预算加收尾。`test:changed` 判需全跑时先认非空 `FLEET_RUN_ID`（引擎会话显式 `--affected` 生效，写码 CLI 注入的 `CI=true` 不覆盖它）。
 - 只改一个包「对外面」以外的文件只测这个包自己（`package-surface.ts`）；认不出面就当整个包都是面。
 - 文档指针检查误报了就收窄 `doc-pointers.ts` 的规则，不往文档里加豁免；章节别光写「第 X 节」，写明是 design 还是 ops 的。
