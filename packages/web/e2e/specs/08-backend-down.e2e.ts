@@ -75,13 +75,15 @@ test.describe('后端不可用', () => {
     // 定时任务数据在法国页已读过、进页不会自己重读：后端回 500 以后点页头刷新才读到这次的错
     await request.post(`${stack.controlOrigin}/mode/error`);
     await page.getByRole('button', { name: /刷新/ }).first().click();
+    // 读成过、这次刷新没成：照旧画上一次的行，顶上一条提示写「刷新没成」和原因、给重试（不是空白、不是 0）
     const alert = page
-      .getByRole('alert')
-      .filter({ hasText: /没读成|没查成/ })
+      .locator('[role="alert"], [role="status"]')
+      .filter({ hasText: /没读成|没查成|刷新没成/ })
       .first();
     await expect(alert).toBeVisible({ timeout: 30_000 });
     await expect(alert).toContainText(/后端出错|出错|500/);
     await expect(alert.getByRole('button', { name: '重试' })).toBeVisible();
+    await expect(page.locator('[data-row-key]').first()).toBeVisible();
     await shot(page, '08-后端500');
   });
 
