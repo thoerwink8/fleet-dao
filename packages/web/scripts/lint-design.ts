@@ -788,6 +788,72 @@ function primaryKind(v: AstNode): 'static' | 'conditional' | undefined {
   return undefined;
 }
 
+/** 「只有一个」的名字：selected / current / active / chosen / picked / primary / lead / first 开头。 */
+const SINGLETON_NAME = /^(?:selected|current|active|chosen|picked|primary|lead|first)/i;
+
+function namesOf(e: unknown): string[] {
+  if (!isNode(e)) return [];
+  if (e.type === 'Identifier') return [e.name as string];
+  if (e.type === 'MemberExpression' || e.type === 'OptionalMemberExpression') {
+    const p = e.property;
+    return isNode(p) && p.type === 'Identifier' && !e.computed ? [p.name as string] : [];
+  }
+  if (e.type === 'ParenthesizedExpression' || e.type === 'TSNonNullExpression') return namesOf(e.expression);
+  return [];
+}
+
+/**
+ * 列表里的条件主按钮能放行：条件（&& 连着的各项）里有一项把列表钉在恰好一行上——
+ * 回调的下标 === 0（只给第一行），或某项 === selected… / current… / primary… 这类「只有一个」的值（只给被选中的一行）。
+ * || 、! 、> 这些可能放出多行的写法不算。
+ */
+function singletonGuard(test: unknown, indexName: string | undefined): boolean {
+  if (!isNode(test)) return false;
+  if (test.type === 'ParenthesizedExpression') return singletonGuard(test.expression, indexName);
+  if (test.type === 'LogicalExpression') {
+    return (
+      test.operator === '&&' &&
+      (singletonGuard(test.left, indexName) || singletonGuard(test.right, indexName))
+    );
+  }
+  if (test.type !== 'BinaryExpression' || (test.operator !== '===' && test.operator !== '==')) return false;
+  const sides = [test.left, test.right];
+  const isZero = (e: unknown) => isNode(e) && e.type === 'NumericLiteral' && e.value === 0;
+  if (indexName && sides.some((s) => namesOf(s).includes(indexName)) && sides.some(isZero)) return true;
+  return sides.some((s) => namesOf(s).some((nm) => SINGLETON_NAME.test(nm)));
+}
+
+/** variant 按条件选 primary 的那个条件：cond ? 'primary' : … 取 cond；cond && 'primary' 取 cond。 */
+function primaryCondition(v: AstNode): unknown {
+  if (v.type === 'ParenthesizedExpression' || v.type === 'TSAsExpression' || v.type === 'TSNonNullExpression')
+    return isNode(v.expression) ? primaryCondition(v.expression) : undefined;
+  if (v.type === 'ConditionalExpression') return v.test;
+  if (v.type === 'LogicalExpression' && v.operator === '&&') return v.left;
+  return undefined;
+}
+
+/** 最近的 .map( 回调；有就返回它的下标参数名（没写下标返回空串）。 */
+function nearestMapCallback(anc: AstNode[]): { index: string; depth: number } | undefined {
+  for (let i = anc.length - 1; i >= 0; i--) {
+    const a = anc[i] as AstNode;
+    if (a.type !== 'ArrowFunctionExpression' && a.type !== 'FunctionExpression') continue;
+    const p = anc[i - 1];
+    if (
+      p &&
+      p.type === 'CallExpression' &&
+      isNode(p.callee) &&
+      (p.callee.type === 'MemberExpression' || p.callee.type === 'OptionalMemberExpression') &&
+      isNode(p.callee.property) &&
+      p.callee.property.name === 'map' &&
+      (p.arguments as unknown[]).includes(a)
+    ) {
+      const second = (a.params as AstNode[])[1];
+      return { index: second && second.type === 'Identifier' ? (second.name as string) : '', depth: i };
+    }
+  }
+  return undefined;
+}
+
 const STATUS_KEYS = new Set([
   'running',
   'idle',
@@ -966,17 +1032,24 @@ export function scanBusinessAst(src: string, file: string): Hit[] {
               ),
           );
           const shown = kind === 'static' ? 'variant="primary"' : 'variant={条件 ? "primary" : …}';
-          if (inMap) {
+          // 列表里只有一种写法放行：按条件选，且条件把列表钉在恰好一行（下标 === 0，或 === selected… 这类只有一个的值）
+          const mapCb = inMap ? nearestMapCallback(anc) : undefined;
+          const pinned =
+            kind === 'conditional' &&
+            v !== null &&
+            mapCb !== undefined &&
+            singletonGuard(primaryCondition(v), mapCb.index || undefined);
+          if (inMap && !pinned) {
             hits.push({
               file,
               line: at(n),
               rule: 'R20',
               cls: `<Button ${shown}> 在 .map( 里`,
-              fix: '列表行不许有主按钮 → 用 type="text" 的按钮，或收进「更多」',
+              fix: '列表行不许有主按钮 → 用 type="text" 的按钮，或收进「更多」；只给第一行或被选中那一行画主按钮时，条件里写 i === 0 或 === selected…，让它恰好一个',
             });
           } else {
             // 「同一块区域」＝最近的容器（Form、Section、Card、对话框、抽屉、Page、AuthCard…），碰到函数边界就以那个函数为一块
-            const area = areaOf(anc);
+            const area = areaOf(mapCb ? anc.slice(0, mapCb.depth) : anc);
             const seen = (primaryByArea.get(area) ?? 0) + 1;
             primaryByArea.set(area, seen);
             if (seen >= 2) {
