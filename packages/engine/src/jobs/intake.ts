@@ -557,7 +557,7 @@ export interface IntakeDeps {
     body: string;
   }): Promise<void>;
   /**
-   * 撤掉「留给本机」的提醒（notifyLocal 报的那些）：这个仓里开着、贴着「本机做」的单号在 keep 里，其余单号（单关了、或标签摘了）的提醒撤掉。
+   * 撤掉「留给本机」的提醒（notifyLocal 报的那些）：keep 内保留；keep 外须现读确认单关了或标签摘了，不能凭列表缺席直接撤。
    * 写不进照抛：这一轮记没查成，下一轮重来。不给（测试）就不撤。
    */
   settleLocalKept?(input: { repo: IntakeRepo; keep: ReadonlySet<number> }): Promise<void>;
