@@ -694,19 +694,24 @@ describe('前一实例不满一轮工作上限的遗留行（startEngineTimers �
   it('下一轮开头也会补一次没补成的（不依赖重试定时器）', async () => {
     const rows: Row[] = [{ id: 1, job: 'hourly-reconcile', startedAt: S - 8 * MIN, endedAt: null }];
     const f = fakeHost(S, lastAfterSlot);
-    // 启动补记成功，二次补记第一次失败；重试定时器之前正常一轮先到
+    // 启动补记成功；二次补记（S+15）和两次重试（S+30、S+45）都写不进。下一次重试在 S+60，正常一轮 S+52 先到，由它补上
     const base = fakeRows(rows);
     let call = 0;
     const close = async (input: Parameters<typeof base.close>[0]) => {
       call += 1;
-      if (call === 2) throw new Error('补记没收尾的定时任务失败：库写不进');
+      if (call >= 2 && call <= 4) throw new Error('补记没收尾的定时任务失败：库写不进');
       return base.close(input);
     };
     await startEngineTimers([hourly({ overdueMinutes: 15 })], f.host, close);
-    await f.advanceTo(S + 15 * MIN);
+    await f.advanceTo(S + 51 * MIN);
     expect(rows[0]?.endedAt).toBeNull();
+    expect(call).toBe(4);
     await f.advanceTo(T0 + 101 * MIN + 1);
     expect(rows[0]?.endedAt).toBe(S - 8 * MIN);
+    expect(call).toBe(5);
+    // 补上之后 S+60 的重试定时器醒来也不再调端口
+    await f.advanceTo(S + 70 * MIN);
+    expect(call).toBe(5);
   });
 
   it('归属认不出（本进程起点、或一轮工作上限读不出来）：不补记、保留，日志说清，不写成 ok', async () => {
