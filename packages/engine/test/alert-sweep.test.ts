@@ -1,6 +1,7 @@
 // 卡住报警立案（#1406）：超过 24 小时没人处理的开一张未排期的单，单号写回正文开头。
 // 每条失败路径都故意造一次；GitHub 写不进的后面还有一条：合并时刻读不到不跳过，放最后。
 import {
+  checkIssueBody,
   doneSection,
   offDiffAcceptanceItems,
   parseMd,
@@ -205,6 +206,9 @@ describe('卡住报警立案', () => {
     const doc = parseMd('body.md', opened?.body ?? '');
     expect(requiredSectionProblems(doc)).toEqual([]);
     expect(doneSection(doc)).toBe('ok');
+    expect(opened?.body).toContain('## 影响');
+    expect(opened?.body).toContain('创始人被打扰次数上升');
+    expect(checkIssueBody(opened?.body ?? '', { kind: '缺陷' })).toMatchObject({ ok: true });
     expect(opened?.body).toContain('合并队列判断出错');
     expect(opened?.body).toContain('正文里提到 #12，不是立案标记');
     expect(opened?.body).toContain('无（AI 发现：提醒 wf:failure:acme/widgets:rule 第 1 天没人处理）');

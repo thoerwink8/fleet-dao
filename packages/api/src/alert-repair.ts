@@ -568,6 +568,10 @@ export function repairIssueBody(n: Pick<NotificationRecord, 'id' | 'title' | 'bo
     '',
     `这条看门狗提醒（键 ${key}）没有可直接执行的修复，创始人在驾驶舱点了「交给修复」。`,
     '',
+    '## 影响',
+    '',
+    `看门狗提醒 ${key} 一直亮着：创始人在驾驶舱反复看到同一条提醒、被打扰，它背后的故障也可能拖低一轮做成率；创始人已点「交给修复」，在等结果。`,
+    '',
     '## 原话',
     '',
     `无（AI 发现：看门狗提醒 ${key}，创始人在驾驶舱点了「交给修复」）`,
@@ -744,7 +748,7 @@ function runHand(incident: string) {
     if (!open || !self)
       return { state: 'failed', text: '开单没接上（缺机器人凭据或受管的仓里没有 fleet-dao），没开' };
     const body = repairIssueBody(n);
-    const checked = checkIssueBody(body);
+    const checked = checkIssueBody(body, { kind: '缺陷' });
     if (!checked.ok) return { state: 'failed', text: `修复单正文不合格，没开：${checked.why}` };
     const tooLong = issueBodyTooLong(body);
     if (tooLong) return { state: 'failed', text: tooLong };

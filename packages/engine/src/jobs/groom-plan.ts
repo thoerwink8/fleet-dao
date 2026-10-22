@@ -8,7 +8,8 @@
 // - 限额：每次最多开 5 张新单、补写 10 张老单、下 40 条判断；超出的进 rejected，不顺延。
 // - 开单的正文由引擎按四节模板自己拼（场景、原话、已知的模块、怎么算做完），会话只给各节的内容：「原话」一栏引擎写死「无（AI 发现）」，
 //   会话编不了创始人的原话；会话给的文字里行首的 # 标题全剥掉，伪造不了新的一节。拼完再用开单脚本同一份判法
-//   （conventions 的 requiredSectionProblems、doneSection）核一遍。新单一律不挂里程碑（未排期）、不排进版本先后：不动先后列表。
+//   （conventions 的 requiredSectionProblems、doneSection）核一遍。kind 是「缺陷」时还必须给 impact（会让哪项结果变差，或创始人看得见的现象）；
+//   没给就不开，填了 splitFrom 的改成在那张来源单上追加一条评论。新单一律不挂里程碑（未排期）、不排进版本先后：不动先后列表。
 // - 开之前先查：开着的单、最近 30 天关掉的单、开着的 PR，标题和路径像的（conventions 的 rankSimilar，开单脚本提示重复用的同一份）就不开，
 //   进 rejected 写明像谁。
 // - splitFrom 的新单标题必须带「（#<号> 第 N 片）」（N 是正整数，号和 splitFrom 一样），否则整条 rejected。
@@ -26,6 +27,7 @@
 
 import {
   DOMAIN_VALUES,
+  defectImpactProblem,
   describeOffDiff,
   doneSection,
   GROOM_PENDING_LABEL,
@@ -41,6 +43,7 @@ import {
   type OffDiffItem,
   offDiffAcceptanceItems,
   parseMd,
+  planDefectFiling,
   rankSimilar,
   requiredSectionProblems,
   resolveQueryAxes,
@@ -72,6 +75,8 @@ const NewIssueItem = z.object({
   domain: z.enum(DOMAIN_VALUES).optional(),
   nature: z.enum(NATURE_VALUES).optional(),
   scene: Text(3000),
+  /** 类别是「缺陷」时必填：会让哪项结果变差，或创始人看得见的现象。没写就不开新单。 */
+  impact: Text(1000).optional(),
   modules: Text(2000).optional(),
   done: z.array(Text(500)).min(1).max(12),
   /** 从哪张大单拆出来的（拆大单 = 开若干张独立小单并在大单留言，不开子单）。 */
@@ -260,15 +265,17 @@ export function groomHold(
   return local ? { kind: 'local', reason: local } : null;
 }
 
-/** 新单的正文：引擎按四节模板拼，原话一栏写死。 */
+/** 新单的正文：引擎按四节模板拼，原话一栏写死。缺陷单另写会话给的「影响」，没给就不出这一节（调用方不开单）。 */
 export function renderNewIssueBody(item: NewIssueItem): string {
   const split =
     item.splitFrom === undefined ? '' : `\n\n（从 #${item.splitFrom} 拆出来的独立小单，不是子单。）`;
+  const impact = item.kind === '缺陷' && item.impact ? plainText(item.impact) : '';
   return [
     '## 场景',
     '',
     `${plainText(item.scene)}${split}`,
     '',
+    ...(impact ? ['## 影响', '', impact, ''] : []),
     '## 原话',
     '',
     `无（AI 发现；引擎的临时指挥官整理待办时开的）。${item.splitFrom === undefined ? '' : `大单 #${item.splitFrom} 里的原话见该单。`}`,
@@ -677,6 +684,24 @@ export async function executeGroomPlan(
         what,
         why: `「怎么算做完」要 diff 外证据，不能开给引擎：\n${describeOffDiff(offDiff)}\n${OFF_DIFF_REWRITE}`,
       });
+      continue;
+    }
+    if (item.kind === '缺陷' && defectImpactProblem(body)) {
+      const filing = planDefectFiling(body, `${title}：${plainText(item.scene)}`);
+      if (!filing.open) {
+        if (parent !== undefined) {
+          const posted = await act(what, async () => {
+            await writes.comment({
+              issueNumber: parent.number,
+              key: `groom-no-impact:${ctx.requestId}:${index}`,
+              body: filing.comment,
+            });
+          });
+          if (posted) rejected.push({ what, why: '缺陷单没写「影响」，没开，已在来源单上追加评论' });
+        } else {
+          rejected.push({ what, why: `${defectImpactProblem(body)}。没有已有的单可追加评论，没开。` });
+        }
+      }
       continue;
     }
     if (parent !== undefined && isLedgerIssue(parent)) {

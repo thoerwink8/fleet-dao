@@ -15,10 +15,11 @@ const ok = (value: unknown): GhResult => ({
 const fail = (why: string): GhResult => ({ code: 1, stdout: '', stderr: why });
 const body =
   '## 场景\n\n批量登记改进点。\n\n## 原话\n\n无（AI 发现）。\n\n## 已知的模块\n\n开单脚本。\n\n## 怎么算做完\n\n- 测试：批量创建成功时返回所有单号。\n';
+const defectBody = body.replace('## 原话', '## 影响\n\n主线 CI 红：批量登记失败时单子丢失。\n\n## 原话');
 const spec = (): BatchSpec => ({
   mother: { kind: '需求', title: '一批改进', body, domain: 'engine', nature: 'process' },
   subs: [
-    { kind: '缺陷', title: '第一项', body },
+    { kind: '缺陷', title: '第一项', body: defectBody },
     { kind: '杂项', title: '第二项', body },
   ],
 });
@@ -176,6 +177,15 @@ describe('母单与子单原子批量创建', () => {
     expect(existsSync(old.journal)).toBe(false);
     expect(old.closeAttempts).toEqual([]);
     expect(old.calls).toEqual([]);
+  });
+  it('【故意造出的失败】缺陷子单没写「影响」：整批写入前拒绝，一张都没开', async () => {
+    const input = spec();
+    const bug = input.subs[0];
+    if (bug) bug.body = body;
+    const fake = setup();
+    await expect(fake.run(input)).rejects.toThrow('第 1 张：「缺陷」类的单正文里没有「## 影响」一节');
+    expect(fake.calls).toEqual([]);
+    expect(existsSync(fake.journal)).toBe(false);
   });
   it('显式轴标签初始化失败时明确报错，尚未创建或补偿任何单', async () => {
     const input = spec();

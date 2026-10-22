@@ -77,7 +77,7 @@ export function validateBatch(spec: BatchSpec): void {
     if (typeof issue.body !== 'string' || !isKindLabel(issue.kind))
       throw new Error(`第 ${index} 张需要 body 和 kind（需求/缺陷/杂项）。`);
     batchAxis(issue, spec.mother);
-    const check = checkIssueBody(issue.body, { local: spec.local === true });
+    const check = checkIssueBody(issue.body, { local: spec.local === true, kind: issue.kind });
     if (!check.ok) throw new Error(`第 ${index} 张：${check.why}`);
     const long = issueBodyTooLong(
       `${issue.body}\n\nparent: #999999999999999\n${marker(randomUUID())}mother -->`,

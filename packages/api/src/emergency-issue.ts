@@ -82,7 +82,7 @@ export async function fileEmergencyIssue(
   deps: { port: EmergencyIssuePort; repo: { owner: string; name: string } },
 ): Promise<{ number: number; url: string; created: boolean }> {
   const text = body.trim();
-  const checked = checkIssueBody(text);
+  const checked = checkIssueBody(text, { kind: '缺陷' });
   if (!checked.ok) throw new EmergencyIssueError(`急修单正文不合格：${checked.why}`, 1);
   const tooLong = issueBodyTooLong(text);
   if (tooLong) throw new EmergencyIssueError(tooLong, 1);

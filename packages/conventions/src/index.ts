@@ -101,6 +101,7 @@ export {
 export {
   checkIssueBody,
   checkRequiredSections,
+  defectImpactProblem,
   type Gh,
   type GhResult,
   ghRunner,
@@ -110,6 +111,7 @@ export {
   issueBodyTooLong,
   issueNew,
   type MissingSection,
+  planDefectFiling,
   requiredSectionProblems,
   sectionText,
   USAGE,
