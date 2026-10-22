@@ -1,54 +1,41 @@
 # packages/api：驾驶舱后端
 
-Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推送（SSE）、GitHub 事件接收、给 Temporal 工作流发信号，另有一个只听本机回环的 fleet 命令接口。读数据只从 Postgres 读、不直接查 GitHub（例外和理由见 design 第四节「架构」）。
+Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推送（SSE）、GitHub 事件接收、给 Temporal 工作流发信号，另有一个只听本机回环的 fleet 命令接口。读数据只从 Postgres 读、不直接查 GitHub（例外和理由见 design 第四节「架构」）。各模块的细节约束在文件头注释，这里只留跨文件的不变量。
 
-## 入口
+## 去哪找
 
-- `packages/api/src/main.ts`：进程入口，两个监听（驾驶舱接口、fleet 命令接口）；有 `DATABASE_URL` 走真库 + 真 Temporal，没有就用内存样例数据，飞书登录没配时 `POST /auth/dev-login` 免登（只许本机回环）。
-- `packages/api/src/app.ts`：`buildApps` 装两个应用；驾驶舱挂 `/auth`、`/api`、`/github`，命令接口挂 `/agent/v1`。新路由在这里挂。
-- `packages/api/src/config.ts`：地址、端口、密钥都从环境变量读。
-- `github-mirror.ts`：main 的真实 GitHub 装配；开发环境非 HTTPS origin 只让策略桥未装配，不能把其它能力误报凭据缺失。生产桥初始化错误单独失败。
-- `ci-policy-bridge.ts`、`ci-policy-public.ts`：受管公开仓 DB 策略只读协议、HTTP 错误映射与策略切换；source publisher/wrapper 复用 store，与 engine replay/poll 同义。精确 GET 挂在 session 前，严格核 GitHub 当前 public/数字身份；协议在 shared 的 `ci-policy-bridge.ts`，独立于浏览器 FleetApi，路由契约测试仍逐条登记。私有 force 原路径，私有 off 明确不支持。
-- `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
-- `historical-audit` 管理命令从 stdin 收历史通知审计 JSON，现读 GitHub PR/head 与证据 issue，再以真实 ops 身份原子处理通知、记审计。结论只允许 `historical_unproven`，不能作为正常队列账或创始人批准；入口在 `src/historical-audit-cli.ts`。
-- `checkout-history` 是 checkout 失败卡的私有 ops 管理命令：stdin 的 `temporalRunId` 原样匹配 DB（旧 NULL 用空串），另给 `executionRunId` 明确指定原 Temporal execution UUID。预检和 `--archive` 分别通过服务端 `checkout-execution-reader.ts` 鲜读完整连续有界历史，要求唯一 coldVerify 的 scheduled→started→completed 及严格 started/completed 区间绑定 DB run、任务、仓、PR/head；重试或重叠未完活动也拒绝，不追 latest，不接上传 history/proof。reader 复用 acceptance 的 SDK transport/预算，checkout 不借最终 pass 规则。`raisedAt` 只核通知事故代次；显式归档还须完整快照、操作者、原因、证据和 `conclusion: "historical_unproven"`，网络在 PG 锁外，Store 短事务重核来源和 CAS 后才撤卡记审计。不证明检出恢复，不改任务、run、PR 或验收责任。
-- `attention --json` 的 `runningIdle` 是版本化即时只读结论：完整 `listRunningEngineTasks` 与 core 唯一 idle 判据，带任务身份、完整 openRuns 和采集时刻。`notes` 是按推送白名单到点的通知，两者不能相互替代；读取失败退出 1，诊断不回退为展示会话计数。
+| 要找 | 位置 |
+|---|---|
+| 进程入口（两个监听；有 `DATABASE_URL` 走真库 + 真 Temporal，没有用内存样例；飞书未配时 `POST /auth/dev-login` 免登，只许本机回环） | `src/main.ts` |
+| 装应用、挂路由（驾驶舱 `/auth`、`/api`、`/github`，命令接口 `/agent/v1`；新路由在这里挂） | `src/app.ts` |
+| 地址、端口、密钥（都从环境变量读） | `src/config.ts` |
+| 真实 GitHub 装配；CI 策略读桥 | `github-mirror.ts`；`ci-policy-bridge.ts`、`ci-policy-public.ts`（协议在 shared 的 `ci-policy-bridge.ts`） |
+| 法国上的管理命令 `fleet-api`（用法见 ops 第九节「发布应用（deploy/release.sh）」前后） | `packages/api/bin/`；`historical-audit`、`checkout-history`、`acceptance`、`task correct-merged`、`quote`、`node-key`、`project` 等子命令的逻辑在 `src/*-cli.ts` 与同名模块 |
+| `attention --json` | `runningIdle` 是版本化即时只读结论（完整 `listRunningEngineTasks` + core 唯一 idle 判据），与按推送白名单到点的 `notes` 不能互相替代；读取失败退出 1 |
+
+## 必须守的不变量
+
+- 接口契约只有一份：`packages/shared/src/web-api.ts` 的 `WebRoutes`、`AuthRoutes`；`test/web-routes-contract.test.ts` 两头核对（契约有后端没注册、后端注册了契约没有，都红）。
+- 「只有创始人本人能开」（决定 0033）：打开 Fable、加进或拖动用途一律调 `src/founder-only.ts` 的 `guardFounderOnly`，不另写判法（`test/fable-founder-only.test.ts` 两道门都测）。
+- 飞书网关的意图接口、别的环境推快照的写口挂在登录门前面，只认各自通行证；改挂载顺序会把它们关到登录门后面（见 `app.ts` 注释）。
+- 机器通行证认谁只有一份：`src/node-keys.ts` 的 `readNodeKeys`（库表 `node_keys` 有效行 + 旧 `FLEET_NODE_KEYS`，同编号库为准，作废行遮住旧配置），快照、本机会话、领单、看板读口都走它；每次现读不缓存，库读失败 503 `node_keys_unreadable`，不放行也不回 401。
+- 两个 App 装没装的判法只有一份：`repo-import-routes.ts` 的 `mergedInstallations`（一边失败整次失败），驾驶舱与 `fleet-api project installations` 都调它；没读全、身份对不上退出 1，不当成没装。
+- 读不到就如实报红：GitHub 机器人凭据、Temporal 连不上都不能当成没事，健康检查照实报。
+- CI 策略的唯一权威是 repos 行，不能把 mode 写进 caller/source；publisher 必须在 intake 的 await accept 内（wake=false 也执行），失败沿投递账重放。
+- 通知回答先存代次，再原子 claim，最后按答案和 claim CAS 结算；在途或结果未知返回 409，不自动重放；带 `requestId` 必须同时带 `expectedAnswerId`（首答 null），拒绝跨新答案的迟到重试。
+- 看门狗提醒的受控修复（`src/alert-repair.ts`）：动作读时现算，不存；点的时候只收服务端动作编号 + incident + `requestId`，条件变了、已撤、incident 对不上、过期、上一次在途或未知一律 409 不发副作用；`accepted` 与 `verified`（要重读原条件）分开，读不到保持未修好；同一 incident 在执行、未知、待核验时其它动作也被挡；不替看门狗撤原通知；开修复单固定调 `engine/src/bin/dispatch-issue.ts`，不拼 shell。
+- 看门狗改了提醒键、标题、撤卡口径，`alert-repair.ts` 的 `IDLE_PREFIX`、`RELEASE_KEY` 要一起改；其测试跑引擎真看门狗，所以 api 的 `devDependencies` 有 engine（只有测试用，`src` 不许引 engine；`tsconfig.json` include 带 `../engine/src`）。
+- 关联已有单（`POST /api/notifications/:id/repair/link`）：只收受管仓 + 单号 + 关联版本 + incident + `requestId`，多一个字段 400；服务端现读必须是开着的 issue，读不到、错仓、已关闭一律拒绝，不回退成开单。线上契约不加枚举，关联存成设置表内部记录，通知卡按旧枚举取 `PHASE_META[state]`，新枚举会让它崩溃（`alert-repair.test.ts` 有照抄旧消费者的检查）。
+- 私有 ops 写入（`acceptance settle|merge`、`task correct-merged`、`checkout-history --archive`、`quote put`）：不挂普通 HTTP，没经 `bin/fleet-api`（无 `FLEET_OPS_OPERATOR`）不许执行；`settle` 必须精确责任 id、generation、PR/head 和证据，旧代次不能结清新增项；`correct-merged` 默认只读预检，执行必须带预检打印的 `--task`/`--seen`；错误不回显 payload 或数据库明细。
+- 历史/检出归档证据只认服务端鲜读的完整有界 Temporal 历史（`acceptance-execution-reader.ts`、`checkout-execution-reader.ts`），不追 latest，不接上传 history/proof，不用旧 runs 的 NULL 列或会话号授权；`conclusion` 只许 `historical_unproven`，不能当正常队列账或创始人批准。
 
 ## 测试
 
-- 单测：`npx vitest run packages/api/test/<文件>`；整包 `npx vitest run packages/api`（本机一般不跑整包，交给 CI）。
-- 默认用内存 Store，不要 Postgres。驾驶舱用户视角的 e2e（真库 + 真后端 + 真前端）在 `packages/web/e2e/`，备库脚本是 `packages/api/test/e2e/prepare.ts`，跑法见 `packages/web/e2e/README.md`。
-
-## 常见坑
-
-- 接口契约只有一份：`packages/shared/src/web-api.ts` 的 `WebRoutes`、`AuthRoutes`。`packages/api/test/web-routes-contract.test.ts` 两头核对（契约里有、后端没注册；后端注册了、契约里没有，都红）。
-- 「只有创始人本人能开」（决定 0033）：打开 Fable 的路由/模型、加进或拖动用途，一律调 `packages/api/src/founder-only.ts` 的 `guardFounderOnly`，不另写判法；`packages/api/test/fable-founder-only.test.ts` 两道门都测。
-- 飞书网关的意图接口、别的环境推快照的写口挂在登录门前面，只认各自的通行证；改挂载顺序会把它们关到登录门后面（见 `app.ts` 注释）。
-- 机器通行证（#3388）认谁只有一份：`src/node-keys.ts` 的 `readNodeKeys`（库表 `node_keys` 的有效行 + 旧配置 `FLEET_NODE_KEYS`，同编号库为准，作废行遮住旧配置），快照、本机会话、领单（含 `GET /api/nodes/claims`）、看板读口都走它；每次现读、不缓存，库读失败 503 `node_keys_unreadable`，不放行也不回 401。发/列/作废在 `fleet-api node-key new|list|revoke`（`cli.ts`），读口协议在 shared 的 `node-claims.ts`（零依赖，本机脚本直接导入）。
-- 读不到就如实报红：GitHub 机器人凭据、Temporal 连不上都不能当成没事，健康检查照实报。
-- CI 策略的唯一权威是 repos 行，不能把 mode 写进 caller/source。publisher 必须在 intake 的 await accept 内，wake=false 也执行，失败沿投递账重放；不让 source status 再发布 source。setter 用策略专用 strict pgLocker，先撤绿、原 DB+audit 事务、再撤绿+刷新 source；成功只排重算，失锁和部分同步返回明确阶段。
-- 两个 App 装没装的判法只有一份：`packages/api/src/repo-import-routes.ts` 的 `mergedInstallations`（一边失败整次失败）。驾驶舱 `GET /api/repos/importable` 和 `fleet-api project installations`（`project-cli.ts` 的 `installationFacts`，#2977）都调它，别另写；后者按仓号认、只打目标仓，没读全、身份对不上退出 1（没查成），不当成没装，也不碰 repos 表、不写安装。
+- `npx vitest run packages/api/test/<文件>`；整包交给 CI。默认内存 Store，不要 Postgres。驾驶舱 e2e 在 `packages/web/e2e/`（备库脚本 `packages/api/test/e2e/prepare.ts`，跑法见该目录 README）。
+- 字符数上限：`packages/conventions/test/agents-md-size.test.ts`（8,000）。
 
 ## 改它时要连带改
 
-- 加改接口：先改 `packages/shared/src/web-api.ts`，再改这里的路由、`packages/web/src/api/http.ts`，以及 web 的 mock（`packages/web/src/api/mock/server.ts`，它 `implements FleetApi`，类型不同步编译不过）。
-- 测试会读 web 的文件（`packages/conventions/src/ci-plan.ts` 的 `TEST_READS` 里 api 读 web）：改 web 也可能让这里的测试红。
-- 改了行为（发信号、权限、读写哪张表）：同步 `docs/design.md` 第十五节「驾驶舱」对应条；改了部署相关的环境变量、端口：同步 `docs/ops.md`。
-
-- 通知回答先存代次，再原子 claim，最后按答案和 claim CAS 结算；在途或结果未知返回明确 409，不自动重放。HTTP 重试复用 `requestId`，新决定用新编号，带 `requestId` 必须同时带 `expectedAnswerId`（首答 null），拒绝跨新答案的迟到重试。handoff 的 GitHub key 绑定答案代次；历史无代次不能执行或交接。
-
-- 最终现场验收：`fleet-api acceptance status <owner/仓> <单号>` 读持久责任账；`settle` 必须提交精确责任 id、generation、PR/head 和证据，旧代次不能结清新增项。公开只读口复用现有 CI bridge 验证公开仓身份，不提供写口。
-
-- 看门狗提醒的受控修复（#3033，`alert-repair.ts`）：动作读时现算，不存、不借 `decision_reason`；点的时候只收服务端动作编号（含证据摘要）+ incident + `requestId`，条件变了、已撤、incident 对不上、动作过期、上一次在途或结果未知一律 409，不发副作用。信号、请求文件只记 `accepted`，要重读原条件才记 `verified`，读不到或未恢复保持未修好。idle-running 的仓和工作流从键里的任务编号现查，不从正文猜；没有直接修复入口的只能「交给修复」（开在 fleet-dao，key `alert-repair:<incident>`，同一次事故一张），不放开 alert-sweep 的 24 小时立案排除。修复状态在设置表 `alert.repair:<提醒编号>`，版本号 CAS；incident 用现成 `raisedAt` 区分同 key 重开，跨代在途/未知/受理待核验仍禁止覆盖和重放。测试 `alert-repair.test.ts` 跑引擎的真看门狗（`runWatchdogJob(watchdogJob(...))`，PGlite 真库）造提醒，所以 api 的 `devDependencies` 有 engine（只有测试用，`src` 不许引 engine；`tsconfig.json` 的 include 带 `../engine/src`），改 engine 的 PR 也会测 api。看门狗改了键、标题、撤卡口径，这些测试会红：`alert-repair.ts` 的 `IDLE_PREFIX`、`RELEASE_KEY` 要一起改。
-
-- 受控修复同一 incident 在执行、结果未知或受理待核验时，所有其他动作也必须阻挡，不允许覆盖原副作用。idle 判据与原检测器共用 core 纯模块，具体 workflow run 必须现读并钉入信号；发版核验绑原 SHA 和 startedAt。交修复在开单后调用固定 `engine/src/bin/dispatch-issue.ts` 准入入口，不拼 shell，不提权，派工未知保留原单和未知状态；确定未派重试复用原单。
-
-- 真核验通过后按设置版本与通知 `raisedAt` 双守卫 CAS 持久写 verified 和审计；并发 GET 只一份结清审计，结算冲突/读取失败均不展示绿。不替看门狗撤原通知。执行路由的最终结算同样只回已落库的记录：CAS 冲突或持久读写失败不把内存里的 verified 等终态当 200；重读只采纳精确同一 incident、requestId、动作且已落库的结果，不覆盖并发赢家，不重放动作。
-
-- 明确关联已有单（#3100，`POST /api/notifications/:id/repair/link`）：可信登录操作者指定这次告警由哪张现有 fleet-dao 单处理，只收受管仓 + 单号 + 服务端关联版本（视图 `linkAction`）+ incident + `requestId`，多一个字段（如伪造 actor）就 400；服务端现读必须是开着的 issue，并按目标仓和单精确查任务、开放 PR（`listPullRequests` 的 `repoId`/`issueNumber`，不读全局前 N 条再筛；一页读满当没读全，关联 502、交给修复标 failed 不派工）；读不到、PR、错仓、已关闭一律拒绝，不回退成开单。线上契约不加枚举：修复记录的 kind/state 与 #3033 一样，关联存成设置表里的内部记录（`StoredRecordSchema`，只在 `alert-repair.ts` 里认），出口经 `wireLast` 投影，关联只走视图的 `linked` 和关联端点自己的回执；通知卡（#3034）按旧枚举取 `PHASE_META[state]`，新枚举会让它崩溃，`alert-repair.test.ts` 有照抄旧消费者的严格检查。交给修复沿用绑定：每次重新核实，失效标 `invalid` 不开新单；已有进行中的任务或开放 PR 回 409 `link_already_handled` 不派工，否则经原准入派一次（不传 force）。关联与开单抢同一事故走同一个设置版本 CAS。标题正文相似不自动认同根因。
-
-- `fleet-api quote put|get|list` 仅私有管理命令；put 从 stdin 收数组，同 id 同内容幂等、异文整批拒绝。错误不回显 payload 或数据库明细，get/list 的私有原文输出不可送公开日志；不挂 HTTP 或 realtime。
-
-- 已结束却误记 abandoned 的真实已合任务：`fleet-api task correct-merged`（`task-correct-merged.ts`）。默认只读预检（现读 GitHub 精确 PR/head/合并提交/基线分支、Temporal 原 run 已 COMPLETED 且是最新一代且结果为 abandoned、库里 stopped/abandoned 且无活 run），执行必须带预检打印的 `--task`/`--seen`，由 `Store.correctMergedAbandoned` 在一个事务里 CAS 改任务并写操作记录（`task.correct-merged`，带前后状态和证据）。不改旧 run、不动 Temporal、不关 issue、不碰验收责任；同一请求幂等，换了任何身份或证据拒绝；没经 `bin/fleet-api`（无 FLEET_OPS_OPERATOR）不许执行。
-
-- 历史验收归并：`acceptance merge-plan` / `merge` 使用专用 `acceptance-execution-reader.ts`，只接受同 run 已完成活动的明确来源A/B，完整限额历史与最终头冷验收通过关联；不用旧 runs 的 NULL 列或会话号授权。历史分页只按 token 耗尽收尾（同官方 SDK）：0 事件页（有进展 token）在终态前后都合法，没有固定空页个数上限，只受原总页数 256、事件、字节、时间和 token 循环预算约束；终态后任何事件、token 循环、rawHistory/归档仍 unknown，token 耗尽后连续事件、historyLength、唯一终态、来源和精确 head 冷验收仍须全过（#3500、#3502）。merge 是私有 ops 写入，重取证据，随后由 DB 短事务完成目标/审计/幂等，不能挂普通HTTP或公开原项。
+- 加改接口：先改 `packages/shared/src/web-api.ts`，再改这里的路由、`packages/web/src/api/http.ts`、web 的 mock（`packages/web/src/api/mock/server.ts`，它 `implements FleetApi`）。
+- 测试会读 web 的文件（`ci-plan.ts` 的 `TEST_READS`）：改 web 也可能让这里的测试红。
+- 改了行为（发信号、权限、读写哪张表）：同步 `docs/design.md` 第十五节「驾驶舱」；改了部署相关环境变量、端口：同步 `docs/ops.md`。
