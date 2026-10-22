@@ -15,4 +15,22 @@ describe('LocalClaimRequestSchema', () => {
       LocalClaimRequestSchema.safeParse({ action: 'claim', repo: 'a/b', issue: 1, title: 't' }).success,
     ).toBe(true);
   });
+
+  it('接手 PR：claim 可带精确 PR 号 + 完整小写 40 位 head；确认动作必须带；短 head、大写、多字段、缺字段拒收', () => {
+    const base = { repo: 'a/b', issue: 1 };
+    const takeoverPr = { pr: 7, head: 'a'.repeat(40) };
+    const parse = (v: unknown) => LocalClaimRequestSchema.safeParse(v).success;
+    expect(parse({ action: 'claim', ...base, title: 't', takeoverPr })).toBe(true);
+    expect(parse({ action: 'takeover_confirm', ...base, takeoverPr })).toBe(true);
+    expect(parse({ action: 'takeover_confirm', ...base })).toBe(false);
+    for (const bad of [
+      { pr: 7, head: 'a'.repeat(39) },
+      { pr: 7, head: 'A'.repeat(40) },
+      { pr: 0, head: 'a'.repeat(40) },
+      { pr: 7, head: 'a'.repeat(40), verified: true },
+      { head: 'a'.repeat(40) },
+    ]) {
+      expect(parse({ action: 'claim', ...base, title: 't', takeoverPr: bad })).toBe(false);
+    }
+  });
 });
