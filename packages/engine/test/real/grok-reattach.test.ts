@@ -60,7 +60,8 @@ function grokDriverWith(script: () => Record<string, unknown>) {
     // 真插头；测试机上没有 fleet-agent-scope，不进 scope（其余照生产传进去的那一份）
     run: {
       grok: (spec: GrokRunSpec, options) => {
-        const bare: GrokRunSpec = { ...spec };
+        // 假执行体不会答 --version（还会按脚本卡住），版本直接给
+        const bare: GrokRunSpec = { ...spec, grokVersion: '1.0.41' };
         delete bare.cgroup;
         return runGrok(bare, options);
       },

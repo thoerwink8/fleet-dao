@@ -85,6 +85,10 @@ function healthFixture(to: Date): PipelineHealth {
     heavyAddedP90: thisWeek ? 7117 : 5000,
     verifyRejectShare: 5 / rounds,
     resume: thisWeek ? { decisions: 10, resumed: 6, rate: 0.6 } : { decisions: 8, resumed: 4, rate: 0.5 },
+    verifyByFamily: [
+      { family: 'gpt', passed: 5, decided: 11 },
+      { family: 'claude', passed: 9, decided: 10 },
+    ],
   };
 }
 
@@ -379,6 +383,7 @@ describe('流程健康（#2762）', () => {
     expect(body).toContain('做成 7 轮，占 35%（7 天前 20%，涨 15 点）');
     expect(body).toContain('CI 红 8 轮，占 40%（7 天前 30%，涨 10 点）');
     expect(body).toContain('冷验收拒绝占比：25%（7 天前 50%，跌 25 点）');
+    expect(body).toContain('冷验收通过率（按验收族，过/有结论）：gpt 5/11（45%），claude 9/10（90%）');
     expect(body).toContain('返工续上会话：6/10，比例 60%（7 天前 50%，涨 10 点）');
     expect(body).toContain(
       '重活（11 轮）：一轮做成率 18%（7 天前 10%，涨 8 点），合并的平均 2.77 轮（7 天前 3.5 轮，跌 0.73）',
@@ -426,6 +431,7 @@ describe('流程健康（#2762）', () => {
         heavyAddedP90: null,
         verifyRejectShare: null,
         resume: { decisions: 0, resumed: 0, rate: null },
+        verifyByFamily: [],
       }),
     });
     await runDailyBriefJob(d.deps);

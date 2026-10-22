@@ -2,13 +2,22 @@
 // 会话号和实际模型只在最后一行 end 里：跑的中途核对不了，跑完核对。模型不符判失败；会话号只在续会话（-r）时核对——
 // -r 认不出那个号它当场退出、报 not found（几秒内），续上了终帧回的就是同一个号（法国真跑：同一个号续过四轮）。
 // 开新会话（-s）时号是我们起的名字，终帧回的不一样也不算「续会话没续上」：活已经在树上，照它报的真号记，不把一整段作废。
+
+import { parseInstalledOutput } from '@fleet-dao/shared';
 import { type AgentRunOptions, assertRunnable, runCliAgent } from '../cli-run.ts';
 import { buildSessionEnv, type SessionEnvInput } from '../env.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
-import type { AgentProcessResult, ProcessLimits } from '../process.ts';
+import { type AgentProcessResult, type ProcessLimits, runAgentProcess } from '../process.ts';
 import type { CgroupScope } from '../procs.ts';
 import { cut, lastLines, looksLikeQuotaExhausted } from '../stream-kit.ts';
-import { buildGrokArgs, type GrokArgsSpec, type GrokSession, grokModelMatches } from './args.ts';
+import {
+  buildGrokArgs,
+  GROK_DISALLOWED_TOOLS_MIN_VERSION,
+  type GrokArgsSpec,
+  type GrokSession,
+  grokModelMatches,
+  grokSupportsDisallowedTools,
+} from './args.ts';
 import { GrokStreamReader, type GrokStreamSummary } from './stream.ts';
 
 export interface GrokRunSpec extends Omit<GrokArgsSpec, 'cwd' | 'promptFile'> {
@@ -26,6 +35,40 @@ export interface GrokRunSpec extends Omit<GrokArgsSpec, 'cwd' | 'promptFile'> {
   cgroup?: CgroupScope;
   /** 不在 Linux 上跑时（开发机）换成真文件；默认 /dev/stdin。 */
   promptFile?: string;
+  /** 命令行版本（如 1.0.41）；不给就起会话前用 --version 问一次。测试和已经知道版本的调用方用。 */
+  grokVersion?: string;
+  /** 没关成工具时记的那条日志；默认 console.warn。 */
+  log?: (message: string) => void;
+}
+
+/** 问命令行版本的时限：只是 --version，几秒内必回。 */
+const VERSION_PROBE_LIMITS: ProcessLimits = { startupMs: 15_000, wallClockMs: 20_000, killGraceMs: 1_000 };
+
+/** 起一次 `<命令> --version` 读版本；起不来、超时、认不出都给 null（调用方按不支持算）。同一个 scope 编号加后缀，不和正式会话撞名。 */
+export async function probeGrokVersion(
+  spec: Pick<GrokRunSpec, 'runId' | 'cwd' | 'cgroup'>,
+  env: Record<string, string>,
+  command: readonly string[],
+): Promise<string | null> {
+  const lines: string[] = [];
+  try {
+    const result = await runAgentProcess(
+      {
+        command: [...command, '--version'],
+        cwd: spec.cwd,
+        env,
+        stdin: '',
+        limits: VERSION_PROBE_LIMITS,
+        runId: `${spec.runId}-version`,
+        ...(spec.cgroup ? { scope: { ...spec.cgroup, id: `${spec.cgroup.id.slice(0, 56)}-version` } } : {}),
+      },
+      { onLine: (line) => void lines.push(line) },
+    );
+    if (result.exitCode !== 0) return null;
+  } catch {
+    return null;
+  }
+  return parseInstalledOutput('grok', lines.join('\n'));
 }
 
 export interface GrokRunReport extends AgentProcessResult {
@@ -50,7 +93,21 @@ export const GROK_UNATTENDED_ENV: Readonly<Record<string, string>> = {
 
 export async function runGrok(spec: GrokRunSpec, options: AgentRunOptions): Promise<GrokRunReport> {
   await assertRunnable(options.command, spec.prompt, spec.cwd, options.io);
+  const env = { ...buildSessionEnv(spec.env), ...GROK_UNATTENDED_ENV };
+  // 接回（attach）不起进程，不用问；其余先看版本，不认 --disallowed-tools 的老版本不带，照旧起会话
+  let disallowTools = spec.disallowTools !== false;
+  if (disallowTools && !options.io?.attach) {
+    const version = spec.grokVersion ?? (await probeGrokVersion(spec, env, options.command));
+    if (!grokSupportsDisallowedTools(version)) {
+      disallowTools = false;
+      (spec.log ?? console.warn)(
+        `grok 会话 ${spec.runId} 没关成写码用不上的工具：命令行版本${version ? ` ${version}` : '读不出来'}，` +
+          `认得 --disallowed-tools 的最低版本是 ${GROK_DISALLOWED_TOOLS_MIN_VERSION}，照旧不带这个参数起会话`,
+      );
+    }
+  }
   const args = buildGrokArgs({
+    disallowTools,
     model: spec.model,
     session: spec.session,
     cwd: spec.cwd,
@@ -70,7 +127,7 @@ export async function runGrok(spec: GrokRunSpec, options: AgentRunOptions): Prom
       runId: spec.runId,
       cwd: spec.cwd,
       args,
-      env: { ...buildSessionEnv(spec.env), ...GROK_UNATTENDED_ENV },
+      env,
       stdin: spec.prompt,
       limits: spec.limits,
       cgroup: spec.cgroup,

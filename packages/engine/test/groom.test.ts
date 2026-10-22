@@ -1,5 +1,6 @@
 // 临时指挥官整理待办（#1338）：清单的校验和执行（限额、查重、追加补充不改原文、只能做那四件事）、接手一次整理的全流程
 // （成功推总结、失败明确报失败）、真装配里的写操作面没有关单。故意造出的失败放最后。
+import { checkIssueBody } from '@fleet-dao/conventions';
 import { GROOM_ACTION, GROOM_TARGET, type GroomAuditRow, type GroomResult } from '@fleet-dao/shared';
 import { githubWhitelist } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
@@ -232,6 +233,61 @@ describe('executeGroomPlan · 开新单', () => {
     expect(body).toContain('无（AI 发现');
     expect(call?.args.labels).toEqual(['需求', '域:engine', '性质:process']);
     expect(call?.args).not.toHaveProperty('milestone');
+  });
+
+  it('缺陷单写了影响：照开，正文过开单脚本同一份检查', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        newIssues: [newItem(1, { kind: '缺陷', nature: 'bug', impact: '主线 CI 红：导出一直失败。' })],
+      }),
+      ctxOf([]),
+      f.writes,
+    );
+    expect(out.result.opened).toHaveLength(1);
+    const body = String(f.calls[0]?.args.body);
+    expect(body).toContain('## 影响');
+    expect(body).toContain('主线 CI 红：导出一直失败。');
+    expect(checkIssueBody(body, { kind: '缺陷' })).toMatchObject({ ok: true });
+    expect(f.calls.filter((c) => c.kind === 'comment')).toEqual([]);
+  });
+
+  it('【故意造出的失败】缺陷单没写影响、有来源单：不开，改成在来源单上追加评论', async () => {
+    const parent = issue(139, { title: '一张很大的单' });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        newIssues: [
+          newItem(1, {
+            kind: '缺陷',
+            nature: 'bug',
+            title: '统一导出报表格式（#139 第 2 片）',
+            splitFrom: 139,
+          }),
+        ],
+      }),
+      ctxOf([parent]),
+      f.writes,
+    );
+    expect(out.result.opened).toEqual([]);
+    expect(f.calls.filter((c) => c.kind === 'openIssue')).toEqual([]);
+    const comment = f.calls.find((c) => c.kind === 'comment');
+    expect(comment?.args).toMatchObject({ issueNumber: 139, key: 'groom-no-impact:req-1:0' });
+    expect(String(comment?.args.body)).toMatch(/不开新的缺陷单[\s\S]*没有「## 影响」一节[\s\S]*一轮做成率/);
+    expect(String(comment?.args.body)).toContain('统一导出报表格式（#139 第 2 片）');
+    expect(out.result.rejected.map((r) => r.why)).toContain('缺陷单没写「影响」，没开，已在来源单上追加评论');
+  });
+
+  it('【故意造出的失败】缺陷单没写影响、也没有来源单：不开，也不往别的单上评论', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ newIssues: [newItem(2, { kind: '缺陷', nature: 'bug' })] }),
+      ctxOf([issue(5)]),
+      f.writes,
+    );
+    expect(f.calls).toEqual([]);
+    expect(out.result.opened).toEqual([]);
+    expect(out.result.rejected[0]?.why).toMatch(/没有「## 影响」一节[\s\S]*没有已有的单可追加评论，没开/);
   });
 
   it('会话在文字里塞标题伪造「原话」或「涉及面」→ 行首的 # 被剥掉，开出来的单里没有多出来的节', async () => {

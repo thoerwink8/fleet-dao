@@ -103,7 +103,7 @@ export const USAGE =
   '用法：pnpm issue:new --kind 需求|缺陷|杂项 --domain engine|api|mirasim --nature bug|perf|process --milestone 当前 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]' +
   ' [--allow-pr-body-acceptance "<理由>"]' +
   '（--domain、--nature 每轴恰好一个，和类别同一次贴上：标签名是「域:…」「性质:…」，只用来筛，不参与派工和合并；' +
-  '--milestone 写「当前」挂开着的那个版本（一周一版、到期自动收口，别写死 v<N>），也认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
+  '--milestone 写「当前」挂开着的那个版本（一周一版、到期自动收口，别写死 v<N>），也认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节（--kind 缺陷 另要写了字的「## 影响」：会让哪项结果变差），' +
   '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
   '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派；' +
   '挂版本的母单、单独的单开完自动排进版本里程碑说明的先后末尾，--order-after 插在那张后面；子单、未排期不排；' +
@@ -202,6 +202,41 @@ export function sectionText(doc: MdDoc, name: string): string | undefined {
     .trim();
 }
 
+/** 「缺陷」类单另外必填「## 影响」：说清会让哪项结果变差（母单 #3582）。只管新开的单，开着的老单不回头查。 */
+const DEFECT_KIND = '缺陷';
+const IMPACT_SECTION = '影响';
+const IMPACT_HOWTO =
+  '写会让哪项结果指标（一轮做成率、冷验收拒绝、主线 CI 红、创始人被打扰次数）变差，或创始人看得见的哪个现象；说不清的就别开单，在已有的单上追加一条评论';
+
+function impactProblem(doc: MdDoc): string | undefined {
+  const text = sectionText(doc, IMPACT_SECTION);
+  if (text === undefined) return `「缺陷」类的单正文里没有「## 影响」一节：${IMPACT_HOWTO}`;
+  if (text.replace(/\s+/g, '').length === 0) return `「## 影响」一节是空的：${IMPACT_HOWTO}`;
+  return undefined;
+}
+
+/** 缺陷单缺「## 影响」或这一节是空的时的原因；齐了回 undefined。不管别的节，只在类别是缺陷时用。 */
+export function defectImpactProblem(body: string): string | undefined {
+  return impactProblem(parseMd('body.md', body));
+}
+
+/**
+ * 机器要开一张缺陷单：正文过了检查（含写了字的「影响」）才开。
+ * 过不了就不开。comment 由调用方追加到已有的单上；没有已有的单就只不开。
+ */
+export function planDefectFiling(
+  body: string,
+  finding: string,
+): { open: true } | { open: false; comment: string } {
+  const checked = checkIssueBody(body, { kind: DEFECT_KIND });
+  if (checked.ok) return { open: true };
+  const clipped = finding.replace(/\s+/g, ' ').trim().slice(0, 500);
+  return {
+    open: false,
+    comment: `不开新的缺陷单：${checked.why}\n\n本来要记的：${clipped || '（没有摘要）'}`,
+  };
+}
+
 /** 「怎么算做完」里提到 PR 正文的写法（冷验收看不到，#1792 / #1764）。不分大小写。 */
 const PR_BODY_IN_DONE = /PR\s*(?:正文|描述|body)/i;
 
@@ -243,11 +278,13 @@ export type IssueBodyCheck =
 
 export function checkIssueBody(
   body: string,
-  opts: { allowPrBodyAcceptance?: boolean; local?: boolean } = {},
+  opts: { allowPrBodyAcceptance?: boolean; local?: boolean; kind?: string } = {},
 ): IssueBodyCheck {
   const doc = parseMd('body.md', body);
   const missing = checkRequiredSections(doc);
   if (missing) return { ok: false, why: `${missing.why}，单没开。`, field: missing.label };
+  const impact = opts.kind === DEFECT_KIND ? impactProblem(doc) : undefined;
+  if (impact) return { ok: false, why: `${impact}，单没开。`, field: IMPACT_SECTION };
   const done = doneSection(doc);
   if (done !== 'ok') {
     return {
@@ -304,6 +341,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   const checked = checkIssueBody(body, {
     allowPrBodyAcceptance: o.allowPrBodyAcceptance !== undefined,
     local: o.local,
+    kind: o.kind,
   });
   if (!checked.ok) throw new Error(checked.why);
   let createBodyPath = bodyPath;

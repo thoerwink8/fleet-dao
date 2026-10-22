@@ -51,6 +51,19 @@ const DIAGNOSTIC: readonly RegExp[] = [
   /完整\s*CI[^\n。；;]{0,24}\d+\s*(?:秒|毫秒|ms|s)[^\n。；;]{0,4}超时/i,
 ];
 
+/**
+ * 诊断型单的标题（#3597，验收条部分是上面的 DIAGNOSTIC，#3595）：「定位……在完整 CI 的原 N 秒超时」一类——要的是某一次 CI 运行里
+ * 实际卡在哪，证据在那次运行的日志里，引擎的冷验收看不到，派给引擎只会白跑几轮再被拒。这种单判成本机做，不派引擎。
+ * 只认以「定位 / 查明 / 查清 / 弄清 / 核实」开头、后面带「原 N 秒超时」或「在完整 CI 的 N 秒超时」的标题（N 可以是汉字数字）；
+ * 「修复……超时」「把……改成在限定时间内跑完」这类是改代码的单，不算。真标题钉在 test/off-diff-acceptance.test.ts（#3413、#3414、#3450）。
+ */
+const DIAGNOSTIC_TITLE =
+  /^\s*(?:定位|查明|查清|弄清|核实)[^\n]{0,80}?(?:原|在完整\s*CI[^\n]{0,8}?)[0-9零一二三四五六七八九十百千]+\s*(?:秒|毫秒|ms|s)\s*超时/i;
+
+export function isDiagnosticTitle(title: string): boolean {
+  return DIAGNOSTIC_TITLE.test(title);
+}
+
 /** 本身多半要 diff 外证据、但同一条写了测试锚点就算看得见的写法。 */
 const SOFT: readonly RegExp[] = [
   /线上|现网|生产环境|正式环境/,
@@ -88,8 +101,32 @@ export function splitAcceptanceItems(text: string): string[] {
   return items;
 }
 
-/** 一条验收条里认出的 diff 外证据的词；没有回空数组。 */
+/**
+ * 收尾验收条（#3629）：「检查全绿」「CI 全绿」「PR 合进主线」「合并」。这类条由合并闸自己证明——PR 能合进主线，
+ * 就说明必过检查全绿了——冷验收不核、不转人，合并后关单视为已满足（#3594：PR 早已合入、检查全 success，
+ * 冷验收却把这条当「要完整 CI 全绿及平台现场证据」转人，单子留着不关，还有会话为 deploy job 反复取证）。
+ * 只认整条都由这几种说法组成（以逗号、顿号、分号、句号、「和」「并且」「以及」切开，每段都得是）；
+ * 同一条里夹了别的要求（「完整 CI 通过，不改 3249 的预算」）不算，照常判。
+ */
+const MERGE_GATE_PARTS: readonly RegExp[] = [
+  /^(?:所有|全部|必过|全套)?(?:完整)?(?:检查|ci|check|pnpmcheck|必过检查)(?:都|全部)?(?:全绿|全部通过|通过|变绿|绿了?)$/i,
+  /^(?:本)?pr(?:#?\d+)?(?:已|可以|能)?(?:合进|合入|合并进|合并入|合并到|合到|并入|合并)(?:到|进|入)?(?:主线|main|master)?$/i,
+  /^(?:已)?合并(?:进|入|到)?(?:主线|main|master)?$/i,
+  /^合并闸(?:通过|放行)?$/,
+];
+
+export function isMergeGateItem(item: string): boolean {
+  const flat = item.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').replace(/[\s`*_]/g, '');
+  const parts = flat
+    .split(/[，,、；;。.]|并且|以及|和/)
+    .map((x) => x.trim())
+    .filter((x) => x !== '');
+  return parts.length > 0 && parts.every((part) => MERGE_GATE_PARTS.some((re) => re.test(part)));
+}
+
+/** 一条验收条里认出的 diff 外证据的词；没有回空数组。收尾条（isMergeGateItem）交合并闸，不算。 */
 export function offDiffWords(item: string): string[] {
+  if (isMergeGateItem(item)) return [];
   const words: string[] = [];
   for (const re of [...HARD, ...DIAGNOSTIC]) {
     const m = re.exec(item);

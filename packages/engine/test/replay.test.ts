@@ -28,6 +28,7 @@ const REQUIRED = [
   'task-verify-reattach',
   'task-contract-first-accept',
   'task-acceptance-duty-merged',
+  'task-rounds-continued-old',
 ];
 
 const HOW =
@@ -186,7 +187,11 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     // 首次接纳（之前没有合同）才会写进度行；被默认参数吞成「没变」就直接往下选路，重放当场对不上
     expect(scheduled[at + 1]?.activityType.name).toBe('saveTaskState');
     // #3402 之后录的夹具（新代码每次都过合同修订边界，自然带这个标记）不在「老夹具」之列
-    const AFTER_3402 = ['task-contract-first-accept.json', 'task-acceptance-duty-merged.json'];
+    const AFTER_3402 = [
+      'task-contract-first-accept.json',
+      'task-acceptance-duty-merged.json',
+      'task-rounds-continued-old.json',
+    ];
     for (const old of files.filter((f) => !AFTER_3402.includes(f))) {
       expect(readFileSync(`${DIR}${old}`, 'utf8')).not.toContain(marker);
     }
@@ -392,6 +397,38 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
       await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
     });
   }
+
+  it('task-rounds-continued-old 老历史（总轮数上限之前录的）：累计 6 轮停下、不带原因点了「继续」、又做 3 轮停下；没有 task-total-rounds 标记，现在的代码照老步序重放得过', async () => {
+    // 录法：在 origin/main 5eaf379fd（#3603 第 1 片已合、总轮数上限还没有）的代码上，用 record.ts 同一套假端口和 scripted()，每轮都没提交（不走 CI 红，
+    // 「旧夹具没有 CI 红带评审这一步」那条只许老夹具有），停在 6 轮后发一次 { by: 'recorder' } 的继续，停在 9 轮后取历史。
+    // record.ts 跑的是现在的代码，录不出这份老历史，所以没把它写成那里的场景。
+    const { workflowId, history } = load('task-rounds-continued-old.json');
+    const marker = Buffer.from(JSON.stringify({ id: 'task-total-rounds', deprecated: false })).toString(
+      'base64',
+    );
+    expect(JSON.stringify(history)).not.toContain(marker);
+    const acts = scheduledActivities(history);
+    // 真跑满了 9 轮（过了 6 轮的上限），中间没有交还本机这一步
+    expect(acts.filter((n) => n === 'runSegment')).toHaveLength(9);
+    expect(acts).not.toContain('handBackLocal');
+    // 那一下「继续」是人点的、没带原因：老代码照样清零放行
+    const signals = history.events
+      .map(
+        (e) =>
+          e.workflowExecutionSignaledEventAttributes as
+            | { signalName: string; input?: { payloads?: { data?: string }[] } }
+            | undefined,
+      )
+      .filter((s) => s !== undefined);
+    expect(signals.map((s) => s.signalName)).toEqual(['taskContinue']);
+    const command = JSON.parse(
+      Buffer.from(signals[0]?.input?.payloads?.[0]?.data ?? '', 'base64').toString('utf8'),
+    ) as { note?: string };
+    expect(command.note).toBeUndefined();
+    // 反过来验过：把 holdAtTotalRounds 里的 patched('task-total-rounds') 换成恒真，这份历史重放当场报 TMPRL1100
+    // （第 6 轮停下那一步走进了交还本机那一支，和历史里的停下对不上）——在途的老任务确实靠这个标记照老步序走
+    await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
+  });
 
   it('对照：历史里调度的活动和代码调的对不上，重放当场报 DeterminismViolationError（这道检查真能红）', async () => {
     const { workflowId, history } = load('task-merged.json');

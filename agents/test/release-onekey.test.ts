@@ -295,7 +295,8 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
     const run0: OnekeyIo = {
       ...base0,
       run: (c, a) => {
-        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check-runs')) {
+        // 只数汇总检查 check 的那一读（heavy 的读不数：每次预检先读 check 再读 heavy，#3597）
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check_name=check&')) {
           checks += 1;
           if (checks >= 2)
             return {

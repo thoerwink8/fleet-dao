@@ -3,6 +3,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeOffDiff,
+  isDiagnosticTitle,
+  isMergeGateItem,
   offDiffAcceptanceItems,
   offDiffHoldOf,
   offDiffWords,
@@ -197,5 +199,74 @@ describe('offDiffAcceptanceItems / describeOffDiff', () => {
 
   it('splitAcceptanceItems：列表项各一条，非列表的连续行合成一段', () => {
     expect(splitAcceptanceItems('1. a\n2) b\n续行\n\nc\nd')).toEqual(['1. a', '2) b\n续行', 'c\nd']);
+  });
+});
+
+describe('诊断型单的标题（#3597）：「定位……原 N 秒超时」判成本机做', () => {
+  it.each([
+    // 真单标题（2026-10-22 从 GitHub 读的）
+    '定位权限交还测试在worker替换后原六十秒超时，保留自身历史',
+    '定位SQLite COMMIT峰值测试在完整CI的原十五秒超时',
+    '定位cleanup-status命名空间测试在完整CI的原五秒超时，保留帮手等待阶段',
+    // 写法变体
+    '定位 task-budget 用例在完整 CI 的 180 秒超时',
+    '查明 push-handback 契约测试在完整 CI 的原 60s 超时',
+  ])('诊断型：%s', (title) => {
+    expect(isDiagnosticTitle(title)).toBe(true);
+  });
+
+  it.each([
+    // 改代码的单、不是定位某次运行的单：照常派
+    '『第257条明确capacity』用例改成在限定时间内跑完并留下实测分段耗时',
+    'CI test (3/8) 台上 admission-alert-crash 32 进程重负载用例让同台 5 秒用例偶发超时：先对照实验，再给重负载文件单独排台',
+    '修复登录接口在完整 CI 的 30 秒超时',
+    '定位按钮在窄屏下错位',
+    '定位并修复请求超时（没有写是哪一秒）',
+    '重型和不确定测试移出必过 CI，进每个 PR 都跑的独立 job、发版前必须绿；诊断型单不派引擎',
+    '',
+  ])('不是诊断型：%s', (title) => {
+    expect(isDiagnosticTitle(title)).toBe(false);
+  });
+});
+
+// #3629：收尾验收条由合并闸满足。夹具是 #3594 第 4 条原文（2026-10-22 从 GitHub 读的）。
+describe('收尾验收条交合并闸（#3629）', () => {
+  const ISSUE_3594_DONE = [
+    '- 起 grok 动手和验收会话时命令行带上关工具参数（以 grok CLI 实际支持的写法为准，先看它的 `--help` 和仓里已有的版本解析代码），关掉：image_gen、image_edit、image_to_video、reference_to_video、send_feedback、workflow、scheduler 类；要关的名单只写在一处常量里。',
+    '- 单测断言拼出的参数里带上这份名单、并且读写文件、执行命令、搜索这几类写码工具不在名单里。',
+    '- grok CLI 版本不支持这个参数时照旧起会话、不带参数，并记一条日志说明没关成（不让会话起不来），有单测。',
+    '- 检查全绿，PR 合进主线。',
+  ].join('\n');
+
+  it('#3594 第 4 条：是收尾条，不判成 diff 外、不转人', () => {
+    const items = splitAcceptanceItems(ISSUE_3594_DONE);
+    expect(isMergeGateItem(items[3] ?? '')).toBe(true);
+    expect(offDiffWords(items[3] ?? '')).toEqual([]);
+    expect(offDiffAcceptanceItems(ISSUE_3594_DONE)).toEqual([]);
+  });
+
+  it.each([
+    '检查全绿，PR 合进主线。',
+    '- CI 全绿',
+    '1. 完整 CI 全绿、PR 合并',
+    '所有检查通过，PR #3614 已合入主线',
+    '合并',
+  ])('收尾条：%s', (item) => {
+    expect(isMergeGateItem(item)).toBe(true);
+  });
+
+  it('收尾条之外的 diff 外条目照常拦', () => {
+    const body = ['- 现场截图贴在评论里', '- 检查全绿，PR 合进主线。'].join('\n');
+    expect(offDiffAcceptanceItems(body).map((h) => h.item)).toEqual(['- 现场截图贴在评论里']);
+  });
+
+  it.each([
+    '完整CI/check/独立合并闸通过，不改3249的预算和其它执行护栏，不误关3249',
+    '部署后检查全绿，线上 healthz 返回 ok',
+    '检查全绿，并在本单评论贴运行截图',
+    '新增测试通过',
+    '',
+  ])('夹了别的要求的不算收尾条：%s', (item) => {
+    expect(isMergeGateItem(item)).toBe(false);
   });
 });

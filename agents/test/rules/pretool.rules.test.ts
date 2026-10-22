@@ -153,6 +153,9 @@ const cases: Case[] = [
   ['cat <<< "here-string"; echo ok', 0, O],
   ['echo "a $(echo "b") c"', 0, O],
   [`echo "a $(echo "b ${bt}c${bt}") d"`, 2, O],
+  // 改仓里的文件的写法：目标在 _tmp/、系统临时目录里的放行（#3631）；仓里其他文件的拦截在 pretool-shell-edit.test.ts
+  [`echo hi > _tmp/x.md`, 0, F],
+  [`echo hi > ${tmpdir().split('\\').join('/')}/x.md`, 0, F],
   // PowerShell 里反引号是转义符，不归这条管
   ['Write-Output "a`nb"', 0, O, 'PowerShell'],
   // 认不出的输入：按拦处理

@@ -10,6 +10,7 @@ import {
   acceptPoolHoldsWrite,
   BoardResponse,
   continueExhausted,
+  continueNeedsReason,
   DEFAULT_SESSION_EFFORT,
   EnvResponseSchema,
   flowFallbackReason,
@@ -74,7 +75,7 @@ import { registerFranceReleaseRoutes } from './france-release.ts';
 import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
-import { holdOffDiff } from './local-hold.ts';
+import { holdOffDiff, holdTotalRounds } from './local-hold.ts';
 import { readLocalSessions } from './local-sessions.ts';
 import { manualTracksView } from './manual-tracks.ts';
 import { modelRosterFields } from './model-roster.ts';
@@ -515,6 +516,24 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       await markRedoFailed(audit, held.why);
       throw new ApiError(409, 'off_diff_hold', held.why);
     }
+    // 历代累计动手轮数到了上限不另起新一代（#3625）：另起一代会把 #3603 的总轮数清零，交回本机
+    let capped: Awaited<ReturnType<typeof holdTotalRounds>>;
+    try {
+      capped = await holdTotalRounds(
+        await store.listSegmentRuns(task.id),
+        { repo: { owner: repo.owner, name: repo.name }, issueNumber: task.issueNumber },
+        'task.redo',
+        deps.localHold,
+      );
+    } catch (err) {
+      await markRedoFailed(audit, `读不到这张单历代的动手轮数：${String(err)}`);
+      deps.log.error('重做前读历代动手轮数失败', { taskId: task.id, error: fullStack(err) });
+      throw new ApiError(503, 'redo_unavailable', '重做没起成：读不到这张单历代的动手轮数，稍后再试');
+    }
+    if (capped) {
+      await markRedoFailed(audit, capped.why);
+      throw new ApiError(409, 'total_rounds_hold', capped.why);
+    }
     try {
       const outcome = await deps.taskRedo.redo({
         taskId: task.id,
@@ -558,6 +577,10 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       case 'resume': {
         const exhausted = continueExhausted(task.stalled?.why);
         if (exhausted) throw new ApiError(409, 'continue_exhausted', exhausted);
+        // 总轮数到顶交还本机（#3603）：不带原因的「继续」工作流不放行，这里先当场拒，不让信号白发
+        const reason = body.reason?.trim() ?? '';
+        const needsReason = continueNeedsReason(task.stalled?.why);
+        if (needsReason && reason === '') throw new ApiError(409, 'continue_needs_reason', needsReason);
         // 诊断型 / diff 外验收条的单不再续上，交回本机（#3602）
         const repo = await store.getRepo(task.repoId);
         if (repo) {
@@ -569,7 +592,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
           );
           if (held) throw new ApiError(409, 'off_diff_hold', held.why);
         }
-        const [cont, wake] = continueSignals(by);
+        const [cont, wake] = continueSignals(by, reason === '' ? undefined : reason);
         if (!cont || !wake) throw new ApiError(500, 'continue_signals', '继续信号没配全');
         signal = cont;
         routeWake = wake;

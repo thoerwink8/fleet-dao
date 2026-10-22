@@ -137,8 +137,48 @@ describe('pipelineHealth', () => {
     expect(h.resume).toEqual({ decisions: 3, resumed: 1, rate: 1 / 3 });
   });
 
+  it('冷验收按验收族分的通过率（#3604）：窗口内带结论的验收段每族「过 / 有结论」；无结论、窗口外的、别的段不算', async () => {
+    await catalog(t.db);
+    const verdict = (pass: boolean) => ({
+      pass,
+      problems: pass ? [] : ['没做到验收条：第 1 条：x'],
+      failedCriteria: pass ? [] : [1],
+      handedOver: [],
+    });
+    const base = { startedAt: ago(2 * DAY + HOUR), outcome: 'done' as const };
+    await t.db.insert(runs).values([
+      { ...base, segment: 'verify', model: 'opus-4.9', endedAt: ago(2 * DAY), verdict: verdict(true) },
+      { ...base, segment: 'verify', model: 'opus-4.9', endedAt: ago(2 * DAY), verdict: verdict(true) },
+      {
+        ...base,
+        segment: 'verify',
+        model: 'claude-lite-5.2',
+        endedAt: ago(2 * DAY),
+        verdict: verdict(false),
+      },
+      { ...base, segment: 'verify', model: 'not-in-catalog', endedAt: ago(2 * DAY), verdict: verdict(false) },
+      // 没结论、窗口外、不是验收段：都不算
+      { ...base, segment: 'verify', model: 'opus-4.9', endedAt: ago(2 * DAY) },
+      {
+        ...base,
+        startedAt: ago(9 * DAY + HOUR),
+        segment: 'verify',
+        model: 'opus-4.9',
+        endedAt: ago(9 * DAY),
+        verdict: verdict(true),
+      },
+      { ...base, segment: 'manual', model: 'opus-4.9', endedAt: ago(2 * DAY), verdict: verdict(true) },
+    ]);
+    const h = await pipelineHealth(t.db, NOW);
+    expect(h.verifyByFamily).toEqual([
+      { family: 'claude', passed: 2, decided: 3 },
+      { family: '（未知）', passed: 0, decided: 1 },
+    ]);
+  });
+
   it('【故意造出的失败】窗口里一轮都没有：占比、p90 是 null，不拿 0 顶', async () => {
     const h = await pipelineHealth(t.db, NOW);
+    expect(h.verifyByFamily).toEqual([]);
     expect(h.rounds).toBe(0);
     expect(h.verifyRejectShare).toBeNull();
     expect(h.heavyAddedP90).toBeNull();

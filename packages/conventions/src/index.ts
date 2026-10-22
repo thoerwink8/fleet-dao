@@ -101,6 +101,7 @@ export {
 export {
   checkIssueBody,
   checkRequiredSections,
+  defectImpactProblem,
   type Gh,
   type GhResult,
   ghRunner,
@@ -110,6 +111,7 @@ export {
   issueBodyTooLong,
   issueNew,
   type MissingSection,
+  planDefectFiling,
   requiredSectionProblems,
   sectionText,
   USAGE,
@@ -170,6 +172,8 @@ export {
 } from './merge-gates.ts';
 export {
   describeOffDiff,
+  isDiagnosticTitle,
+  isMergeGateItem,
   OFF_DIFF_REWRITE,
   type OffDiffHold,
   type OffDiffHoldAction,
@@ -272,4 +276,11 @@ export {
   TIMINGS_RUN_EVENT,
   timingsSource,
 } from './test-timings.ts';
+export {
+  implementRoundsDone,
+  type RoundRunFact,
+  type TotalRoundsHold,
+  type TotalRoundsHoldAction,
+  totalRoundsHoldOf,
+} from './total-rounds-hold.ts';
 export { addDays } from './version-cut.ts';

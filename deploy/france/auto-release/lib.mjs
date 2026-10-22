@@ -946,6 +946,10 @@ export function emergencyIssue(train, n, kind = 'untouched') {
       '现场（只读）：`journalctl -u fleet-release-request -n 100`；进度 `/srv/fleet-dao-releases/.train/release-train.json`；' +
         '自动发布的读数 `journalctl -u fleet-auto-release -n 30`。',
       '',
+      '## 影响',
+      '',
+      '自动发版停了：主线合进去的改动发不到法国，创始人看不到新版本，要手动在驾驶舱发布，被打扰次数上升。',
+      '',
       '## 原话',
       '',
       '无（AI 发现：法国自动发布单元在同一个提交发版连败时开的急修单，#2728）。',

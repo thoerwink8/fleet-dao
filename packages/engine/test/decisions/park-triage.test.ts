@@ -2,11 +2,9 @@
 // 留给人只认三种理由类别；白名单外的裁决不放行；额度超预算按空转判，不按钱；老历史的停法从提醒正文认。
 import { describe, expect, it } from 'vitest';
 import {
-  type AcceptanceFounderFact,
   allowedActions,
   COMMANDER_ACTIONS,
   type CommanderAction,
-  checkAcceptanceVerdict,
   checkVerdict,
   defaultAction,
   LEAVE_REASONS,
@@ -15,7 +13,6 @@ import {
   RUNTIME_RULES,
   type TriageKind,
   triageKindOf,
-  trustedFounderFact,
 } from '../../src/decisions/park-triage.ts';
 import { judgeSpin, type SpinRound } from '../../src/decisions/spin.ts';
 import { PARK_CODE_NO_ROUTE, PARK_CODE_ROUTE_SWITCH } from '../../src/task-contract.ts';
@@ -307,117 +304,5 @@ describe('默认动作：没给裁决、留给人没带类别、交了表外动�
           if (d.action === 'leave') continue;
           expect(allowedActions(park(kind), spin)[d.action], `${kind}/${d.action}`).toBe(true);
         }
-  });
-});
-
-describe('验收责任裁决白名单', () => {
-  const source = (over: Partial<Parameters<typeof checkAcceptanceVerdict>[0]> = {}) => ({
-    id: 7,
-    generation: 2,
-    repo: 'acme/app',
-    issueNumber: 42,
-    prNumber: 99,
-    head: 'a'.repeat(40),
-    items: ['线上审计记录'],
-    mergeCommit: 'b'.repeat(40),
-    ...over,
-  });
-  const target = (over: Partial<Parameters<typeof checkAcceptanceVerdict>[1]> = {}) => ({
-    id: 8,
-    generation: 1,
-    repo: 'acme/app',
-    issueNumber: 42,
-    prNumber: 99,
-    head: 'c'.repeat(40),
-    items: ['线上审计记录'],
-    mergeCommit: 'd'.repeat(40),
-    ...over,
-  });
-  const base = {
-    dutyId: 7,
-    generation: 2,
-    prNumber: 99,
-    head: 'a'.repeat(40),
-    reason: '证据与责任逐条对应',
-  };
-
-  it('结清、supersede、留给人三种裁决都各自满足自己的证据要求', () => {
-    expect(
-      checkAcceptanceVerdict(source(), undefined, {
-        ...base,
-        action: 'settle',
-        evidence: 'GitHub 合并回执与主机审计记录相符',
-      }),
-    ).toEqual({ ok: true, action: 'settle' });
-    expect(
-      checkAcceptanceVerdict(source(), target(), {
-        ...base,
-        action: 'supersede',
-        evidence: '最终头已覆盖旧头责任',
-        target: {
-          id: 8,
-          generation: 1,
-          prNumber: 99,
-          head: 'c'.repeat(40),
-        },
-        coverage: [{ source: '线上审计记录', target: '线上审计记录', basis: '同一验收项' }],
-      }),
-    ).toMatchObject({ ok: true, action: 'supersede' });
-    expect(
-      checkAcceptanceVerdict(source(), undefined, {
-        ...base,
-        action: 'leave',
-        humanOnly: '只有 Contabo 控制台审计能提供这条证据',
-      }),
-    ).toEqual({ ok: true, action: 'leave' });
-  });
-
-  it('证据为空、身份头不符、PR 没有合并回执都拒绝', () => {
-    expect(checkAcceptanceVerdict(source(), undefined, { ...base, action: 'settle', evidence: ' ' })).toEqual(
-      { ok: false, why: '验收收口必须写非空证据' },
-    );
-    expect(
-      checkAcceptanceVerdict(source(), undefined, {
-        ...base,
-        action: 'settle',
-        head: 'z'.repeat(40),
-        evidence: '有证据',
-      }),
-    ).toEqual({ ok: false, why: '验收责任的 id、代次、PR 或 head 与现读不符' });
-    expect(
-      checkAcceptanceVerdict(source({ mergeCommit: null }), undefined, {
-        ...base,
-        action: 'settle',
-        evidence: '只有未合并的 PR 记录',
-      }),
-    ).toEqual({ ok: false, why: 'PR 没有合并回执，不能结清验收责任' });
-  });
-
-  it('创始人证据只认引擎可信来源的精确事实：身份差一项、种类不认、说明空或超长、同责任多条，都不算（#3497）', () => {
-    const duty = source({ id: 7, generation: 2, prNumber: 99, head: 'a'.repeat(40) });
-    const fact = (over: Partial<AcceptanceFounderFact> = {}): AcceptanceFounderFact => ({
-      dutyId: 7,
-      generation: 2,
-      prNumber: 99,
-      head: 'a'.repeat(40),
-      kind: 'founder-decision',
-      what: '线下合同签章确认',
-      ...over,
-    });
-    expect(trustedFounderFact(duty, [fact()])).toEqual(fact());
-    expect(trustedFounderFact(duty, [fact({ dutyId: 8 }), fact()])).toEqual(fact());
-    // 没有事实（受限模型自述不是事实）
-    expect(trustedFounderFact(duty, [])).toBeUndefined();
-    expect(trustedFounderFact(duty, [fact({ dutyId: 8 })])).toBeUndefined();
-    // 身份精确：代次、PR、head 差一项都不认
-    expect(trustedFounderFact(duty, [fact({ generation: 1 })])).toBeUndefined();
-    expect(trustedFounderFact(duty, [fact({ prNumber: 100 })])).toBeUndefined();
-    expect(trustedFounderFact(duty, [fact({ head: 'b'.repeat(40) })])).toBeUndefined();
-    // 种类认不出、说明为空、说明超长
-    expect(trustedFounderFact(duty, [fact({ kind: 'model-said' as never })])).toBeUndefined();
-    expect(trustedFounderFact(duty, [fact({ what: '  ' })])).toBeUndefined();
-    expect(trustedFounderFact(duty, [fact({ what: 'x'.repeat(301) })])).toBeUndefined();
-    // 同一责任有不止一条：不猜
-    expect(trustedFounderFact(duty, [fact(), fact({ what: '另一条' })])).toBeUndefined();
   });
 });

@@ -14,7 +14,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { continueSignals } from './continue-signals.ts';
 import type { TaskRedoPort } from './deps.ts';
 import type { HistoricalAuditSource } from './historical-audit-cli.ts';
-import { holdOffDiff, type LocalHoldPort } from './local-hold.ts';
+import { holdOffDiff, holdTotalRounds, type LocalHoldPort } from './local-hold.ts';
 import type { Store, TaskSignal, WorkflowControl } from './ports.ts';
 import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableError } from './ports.ts';
 import { correctMerged } from './task-correct-merged.ts';
@@ -179,7 +179,12 @@ export function parseTaskArgs(argv: readonly string[]): TaskArgs {
 export interface TaskRunDeps {
   store: Pick<
     Store,
-    'findRepoByName' | 'findTaskByIssue' | 'appendAudit' | 'readMergedCorrection' | 'correctMergedAbandoned'
+    | 'findRepoByName'
+    | 'findTaskByIssue'
+    | 'appendAudit'
+    | 'readMergedCorrection'
+    | 'correctMergedAbandoned'
+    | 'listSegmentRuns'
   >;
   workflows: WorkflowControl;
   /** correct-merged 现读 GitHub PR 用（只 GET，和 historical-audit 同一份引擎安装凭据）。没给就拒绝纠正。 */
@@ -396,6 +401,19 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
       deps.localHold,
     );
     if (held) return refuse(ref, held.why, task.id);
+    // 历代累计动手轮数到了上限不另起新一代（#3625）：另起一代会把 #3603 的总轮数清零，交回本机
+    let capped: Awaited<ReturnType<typeof holdTotalRounds>>;
+    try {
+      capped = await holdTotalRounds(
+        await deps.store.listSegmentRuns(task.id),
+        { repo: { owner: repo.owner, name: repo.name }, issueNumber: task.issueNumber },
+        'task.redo',
+        deps.localHold,
+      );
+    } catch (err) {
+      return refuse(ref, `重做没起成：读不到这张单历代的动手轮数：${errMessage(err)}`, task.id);
+    }
+    if (capped) return refuse(ref, capped.why, task.id);
     let outcome: Awaited<ReturnType<TaskRedoPort['redo']>>;
     try {
       outcome = await deps.taskRedo.redo({
@@ -465,7 +483,8 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
 
   const signals: TaskSignal[] =
     args.action === 'continue'
-      ? continueSignals(deps.operator)
+      ? // --note 必填，随「继续」交给工作流：总轮数到顶交还本机的停下（#3603）只认带原因的继续
+        continueSignals(deps.operator, args.note)
       : [{ name: TASK_SIGNAL_NAMES.abandon, by: deps.operator, reason: args.note }];
   try {
     for (const signal of signals) await deps.workflows.signal(workflowId, signal);

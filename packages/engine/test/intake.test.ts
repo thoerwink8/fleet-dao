@@ -663,6 +663,39 @@ describe('runIntakeJob · 一轮', () => {
     expect(h.comments).toHaveLength(1); // 再来一轮不重复留言
   });
 
+  it('标题是诊断型（「定位……在完整 CI 的原 N 秒超时」）→ 不起，留一句话、贴一次「本机做」，不读 PR 列表（#3597）', async () => {
+    let prRead = 0;
+    const h = harness(
+      {
+        async openPrClaims() {
+          prRead += 1;
+          return new Map();
+        },
+      },
+      { issues: [issue({ title: '定位SQLite COMMIT峰值测试在完整CI的原十五秒超时' })] },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([12]);
+    expect(h.comments).toHaveLength(1);
+    expect(h.comments[0]?.key).toBe('intake-diagnostic-title');
+    expect(h.comments[0]?.body).toContain('诊断型');
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(prRead).toBe(0);
+    await runIntakeJob(h.deps);
+    expect(h.comments).toHaveLength(1); // 再来一轮不重复留言
+  });
+
+  it('标题不是诊断型（改代码的单，哪怕写了超时）→ 照常起', async () => {
+    const h = harness(
+      {},
+      { issues: [issue({ title: '『第257条明确capacity』用例改成在限定时间内跑完并留下实测分段耗时' })] },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.localMarked).toEqual([]);
+    expect(h.started).toHaveLength(1);
+  });
+
   it('有「已知的模块」时，场景、怎么算做完、原话里的工作流路径都不算（只认这一节列出的）', async () => {
     const inScene = harness(
       {},

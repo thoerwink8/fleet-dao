@@ -7,6 +7,7 @@ import {
   cliToolStatus,
   compareVersions,
   countBehind,
+  matchReclaudeArtifact,
   parseCursorChangelog,
   parseCursorInstallScript,
   parseInstalledOutput,
@@ -27,6 +28,37 @@ function version(raw: string) {
 }
 
 const at = '2026-10-12T14:00:00.000Z';
+
+describe('reclaude 只读安装摘要与官方 artifact', () => {
+  // 2026-10-23 现有两份 Linux 二进制与官方 stable.json 实测匹配；不是合成 CLI 输出。
+  const sha256 = '0c769d6b70da513cef6860e4788e97183e35782ef8d9189be453fe3d551c95fa';
+  const probe = { source: 'reclaude-binary-sha256', platform: 'linux-amd64', sha256 };
+  const stable = { version: 'v1.5.0', binaries: { 'linux-amd64': { sha256 } } };
+  it('匹配具体平台的文件摘要才认版本，仍不接受任何猜测的 CLI stdout', () => {
+    expect(matchReclaudeArtifact(JSON.stringify(probe), JSON.stringify(stable))).toEqual({
+      version: '1.5.0',
+    });
+    expect(parseInstalledOutput('reclaude', JSON.stringify(probe))).toBeNull();
+  });
+  it.each([
+    [{ ...probe, sha256: '1'.repeat(64) }, stable],
+    [{ ...probe, platform: 'linux-arm64' }, stable],
+    [{ ...probe, source: 'reclaude --version' }, stable],
+    [{ ...probe, sha256: 'bad' }, stable],
+    [probe, { version: '1.5.0' }],
+    [probe, { ...stable, binaries: { 'linux-amd64': { sha256: '' } } }],
+    [probe, { ...stable, version: 'garbled' }],
+    [null, stable],
+  ])('摘要/平台/来源/清单无效：%j，不能用 latest 冒充在用', (installed, manifest) => {
+    expect(matchReclaudeArtifact(JSON.stringify(installed), JSON.stringify(manifest))).toHaveProperty(
+      'error',
+    );
+  });
+  it('旧帮手 Claude 输出或损坏清单都明确失败', () => {
+    expect(matchReclaudeArtifact('2.1.308 (Claude Code)', JSON.stringify(stable))).toHaveProperty('error');
+    expect(matchReclaudeArtifact(JSON.stringify(probe), '<html>failure</html>')).toHaveProperty('error');
+  });
+});
 
 describe('【故意造出的失败】读不到记「读不到」，不写成 0 或 ok', () => {
   it('探测失败：状态是读不到，在用版本不拿 0、ok 或空白顶', () => {

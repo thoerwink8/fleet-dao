@@ -583,16 +583,12 @@ function ghScript(script: {
 }
 
 const ok = (value: unknown) => ({ code: 0, stdout: JSON.stringify(value), stderr: '' });
-const settled = async () => 'settled' as const;
-const noAcceptance = async () => {
-  throw new Error('没有核到外部事实，不该读验收责任');
-};
 
 describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', () => {
   it('issue已关闭、同仓也没有关联的已合并PR：blocked，不记完成', async () => {
     const spec = externalSpec();
     const { gh, calls } = ghScript({ search: ok([]) });
-    await expect(validateManagedDelivery(gh, spec, true, '/unused', noAcceptance)).rejects.toMatchObject({
+    await expect(validateManagedDelivery(gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'blocked',
       message: expect.stringContaining('issue是否关闭不能当作交付'),
     });
@@ -617,7 +613,7 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
         search: ok([{ number: 3194 }]),
         pulls: { 3194: ok(body) },
       });
-      await expect(validateManagedDelivery(gh, spec, true, '/unused', noAcceptance)).rejects.toMatchObject({
+      await expect(validateManagedDelivery(gh, spec, true, '/unused')).rejects.toMatchObject({
         kind: 'blocked',
       });
       expect(calls.some((c) => c.includes('create') || c.includes('merge'))).toBe(false);
@@ -636,7 +632,7 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
         ),
       },
     });
-    await expect(validateManagedDelivery(gh, spec, true, '/unused', noAcceptance)).rejects.toMatchObject({
+    await expect(validateManagedDelivery(gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'blocked',
       message: expect.stringContaining('不记完成'),
     });
@@ -651,23 +647,23 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
         3195: ok(mergedBody(3195, 'Fixes #42')),
       },
     });
-    await expect(validateManagedDelivery(gh, spec, true, '/unused', settled)).rejects.toMatchObject({
+    await expect(validateManagedDelivery(gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'blocked',
       message: expect.stringContaining('#3194、#3195'),
     });
   });
 
-  it('同仓关单、head、mergeCommit都核上才报外部交付；验收未结不能当完成', async () => {
+  it('同仓关单、head、mergeCommit都核上才报外部交付；不读验收责任账（#3630）', async () => {
     const spec = externalSpec();
     const { gh, calls } = ghScript({
       search: ok([{ number: 3194 }]),
       pulls: { 3194: ok(mergedBody(3194, '**需求**：Closes #42\n')) },
     });
-    await expect(
-      validateManagedDelivery(gh, spec, true, '/unused', async () => 'open'),
-    ).rejects.toMatchObject({
+    const err = await validateManagedDelivery(gh, spec, true, '/unused').catch((e: unknown) => e);
+    expect(err).not.toHaveProperty('acceptance');
+    expect(String((err as Error).message)).not.toContain('验收责任');
+    await expect(validateManagedDelivery(gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'external',
-      acceptance: 'open',
       external: { repo: 'acme/app', pr: 3194, head: OTHER_HEAD, mergeCommit: MERGE },
     });
     expect(calls.some((c) => c.includes('create') || c.includes('merge'))).toBe(false);
@@ -684,10 +680,9 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
         search: ok([{ number: 3194 }]),
         pulls: { 3194: ok(mergedBody(3194, 'Closes #42')) },
       });
-      await expect(validateManagedDelivery(gh, spec, true, root, settled)).rejects.toMatchObject({
+      await expect(validateManagedDelivery(gh, spec, true, root)).rejects.toMatchObject({
         kind: 'external',
         retain: true,
-        acceptance: 'settled',
         message: expect.stringContaining('不能终结'),
       });
     } finally {
@@ -698,14 +693,12 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
   it('搜索被截断、列表认不出、404跳过后没有第二条：都不记完成', async () => {
     const spec = externalSpec();
     const truncated = ghScript({ search: ok(Array.from({ length: 100 }, (_, i) => ({ number: i + 1 }))) });
-    await expect(
-      validateManagedDelivery(truncated.gh, spec, true, '/unused', noAcceptance),
-    ).rejects.toMatchObject({
+    await expect(validateManagedDelivery(truncated.gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'blocked',
       message: expect.stringContaining('截断'),
     });
     const odd = ghScript({ head: ok({ state: 'CLOSED' }) });
-    await expect(validateManagedDelivery(odd.gh, spec, true, '/unused', noAcceptance)).rejects.toMatchObject({
+    await expect(validateManagedDelivery(odd.gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'blocked',
       message: expect.stringContaining('认不出'),
     });
@@ -713,9 +706,7 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
       search: ok([{ number: 3194, title: 'not a field we trust' }]),
       pulls: { 3194: { code: 1, stdout: '', stderr: 'HTTP 404: Not Found' } },
     });
-    await expect(
-      validateManagedDelivery(missing.gh, spec, true, '/unused', noAcceptance),
-    ).rejects.toMatchObject({
+    await expect(validateManagedDelivery(missing.gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'blocked',
     });
   });
@@ -723,16 +714,12 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
   it('本分支列表、搜索或外部PR读失败是可重试，不是已交付', async () => {
     const spec = externalSpec();
     const headDown = ghScript({ head: { code: 1, stdout: '', stderr: 'socket hang up' } });
-    await expect(
-      validateManagedDelivery(headDown.gh, spec, true, '/unused', noAcceptance),
-    ).rejects.toMatchObject({
+    await expect(validateManagedDelivery(headDown.gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'retry',
       message: expect.stringContaining('受管PR读取失败'),
     });
     const searchDown = ghScript({ search: { code: 1, stdout: '', stderr: 'timed out' } });
-    await expect(
-      validateManagedDelivery(searchDown.gh, spec, true, '/unused', noAcceptance),
-    ).rejects.toMatchObject({
+    await expect(validateManagedDelivery(searchDown.gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'retry',
       message: expect.stringContaining('他分支交付没读成'),
     });
@@ -740,16 +727,12 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
       search: ok([{ number: 3194 }]),
       pulls: { 3194: { code: 1, stdout: '', stderr: 'HTTP 502' } },
     });
-    await expect(
-      validateManagedDelivery(apiDown.gh, spec, true, '/unused', noAcceptance),
-    ).rejects.toMatchObject({
+    await expect(validateManagedDelivery(apiDown.gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'retry',
       message: expect.stringContaining('外部PR #3194'),
     });
     const badJson = ghScript({ head: { code: 0, stdout: 'not-json', stderr: '' } });
-    await expect(
-      validateManagedDelivery(badJson.gh, spec, true, '/unused', noAcceptance),
-    ).rejects.toMatchObject({
+    await expect(validateManagedDelivery(badJson.gh, spec, true, '/unused')).rejects.toMatchObject({
       kind: 'retry',
       message: expect.stringContaining('响应不是JSON'),
     });
@@ -761,7 +744,7 @@ describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', ()
       search: ok([{ number: 3194 }]),
       pulls: { 3194: ok(mergedBody(3194, 'Closes #42')) },
     });
-    await expect(validateManagedDelivery(gh, spec, false, '/unused', settled)).resolves.toBeUndefined();
+    await expect(validateManagedDelivery(gh, spec, false, '/unused')).resolves.toBeUndefined();
     expect(calls.some((c) => c.includes('--search'))).toBe(false);
   });
 });

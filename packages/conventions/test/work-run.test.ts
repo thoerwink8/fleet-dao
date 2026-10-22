@@ -841,10 +841,7 @@ describe('supervisor独立交付核验与精确恢复', () => {
 });
 
 describe('他分支已交付与恢复不派工', () => {
-  function world(
-    acceptance: 'open' | 'settled' | 'unknown',
-    pull = mergedPull(3194, '**需求**：Closes #42\n'),
-  ) {
+  function world(pull = mergedPull(3194, '**需求**：Closes #42\n')) {
     const { dir, spec } = runFixture();
     const tree = join(temp(), 'wt');
     mkdirSync(tree);
@@ -868,39 +865,12 @@ describe('他分支已交付与恢复不派工', () => {
     const w = fakeDeps([
       { code: 0, stdout: resultJson({ result: '按审查停下', session_id: SID }), stderr: '' },
     ]);
-    w.deps.validateDelivery = (s) =>
-      validateManagedDelivery(gh, s, true, dirname(dir), async () => acceptance);
+    w.deps.validateDelivery = (s) => validateManagedDelivery(gh, s, true, dirname(dir));
     return { dir, tree, calls, w };
   }
 
-  it('他分支已合且有本机未推成果、验收未结：waiting，不记 done，不续工人，成果还在', async () => {
-    const { dir, tree, calls, w } = world('open');
-    const first = await superviseRun(dir, w.deps);
-    expect(first?.state).toBe('waiting');
-    expect(w.calls).toHaveLength(1);
-    expect(readJson(runFiles(dir).result)).toBeNull();
-    expect(readFileSync(join(tree, 'unpushed.txt'), 'utf8')).toBe('keep-me');
-    const status = readJson<RunStatus>(runFiles(dir).state);
-    expect(status).toMatchObject({
-      state: 'waiting',
-      sessionId: SID,
-      worktree: tree,
-      supervisorPid: null,
-      hold: {
-        kind: 'external',
-        acceptance: 'open',
-        external: { repo: 'acme/app', pr: 3194, head: HEAD, mergeCommit: MERGE },
-      },
-    });
-    expect(calls.some((c) => c.includes('create') || c.includes('merge'))).toBe(false);
-    const again = await superviseRun(dir, w.deps);
-    expect(again?.state).toBe('waiting');
-    expect(w.calls).toHaveLength(1);
-    expect(readFileSync(join(tree, 'unpushed.txt'), 'utf8')).toBe('keep-me');
-  });
-
-  it('外部交付且验收已结清：stopped，不是 done；再进一次不起工人', async () => {
-    const { dir, tree, w } = world('settled');
+  it('外部交付核到（不再看验收责任账，#3630）：stopped，不是 done；不伪造 PR，再进一次不起工人，成果还在', async () => {
+    const { dir, tree, calls, w } = world();
     const first = await superviseRun(dir, w.deps);
     expect(first?.state).toBe('stopped');
     expect(first?.state).not.toBe('done');
@@ -908,17 +878,9 @@ describe('他分支已交付与恢复不派工', () => {
     expect(readJson<RunResult>(runFiles(dir).result)?.why).toContain('PR #3194');
     expect(readJson<RunResult>(runFiles(dir).result)?.why).toContain(MERGE);
     expect(readFileSync(join(tree, 'unpushed.txt'), 'utf8')).toBe('keep-me');
+    expect(calls.some((c) => c.includes('create') || c.includes('merge'))).toBe(false);
     const again = await superviseRun(dir, w.deps);
     expect(again?.state).toBe('stopped');
-    expect(w.calls).toHaveLength(1);
-  });
-
-  it('验收没读成：有外部事实也只 waiting，不当已交付', async () => {
-    const { dir, w } = world('unknown');
-    const result = await superviseRun(dir, w.deps);
-    expect(result?.state).toBe('waiting');
-    expect(readJson<RunStatus>(runFiles(dir).state)?.hold?.acceptance).toBe('unknown');
-    expect(readJson(runFiles(dir).result)).toBeNull();
     expect(w.calls).toHaveLength(1);
   });
 
@@ -930,7 +892,6 @@ describe('他分支已交付与恢复不派工', () => {
         'external',
         '需求已由同仓其他真实PR #3194 交付。本机退回意图仍保留，不能终结。',
         {
-          acceptance: 'settled',
           external: {
             repo: 'acme/app',
             pr: 3194,

@@ -89,17 +89,19 @@ if [[ $rc -eq 0 && "$out" == *"2026.09.23-86fc751"* && "$args" == "--version" ]]
 out=$(run_scope probe --user pilot -- mirasim-server 2>&1) && rc=0 || rc=$?
 if [[ $rc -eq 0 && "$out" == "0.0.355" ]]; then pass "Mirasim 读目录名 0.0.355"; else flunk "mirasim 得到 $rc [$out]"; fi
 
-echo "reclaude：不执行二进制（--version 会同步配置、查登录），没有可信来源就如实报来源不明"
+echo "reclaude：只读二进制摘要（--version 会同步配置、查登录），不执行它"
 # shellcheck disable=SC2016 # $* 和 $HOME 要由假 reclaude 自己展开
 write_reclaude() { printf '#!/bin/sh\nprintf "%%s\\n" "$*" >"$HOME/reclaude-args"\n%s\n' "$1" >"$HOME_DIR/.local/bin/reclaude"; chmod +x "$HOME_DIR/.local/bin/reclaude"; }
 reclaude_case() { # 说明 假 reclaude 的脚本体：不管它会打什么，探测都不该执行它
   rm -f "$HOME_DIR/reclaude-args"
   write_reclaude "$2"
+  expected=$(/usr/bin/sha256sum -- "$HOME_DIR/.local/bin/reclaude")
+  expected=${expected%% *}
   out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
-  if [[ $rc -eq 1 && "$out" == *来源不明* && "$out" != *"2.1.308"* && "$out" != *"1.5.0"* && ! -e "$HOME_DIR/reclaude-args" ]]; then
-    pass "$1：没执行它、来源不明、非 0、输出里没有版本数"
+  if [[ $rc -eq 0 && "$out" == *'"source":"reclaude-binary-sha256"'* && "$out" == *'"platform":"linux-'* && "$out" == *"\"sha256\":\"$expected\""* && "$out" != *"2.1.308"* && "$out" != *"1.5.0"* && ! -e "$HOME_DIR/reclaude-args" ]]; then
+    pass "$1：没执行它，实际文件摘要相符，输出没有版本数"
   else
-    flunk "$1 该来源不明且不执行，得到 $rc args=[$(cat "$HOME_DIR/reclaude-args" 2>/dev/null || true)] [$out]"
+    flunk "$1 该只读摘要且不执行，得到 $rc args=[$(cat "$HOME_DIR/reclaude-args" 2>/dev/null || true)] [$out]"
   fi
 }
 reclaude_case "Claude Code 版本" 'printf "2.1.308 (Claude Code)\n"'
@@ -111,6 +113,12 @@ rm -f "$HOME_DIR/.local/bin/reclaude"
 out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
 if [[ $rc -eq 127 && "$out" != *来源不明* ]]; then pass "没装 reclaude：127，不报来源不明"; else flunk "没装该 127，得到 $rc [$out]"; fi
 write_reclaude 'echo "reclaude 1.3.0"'
+# 可执行目录通过 test -x，但 sha256sum 读取失败，不能回成功或空摘要。
+rm -f "$HOME_DIR/.local/bin/reclaude"
+mkdir "$HOME_DIR/.local/bin/reclaude"
+out=$(run_scope probe --user pilot -- reclaude 2>&1) && rc=0 || rc=$?
+if [[ $rc -ne 0 && "$out" != *'"sha256"'* && -n "$out" ]]; then pass "读摘要失败：非 0 且没有成功回执"; else flunk "摘要失败该非 0，得到 $rc [$out]"; fi
+rmdir "$HOME_DIR/.local/bin/reclaude"
 
 echo "缺命令、指错目录：非 0，不写成成功"
 rm -f "$HOME_DIR/.local/bin/codex"

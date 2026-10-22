@@ -29,6 +29,8 @@
 // 下一次验收用新正文。同一次继续里上限仍在。这样继续累计超过 3 次就不再清零，停下交给指挥官；
 // 再点「继续」由命令行和驾驶舱拒绝（不在工作流里吞掉信号）。老历史没有这个标记，
 // 仍只把用尽的那一个计数清掉。
+// 总轮数上限（#3603，patched('task-total-rounds')，task-runtime.ts 的 holdAtTotalRounds）：这一代累计动手到 MAX_TOTAL_ROUNDS，
+// 再用尽时先贴「本机做」留言交还本机再停下；「继续」不清零累计，不带原因（ContinueCommand.note）的继续原样再停，带原因的才再放 3 轮。
 // 停下之前先自动处理一次（决定 0093）：这张单头一回轮数用尽不停下（patched('auto-continue-rounds')，task-runtime.ts 的
 // exhaustRounds 回 auto）：轮数清零、重读单子，下一轮动手避开最近的模型和它那一族（rt.avoidModel；别的族派不出退回只避开模型），直接再动手不先重走 CI；之后用尽照旧停下，
 // 自动那一次算进 MAX_ROUND_RESETS。推的时候空交付（EMPTY_DELIVERY）这张单里先再派一轮（patched('auto-before-park')）。
@@ -355,6 +357,8 @@ class TaskFlow {
         }
       }
       if (!full) rt.round += 1;
+      // 累计轮数（#3603）：每回到动手一次算一轮，三段、全程都算，继续不清零（引擎自己并掉冲突、不派模型的那一轮在 implement 里退回）
+      rt.totalRounds += 1;
       this.startRound();
       const implemented = await this.implement(brief, tier);
       // 全程的单（第一段里才定模式，所以在动手之后数）：回到动手一次算交付一次
@@ -383,12 +387,14 @@ class TaskFlow {
     const rejected = rt.status.lastProblem === '验收没过' && rt.verifyRound >= MAX_VERIFY_ROUNDS;
     if (!rejected && rt.fullPushes < MAX_FULL_PUSHES) return;
     const problems = rt.feedback.join('；') || '（没有）';
-    await rt.park(
-      rejected ? `全程：冷验收被拒 ${MAX_VERIFY_ROUNDS} 次` : `全程：推送 ${MAX_FULL_PUSHES} 次还没合`,
-      `最近的意见：${problems}。点「继续」两样都从 0 再计、重读单子，接着续同一个会话修；或「放弃」。`,
-      'stuck',
-      'rounds',
-    );
+    const title = rejected
+      ? `全程：冷验收被拒 ${MAX_VERIFY_ROUNDS} 次`
+      : `全程：推送 ${MAX_FULL_PUSHES} 次还没合`;
+    const detail = `最近的意见：${problems}。点「继续」两样都从 0 再计、重读单子，接着续同一个会话修；或「放弃」。`;
+    // 累计动手到了总轮数上限（#3603）：交还本机，等带原因的「继续」，不走下面的普通停下
+    if (!(await rt.holdAtTotalRounds(title, detail))) {
+      await rt.park(title, detail, 'stuck', 'rounds');
+    }
     rt.fullPushes = 0;
     rt.verifyRound = 0;
     await rt.reloadBrief();
@@ -759,6 +765,7 @@ class TaskFlow {
       // 并干净了、已经推上去（syncMainline 并完就推）：不派模型，直接重跑 CI；这一轮不算动手的轮数
       this.conflictSelfSyncs += 1;
       rt.round -= 1;
+      rt.totalRounds -= 1;
       rt.feedback = [];
       rt.status.lastProblem = null;
       await rt.advance(

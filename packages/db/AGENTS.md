@@ -5,7 +5,7 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 ## 入口
 
 - `packages/db/src/schema/`：全部表和枚举；`packages/db/src/queries/`：查询函数；`packages/db/src/index.ts`：对外导出。
-- 验收候选读取：两个引擎消费者先显式 `maintainAcceptanceCandidates`，再调用纯读 `listCommanderAcceptanceTasks`。派生组账不是验收状态或关单授权；初始化/dirty未完或超预算报 `unknown`，不返回截断成功。预算与判法升级见 [验收候选索引](../../docs/acceptance-candidates.md)。
+- `acceptance_duties` 只读（决定 0113）：`queries/acceptance-duties.ts` 只剩读口和一次性交回 `handBackAcceptanceDuty`（只写 `settled_*`，按 id + 代次 + 未结清条件更新，已交回回 `already`）。验收候选索引和管理归并已删（#3630）；表、`acceptance_candidate_groups` 和迁移里的触发器照留。
 - `src/queries/admission-alerts.ts`：独立准入未知事件的专用 insert-once/read-back，复用 notifications，不新增表；全局 identity 与首码分离，不更新原通知的时间、处理状态或交付记录，不用会重开通知的 `upsertAlert`。调用宿主仍须核外层 COMMIT/close，函数返回本身不是渠道送达证明。
 - `src/schema/task-execution.ts`：未接生产的持久执行资格、原子出生与 legacy 责任表；控制行缺失就是未受管，不回填、不自动初始化。当前指针组合外键绑定任务、操作、epoch和revision，出生组合外键绑定control/task/epoch；birthRequest全局唯一，legacy的namespace/runId唯一且不按任务限制责任行数。完整 canonical 仅进私有库，不进实时推送或审计正文。历史操作和epoch都不是受管覆盖证明；真实竞争夹具只在 `@fleet-dao/db/testing` 创建随机克隆库和独立连接。新增复合unique被后续新表FK引用时，分两次正规生成迁移，保证unique先落库，再建引用表。
 - `packages/db/migrations/`：迁移，drizzle-kit 生成的和手写的（触发器等，如 `0001_triggers.sql`）放在一起，按编号走。
@@ -48,4 +48,3 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 
 - `recordCheckoutReceipt` 复用 audit_log：每次物理完整检出独立 receiptId，target 为 checkout:<receiptId>，同 ID 同内容幂等、异内容拒绝；事务锁串行查重。无回执的旧历史保持未知，不回填、不以已撤报警冒充成功证据。
 
-- 受管验收归并在 `queries/acceptance-merge.ts`：外部取证在事务外，按幂等键→runs SHARE表锁→任务/仓→同仓PR→数值升序责任行加锁，重读精确run关联；runs归属可变且无共同细锁，因此短暂排队全部run写入，2秒拿不到锁明确失败，提交后的新run写入可正常发生；目标、审计、幂等回执同事务。源原项不改，已有目标加项换代并撤旧终态；source 是初建来源，新增项的管理来源留受限审计，不伪造冷验收。
