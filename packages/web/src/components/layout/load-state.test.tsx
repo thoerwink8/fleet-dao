@@ -2,7 +2,7 @@
 // LoadError（#902 缺陷 D5）：读失败的那一块要写明没读成、原因，并给「重试」——点了把所有读失败的查询再读一遍，读好的不动。
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { LoadError, LoadingRows, LoadPartial, LoadStale } from './load-state';
 import { Page } from './page';
 
@@ -93,6 +93,24 @@ describe('五种样子（#3509）', () => {
     expect(stale?.textContent).toContain('任务列表刷新没成，下面是5 分钟前读到的：网关超时');
     expect(expired?.textContent).toContain('数据已过期');
     expect(screen.getAllByRole('button', { name: '重试' })).toHaveLength(3);
+  });
+
+  test('stale 直接收 viewOf 的 stale：时间自己算，过了 staleAfterMs 标已过期，重试走它自己的 retry', () => {
+    const retry = vi.fn();
+    const now = Date.parse('2026-10-21T10:00:00Z');
+    const stale = { error: new Error('网关超时'), dataUpdatedAt: now - 3 * 60_000, retry };
+    const qc = new QueryClient();
+    render(
+      <QueryClientProvider client={qc}>
+        <LoadStale stale={stale} now={now} />
+        <LoadStale stale={stale} now={now} staleAfterMs={60_000} />
+      </QueryClientProvider>,
+    );
+    const [fresh, expired] = screen.getAllByRole('alert');
+    expect(fresh?.textContent).toContain('刷新没成，下面是3 分钟前读到的：网关超时');
+    expect(expired?.textContent).toContain('数据已过期，下面是3 分钟前读到的');
+    fireEvent.click(screen.getAllByRole('button', { name: '重试' })[0] as HTMLElement);
+    expect(retry).toHaveBeenCalledTimes(1);
   });
 
   test('partial：橙提示写清缺了哪部分，不打断读屏', () => {

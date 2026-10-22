@@ -33,7 +33,7 @@ import {
   ShippedBlock,
 } from '../components/home/today-blocks';
 import { Grid } from '../components/layout/grid';
-import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { LoadError, LoadingRows, LoadStale } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
 import { Stack } from '../components/layout/stack';
@@ -60,7 +60,7 @@ export default function Home() {
   // 推送重读会把从没读成过的快照退回骨架：显示记住的那次失败
   const remoteError = useShownError(nodeId ?? undefined, { error: remote.error, data: remote.node });
   const state =
-    nodeId !== null && remoteError
+    nodeId !== null && remoteError && !remote.node
       ? { status: 'error' as const, error: remoteError, retry: () => void remote.refetch() }
       : nodeId === null
         ? local.data
@@ -110,6 +110,9 @@ export default function Home() {
               receivedAt={remote.node.receivedAt}
               reportedAt={remote.node.reportedAt}
             />
+          ) : null}
+          {state.status === 'data' && state.stale ? (
+            <LoadStale what={what} stale={state.stale} staleAfterMs={HOME_STALE_AFTER_MS} />
           ) : null}
           {missing ? (
             <MissingEnv nodeId={nodeId} />

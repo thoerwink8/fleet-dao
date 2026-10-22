@@ -7,6 +7,8 @@
 import { errMessage } from '@fleet-dao/shared/util';
 import { useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
+import { formatAgo } from '../../lib/format';
+import type { StaleInfo } from '../../lib/query-view';
 import { ErrorDetail, errorRaw } from '../route-error';
 import { Button } from '../ui/button';
 import { Skeleton } from '../ui/skeleton';
@@ -78,20 +80,35 @@ export function LoadStale({
   when,
   expired,
   onRetry,
+  stale,
+  staleAfterMs,
+  now,
 }: {
-  error: unknown;
+  error?: unknown;
   what?: string | undefined;
   /** 上一次读成是什么时候（「5 分钟前」）。 */
   when?: string | undefined;
   expired?: boolean | undefined;
   onRetry?: (() => void) | undefined;
+  /** 直接收 `viewOf`（lib/query-view.ts）给的 stale：错误、重试、上一次读成的时刻都从它取，「N 分钟前」自己算。 */
+  stale?: StaleInfo | undefined;
+  /** 配合 stale：过了这么久没读成就标「数据已过期」。 */
+  staleAfterMs?: number | undefined;
+  /** 当前时刻（毫秒），测试用；默认取系统时钟。 */
+  now?: number | undefined;
 }) {
-  const retry = useRetryFailed(onRetry);
-  const head = expired ? '数据已过期' : `${what ?? ''}刷新没成`;
-  const tail = when ? `下面是${when}读到的` : '下面是上一次读到的';
+  const retry = useRetryFailed(onRetry ?? stale?.retry);
+  const at = stale && stale.dataUpdatedAt > 0 ? stale.dataUpdatedAt : undefined;
+  const clock = now ?? Date.now();
+  const whenText = when ?? (at === undefined ? undefined : formatAgo(new Date(at).toISOString(), clock));
+  const isExpired =
+    expired ?? (at !== undefined && staleAfterMs !== undefined ? clock - at > staleAfterMs : false);
+  const err = stale ? stale.error : error;
+  const head = isExpired ? '数据已过期' : `${what ?? ''}刷新没成`;
+  const tail = whenText ? `下面是${whenText}读到的` : '下面是上一次读到的';
   return (
     <Notice tone="stall" action={<RetryButton onClick={retry} />}>
-      <ErrorDetail summary={`${head}，${tail}：${errMessage(error)}`} raw={errorRaw(error)} />
+      <ErrorDetail summary={`${head}，${tail}：${errMessage(err)}`} raw={errorRaw(err)} />
     </Notice>
   );
 }
