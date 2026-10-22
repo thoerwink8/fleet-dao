@@ -425,7 +425,17 @@ export async function treeProcessUsage(
 /** Production reads through the fixed root protocol; ProcLook is an explicit fixture only. */
 async function placeProcessUsage(t: UserTree, place: TreePlace, look?: ProcLook): Promise<TreeUsageReading> {
   if (look) return { state: await treeProcessUsage(place.real, place.uid, undefined, undefined, look) };
-  return readTreeUsageDetail(place, { ...(t.signal ? { signal: t.signal } : {}) });
+  try {
+    return await readTreeUsageDetail(place, { ...(t.signal ? { signal: t.signal } : {}) });
+  } catch {
+    // 读取方本该只交读数；真抛出来也不让异常原文越过保留错误，缺证按原因未知留树。
+    return { state: 'unknown', reason: 'unknown' };
+  }
+}
+
+/** 读数里只认安全非负整数进保留错误，别的值一律不带。 */
+function bounded(key: 'exitCode' | 'scanned' | 'failed', value: unknown): Record<string, number> {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? { [key]: value as number } : {};
 }
 
 /** 占用核验答不出时的原因说法。只认帮手读数里的固定类别；缺证说原因未知，不说成超时。 */
@@ -453,9 +463,9 @@ async function assertPlaceIdle(
   if (usage.state === 'idle') return;
   const reason = usage.reason && Object.hasOwn(USAGE_REASON, usage.reason) ? usage.reason : 'unknown';
   const counts = {
-    ...(usage.exitCode !== undefined ? { exitCode: usage.exitCode } : {}),
-    ...(usage.scanned !== undefined ? { scanned: usage.scanned } : {}),
-    ...(usage.failed !== undefined ? { failed: usage.failed } : {}),
+    ...bounded('exitCode', usage.exitCode),
+    ...bounded('scanned', usage.scanned),
+    ...bounded('failed', usage.failed),
   };
   throw keep(
     'WORKTREE_PRESERVED',

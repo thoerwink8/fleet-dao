@@ -127,6 +127,32 @@ describe('占用核验未知带原因和阶段进原保留错误', () => {
     expect(error.details).toEqual({ dir: t.dir, stage: '打快照前', usage: 'unknown', reason: 'unknown' });
   }, 30_000);
 
+  it('读取方真抛错：原文不进保留错误，按原因未知留树', async () => {
+    const t = dirtyTree();
+    const secret = `sudo -n /usr/local/sbin/fleet-agent-scope TOKEN=ghp_secret ${'x'.repeat(4096)}`;
+    usage.mockRejectedValueOnce(new Error(secret));
+    const error = await kept(t);
+    expect(error.message).toBe('打快照前确认不了有没有进程用着这棵树（unknown：原因未知），保留原树');
+    expect(error.details).toEqual({ dir: t.dir, stage: '打快照前', usage: 'unknown', reason: 'unknown' });
+    expect(JSON.stringify({ message: error.message, details: error.details })).not.toMatch(
+      /ghp_secret|sudo|fleet-agent-scope/,
+    );
+    expect(receipts()).toEqual([]);
+  }, 30_000);
+
+  it('读数里越界或非整数的计数不带进保留错误', async () => {
+    const t = dirtyTree();
+    usage.mockResolvedValueOnce({
+      state: 'unknown',
+      reason: 'incomplete',
+      exitCode: -1,
+      scanned: 1.5,
+      failed: Number.MAX_SAFE_INTEGER + 2,
+    });
+    const error = await kept(t);
+    expect(error.details).toEqual({ dir: t.dir, stage: '打快照前', usage: 'unknown', reason: 'incomplete' });
+  }, 30_000);
+
   it('busy 不冒充 idle：打快照前就留树', async () => {
     const t = dirtyTree();
     usage.mockResolvedValueOnce({ state: 'busy' });
