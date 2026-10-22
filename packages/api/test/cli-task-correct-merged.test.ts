@@ -664,3 +664,95 @@ describe('fleet-api task correct-merged（#3114 反例）', () => {
     expect(h.pullReads.every((p) => p.includes('/pulls/'))).toBe(true);
   });
 });
+
+describe('fleet-api task correct-merged：--workflow 预检回执与 --apply 执行（运维单入口）', () => {
+  const RECEIPT_FLAGS = [...FLAGS, '--workflow', WF];
+  const receipt = (h: ReturnType<typeof setup>) => JSON.parse(h.out.at(-1) ?? '{}');
+
+  it('带 --workflow 的预检回 JSON：mode=precheck、status=precheck，预览精确的任务/原 run/PR/head 和拟改成的 done/merged，不写任何东西', async () => {
+    const h = setup();
+    expect(await h.run([...RECEIPT_FLAGS, '--note', NOTE])).toBe(0);
+    expect(receipt(h)).toMatchObject({
+      mode: 'precheck',
+      status: 'precheck',
+      preview: {
+        repo: 'thoerwink8/fleet-dao',
+        issue: 3114,
+        taskId: TASK_ID,
+        workflowId: WF,
+        run: TEMPORAL_RUN,
+        pr: 3137,
+        head: HEAD,
+        mergeCommit: MERGE,
+        current: { state: 'stopped', phase: 'abandoned' },
+        proposed: { state: 'done', phase: 'done', merged: true },
+      },
+    });
+    expect(task(h)?.state).toBe('stopped');
+    expect(audits(h)).toEqual([]);
+    expect(h.correctCalls()).toBe(0);
+  });
+
+  it('--workflow 与按单号推出的工作流不一致：拒绝，什么都不改', async () => {
+    const h = setup();
+    expect(await h.run([...FLAGS, '--workflow', 'task:thoerwink8/fleet-dao#3115', '--note', NOTE])).toBe(1);
+    expect(text(h)).toContain(WF);
+    expect(task(h)?.state).toBe('stopped');
+    expect(audits(h)).toEqual([]);
+  });
+
+  it('--apply 只在预检同一命令末尾加：自己重读事实并事务 CAS，首次 status=corrected；之后预检和再 apply 都是 already，审计不新增', async () => {
+    const h = setup();
+    const before = structuredClone(h.store.data.segmentRuns);
+    expect(await h.run([...RECEIPT_FLAGS, '--note', NOTE])).toBe(0);
+    expect(await h.run([...RECEIPT_FLAGS, '--note', NOTE, '--apply'])).toBe(0);
+    expect(receipt(h)).toMatchObject({ mode: 'apply', status: 'corrected', preview: { taskId: TASK_ID } });
+    expect(task(h)?.state).toBe('done');
+    expect(h.store.data.segmentRuns).toEqual(before);
+    expect(h.signals).toEqual([]);
+    expect(h.redos).toEqual([]);
+    const [record, ...rest] = audits(h);
+    expect(rest).toEqual([]);
+    expect(record).toMatchObject({
+      action: 'task.correct-merged',
+      target: `task:${TASK_ID}`,
+      actor: { kind: 'ops', id: 'ops:task' },
+      after: {
+        who: 'root',
+        workflowId: WF,
+        temporalRunId: TEMPORAL_RUN,
+        pr: 3137,
+        head: HEAD,
+        mergeCommit: MERGE,
+      },
+    });
+
+    expect(await h.run([...RECEIPT_FLAGS, '--note', NOTE])).toBe(0);
+    expect(receipt(h)).toMatchObject({ mode: 'precheck', status: 'already' });
+    expect(await h.run([...RECEIPT_FLAGS, '--note', NOTE, '--apply'])).toBe(0);
+    expect(receipt(h)).toMatchObject({ mode: 'apply', status: 'already' });
+    expect(audits(h)).toHaveLength(1);
+  });
+
+  it('--apply 不与 --execute、--task、--seen 同用：退出码 2，不连 GitHub', async () => {
+    const h = setup();
+    for (const extra of [['--execute'], ['--task', TASK_ID], ['--seen', '0123456789abcdef']])
+      expect(await h.run([...FLAGS, ...extra, '--apply', '--note', NOTE]), extra.join(' ')).toBe(2);
+    expect(h.pullReads).toEqual([]);
+    expect(task(h)?.state).toBe('stopped');
+  });
+
+  it('--apply 没有可信操作者（没经 bin/fleet-api）：拒绝，任务不动', async () => {
+    const h = setup({ operator: null });
+    expect(await h.run([...RECEIPT_FLAGS, '--note', NOTE, '--apply'])).not.toBe(0);
+    expect(task(h)?.state).toBe('stopped');
+    expect(h.correctCalls()).toBe(0);
+  });
+
+  it('--apply 遇证据对不上（GitHub 回的 head 不是请求的）：拒绝，任务不动、不调 Store 纠正', async () => {
+    const h = setup({ pull: { head: { sha: 'f'.repeat(40) } } });
+    expect(await h.run([...RECEIPT_FLAGS, '--note', NOTE, '--apply'])).toBe(1);
+    expect(task(h)?.state).toBe('stopped');
+    expect(h.correctCalls()).toBe(0);
+  });
+});

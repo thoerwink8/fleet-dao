@@ -30,28 +30,9 @@ const IssueNo = z.number().int().positive();
 export const LOCAL_FINISH_OUTCOMES = ['done', 'failed', 'released'] as const;
 export type LocalFinishOutcome = (typeof LOCAL_FINISH_OUTCOMES)[number];
 
-/** 接手已有 PR 的单：精确 PR 号和完整 40 位小写 head。后端按它独立现核，不信客户端的「已核」。 */
-const TakeoverPr = z
-  .object({
-    pr: z.number().int().positive(),
-    head: z.string().regex(/^[0-9a-f]{40}$/, '完整 40 位小写 head'),
-  })
-  .strict();
-
 export const LocalClaimRequestSchema = z.discriminatedUnion('action', [
   z
-    .object({
-      action: z.literal('claim'),
-      repo: RepoSlug,
-      issue: IssueNo,
-      title: z.string().min(1).max(300),
-      /** 只有受管接手路径带；不带就是普通 claim（单上有开着的 PR 照旧由本机命令拒绝）。 */
-      takeoverPr: TakeoverPr.optional(),
-    })
-    .strict(),
-  /** 接手交接确认：原工作流确认终态、本机租约在、原 PR/head 仍匹配，后端才回 ok；信号受理不算交接完成。 */
-  z
-    .object({ action: z.literal('takeover_confirm'), repo: RepoSlug, issue: IssueNo, takeoverPr: TakeoverPr })
+    .object({ action: z.literal('claim'), repo: RepoSlug, issue: IssueNo, title: z.string().min(1).max(300) })
     .strict(),
   z.object({ action: z.literal('renew'), repo: RepoSlug, issue: IssueNo }).strict(),
   z
@@ -66,18 +47,8 @@ export const LocalClaimRequestSchema = z.discriminatedUnion('action', [
 ]);
 export type LocalClaimRequest = z.infer<typeof LocalClaimRequestSchema>;
 
-/**
- * 不成的原因：引擎在做；这张单不是本机领着的；仓不归法国管；
- * takeover_refused 接手的身份核不过或引擎没明确停下（串仓、换头、多 PR、读不到、有未结束的工人……）；
- * takeover_pending 接手已登记但原工作流还没确认终态（责任保留在本机，重跑同一命令复核）。
- */
-export const LOCAL_CLAIM_REFUSALS = [
-  'engine_has_it',
-  'not_claimed',
-  'unknown_repo',
-  'takeover_refused',
-  'takeover_pending',
-] as const;
+/** 不成的原因：引擎在做；这张单不是本机领着的；仓不归法国管。 */
+export const LOCAL_CLAIM_REFUSALS = ['engine_has_it', 'not_claimed', 'unknown_repo'] as const;
 export type LocalClaimRefusal = (typeof LOCAL_CLAIM_REFUSALS)[number];
 
 export const LocalClaimResponseSchema = z.discriminatedUnion('ok', [
