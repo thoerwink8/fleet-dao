@@ -16,6 +16,8 @@
 //    对账只在合并时判一次，条件永远还在，开单没有可做的事（#1418、#1419 因此白起了会话）。合并未满 7 天仍立案，但验收不写
 //    「条件不再成立」：缺证据不可逆，那句会诱导按 PR 号或分支名豁免来清卡。验收改为真实来源与完整回执按现规则核实，或缺证据
 //    标 historical_unproven、走已有可信 ops 历史审计（精确身份、证据、缺口、后续责任）。别的类别照旧。
+//    本机留着的单（local-kept:<仓>#<号>:…，拉单报的「本机退回的单，引擎接不了」）不立案：那张单已贴「本机做」留给本机领，
+//    再开提醒单只会验收只剩「条件不再成立」、被拉单判 acceptance_off_diff 退回再报。它不在自己会撤的清单里，没人动就按过期兜底收。
 //    读不到合并时刻不跳过，记没查成。立案前再自检：单的「怎么算做完」只有「提醒的条件不再成立」一条、且类别不在自己会撤的
 //    清单里，不开单，提醒正文写「没有可做的事，已跳过立案」。
 //
@@ -374,6 +376,9 @@ export const RULES: readonly Rule[] = [
   },
 ];
 
+/** 拉单把单子留给本机时报的提醒键前缀（real/intake.ts 的 notifyLocal）。 */
+const LOCAL_KEPT_PREFIX = 'local-kept:';
+
 /** 别处自己会撤的：过期兜底不碰。 */
 const resolvesItself = (key: string) => SELF_RESOLVING_PREFIXES.some((p) => key.startsWith(p));
 
@@ -389,6 +394,9 @@ export function eligibleToFile(key: string): boolean {
   // 停着的任务本身就是那张单，撤提醒要的是续上、放弃、拆单这类状态动作，PR 做不到（#3407 派了 6 轮、4 次冷验收拒）。
   // 交给法国指挥官（jobs/park-triage.ts）拍板；它也看不了的，原因写在它那条提醒的正文里。
   if (isTaskParkAlertKey(key) || /^commander:.+:park:\d+$/.test(key)) return false;
+  // 本机留着的单（拉单 notifyLocal 报的）：那张单已经贴了「本机做」，开提醒单验收只剩「条件不再成立」，引擎拉单判 acceptance_off_diff
+  // 接不了，退回再报，没人做。不在自己会撤的清单里，没人动就按过期兜底收。
+  if (key.startsWith(LOCAL_KEPT_PREFIX)) return false;
   if (key.startsWith('reconcile:')) return true;
   return !resolvesItself(key);
 }

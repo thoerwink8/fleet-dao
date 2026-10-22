@@ -770,6 +770,25 @@ describe('冷验收检出报警不落三天过期兜底', () => {
     expect(commander.body).not.toContain('已立案：');
   });
 
+  it('本机留着的单（local-kept:*）挂满 24 小时不开单：那张单已贴「本机做」，提醒单引擎拉不动', async () => {
+    const key = 'local-kept:thoerwink8/fleet-dao#3337:intake-returned-blocked:2026-10-20T07:13:03.139Z';
+    expect(eligibleToFile(key)).toBe(false);
+    expect(eligibleToFile('wf:failure:acme/widgets:plain')).toBe(true);
+    const since = new Date(NOW.getTime() - 30 * HOUR);
+    const kept = row({
+      dedupeKey: key,
+      title: 'thoerwink8/fleet-dao#3337 本机退回的单，引擎接不了，留给本机做',
+      createdAt: since,
+      updatedAt: since,
+    });
+    const h = harness([kept]);
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(h.opened).toEqual([]);
+    expect(kept.resolvedAt).toBeNull();
+    expect(kept.body).not.toContain('已立案：');
+  });
+
   it('检出前缀不走自动兜底立案，普通未知键仍立案', async () => {
     const stale = new Date(NOW.getTime() - 30 * DAY);
     const checkout = row({
