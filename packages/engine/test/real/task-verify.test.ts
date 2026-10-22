@@ -669,10 +669,10 @@ describe('【故意造出的失败】做不出来：回 unavailable（工作流�
     expect(r.ft.removes.some((d) => d.includes('verify-run-0001'))).toBe(true);
   });
 
-  it('结论写 fail 却没有一条算挡的问题：unavailable（要人看），不让写代码的会话拿一张空问题表白改一轮', async () => {
+  it('结论写 fail 却一条问题都没写：unavailable（要人看），不让写代码的会话拿一张空问题表白改一轮', async () => {
     const r = rig({
       picks: { gpt: okRoute('gpt') },
-      driverRun: async () => report(['## 问题', '- 命名不好看', '', 'verdict: fail'].join('\n')),
+      driverRun: async () => report('verdict: fail'),
     });
     const got = await r.run(r.input(), ctx());
     expect(got.pass).toBe(false);
@@ -2004,8 +2004,8 @@ describe('材料带 PR 正文和测试输出；「不归我验」留言到单上
 
   it('第 2 轮真实装配只留下上一轮问题和能对上增量文件的问题', async () => {
     const oldProblem = '没做到验收条：第 1 条：上一轮的问题还没修好';
-    const newProblem = '弄坏了原有功能：第 2 条：增量文件：`src/status.ts`，把状态导出删了';
-    const unrelated = '弄坏了原有功能：第 2 条：增量里顺手发现的旧问题，但不在本轮改动';
+    const newProblem = '没做到验收条：第 2 条：增量文件：`src/status.ts`，把状态导出删了';
+    const unrelated = '没做到验收条：第 2 条：增量里顺手发现的旧问题，但不在本轮改动';
     const stdout = [
       '## 问题',
       `- ${oldProblem}`,
@@ -2231,8 +2231,8 @@ describe('第 2 轮装配按可信主线拆增量', () => {
 
   it('模型把主线删除写成增量文件不算拒；上轮没过的条和本单新回归仍拒', async () => {
     const oldProblem = '没做到验收条：第 1 条：上一轮的问题还没修好';
-    const launcherFalse = `弄坏了原有功能：第 2 条：增量文件：\`${LAUNCHER_GO}\`，启动器被删了`;
-    const realRegression = '弄坏了原有功能：第 2 条：增量文件：`regression.txt`，新写了 new-bug';
+    const launcherFalse = `没做到验收条：第 2 条：增量文件：\`${LAUNCHER_GO}\`，启动器被删了`;
+    const realRegression = '没做到验收条：第 2 条：增量文件：`regression.txt`，新写了 new-bug';
     const stdout = [
       '## 问题',
       `- ${oldProblem}`,
