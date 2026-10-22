@@ -69,6 +69,7 @@ function harness(
     openIssue?: AlertFiling['openIssue'];
     prMergedAt?: AlertSweepDeps['prMergedAt'];
     lateReviews?: AlertSweepDeps['lateReviews'];
+    localKept?: AlertSweepDeps['localKept'];
     doneItems?: AlertSweepDeps['doneItems'];
     workflows?: AlertSweepDeps['workflows'];
   } = {},
@@ -139,6 +140,7 @@ function harness(
     filing,
     prMergedAt: over.prMergedAt ?? (async () => new Date((over.now ?? (() => NOW))().getTime() - DAY)),
     ...(over.lateReviews ? { lateReviews: over.lateReviews } : {}),
+    ...(over.localKept ? { localKept: over.localKept } : {}),
     ...(over.doneItems ? { doneItems: over.doneItems } : {}),
     now: over.now ?? (() => NOW),
     log: () => {},
@@ -768,6 +770,81 @@ describe('冷验收检出报警不落三天过期兜底', () => {
     expect(park.resolvedAt).toBeNull();
     expect(park.body).not.toContain('已立案：');
     expect(commander.body).not.toContain('已立案：');
+  });
+
+  it('本机留着的单（local-kept:*）挂满 24 小时不开单：那张单已贴「本机做」，提醒单引擎拉不动', async () => {
+    const key = 'local-kept:thoerwink8/fleet-dao#3337:intake-returned-blocked:2026-10-20T07:13:03.139Z';
+    expect(eligibleToFile(key)).toBe(false);
+    expect(eligibleToFile('wf:failure:acme/widgets:plain')).toBe(true);
+    const since = new Date(NOW.getTime() - 30 * HOUR);
+    const kept = row({
+      dedupeKey: key,
+      title: 'thoerwink8/fleet-dao#3337 本机退回的单，引擎接不了，留给本机做',
+      createdAt: since,
+      updatedAt: since,
+    });
+    const asked: string[] = [];
+    const h = harness([kept], {
+      localKept: async (repo, number) => {
+        asked.push(`${repo.owner}/${repo.name}#${number}`);
+        return 'held';
+      },
+    });
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(asked).toEqual(['thoerwink8/fleet-dao#3337']);
+    expect(h.opened).toEqual([]);
+    expect(kept.resolvedAt).toBeNull();
+    expect(kept.body).not.toContain('已立案：');
+  });
+
+  describe('本机留着的单：条件没了对账撤掉', () => {
+    const key = 'local-kept:thoerwink8/fleet-dao#3337:intake-returned-blocked:2026-10-20T07:13:03.139Z';
+    const since = new Date(NOW.getTime() - 30 * HOUR);
+    const keptRow = () => row({ dedupeKey: key, createdAt: since, updatedAt: since });
+
+    it('单关了：撤', async () => {
+      const kept = keptRow();
+      const h = harness([kept], { localKept: async () => 'closed' });
+      const part = await h.run();
+      expect(part.unchecked).toEqual([]);
+      expect(kept.resolvedBy).toBe(RECONCILE_ACTOR);
+      expect(kept.body).toContain('#3337 已经关了');
+      expect(h.opened).toEqual([]);
+    });
+
+    it('「本机做」被摘掉交回引擎：撤', async () => {
+      const kept = keptRow();
+      const h = harness([kept], { localKept: async () => 'released' });
+      await h.run();
+      expect(kept.resolvedBy).toBe(RECONCILE_ACTOR);
+      expect(kept.body).toContain('「本机做」已经摘掉');
+    });
+
+    it('还贴着「本机做」：不撤，也不走 3 天过期兜底', async () => {
+      const stale = new Date(NOW.getTime() - 30 * DAY);
+      const kept = row({ dedupeKey: key, createdAt: stale, updatedAt: stale });
+      const h = harness([kept], { localKept: async () => 'held' });
+      await h.run();
+      expect(kept.resolvedAt).toBeNull();
+    });
+
+    it('读不到单、或没接上读单的口子：不撤，记没查成', async () => {
+      const failing = keptRow();
+      const h1 = harness([failing], {
+        localKept: async () => {
+          throw new Error('GitHub 读不到');
+        },
+      });
+      const part1 = await h1.run();
+      expect(failing.resolvedAt).toBeNull();
+      expect(part1.unchecked.join()).toContain('GitHub 读不到');
+
+      const unwired = keptRow();
+      const part2 = await harness([unwired]).run();
+      expect(unwired.resolvedAt).toBeNull();
+      expect(part2.unchecked.join()).toContain('没接上读单的口子');
+    });
   });
 
   it('检出前缀不走自动兜底立案，普通未知键仍立案', async () => {
