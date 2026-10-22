@@ -2251,6 +2251,80 @@ describe('第 2 轮装配按可信主线拆增量', () => {
     expect(r.specs).toHaveLength(0);
   });
 
+  it('作者和主线写成相同最终内容：装配后的提示词仍把作者提交当增量', async () => {
+    await setFetchedMainline(fx.bare, fx.mCoincide);
+    const r = rig({
+      pull: { headSha: fx.coincided },
+      driverRun: async () => report(MODEL_PASS),
+    });
+    r.gh.fetchMainline = async () => ({ head: fx.mCoincide, defaultBranch: 'main' });
+    const got = await r.run(r.input(round2(fx.coincided)), ctx());
+    expect(got.pass).toBe(true);
+    const prompt = r.specs[0]?.prompt ?? '';
+    const files = prompt.split('## 改了哪些文件')[1]?.split('## ')[0] ?? '';
+    expect(files).toContain('- coincide.txt');
+    expect(files).toContain('- keep.txt');
+    expect(files).not.toContain(LAUNCHER_GO);
+    expect(files).not.toContain('mainline-only.txt');
+    const reworkAt = prompt.indexOf('# 本单返工');
+    const syncAt = prompt.indexOf('# 主线同步');
+    expect(reworkAt).toBeGreaterThan(-1);
+    expect(syncAt).toBeGreaterThan(reworkAt);
+    const author = prompt.slice(reworkAt, syncAt);
+    const context = prompt.slice(syncAt);
+    expect(author).toContain('author-only-line');
+    expect(author).toContain('author-wrote-coincide');
+    expect(author).not.toContain('only-mainline');
+    expect(context).toContain(LAUNCHER_GO);
+    expect(context).toContain('only-mainline');
+    expect(context).not.toContain('author-only-line');
+    expect(r.posted.at(-1)?.state).toBe('success');
+    expect(r.posted.at(-1)?.sha).toBe(fx.coincided);
+  });
+
+  it('主线读取期间 PR 头移动：再读到新头就回 headMoved，不按旧头验收、不贴状态', async () => {
+    const moved = 'c'.repeat(40);
+    const r = rig({ pull: { headSha: fx.merged } });
+    let mainlineRead = false;
+    r.gh.fetchMainline = async () => {
+      mainlineRead = true;
+      return { head: fx.m1, defaultBranch: 'main' };
+    };
+    const readPull = r.gh.claims.readPull.bind(r.gh.claims);
+    r.gh.claims.readPull = async (repo, number, options) => {
+      const facts = await readPull(repo, number, options);
+      return mainlineRead ? { ...facts, headSha: moved } : facts;
+    };
+    const got = await r.run(r.input(round2(fx.merged)), ctx());
+    expect(mainlineRead).toBe(true);
+    expect(got.headMoved).toBe(moved);
+    expect(got.pass).toBe(false);
+    expect(got.problems).toEqual([]);
+    expect(got.unavailable).toBeUndefined();
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted).toEqual([]);
+  });
+
+  it('主线读完再读 PR 失败：PortError 往外抛，不按旧头贴状态、不当通过', async () => {
+    const r = rig({ pull: { headSha: fx.merged } });
+    let mainlineRead = false;
+    r.gh.fetchMainline = async () => {
+      mainlineRead = true;
+      return { head: fx.m1, defaultBranch: 'main' };
+    };
+    const readPull = r.gh.claims.readPull.bind(r.gh.claims);
+    r.gh.claims.readPull = async (repo, number, options) => {
+      if (mainlineRead) throw new PortError('GITHUB_UNAVAILABLE', '再读 PR 失败', { retryable: true });
+      return readPull(repo, number, options);
+    };
+    await expect(r.run(r.input(round2(fx.merged)), ctx())).rejects.toMatchObject({
+      name: 'PortError',
+      code: 'GITHUB_UNAVAILABLE',
+    });
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted).toEqual([]);
+  });
+
   it('第 2 轮头已经不是要验的头：仍回 headMoved，不贴 success', async () => {
     const moved = 'c'.repeat(40);
     const r = rig({ pull: { headSha: moved } });

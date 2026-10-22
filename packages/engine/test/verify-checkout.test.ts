@@ -1085,6 +1085,61 @@ describe('第 2 轮增量把主线同步和本单返工拆开', () => {
     expect(diff.changedFiles).not.toContain(LAUNCHER_GO);
   });
 
+  it('作者和主线把同一文件写成相同最终内容：仍算本单返工，补丁里有作者自己的字', async () => {
+    const headBlob = await gitText(fx.bare, ['rev-parse', `${fx.coincided}:keep.txt`]);
+    const mainBlob = await gitText(fx.bare, ['rev-parse', `${fx.mCoincide}:keep.txt`]);
+    expect(headBlob).toBe(mainBlob);
+    const newBlob = await gitText(fx.bare, ['rev-parse', `${fx.coincided}:coincide.txt`]);
+    expect(newBlob).toBe(await gitText(fx.bare, ['rev-parse', `${fx.mCoincide}:coincide.txt`]));
+    await setFetchedMainline(fx.bare, fx.mCoincide);
+    const diff = await incrementalDiffAtHead(bound({ headSha: fx.coincided, mainlineSha: fx.mCoincide }));
+    expect(diff.changedFiles).toEqual(['coincide.txt', 'keep.txt']);
+    expect(diff.changedFiles).not.toContain(LAUNCHER_GO);
+    expect(diff.changedFiles).not.toContain(LAUNCHER_YML);
+    expect(diff.changedFiles).not.toContain('mainline-only.txt');
+    expect(diff.changedFiles).not.toContain('shared.txt');
+    const author = between(diff.diffText, '# 本单返工', '# 主线同步');
+    expect(author).toContain('最终内容和主线一致，作者提交仍改过：coincide.txt、keep.txt');
+    expect(author).toContain('author-only-line');
+    expect(author).toContain('author-wrote-coincide');
+    expect(author).not.toContain(LAUNCHER_GO);
+    expect(author).not.toContain('only-mainline');
+    const context = between(diff.diffText, '# 主线同步', '# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(context).toContain(LAUNCHER_GO);
+    expect(context).toContain('mainline-only.txt');
+    expect(context).toContain('only-mainline');
+    expect(context).toContain('最终内容已和主线一致的路径上，主线自己的改动');
+    expect(context).toContain('same-final');
+    expect(context).not.toContain('author-only-line');
+    expect(context).not.toContain('author-wrote-coincide');
+    const guard = between(diff.diffText, '# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(guard).toContain('occupancy.txt');
+    expect(guard).toContain('verified.txt');
+    expect(guard).not.toContain('keep.txt');
+    expect(guard).not.toContain('coincide.txt');
+    const dest = join(fx.stateDir, 'coincide-checkout');
+    await checkoutPrHead(dest, fx.coincided, WORKFLOW_ID);
+    expect(readFileSync(join(dest, 'keep.txt'), 'utf8')).toBe('same-final\n');
+    expect(readFileSync(join(dest, 'coincide.txt'), 'utf8')).toBe('same-final\n');
+    expect(existsSync(join(dest, LAUNCHER_GO))).toBe(false);
+  });
+
+  it('只有主线把文件改成新内容、作者没动：最终 blob 相同仍只算主线同步', async () => {
+    await setFetchedMainline(fx.bare, fx.mCoincide);
+    const diff = await incrementalDiffAtHead(bound({ headSha: fx.coincideSync, mainlineSha: fx.mCoincide }));
+    expect(diff.changedFiles).toEqual([]);
+    expect(diff.diffText).toContain('没有还能证明是本单新增');
+    const author = between(diff.diffText, '# 本单返工', '# 主线同步');
+    expect(author).not.toContain('author-only-line');
+    expect(author).not.toContain('keep.txt');
+    const context = between(diff.diffText, '# 主线同步', '# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(context).toContain('keep.txt');
+    expect(context).toContain('coincide.txt');
+    expect(context).toContain('mainline-only.txt');
+    expect(context).toContain(LAUNCHER_GO);
+    expect(context).not.toContain('author-only-line');
+  });
+
   it('合并或变基却没给可信主线：失败，不退回把主线删除算进本单的两头 diff', async () => {
     await expect(
       incrementalDiffAtHead({ workflowId: WORKFLOW_ID, sinceSha: fx.v1, headSha: fx.merged }),

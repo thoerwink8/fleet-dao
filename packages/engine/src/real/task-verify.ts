@@ -671,6 +671,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     // 第 2 轮在起验收之前现读主线尖，并把旧验收头、当前头、记录的基线补进镜像。
     // 这一步的 GitHub 故障是 PortError，按失败分流重试，不写成「读不到 diff」去停给人。
     // 注入了 rangeDiff 的测试不读主线。读到的尖对不对、能不能拆，交给镜像里的增量读取，拆不开就失败，不回空 diff。
+    // 主线读完后 sources.pr 再读一次当前 PR 头，不用读主线之前捕获的那份。头变了回 headMoved，不按旧头验收、不贴状态。
     let recheckMainline: string | undefined;
     const fetchMainline = deps.gh.fetchMainline;
     try {
@@ -689,16 +690,27 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       run = await runColdVerifyForPr(prNumber, {
         sources: {
           pr: async () => {
-            if (pull.state !== 'open') {
-              throw new Error(`PR #${prNumber} ${pull.merged ? '已经合并' : '已经关闭'}了，没有要验的头`);
+            // 第 2 轮现读主线、补对象之后头可能已经变了。再读一次，不沿用上面捕获的 pull。
+            // 读失败经 mapped 成 PortError，由 runColdVerifyForPr 原样抛出（失败分流重试）。
+            const current =
+              input.recheck && deps.rangeDiff === undefined && fetchMainline
+                ? await mapped(() => deps.gh.claims.readPull(repo, prNumber))
+                : pull;
+            if (current.state !== 'open') {
+              throw new Error(`PR #${prNumber} ${current.merged ? '已经合并' : '已经关闭'}了，没有要验的头`);
             }
-            if (pull.headSha !== input.headSha) {
-              seen.headMoved = pull.headSha;
+            if (current.headSha !== input.headSha) {
+              seen.headMoved = current.headSha;
               throw new Error(
-                `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是要验的 ${short(input.headSha)}（有人推过新提交）`,
+                `PR #${prNumber} 的头是 ${short(current.headSha)}，不是要验的 ${short(input.headSha)}（有人推过新提交）`,
               );
             }
-            return { head: input.headSha, baseSha: input.baseSha, branch: input.branch, body: pull.body };
+            return {
+              head: input.headSha,
+              baseSha: input.baseSha,
+              branch: input.branch,
+              body: current.body,
+            };
           },
           diff: async () => {
             if (input.recheck) {

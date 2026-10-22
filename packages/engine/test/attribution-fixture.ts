@@ -73,6 +73,12 @@ export interface AttributionFixture {
   tamper: string;
   /** 只合并主线，作者在旧验收头之后没有别的返工。 */
   syncOnly: string;
+  /** 主线把已有文件和新建文件写成和作者最终提交相同的内容，并另加只属于主线的文件。 */
+  mCoincide: string;
+  /** 作者改过这些文件（中间内容不同），合并后最终 blob 与 mCoincide 相同。 */
+  coincided: string;
+  /** 只把 mCoincide 并进旧验收头，作者没有再改那些文件。 */
+  coincideSync: string;
   /** 不在可信主线上的旁支。 */
   side: string;
   /** 第二父是旁支的合并。 */
@@ -189,6 +195,37 @@ export async function buildAttributionFixture(stateDir: string): Promise<Attribu
   write('later.txt', LATER);
   const m2 = await commit('later mainline');
 
+  // 作者和主线把同一文件写成相同的最终字节。中间提交留着作者自己的字，最终树上看不见。
+  await gitText(work, ['checkout', '-B', 'coincide-pr', v1]);
+  write('keep.txt', 'author-only-line\n');
+  write('coincide.txt', 'author-wrote-coincide\n');
+  await commit('author touches files mainline will match');
+  write('keep.txt', 'same-final\n');
+  write('coincide.txt', 'same-final\n');
+  await commit('author lands on the same bytes');
+
+  await gitText(work, ['checkout', '-B', 'm-coincide', m1]);
+  write('keep.txt', 'same-final\n');
+  write('coincide.txt', 'same-final\n');
+  write('mainline-only.txt', 'only-mainline\n');
+  const mCoincide = await commit('mainline writes the same final bytes');
+
+  await gitText(work, ['checkout', 'coincide-pr']);
+  await gitText(work, ['merge', '--no-ff', '-m', 'sync coincided mainline', 'm-coincide']);
+  const coincided = await gitText(work, ['rev-parse', 'HEAD']);
+  const keepHead = await gitText(work, ['rev-parse', `${coincided}:keep.txt`]);
+  const keepMain = await gitText(work, ['rev-parse', `${mCoincide}:keep.txt`]);
+  if (keepHead !== keepMain) throw new Error('keep.txt 最终 blob 和主线不一致，夹具没造出最终内容相同的情况');
+  const coincideHead = await gitText(work, ['rev-parse', `${coincided}:coincide.txt`]);
+  const coincideMain = await gitText(work, ['rev-parse', `${mCoincide}:coincide.txt`]);
+  if (coincideHead !== coincideMain) {
+    throw new Error('coincide.txt 最终 blob 和主线不一致，夹具没造出最终内容相同的情况');
+  }
+
+  await gitText(work, ['checkout', '-B', 'coincide-sync', v1]);
+  await gitText(work, ['merge', '--no-ff', '-m', 'sync same bytes only', 'm-coincide']);
+  const coincideSync = await gitText(work, ['rev-parse', 'HEAD']);
+
   await gitText(work, ['checkout', '--orphan', 'orphan']);
   for (const name of readdirSync(work)) {
     if (name === '.git') continue;
@@ -205,5 +242,23 @@ export async function buildAttributionFixture(stateDir: string): Promise<Attribu
   const rebasedTree = await gitText(bare, ['rev-parse', `${rebased}^{tree}`]);
   if (mergedTree !== rebasedTree) throw new Error('变基结果和合并结果不是同一棵树');
 
-  return { stateDir, bare, m0, v1, rework, m1, m2, merged, rebased, tamper, syncOnly, side, bad, orphan };
+  return {
+    stateDir,
+    bare,
+    m0,
+    v1,
+    rework,
+    m1,
+    m2,
+    merged,
+    rebased,
+    tamper,
+    syncOnly,
+    mCoincide,
+    coincided,
+    coincideSync,
+    side,
+    bad,
+    orphan,
+  };
 }
