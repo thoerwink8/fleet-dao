@@ -2,7 +2,14 @@
 // 和 10 个定时任务的登记（jobs/engine-timers.ts）：原来 8 个的格子是 Temporal Schedule 的 interval + offset，没改；
 // 耗时表是 #921 新加的，周一 06:00（北京时间）。
 // 用假的钟和假的 setTimeout，不真等。
-import { closeInterruptedScheduleRuns, registerScheduledJobs, startScheduleRun } from '@fleet-dao/db';
+import {
+  closeInterruptedScheduleRuns,
+  finishScheduleRun,
+  recordScheduleRunProgress,
+  registerScheduledJobs,
+  scheduleHealth,
+  startScheduleRun,
+} from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
@@ -553,6 +560,245 @@ describe('起来时补记进程中断没收尾的 schedule_runs（startEngineTim
         expect(rows[0]?.outcome ?? null).toBeNull();
         expect(rows[0]?.ended_at ?? null).toBeNull();
         expect(rows[0]?.why ?? null).toBeNull();
+      } finally {
+        await db.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
+describe('前一实例不满一轮工作上限的遗留行（startEngineTimers 二次补记，#3585）', () => {
+  /** 每小时 41 分一格，本进程 T0+49 分起：下一格 T0+101 分，二次补记点（起点 + 15 分）前后都没有正常一轮。 */
+  const S = T0 + 49 * MIN;
+  const hourly = (over: Partial<TimerJob> = {}) =>
+    job({
+      id: 'hourly-reconcile',
+      everyMinutes: 60,
+      offsetMinutes: 41,
+      catchupMinutes: 60,
+      overdueMinutes: 15,
+      run: async () => {},
+      ...over,
+    });
+  /** 本进程起点（S）之前已经起的那一轮，上一次是几点起的。 */
+  const lastAfterSlot = async () => new Date(S - 8 * MIN);
+
+  interface Row {
+    id: number;
+    job: string;
+    startedAt: number;
+    endedAt: number | null;
+  }
+  /** 和 closeInterruptedScheduleRuns 同口径的假端口：严格早于边界、没结束、名单内的任务才结束，结束时刻写开跑时刻。 */
+  const fakeRows = (rows: Row[]) => {
+    const calls: { jobs: string[]; startedBefore: number[] }[] = [];
+    const close = async (input: Parameters<Parameters<typeof startEngineTimers>[2]>[0]) => {
+      calls.push({
+        jobs: input.jobs.map((j) => j.id),
+        startedBefore: input.jobs.map((j) => j.startedBefore.getTime()),
+      });
+      const ids: number[] = [];
+      for (const item of input.jobs)
+        for (const row of rows)
+          if (row.job === item.id && row.endedAt === null && row.startedAt < item.startedBefore.getTime()) {
+            row.endedAt = row.startedAt;
+            ids.push(row.id);
+          }
+      return ids;
+    };
+    return { calls, close };
+  };
+
+  it('复现：起来时只有 8 分钟的前一实例行被启动补记漏过；本进程起满一轮工作上限后补上，不用再重启；20 分钟前的旧行启动就补', async () => {
+    const rows: Row[] = [
+      { id: 1, job: 'hourly-reconcile', startedAt: S - 29 * MIN, endedAt: null }, // 20 分钟前（对照）
+      { id: 2, job: 'hourly-reconcile', startedAt: S - 8 * MIN, endedAt: null }, // 年轻前实例
+    ];
+    const f = fakeHost(S, lastAfterSlot);
+    const port = fakeRows(rows);
+    await startEngineTimers([hourly()], f.host, port.close);
+    expect(rows.map((r) => r.endedAt)).toEqual([S - 29 * MIN, null]);
+    expect(port.calls).toHaveLength(1);
+
+    await f.advanceTo(S + 14 * MIN);
+    expect(rows[1]?.endedAt).toBeNull();
+    expect(port.calls).toHaveLength(1);
+
+    await f.advanceTo(S + 15 * MIN);
+    expect(port.calls).toHaveLength(2);
+    // 边界是本进程起点，不是「现在减一轮上限」
+    expect(port.calls[1]).toEqual({ jobs: ['hourly-reconcile'], startedBefore: [S] });
+    // 结束时刻仍用原规则：写开跑时刻，不写补记时刻
+    expect(rows[1]?.endedAt).toBe(S - 8 * MIN);
+    expect(f.logs.filter((l) => l.includes('前一个引擎实例'))).toEqual([
+      'info:定时任务 hourly-reconcile：补记了前一个引擎实例留下的 1 条没收尾的记录：2',
+    ]);
+  });
+
+  it('当前实例仍活跃的行、等于边界的行、名单外任务、已结束的行都不动', async () => {
+    const rows: Row[] = [
+      { id: 1, job: 'hourly-reconcile', startedAt: S - 1, endedAt: null }, // 前一实例，差 1 毫秒
+      { id: 2, job: 'hourly-reconcile', startedAt: S, endedAt: null }, // 等于边界
+      { id: 3, job: 'hourly-reconcile', startedAt: S + 1 * MIN, endedAt: null }, // 本进程的，长时间仍在跑
+      { id: 4, job: 'not-ours', startedAt: S - 8 * MIN, endedAt: null }, // 名单外
+      { id: 5, job: 'hourly-reconcile', startedAt: S - 9 * MIN, endedAt: S - 5 * MIN }, // 已结束
+    ];
+    const f = fakeHost(S, lastAfterSlot);
+    const port = fakeRows(rows);
+    await startEngineTimers([hourly()], f.host, port.close);
+    await f.advanceTo(S + 40 * MIN);
+    expect(rows.map((r) => r.endedAt)).toEqual([S - 1, null, null, null, S - 5 * MIN]);
+  });
+
+  it('补过一次就不再补：之后正常钟点的轮次也不重复调用端口', async () => {
+    const rows: Row[] = [{ id: 1, job: 'hourly-reconcile', startedAt: S - 8 * MIN, endedAt: null }];
+    const f = fakeHost(S, lastAfterSlot);
+    const port = fakeRows(rows);
+    let ran = 0;
+    await startEngineTimers([hourly({ run: async () => void ran++ })], f.host, port.close);
+    await f.advanceTo(S + 15 * MIN);
+    await f.advanceTo(T0 + 101 * MIN + 1);
+    await f.advanceTo(T0 + 161 * MIN + 1);
+    expect(ran).toBe(2);
+    expect(port.calls).toHaveLength(2); // 启动一次 + 二次补记一次
+    expect(rows[0]?.endedAt).toBe(S - 8 * MIN);
+  });
+
+  it('补记写不进：明确记 error、行仍是进行中，不当成已补；稍后自己重试，补上才记「补记了」；定时照跑', async () => {
+    const rows: Row[] = [{ id: 1, job: 'hourly-reconcile', startedAt: S - 8 * MIN, endedAt: null }];
+    let ran = 0;
+    // 启动那次成功（没有可补的），二次补记那次写不进一次
+    const base = fakeRows(rows);
+    let call = 0;
+    const close = async (input: Parameters<typeof base.close>[0]) => {
+      call += 1;
+      if (call === 2) throw new Error('补记没收尾的定时任务失败：库写不进');
+      return base.close(input);
+    };
+    const g = fakeHost(S, lastAfterSlot);
+    await startEngineTimers([hourly({ run: async () => void ran++ })], g.host, close);
+    await g.advanceTo(S + 15 * MIN);
+    expect(rows[0]?.endedAt).toBeNull();
+    expect(
+      g.logs.some((l) => l.startsWith('error:') && l.includes('没补记成') && l.includes('库写不进')),
+    ).toBe(true);
+    expect(g.logs.some((l) => l.includes('补记了前一个引擎实例'))).toBe(false);
+    await g.advanceTo(S + 30 * MIN);
+    expect(rows[0]?.endedAt).toBe(S - 8 * MIN);
+    expect(g.logs.some((l) => l.includes('补记了前一个引擎实例留下的 1 条'))).toBe(true);
+    await g.advanceTo(T0 + 101 * MIN + 1);
+    expect(ran).toBeGreaterThan(0);
+  });
+
+  it('下一轮开头也会补一次没补成的（不依赖重试定时器）', async () => {
+    const rows: Row[] = [{ id: 1, job: 'hourly-reconcile', startedAt: S - 8 * MIN, endedAt: null }];
+    const f = fakeHost(S, lastAfterSlot);
+    // 启动补记成功；二次补记（S+15）和两次重试（S+30、S+45）都写不进。下一次重试在 S+60，正常一轮 S+52 先到，由它补上
+    const base = fakeRows(rows);
+    let call = 0;
+    const close = async (input: Parameters<typeof base.close>[0]) => {
+      call += 1;
+      if (call >= 2 && call <= 4) throw new Error('补记没收尾的定时任务失败：库写不进');
+      return base.close(input);
+    };
+    await startEngineTimers([hourly({ overdueMinutes: 15 })], f.host, close);
+    await f.advanceTo(S + 51 * MIN);
+    expect(rows[0]?.endedAt).toBeNull();
+    expect(call).toBe(4);
+    await f.advanceTo(T0 + 101 * MIN + 1);
+    expect(rows[0]?.endedAt).toBe(S - 8 * MIN);
+    expect(call).toBe(5);
+    // 补上之后 S+60 的重试定时器醒来也不再调端口
+    await f.advanceTo(S + 70 * MIN);
+    expect(call).toBe(5);
+  });
+
+  it('归属认不出（本进程起点、或一轮工作上限读不出来）：不补记、保留，日志说清，不写成 ok', async () => {
+    const f = fakeHost(S, lastAfterSlot);
+    const port = fakeRows([{ id: 1, job: 'hourly-reconcile', startedAt: S - 8 * MIN, endedAt: null }]);
+    startTimers([hourly()], f.host, { since: new Date(Number.NaN), close: port.close });
+    startTimers([hourly({ overdueMinutes: Number.NaN })], f.host, { since: new Date(S), close: port.close });
+    await f.advanceTo(S + 40 * MIN);
+    expect(port.calls).toHaveLength(0);
+    expect(f.logs.filter((l) => l.startsWith('warn:') && l.includes('认不出'))).toHaveLength(2);
+  });
+
+  it('停机后不再补记（定时器随 stop 一起撤掉）', async () => {
+    const rows: Row[] = [{ id: 1, job: 'hourly-reconcile', startedAt: S - 8 * MIN, endedAt: null }];
+    const f = fakeHost(S, lastAfterSlot);
+    const port = fakeRows(rows);
+    const timers = await startEngineTimers([hourly()], f.host, port.close);
+    await timers.stop(1_000);
+    await f.advanceTo(S + 40 * MIN);
+    expect(port.calls).toHaveLength(1);
+    expect(rows[0]?.endedAt).toBeNull();
+  });
+
+  it(
+    '真库：年轻前实例行补成 failed 且保留阶段 why、结束时刻是开跑时刻；等于边界、当前实例、已结束、名单外的不动；更新的成功轮不被盖过；重复执行不再动',
+    async () => {
+      const db = await createTestDb();
+      try {
+        await registerScheduledJobs(db.db, [
+          { id: 'hourly-reconcile', name: '每小时对账', schedule: '每小时', expectEveryMinutes: 150 },
+          { id: 'not-ours', name: '别的', schedule: '每小时', expectEveryMinutes: 150 },
+        ]);
+        const young = await startScheduleRun(db.db, 'hourly-reconcile', new Date(S - 8 * MIN));
+        await recordScheduleRunProgress(db.db, {
+          id: young,
+          step: 'worktrees',
+          phase: 'start',
+          at: new Date(S - 7 * MIN),
+        });
+        const equal = await startScheduleRun(db.db, 'hourly-reconcile', new Date(S));
+        const current = await startScheduleRun(db.db, 'hourly-reconcile', new Date(S + 2 * MIN));
+        const other = await startScheduleRun(db.db, 'not-ours', new Date(S - 8 * MIN));
+        const done = await startScheduleRun(db.db, 'hourly-reconcile', new Date(S - 20 * MIN));
+        await finishScheduleRun(db.db, done, { outcome: 'ok', scanned: 3, found: 0 }, new Date(S - 19 * MIN));
+        const newerOk = await startScheduleRun(db.db, 'hourly-reconcile', new Date(S + 3 * MIN));
+        await finishScheduleRun(
+          db.db,
+          newerOk,
+          { outcome: 'ok', scanned: 5, found: 0 },
+          new Date(S + 4 * MIN),
+        );
+
+        const f = fakeHost(S, lastAfterSlot);
+        const close = (input: Parameters<typeof closeInterruptedScheduleRuns>[1]) =>
+          closeInterruptedScheduleRuns(db.db, input);
+        await startEngineTimers([hourly()], f.host, close);
+        await f.advanceTo(S + 15 * MIN);
+
+        const { rows } = await db.client.query<{
+          id: number;
+          outcome: string | null;
+          started_at: string;
+          ended_at: string | null;
+          why: string | null;
+        }>('select id, outcome, started_at, ended_at, why from schedule_runs order by id');
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        const closed = byId.get(young);
+        expect(closed?.outcome).toBe('failed');
+        expect(new Date(closed?.ended_at ?? '').getTime()).toBe(S - 8 * MIN);
+        expect(new Date(closed?.started_at ?? '').getTime()).toBe(S - 8 * MIN);
+        expect(closed?.why).toContain('没收尾');
+        expect(closed?.why).toContain('step=worktrees');
+        for (const id of [equal, current, other]) {
+          expect(byId.get(id)?.ended_at ?? null, String(id)).toBeNull();
+          expect(byId.get(id)?.outcome ?? null).toBeNull();
+        }
+        expect(byId.get(done)?.outcome).toBe('ok');
+        expect(byId.get(newerOk)?.outcome).toBe('ok');
+        // 补记没有把这行变成「最近一次结束的」：看门狗看到的最近一次跑成仍是更新的那条
+        const health = (await scheduleHealth(db.db, new Date(S + 15 * MIN))).find(
+          (h) => h.job.id === 'hourly-reconcile',
+        );
+        expect(health?.lastSuccess?.id).toBe(newerOk);
+        // 重复执行：端口已无可补
+        expect(
+          await close({ jobs: [{ id: 'hourly-reconcile', startedBefore: new Date(S) }], at: new Date(S) }),
+        ).toEqual([]);
       } finally {
         await db.close();
       }

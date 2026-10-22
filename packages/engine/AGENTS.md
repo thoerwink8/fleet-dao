@@ -54,6 +54,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 指挥官（`jobs/park-triage.ts`、`real/park-triage.ts`）：会话只交裁决，动手经白名单；重做的多步先写接续账 `commander.redo`，账写不进不动手，每次动手前现读归属，转本机/对不上记 `given-up`，读不到记 `unverified` 继续保留责任。验收责任巡检里，模型 `leave` 不是转人依据，只有引擎可信来源 `acceptanceFounderFacts` 给出精确绑定的创始人事实才发「要你拍」；自动 settle 须过 `acceptanceTrustedRead`，PR 实际已合的 head 须等于责任 head。当前真装配没有这两种来源，生产上一律保留责任（#3497、#3579 的欠项）。
 - 看门狗只报和撤卡，修复在 api（`packages/api/src/alert-repair.ts`）。改 `jobs/watchdog.ts`、`jobs/idle-running.ts`、`real/watchdog.ts` 的提醒键（`watchdog:idle-running:<任务>`、`watchdog:release:train:<提交>:running|failed`）、阈值、撤卡条件，必须同步 api 的 `IDLE_PREFIX`、`RELEASE_KEY` 和 core 的 idle 判据（`packages/api/test/alert-repair.test.ts` 会红）。
 - 定时任务 `schedule_runs.why` 在一轮没收尾期只放诊断见证，只证明「最后记到的位置」，不证明为什么中断；`ended_at`、scanned、found 仍未知，由下次启动补记 failed。
+- 起来时不满一轮工作上限的前一实例遗留行（#3585）：启动补记的年轻保护不变；`startEngineTimers` 另给 `startTimers` 一个二次补记，边界是本进程起点（单实例、先停旧再起新：起点之前开始又没结束的行只可能是已停掉的前一实例的，等于起点的不动、更晚的是本进程的），每个任务本进程起满自己的一轮工作上限后补一次（一次性定时器，另在该任务下一轮开头兜底，不另起监视、不扫全表）。写库失败记 error、不当已补，隔一轮上限重试；起点或上限认不出时不补、留着。结束时刻、阶段 why 沿用 `closeInterruptedScheduleRuns`；只证明「属于已停掉的前一实例」，不证明原步骤为何中断。
 - 其它定时任务：changelog（`jobs/changelog.ts`）任何一版没查成不开部分 PR；没有已关闭里程碑记 unscanned，不用零扫描冒充成功。固定版本宿主工具（Go，`cli-upgrade-go.ts`）只在发布/空闲排空窗口运行，入口被遮住明确失败、保留现有安装。
 
 ## 真装配里容易误改的几处
