@@ -201,6 +201,12 @@ export function parseInstalledOutput(tool: string, stdout: string): string | nul
     const m = /codex-cli\s+(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/i.exec(text);
     return m?.[1] ?? null;
   }
+  if (tool === 'reclaude') {
+    // reclaude --version 打的是被包装的 Claude Code 版本（「2.1.308 (Claude Code)」），不是它自己的；目前没有任何经证实的
+    // reclaude 自身版本输出格式，所以这里什么都不认：裸 semver、「reclaude x.y.z」之类没证实的写法一律当来源不明，
+    // 等有了可信的只读来源（见 deploy/france/fleet-agent-scope.sh 的 probe_reclaude）再按证实的格式加。
+    return null;
+  }
   const m = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(text);
   return m?.[1] ?? null;
 }
