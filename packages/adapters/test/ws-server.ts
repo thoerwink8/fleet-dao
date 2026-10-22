@@ -18,7 +18,7 @@ export async function startWsServer(
   server.on('upgrade', (req, socket: Socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    // 对端被强杀会让这边读到 ECONNRESET；不接住就成了 vitest 的未处理错误，把整轮测试判红。
+    // 对端被强杀会让这边读到 ECONNRESET；不接住就成了 vitest 的未处理错误，把整轮测试判红（mirasim-launcher 红过两次）。
     socket.on('error', () => {});
     const key = String(req.headers['sec-websocket-key'] ?? '');
     const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');

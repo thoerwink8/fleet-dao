@@ -10,7 +10,7 @@
 // 「源文件里写 bypass 拒收」和「机器上自己设的 bypass 保留」是两件事：前者是把「不用问」推给所有机器，后者是这台自己选的做法。
 // 它的 env 只认 ENV_KEYS 登记的键（现在只有子代理默认模型 CLAUDE_CODE_SUBAGENT_MODEL，决定 0034）：写进同一份设置的 env，
 // 仓里的值每次覆盖（同 defaultMode），机器上 env 里别的变量一个不碰；源文件少写、多写不认得的键、值不合规矩都拒收。
-// 例外（决定 0092）：启动命令是 reclaude 的桌面机不写这个键、已有的删掉——Mirasim 见到 settings.json 的 env 里有改模型的键、
+// 例外（决定 0092）：装了 mirasim-reclaude 启动器的桌面机不写这个键、已有的删掉——Mirasim 见到 settings.json 的 env 里有改模型的键、
 // 又有 reclaude 写的回环代理，就判 claude 走拦截，不给跟随全局的会话注入平台网关，那些会话显示「平台」却花自有额度。
 // 合并那套（judge、merged、checkJson、applyJson）不只给 Claude 用：Devin 的 config.json 也是 permissions.allow/deny 三个数组，
 // 见 permissions-vendors.ts，翻译成它的写法后走同一套；Devin 那边没有 autoMode、env 这两层（不写就整段不管）。
@@ -54,7 +54,7 @@ export interface ListSpec {
   autoMode?: AutoModeSpec;
   /** 设置文件 env 里归本脚本管的几项（键 → 值）；不写就整段不管 env（Devin 那份没有这一层） */
   env?: Record<string, string>;
-  /** env 里这台不该有、见到就删的键（决定 0092：启动命令是 reclaude 的桌面机上的子代理默认模型）；只在写了 env 时生效 */
+  /** env 里这台不该有、见到就删的键（决定 0092：装了启动器的桌面机上的子代理默认模型）；只在写了 env 时生效 */
   dropEnv?: string[];
 }
 
@@ -94,23 +94,23 @@ const ENV_KEYS: ReadonlyMap<string, (value: string) => string | null> = new Map(
 ]);
 
 /**
- * 启动命令是 reclaude 的桌面机上 env 不许有子代理默认模型键的原因（决定 0092）。Mirasim（0.0.498 读过 server.cjs）判 claude 走不走拦截：
+ * 装了 mirasim-reclaude 启动器的桌面机上 env 不许有子代理默认模型键的原因（决定 0092）。Mirasim（0.0.498 读过 server.cjs）判 claude 走不走拦截：
  * ~/.claude/settings.json 的 env 里有任一改模型的键（CLAUDE_CODE_SUBAGENT_MODEL、ANTHROPIC_DEFAULT_*_MODEL、ANTHROPIC_SMALL_FAST_MODEL），
  * 又有指向回环的 HTTPS_PROXY 加 NODE_EXTRA_CA_CERTS（reclaude 写的），又设了启动命令，就判 via=intercept，
  * 不给跟随全局的会话注入平台网关——界面显示「平台」，实际经 reclaude 花自有额度。别的改模型的键不是本脚本写的，不碰。
  */
 const DROP_WHY =
-  '这台 Mirasim 的 claude 启动命令是 reclaude，Mirasim 见到这个键会判 claude 走拦截、不给跟随全局的会话注入平台网关（显示平台、实际花自有额度），所以这类机器不写它、已有的删掉；子代理默认模型改在 Mirasim 设置里管（决定 0092）';
+  '这台装了 mirasim-reclaude 启动器，Mirasim 见到这个键会判 claude 走拦截、不给跟随全局的会话注入平台网关（显示平台、实际花自有额度），所以这类机器不写它、已有的删掉；子代理默认模型改在 Mirasim 设置里管（决定 0092）';
 
-/** 这台是不是「启动命令是 reclaude 的桌面机」；note 是查不成时要带进报告的一句 */
+/** 这台是不是「装了 mirasim-reclaude 启动器的桌面机」；note 是查不成时要带进报告的一句 */
 export interface LauncherDesktop {
   on: boolean;
   note?: string;
 }
 
 /**
- * 判据（决定 0092）：不是 Linux，且 ~/.mirasim/setting.json 的 agentLaunch.claude.command 的文件名是 reclaude 或还没换掉的旧启动器
- * （isLauncherCommand，见 mirasim-launch.ts；决定 0112）。
+ * 判据（决定 0092）：不是 Linux，且 ~/.mirasim/setting.json 的 agentLaunch.claude.command 的文件名是新旧两代启动器之一
+ * （isLauncherCommand，和迁移器的 isManagedLaunch 同一个判据、各一份，见 mirasim-launch.ts 为什么不共用）。
  * 没有这个文件、没设启动命令：不是这类机器，不说什么。读不了、不是 JSON、启动命令不是字符串：按不是这类机器处理（照写），
  * 报告里说没查成——不报错、不中断同步，也不当成「查过了、没装」。
  */
@@ -119,7 +119,7 @@ export function launcherDesktop(ctx: Ctx): LauncherDesktop {
   const shown = '~/.mirasim/setting.json';
   const unsure = (why: string): LauncherDesktop => ({
     on: false,
-    note: `没查成这台 Mirasim 的 claude 启动命令是不是 reclaude（${shown}：${why}），按没装处理、照写 env.${SUBAGENT_MODEL}`,
+    note: `没查成这台装没装 mirasim-reclaude 启动器（${shown}：${why}），按没装处理、照写 env.${SUBAGENT_MODEL}`,
   });
   let text: string;
   try {
@@ -142,7 +142,7 @@ export function launcherDesktop(ctx: Ctx): LauncherDesktop {
   return { on: isLauncherCommand(command) };
 }
 
-/** 按这台的情况调整要写的东西：启动命令是 reclaude 的桌面机不写、并删掉子代理默认模型键 */
+/** 按这台的情况调整要写的东西：装了启动器的桌面机不写、并删掉子代理默认模型键 */
 function forMachine(spec: PermSpec, desk: LauncherDesktop): PermSpec {
   if (!desk.on) return spec;
   const env = { ...spec.env };
@@ -153,7 +153,7 @@ function forMachine(spec: PermSpec, desk: LauncherDesktop): PermSpec {
 /** 报告那一行补的话：这类机器说一句不写的原因，没查成说一句没查成 */
 function withDeskNote(lines: Line[], desk: LauncherDesktop): Line[] {
   const note = desk.on
-    ? `这台 Mirasim 的 claude 启动命令是 reclaude，env.${SUBAGENT_MODEL} 不写（决定 0092）`
+    ? `这台装了 mirasim-reclaude 启动器，env.${SUBAGENT_MODEL} 不写（决定 0092）`
     : desk.note;
   return note === undefined ? lines : lines.map((l) => ({ ...l, text: `${l.text}；${note}` }));
 }

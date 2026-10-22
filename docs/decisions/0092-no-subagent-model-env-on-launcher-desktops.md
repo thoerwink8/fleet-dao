@@ -4,7 +4,6 @@
 - 日期：2026-10-14 15:20（北京时间）
 - 谁拍的：创始人在对话里选方案 A（原话在下面）。改标准，引入它的 PR 合并即生效。
 - 状态：采纳。
-- 后续：决定 0112 退役了启动器，本条依然有效，判据 `isLauncherCommand` 扩到 `reclaude`、`reclaude.exe`（下面「哪类机器」按这个读；迁移器 `isManagedLaunch` 已随包删除）。
 - 取代：决定 0034 第 6 条里「设置里写子代理默认模型（`CLAUDE_CODE_SUBAGENT_MODEL`），由同步工具写到每台机器」那一半——装了启动器的桌面机除外。默认值只许 Opus 或 Sonnet、源文件照旧写这一项、别的机器照旧写，都不变。
 - 关联：`packages/agents-sync/src/permissions.ts`（`launcherDesktop`、`DROP_WHY`）、`packages/agents-sync/src/mirasim-launch.ts`（`isLauncherCommand`，和迁移器 `packages/mirasim-reclaude/src/migrate.ts` 的 `isManagedLaunch` 各一份，`packages/agents-sync/test/mirasim-launch.test.ts` 钉两份一致；同步工具是开会话必经的零安装一步，不 import 别的包的文件）、`agents/config/claude-permissions.json`、`docs/reclaude-in-mirasim.md` 第 1 节和 3.2 排查、`docs/agents-permissions.md`「子代理默认模型」。
 

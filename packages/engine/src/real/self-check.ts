@@ -66,8 +66,11 @@ export {
 export const SELF_CHECK_HEARTBEAT_MS = 30_000;
 /**
  * 会话用户的 PATH：node、pnpm 在 /usr/bin 或 /usr/local/bin（法国 pnpm 在 /usr/local/bin）。
+ * Go 不在这三处：本机装在会话用户家里的 ~/.local/go/bin，官方包在 /usr/local/go/bin。
+ * mirasim-reclaude 的测试要起 go test；不带上的话 spawn 报 ENOENT，整段自测红。
+ * $HOME 由会话用户的 shell 展开。
  */
-const PATH = '/usr/local/bin:/usr/bin:/bin';
+const PATH = '$HOME/.local/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin';
 /** 这些工具链表示仓要 Node 依赖。pnpm / npm / yarn 单独写、不带 node 时也算。 */
 const NODE_TOOLS: ReadonlySet<string> = new Set(['node', 'pnpm', 'npm', 'yarn']);
 const SH = '/bin/sh';

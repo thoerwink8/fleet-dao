@@ -33,6 +33,7 @@
 | `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（引擎任务 PR 等冷验收）、开单脚本、文档指针检查、欠账检查、阶段收口 |
 | `packages/hygiene` | 公开仓卫生检查：全仓扫描和推送前的闸，只拦私钥、令牌、密码这类真密钥（账号、邮箱、IP 不拦） |
 | `packages/agents-sync` | 同步脚本：把通用段 `agents/shared-rules.md`、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |
+| `packages/mirasim-reclaude` | Mirasim 的回合选路启动器（Go 写的，在 `launcher/`）和安全迁移入口（`pnpm mirasim:migrate`：旧接入空闲后才更新，可检查、可回滚，不重启整个 Mirasim） |
 | `agents/` | 给各家 AI 装的东西的原件：技能（`skills/`）、钩子（`hooks/`）、权限配置（`config/`），和钉住规矩的测试（`test/rules/`）；由 agents-sync 装出去 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 目标、设计、决定、运维、进度；`docs/reference/` 是旧系统的坑 |
@@ -62,7 +63,7 @@
 - 加新项目：`pnpm project add <owner/仓>` 一条命令做到底（登记、装两个 App、流程标签、仓档案、补齐 PR、真实策略读桥、全绿才开接活、冒烟单），可重复跑；`pnpm project check <owner/仓>` 只查（退出码 0 全绿、1 有没过的、2 没查成）。两个 App 装没装经法国的 `fleet-api project installations <owner/仓> --github-id <仓号>` 读（只读，和驾驶舱导入列表同一份归并；没读全是没查成，不是没装）。见 ops 第九节「加新项目」。
 - 计划：`pnpm plan` 从 GitHub 现读版本、先后、母单和子单打印出来，不写文件（#654 起仓里不存快照）；没登录、GitHub 读不到、先后标记认不出都报错、退出码 2。每天一轮 GitHub 对账（`.github/workflows/github-audit.yml`，随时也能 `pnpm github:audit`）查单子和先后有没有断，见 design 第七节「GitHub 对账」。
 - 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 是预检：不取远端、不切源、不更新目标配置，最后报这台同步到哪个提交、落后主线几个，但封装仍会临时创建并释放源锁 `~/.fleet-dao/origin-main.lock`，整条命令不是零写入；`--offline` 不取远端）；要严格零写入，直接对官方树跑 `node ~/.fleet-dao/origin-main/packages/agents-sync/bin/agents-sync --check --repo ~/.fleet-dao/origin-main`：不经过源准备封装、不碰源锁、不拉远端，所以须另核官方树的提交身份（`git -C ~/.fleet-dao/origin-main rev-parse HEAD` 对 `origin/main`），旧缓存或候选树的结果不能当最新主线；直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。同步完想核各家实际读没读到规矩，在 fleet-dao 仓根跑 `pnpm agents:probe [家的 id …]`：真起每家装了的 CLI 问一次（花各家额度，只在手动跑时跑），按它原样抄出的通用段、仓根 AGENTS.md 标题和 `pnpm check` 判，每家一行：过、没读到什么、没装、没查成；退出码全过 0、有没读到的 1、只有没查成的 2（`packages/agents-sync/src/probe.ts`）。
-- 无附带维护同步：`pnpm agents:sync --no-maintenance` 仍同步全部目标，只跳过本次本机会话 refresh；直接入口的 `--check`、`--apply` 也支持此参数。不带参数时维护行为不变。
+- 无附带维护同步：`pnpm agents:sync --no-maintenance` 仍同步全部目标，只跳过本次 Mirasim 迁移、本机会话 refresh、reclaude 后台健康维护；直接入口的 `--check`、`--apply` 也支持此参数。不带参数时维护行为不变。
 - 无人值守状态按真实会话号隔离：`unattended.mjs` 的命令依次读取 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`CODEX_SESSION_ID`；Stop 和 SessionStart 优先使用事件里的 `session_id`，缺失才读同一组环境变量。给出的来源不合法就明确报错，不借另一个会话号。
 - 无人值守接续：Claude/Codex 用同步 Stop 把未完成工作送到下一轮，成功 PostToolUse 登记实质进展；后台任务条数不证明完成通知送达。连续三次无进展明确暂停故障；on 只记意图，不代表已安装、信任、执行或通知验证。各入口能力与验法见 [CLI 无人值守接续](docs/design/CLI无人值守接续.md)。
 - `pnpm work run <单号>` 登记真实 Claude session / Codex thread，开启无人值守后由同步 Stop 一次性消费本会话终态；Codex 后台完成不主动开新轮。只有 `CODEX_SESSION_ID` 的 root-session 不代替 thread；缺归属及旧 `dispatcher=null` 记录用 `pnpm work runs` 手工读取，续跑不改原归属。
@@ -124,7 +125,7 @@
 | [docs/PROGRESS.md](docs/PROGRESS.md) | 生效中的临时调整（创始人引导在 docs/directives/、进度流水在置顶单 #1055，`pnpm progress read`） | 有新的临时调整时 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
 | [docs/reclaude.md](docs/reclaude.md) | reclaude 的门口：文档、清理脚本、以及「〈编号〉账号被封了，根据文档清理痕迹」这句提示词 | 入口或提示词变了 |
-| [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 里怎么用 reclaude（启动命令填 reclaude 绝对路径）、自有/平台怎么分、别填错的后果，以及 Linux 与 Fleet 的分工。从 [docs/reclaude.md](docs/reclaude.md) 进 | 装法或 Mirasim 的启动方式变了 |
+| [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 自有/平台切换、旧安装自动迁移、检查/撤回，以及 Linux 与 Fleet 的分工。从 [docs/reclaude.md](docs/reclaude.md) 进 | 装法或启动器变了 |
 | [docs/reclaude-self-check.md](docs/reclaude-self-check.md) | 上机前自检和被封号的细则。从 [docs/reclaude.md](docs/reclaude.md) 进 | 清法与判据变了 |
 | [AGENTS.md](AGENTS.md) | 给 AI 的本仓约定，只当目录（一屏读完，细则指到包和 docs/） | 本仓规则变了 |
 | `packages/<包>/AGENTS.md` | 给 AI 的包说明（engine、api、web、conventions、db、store）：干什么、入口、怎么测、坑、连带改什么 | 改了那个包的入口、命令、坑 |

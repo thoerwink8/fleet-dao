@@ -14,7 +14,7 @@
 | [0006](0006-discussion-model-order.md) | 讨论与独立 Review 的模型顺序和无头调用 | 2026-09-30 | 生效 | — |
 | [0007](0007-new-machine-and-hygiene.md) | 新电脑一键配好：GitHub 账号当总钥匙，卫生检查不卡流程，改了规矩每台机器自动同步 | 2026-10-01 | 生效 | — |
 | [0010](0010-three-segment-flow.md) | 三段一条龙定稿（指挥官 → 工人 → Review），替代 Fusion | 2026-10-02 | 生效 | 0015（第 6 条，PR 三栏改成四栏） |
-| [0012](0012-mirasim-routing-and-migration.md) | Mirasim 额度来源切换、Mac 支持与一条命令迁移 | 2026-10-02 | 生效 | 0112（桌面启动器、迁移器那部分；法国 Linux 直接 reclaude、无头 Mirasim 固定 cloud 不变） |
+| [0012](0012-mirasim-routing-and-migration.md) | Mirasim 额度来源切换、Mac 支持与一条命令迁移 | 2026-10-02 | 生效 | — |
 | [0013](0013-session-directives.md) | 只管这一次会话的话不落盘（「不开 subagent / workflow」不是规则） | 2026-10-03 | 生效 | — |
 | [0015](0015-github-one-home.md) | GitHub 上一个事实一个家：需求在单子里、交付在 PR 里，没人用的关卡删掉 | 2026-10-03 | 生效 | — |
 | [0020](0020-founder-2026-10-05-chain-breaks.md) | 创始人对「断链统一」三条的回答（2026-10-05 北京时间 08:50 前后） | 2026-10-05 | 生效 | — |
@@ -88,7 +88,6 @@
 | [0109](0109-footprint-root-collector.md) | 资源页的磁盘占用交给 root 的定时单元用 du 量，取代「不加 root 小工具」 | 2026-10-21 | 生效 | — |
 | [0110](0110-ego-browser-default.md) | 本机装了 ego lite 就默认用它操作浏览器（部分取代 0086、0087） | 2026-10-22 | 生效 | — |
 | [0111](0111-directive-kind.md) | 记引导前先判类：产品拍板、要做的活不进创始人引导（部分取代 0106） | 2026-10-22 | 生效 | — |
-| [0112](0112-mirasim-direct-reclaude.md) | Mirasim 的 claude 启动命令直接填 reclaude，退役 Go 启动器、迁移器和对账（部分取代 0012） | 2026-10-22 | 生效 | — |
 
 ## 历史
 

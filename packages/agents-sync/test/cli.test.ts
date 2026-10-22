@@ -102,14 +102,14 @@ describe('退出码', () => {
   });
 
   // 决定 0092：真实操作系统（deps.os）要一路传到权限那一步，Mac 在 platform 里也归 linux，只看 platform 判不出桌面机
-  it('Mac 上 Mirasim 的启动命令是 reclaude：写完不带子代理默认模型，报告说明为什么，退出 0', {
+  it('Mac 上 Mirasim 装了 mirasim-reclaude 启动器：写完不带子代理默认模型，报告说明为什么，退出 0', {
     timeout: 15_000,
   }, () => {
     const home = tempDir('home');
     put(
       home,
       '.mirasim/setting.json',
-      JSON.stringify({ agentLaunch: { claude: { command: '/Users/x/.local/bin/reclaude' } } }),
+      JSON.stringify({ agentLaunch: { claude: { command: '/opt/mirasim-reclaude' } } }),
     );
     const r = run(['--apply', '--home', home, '--repo', makeRepo({})], { os: 'darwin' });
     expect(r.code).toBe(0);

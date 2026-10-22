@@ -123,7 +123,7 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
   | statusline-setup | `sonnet` | Sonnet |
 
   所以**派子代理照旧写明类型**（`subagent_type`），`model` 怎么写、汇报首行核对型号、护栏，都在 `agents/subagents/README.md`。主会话在 Fable 上时照旧别用 `fork`。这个变量是忘了写时的兜底，不是替代。
-- **Mirasim 的 claude 启动命令是 reclaude 的桌面机例外**（决定 0092、0112）：不是 Linux、且 `~/.mirasim/setting.json` 的 claude 启动命令文件名是 `reclaude`（或还没换掉的旧启动器 `mirasim-reclaude`、`reclaude-mirasim`），不写这一项、已有的不论值是什么都删掉（`--check` 见到还在报漂移）——Mirasim 见到 env 里有改模型的键会判 claude 被拦截、不给跟随全局的会话注入平台网关（机制见 `docs/reclaude-in-mirasim.md` 第 1 节）。这类机器的子代理默认模型在 Mirasim 设置里管。读不成那份设置就按不是这类机器照写，报告里说没查成。
+- **装了 mirasim-reclaude 启动器的桌面机例外**（决定 0092）：不是 Linux、且 `~/.mirasim/setting.json` 的 claude 启动命令是启动器的，不写这一项、已有的不论值是什么都删掉（`--check` 见到还在报漂移）——Mirasim 见到 env 里有改模型的键会判 claude 被拦截、不给跟随全局的会话注入平台网关（机制见 `docs/reclaude-in-mirasim.md` 第 1 节）。这类机器的子代理默认模型在 Mirasim 设置里管。读不成那份设置就按不是这类机器照写，报告里说没查成。
 - **同步工具怎么写**：只写 `env` 里这一项、每次覆盖（同 `defaultMode`：机器上改成别的，哪怕也是 Opus 或 Sonnet，也报漂移、改回仓里的；要换先改仓里）；`env` 里别的变量（代理这些）一个不碰；机器上的 `env` 不是对象就整份不动、报没做成。`--user`（法国装机）跟权限一起整段不写。
 - **源文件拒收**（报没查成 / 没做成，一台机器都不写，不替它补上）：没写 `env` 或这一项；值不是 Opus 或 Sonnet（只认 `opus`、`sonnet` 或 `claude-opus-…`、`claude-sonnet-…` 这样的 id，可带 `[1m]`；Fable、Mythos、Haiku（含 `claude-haiku-5-5`：派活时能显式用，不能当默认）、`inherit`、`best`、`opusplan` 都不认）；`env` 里多写了同步工具没登记的变量（`env` 会推给每一台机器，要加新变量，先在 `packages/agents-sync/src/permissions.ts` 的 `ENV_KEYS` 里登记它的校验）。
 - **钉住它的测试**：`agents/test/rules/subagent-model.rules.test.ts`（默认值改成 Fable、Haiku（含 5.5）、`inherit` 或删掉都红；自己判、不借同步工具的校验，那边哪天被放宽了这条照样红）；同步工具这边的用例在 `packages/agents-sync/test/permissions.test.ts`。

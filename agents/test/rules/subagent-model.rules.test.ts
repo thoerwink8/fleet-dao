@@ -1,7 +1,7 @@
 // 钉住子代理选模型的设置：兜底默认值只许 Opus 或 Sonnet、子代理和工人不用 Fable，三个角色的模型钉不被环境变量压掉。
 // 改标准：改这个文件要创始人同意（packages/conventions/standard-paths.json 的 agents/test/rules/）。
-// 只钉设置、不钉文字：agents/config/claude-permissions.json 的 env 由同步工具写进 ~/.claude/settings.json——除了 Mirasim 的 claude 启动命令是 reclaude
-// （或还没换掉的旧启动器）的桌面机（决定 0092、0112：那里不写、已有的删掉，Mirasim 见到这个键会误判拦截；这个例外的用例在 packages/agents-sync/test/permissions.test.ts）。
+// 只钉设置、不钉文字：agents/config/claude-permissions.json 的 env 由同步工具写进 ~/.claude/settings.json——除了装了 mirasim-reclaude
+// 启动器的桌面机（决定 0092：那里不写、已有的删掉，Mirasim 见到这个键会误判拦截；这个例外的用例在 packages/agents-sync/test/permissions.test.ts）。
 // 源文件里的值照旧只许 Opus 或 Sonnet，别的机器照旧写。
 // - CLAUDE_CODE_SUBAGENT_MODEL（没写类型、自定义又没写模型的子代理的兜底）只许 Opus 或 Sonnet：兜底落到 Haiku，写代码的活就悄悄
 //   跑在小模型上；不写就跟主会话，主会话可能是 Fable。这里自己判、不借同步工具的校验（permissions.ts 的 OPUS_OR_SONNET），

@@ -19,7 +19,7 @@ export const NOW_USAGE = `pnpm agents:sync —— 现在就把这台机器同步
   pnpm agents:sync --check     预检：不取远端、不切源、不更新目标配置，只报这台和仓里（上次取到的主线）差在哪；
                                 封装仍会临时创建并释放源锁 ~/.fleet-dao/origin-main.lock，整条命令不是零写入
   pnpm agents:sync --offline   不取远端（取不到时用），按本机上次取到的 origin/main 同步
-  pnpm agents:sync --no-maintenance  仍同步全部目标，但本次不运行本机会话 refresh；不是只同步钩子
+  pnpm agents:sync --no-maintenance  仍同步全部目标，但本次不运行 Mirasim 迁移、本机会话 refresh、reclaude 后台健康维护；不是只同步钩子
   pnpm agents:sync --seed <目录>   拿这个 fleet-dao 检出当种子（第一次建专用检出、或它坏了要重建时用；
                                 默认：~/.fleet-dao/synced.json 记的那个检出，再没有就是本脚本所在的检出）
 

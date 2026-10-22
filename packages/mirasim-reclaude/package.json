@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/mirasim-reclaude",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Mirasim 自有/平台的回合选路启动器和安全迁移入口",
+  "dependencies": {
+    "@fleet-dao/adapters": "workspace:*"
+  }
+}

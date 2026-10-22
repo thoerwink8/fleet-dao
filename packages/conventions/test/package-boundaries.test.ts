@@ -1,6 +1,6 @@
 // 包边界钉子（#901 重构方案第 1、4 节）：两件事一份名单。
 // ① 零安装区：这些地方在没有 node_modules 的环境里跑（CI 的 changes/check job 在 pnpm install 之前就 node packages/conventions/src/bin/*.ts、
-//    hygiene 零依赖、agents-sync 跑在不装依赖的专用检出、adapters 的 bridge.ts 被另一个系统用户的 node 当单文件脚本跑），
+//    hygiene 零依赖、agents-sync 和 mirasim-reclaude 跑在不装依赖的专用检出、adapters 的 bridge.ts 被另一个系统用户的 node 当单文件脚本跑），
 //    里面写 `import '@fleet-dao/…'` 会直接找不到包。bridge.ts 更严：只许 node: 内置。
 // ② 跨包相对路径：src 里每一处指向别的包目录的相对 import / new URL，都要在名单里登记（写明理由），并且这个包在 package.json 里声明了对那个包的依赖
 //    ——CI 选测靠 package.json 的依赖算「改了谁、要重测谁」（packages/conventions/src/ci-plan.ts 的 readGraph），声明丢了就漏测。
@@ -14,7 +14,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const SCOPE = '@fleet-dao/';
 
 /** 零安装区：这些包的 src 里不许有包名 import。 */
-const ZONE_PACKAGES = ['conventions', 'hygiene', 'agents-sync'] as const;
+const ZONE_PACKAGES = ['conventions', 'hygiene', 'agents-sync', 'mirasim-reclaude'] as const;
 /** 单文件脚本：只许 import node: 内置。 */
 const SINGLE_FILE_SCRIPTS = ['packages/adapters/src/mirasim/bridge.ts'] as const;
 

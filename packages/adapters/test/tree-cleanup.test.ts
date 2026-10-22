@@ -331,6 +331,11 @@ describe('tree-usage 读不出 idle/busy 时带有界的原因类别（#3557）'
       { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ scanned: secret, failed: 1.5 }) },
       { reason: 'incomplete' },
     ],
+    [
+      '扫描计数为负数',
+      { FLEET_FAKE_SCOPE_USAGE_STDOUT: usage({ scanned: -1, failed: -2 }) },
+      { reason: 'incomplete' },
+    ],
   ])('%s：unknown 带原因，不冒充 idle/busy', async (_name, env, expected) => {
     Object.assign(process.env, env);
     const reading = await readTreeUsageDetail(place, options);

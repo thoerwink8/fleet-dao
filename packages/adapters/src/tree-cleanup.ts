@@ -210,7 +210,7 @@ export async function readTreeUsage(
 }
 
 function count(key: 'scanned' | 'failed', value: unknown): Partial<TreeUsageReading> {
-  return Number.isSafeInteger(value) ? { [key]: value as number } : {};
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? { [key]: value as number } : {};
 }
 
 /** 同 readTreeUsage；答不出 idle/busy 时带上有界的原因类别。能从原回执确定的才确定，缺证仍是 unknown。 */
