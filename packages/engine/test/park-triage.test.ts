@@ -2,6 +2,7 @@
 // 假依赖测任务本身：选哪些单、护栏（每次停下一次、每天上限、开关、没配模型报警）、白名单放行/拒绝、诊断文字带进提醒；
 // 真装配的开关、操作记录名下在 real/park-triage.test.ts。
 
+import { offDiffHoldOf } from '@fleet-dao/conventions';
 import type { AcceptanceDutyRow, CommanderAcceptanceTask } from '@fleet-dao/db';
 import { describe, expect, it, vi } from 'vitest';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
@@ -1365,6 +1366,58 @@ describe('裁决：引擎白名单核过才执行', () => {
     await triageParkedTasks(r.deps);
     expect(r.redone).toEqual([WF]);
     expect(r.sent).toHaveLength(0);
+  });
+
+  it('轮数用尽·重做遇到诊断型验收条的单（#3602）：不叫停、不另起，留言并贴「本机做」交回本机；普通单照常重做', async () => {
+    const DIAGNOSTIC = [
+      '- diff与测试输出能核实原场景卡在哪个COMMIT/等待/收尾边界；新增失败诊断只记录合成数据、阶段与必要资源读数，成功静默，缺采样明确unknown。不能把teardown错误直接当根因。',
+      '- 原完整256条样本、固定字节峰值、真实事务/崩溃边界和15000ms限制保持，不能加重试、跳过或rerun碰绿；定位到原因时增加能击中原因的回归并修对应实现。',
+    ];
+    const handed: { issue: number; key: string; comment: string }[] = [];
+    const wired = (items: string[]) => ({
+      offDiffHold: {
+        check: async () => offDiffHoldOf(items, 'commander.redo'),
+        handBack: async (_repo: IntakeRepo, issue: number, hold: { key: string; comment: string }) => {
+          handed.push({ issue, key: hold.key, comment: hold.comment });
+        },
+      },
+    });
+    const held = rig({ answer: verdict('redo'), over: wired(DIAGNOSTIC) });
+    const out = await triageParkedTasks(held.deps);
+    expect(held.redone).toEqual([]);
+    expect(held.sent).toHaveLength(0);
+    expect(held.abandoned).toHaveLength(0);
+    expect(out.acted).toEqual([]);
+    expect(out.left).toEqual([expect.objectContaining({ why: expect.stringContaining('交回本机') })]);
+    expect(handed).toHaveLength(1);
+    expect(handed[0]?.issue).toBe(ROW.issueNumber);
+    expect(handed[0]?.comment).toContain('核实原场景卡在哪个COMMIT');
+
+    const plain = rig({
+      answer: verdict('redo'),
+      over: wired(['- 新增 packages/engine/test/foo.test.ts，断言 bar 返回 3。']),
+    });
+    await triageParkedTasks(plain.deps);
+    expect(plain.redone).toEqual([WF]);
+    expect(handed).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】判不了验收条（读库失败）：不重做，记失败，不当成没命中', async () => {
+    const r = rig({
+      answer: verdict('redo'),
+      over: {
+        offDiffHold: {
+          check: async () => {
+            throw new Error('库连不上');
+          },
+          handBack: async () => {},
+        },
+      },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(r.redone).toEqual([]);
+    expect(out.acted).toEqual([]);
+    expect(r.acts.at(-1)).toMatchObject({ action: 'redo', ok: false });
   });
 
   it('额度超预算·有进展：放行继续并把预算放宽一档', async () => {

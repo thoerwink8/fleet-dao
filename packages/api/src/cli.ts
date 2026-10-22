@@ -96,6 +96,7 @@ import {
   parseHistoricalAudit,
   resolveHistoricalAudit,
 } from './historical-audit-cli.ts';
+import { type LocalHoldPort, openLocalHold } from './local-hold.ts';
 import {
   NOTIFY_USAGE,
   NotifyCliError,
@@ -1087,6 +1088,8 @@ export interface CliDeps {
   newToken?: () => string;
   /** 任务工作流的信号和重做（task 命令用）。不给就是真的：懒连 Temporal，重做用 temporal.ts 的 taskRedo。 */
   openTaskControl?: (env: CliEnv) => Promise<OpenedTaskControl>;
+  /** 「继续」「重做」遇到诊断型验收条的单时交回本机（留言 + 贴「本机做」，task 命令用，#3602）。不给就是真的：懒连库和机器人凭据，命中了才连。 */
+  openLocalHold?: (url: string) => Promise<{ hold: LocalHoldPort; close(): Promise<void> }>;
   /** 仓档案的读写（project 命令用）。不给就是真的：连库，用 db 的 findRepoProfile、setRepoProfile。 */
   openProject?: (url: string) => Promise<{ port: ProjectPort; close(): Promise<void> }>;
   /** 两个机器人的安装范围（project installations 用，只列）。不给就是真的：读机器人凭据，和后端导入列表同一个 listInstallationRepositories。 */
@@ -1773,6 +1776,15 @@ async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<n
         workflows: control.workflows,
         taskRedo: control.taskRedo,
         pulls: pulls?.source,
+        // 命中诊断型验收条才连 GitHub（懒连，连不上由 holdOffDiff 翻成拒绝原因）
+        localHold: async (input) => {
+          const opened = await (deps.openLocalHold ?? openLocalHold)(url);
+          try {
+            await opened.hold(input);
+          } finally {
+            await opened.close().catch(() => undefined);
+          }
+        },
         operator: operatorName(deps.env),
       }),
     );
