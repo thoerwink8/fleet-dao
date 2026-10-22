@@ -393,6 +393,31 @@ describe('发给工作流的信号', () => {
     expect(h.signals).toHaveLength(0);
   });
 
+  it('总轮数到顶交还本机（#3603）：不带原因的继续 409 continue_needs_reason、不发信号；带原因的照发，原因随信号给工作流', async () => {
+    const h = harness();
+    const s = await h.login();
+    const task = h.store.data.tasks.find((x) => x.id === IDS.task12);
+    if (!task) throw new Error('样例数据里要有 task12');
+    task.state = 'stalled';
+    task.stalled = {
+      why: '动手 3 轮都没过；动手累计 6 轮仍没合，交还本机',
+      since: '2026-10-22T12:00:00.000Z',
+    };
+    for (const body of [{ action: 'resume' }, { action: 'resume', reason: '   ' }]) {
+      const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
+      expect(res.status).toBe(409);
+      expect(await errorCode(res)).toBe('continue_needs_reason');
+    }
+    expect(h.signals).toHaveLength(0);
+    const ok = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', s, { action: 'resume', reason: 'CI 台修好了，再看一次' }),
+    );
+    expect(ok.status).toBe(200);
+    expect(h.signals.map((x) => x.signal.name)).toEqual(['taskContinue', 'taskRouteWake']);
+    expect(h.signals[0]?.signal).toMatchObject({ name: 'taskContinue', note: 'CI 台修好了，再看一次' });
+  });
+
   it('【故意造出的失败】已经暂停着的单再点暂停：409 already_paused，不重复发信号；继续照常发', async () => {
     const h = harness();
     const s = await h.login();

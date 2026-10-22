@@ -170,6 +170,7 @@ export {
 } from './merge-gates.ts';
 export {
   describeOffDiff,
+  isDiagnosticTitle,
   OFF_DIFF_REWRITE,
   type OffDiffHold,
   type OffDiffHoldAction,

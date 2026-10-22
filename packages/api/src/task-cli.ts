@@ -465,7 +465,8 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
 
   const signals: TaskSignal[] =
     args.action === 'continue'
-      ? continueSignals(deps.operator)
+      ? // --note 必填，随「继续」交给工作流：总轮数到顶交还本机的停下（#3603）只认带原因的继续
+        continueSignals(deps.operator, args.note)
       : [{ name: TASK_SIGNAL_NAMES.abandon, by: deps.operator, reason: args.note }];
   try {
     for (const signal of signals) await deps.workflows.signal(workflowId, signal);

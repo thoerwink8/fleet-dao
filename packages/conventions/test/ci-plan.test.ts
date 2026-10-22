@@ -29,6 +29,7 @@ import {
   e2eRuns,
   e2eSpecsFor,
   fallbackUnits,
+  NON_BLOCKING_JOBS,
   PATH_RULES,
   type PackageGraph,
   PLANNED_JOBS,
@@ -63,6 +64,8 @@ const TIMINGS = parseTimings(readFileSync(join(ROOT, TIMINGS_FILE), 'utf8'));
 const REPO = fsRepo(ROOT);
 const ALL_TESTS = listTestFiles(REPO);
 if (typeof ALL_TESTS === 'string') throw new Error(ALL_TESTS);
+/** 装进必过 test 台的全部测试：全部测试文件去掉重型 / 不确定测试（它们在独立的 heavy job，#3597）。 */
+const BOXED_TESTS = ALL_TESTS.filter((f) => !isHeavy(f));
 if (typeof TIMINGS === 'string') throw new Error(TIMINGS);
 const inputs = { all: ALL_TESTS, timings: TIMINGS, read: (rel: string) => REPO.read(rel) };
 /** 装箱之后的计划（和 changes job 的入口同一条路：planCi → assignTests）。 */
@@ -738,7 +741,7 @@ describe('汇总（必过检查 check）：一律全套（决定 0101），该�
   it('CI 的计划就是全套：全部测试、web、e2e all（两种屏宽）、deploy all、biome、整棵树的 tsc', () => {
     expect(plan).toMatchObject({ full: true, web: true, e2e: 'all', deploy: 'all', biome: true, tsc: 'all' });
     const files = plan.tests.flatMap((b) => b.files).sort();
-    expect(files).toEqual([...ALL_TESTS].sort());
+    expect(files).toEqual([...BOXED_TESTS].sort());
     expect(planOutputs(plan)).toMatchObject({ web: 'true', e2e: 'all', deploy: 'all' });
   });
 
@@ -876,23 +879,19 @@ describe('汇总（必过检查 check）：一律全套（决定 0101），该�
     }
   });
 
-  /** 重负载多进程文件和别的文件同台（#3469）：会把同台 5 秒用例饿超时，汇总要红并点名。 */
-  it('【故意造出的失败】重负载多进程文件和别的测试同台：不过', () => {
+  /** 重型 / 不确定测试进了必过的 test 台（#3597）：它们该在独立的 heavy job 里，汇总要红并点名。 */
+  it('【故意造出的失败】重型 / 不确定测试进了必过的测试台：不过', () => {
     const heavy = [...HEAVY_FILES][0] as string;
-    const others = plan.tests.flatMap((b) => b.files).filter((f) => !isHeavy(f));
+    const others = plan.tests.flatMap((b) => b.files);
     const bad: CiPlan = {
       ...plan,
       tests: [{ label: '1/1', files: [heavy, others[0] as string], estMs: 1, pg: false, temporal: false }],
     };
     const v = ciVerdict(needs({}, bad));
     expect(v.ok).toBe(false);
-    expect(v.lines.join('\n')).toContain('重负载多进程文件和别的测试同台');
-    // 独占一台就过（真仓装出来的台就是这样）
-    const alone: CiPlan = {
-      ...plan,
-      tests: [{ label: '1/1', files: [heavy], estMs: 1, pg: false, temporal: false }],
-    };
-    expect(ciVerdict(needs({}, alone)).lines.join('\n')).not.toContain('重负载多进程文件');
+    expect(v.lines.join('\n')).toContain('重型 / 不确定测试进了必过的测试台');
+    // 真仓装出来的台里一个都没有
+    expect(plan.tests.flatMap((b) => b.files).filter(isHeavy)).toEqual([]);
   });
 });
 
@@ -918,7 +917,7 @@ describe('入口', { timeout: 0 }, () => {
         expect(text).toContain(`${line}\n`);
       const tests = /^tests=(.*)$/m.exec(text)?.[1] ?? '[]';
       const files = (JSON.parse(tests) as TestBox[]).flatMap((b) => b.files).sort();
-      expect(files).toEqual([...ALL_TESTS].sort());
+      expect(files).toEqual([...BOXED_TESTS].sort());
     });
   }
 
@@ -1335,6 +1334,8 @@ describe('ci.yml 和这里对得上', () => {
     expect(check).toContain('if: always()');
     for (const j of [...ALWAYS_JOBS, ...PLANNED_JOBS])
       expect(check).toMatch(new RegExp(`needs:[^\\n]*\\b${j}\\b`));
+    // 不挡的 job（heavy）不在 needs 里：它红了不拖红必过检查（#3597）
+    for (const j of NON_BLOCKING_JOBS) expect(check, j).not.toMatch(new RegExp(`needs:[^\\n]*\\b${j}\\b`));
     expect(check).toContain(['CI_NEEDS: $', '{{ toJSON(needs) }}'].join(''));
     expect(check).toContain('node packages/conventions/src/bin/ci-verdict.ts');
   });
@@ -1380,6 +1381,31 @@ describe('ci.yml 和这里对得上', () => {
     expect(lint).not.toContain('steps.plan');
     expect(lint).toContain('start biome pnpm exec biome check .');
     expect(lint).toContain('start tsc pnpm exec tsc -b');
+  });
+
+  /**
+   * 重型 / 不确定测试的独立 job（#3597）：每个 PR 和主线都跑（没有 if、不 needs changes：不看改了什么、不复用同树）、串行、可重试、
+   * 跑的就是 HEAVY_TESTS 那一份并核对「实际跑的 == 名单」；没有任何 job 把它放进 needs（只有 check 汇总 job 有 needs 清单，上一条钉着）。
+   * 不自动开单、不更新汇总单：ci.yml 里没有 gh issue / 开单的命令。
+   */
+  it('heavy 是独立的 job：每个 PR 和主线都跑、串行、可重试、核对跑的 == 名单；不在 check 的 needs 里、不开单', () => {
+    const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
+    for (const j of NON_BLOCKING_JOBS) expect(ids, j).toContain(j);
+    expect([...NON_BLOCKING_JOBS]).toEqual(['heavy']);
+    const heavy = job('heavy');
+    expect(heavy).not.toMatch(/^ {4}needs:/m);
+    expect(heavy).not.toMatch(/^ {4}if:/m);
+    expect(heavy).toContain('node packages/conventions/src/bin/ci-heavy.ts');
+    expect(heavy).toContain('--no-file-parallelism');
+    expect(heavy).toContain('--retry=2');
+    expect(heavy).toContain('ci-box.ts verify');
+    expect(heavy).not.toMatch(/gh issue|gh api|issues:/);
+    // 触发它的事件就是 ci.yml 的事件（PR、主线推送、每夜、手动），这个 job 自己不挑
+    for (const e of ['pull_request:', 'push:', 'schedule:', 'workflow_dispatch:'])
+      expect(yml).toContain(`  ${e}`);
+    // 别的 job 的 needs 里都没有它
+    for (const id of ids.filter((i) => i !== 'heavy'))
+      expect(job(id), id).not.toMatch(/needs:[^\n]*\bheavy\b/);
   });
 
   it('没有 job 用仓库密钥；lint 里卫生检查一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到仓根只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
@@ -1460,8 +1486,11 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     // 8 台封顶（TARGET_BOX_MS 50 秒、MAX_BOXES 8）：全量的耗时合计远大于 8×50 秒 → 8 台
     expect(p.tests.length).toBe(8);
     const all = boxFiles(p).flat();
-    expect(all.length).toBe(ALL_TESTS.length);
-    expect([...all].sort()).toEqual([...ALL_TESTS].sort());
+    expect(all.length).toBe(BOXED_TESTS.length);
+    expect([...all].sort()).toEqual([...BOXED_TESTS].sort());
+    // 重型 / 不确定测试一个都不在必过的台里，在独立的 heavy job（#3597）
+    expect(all.filter(isHeavy)).toEqual([]);
+    expect(BOXED_TESTS.length).toBe(ALL_TESTS.length - HEAVY_FILES.size);
     // 名字：第几台/共几台，pg 台带「· pg」，装了 Temporal 的带「· temporal」（具体哪台随耗时表变，不钉死）
     expect(labels(p).map((l, i) => l.startsWith(`${i + 1}/8`))).toEqual(Array(8).fill(true));
     expect(labels(p).filter((l) => l.includes('· pg')).length).toBeGreaterThanOrEqual(1);
@@ -1542,7 +1571,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     const p = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
     const lost = { ...p, tests: p.tests.slice(0, 3) };
     const all = boxFiles(lost).flat();
-    expect([...all].sort()).not.toEqual([...ALL_TESTS].sort());
+    expect([...all].sort()).not.toEqual([...BOXED_TESTS].sort());
     const first = p.tests[0] as TestBox;
     const dup: CiPlan = { ...p, tests: [first, { ...first, label: '重了' }] };
     expect(

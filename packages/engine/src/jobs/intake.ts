@@ -62,6 +62,7 @@ import {
   GROOM_PENDING_LABEL,
   GROOMED_LABEL,
   HUMAN_DECISION_LABEL,
+  isDiagnosticTitle,
   LOCAL_LABEL,
   loadStandardPaths,
   type MdDoc,
@@ -210,6 +211,7 @@ export type IntakeSkipReason =
   | 'not_groomed'
   | 'touches_workflows'
   | 'touches_standard'
+  | 'diagnostic_title'
   | 'brief_incomplete'
   | 'acceptance_off_diff'
   | 'too_large'
@@ -450,6 +452,15 @@ export function standardPathComment(path: string, rule: StandardPath, listFile?:
     '改标准要创始人同意：PR 正文里得有他的原话，引擎开的 PR 没有，合并闸会一直判红，拉了只会做完卡在合并，先没派。',
     '',
     `已给这张单贴了「${LOCAL_LABEL}」，留给本机做（\`pnpm pr:open --founder-quote\` 带上原话），引擎以后不再拉它。`,
+  ].join('\n');
+}
+
+/** 诊断型单（标题判的）引擎不拉、留给本机时留在单子上的话。 */
+export function diagnosticTitleComment(): string {
+  return [
+    '引擎想拉起这张单，可标题是诊断型的（「定位……在完整 CI 的原 N 秒超时」一类）：要核实的是某一次 CI 运行里实际卡在哪，证据在那次运行的日志里，冷验收只看 diff 和测试输出，验不了，先没派。',
+    '',
+    `已给这张单贴了「${LOCAL_LABEL}」，留给本机做，引擎以后不再拉它。`,
   ].join('\n');
 }
 
@@ -1001,6 +1012,17 @@ async function admitIssue(
       why: `正文要动改标准的路径 ${standard.path}，引擎的 PR 过不了合并闸`,
       key: 'intake-touches-standard',
       comment: standardPathComment(standard.path, standard.rule, ctx.listFile),
+    });
+    return null;
+  }
+  // 诊断型单（标题是「定位……在完整 CI 的原 N 秒超时」一类，#3597）：要的是某一次 CI 运行里实际卡在哪，证据在那次运行的日志里，
+  // 冷验收看不到，派给引擎只会白跑几轮再被拒（#3414、#3450、#3413）。验收条那一头是 off-diff 的诊断型判据（#3595），这里补标题。判成本机做
+  if (isDiagnosticTitle(issue.title)) {
+    await holdForLocal(deps, t, repo, issue, {
+      reason: 'diagnostic_title',
+      why: `标题是诊断型（${issue.title.slice(0, 40)}）：要看某次 CI 运行里实际卡在哪，引擎的冷验收看不到`,
+      key: 'intake-diagnostic-title',
+      comment: diagnosticTitleComment(),
     });
     return null;
   }

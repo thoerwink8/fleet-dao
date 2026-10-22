@@ -15,7 +15,8 @@
 // 2. **换家族**：docs/decisions/0006-discussion-model-order.md 钉的顺序 gpt → grok → claude → deepseek → kimi；
 //    modelFamiliesAvoid（写过这张单的所有族）要全部跳过。别家都挑不出 → 两家都验 → 只派得出一家就「同族兜底验」
 //    （#1731：用挑出来的那一家起一次全新的冷会话，结论照常算）→ 一家都派不出就回等待。不许拿默认模型顶上、不许假装 pass。
-// 3. **只有三种能挡**：没做到验收条 / 有证据弄坏原有功能 / 安全或丢数据（specs/555 第 3 条）。
+// 3. **只有一种能挡**（决定 0094，#3604）：某条验收条在 diff 或测试输出里看得到没做到。弄坏原有功能、安全、边界之类
+//    验收条以外的意见进 suggestions，不挡；看不到 diff 外证据的走 outOfScope（handedOver）转人。
 //    模型提到的风格意见不算挡，从 problems 里滤掉、但不允许反过来把「算挡的」藏起来。
 //
 // 默认 1 轮、最多 2 轮（specs/555 第 3 条）：本模块只跑调用方指定的那一轮（input.round）；要不要起
@@ -398,8 +399,14 @@ export interface VerifierInvokeDeps {
   fetchNamedFiles?: FetchNamedFiles;
 }
 
-/** 三种能挡的问题前缀（specs/555 第 3 条）。problems 里每条必须以这三种之一开头；风格意见不许进。 */
+/**
+ * 问题前缀。#3604 起**只有第一种**（没做到验收条：某条验收条在 diff 或测试输出里看得到没做到）算挡；
+ * 后两种（弄坏原有功能、安全或丢数据）仍认得这个开头，但属验收条以外的意见，进建议、不挡合并，随结论带进 PR 评论。
+ */
 export const BLOCKER_KINDS = ['没做到验收条', '弄坏了原有功能', '安全或丢数据'] as const;
+
+/** 唯一能挡合并的问题前缀（决定 0094，#3604）。 */
+export const BLOCKING_KIND = BLOCKER_KINDS[0];
 
 /** 提示词里这一句：验收会话可以读 PR 头的完整检出，不只好看 diff。 */
 export const VERIFY_MAY_READ_HEAD = '你可以在 PR 头的完整检出里读文件';
@@ -603,9 +610,9 @@ function renderPrompt(
     `分支：\`${input.branch}\`  基线：\`${input.baseSha}\``,
     `${VERIFY_MAY_READ_HEAD}。能看的材料：${materials.join('、')}。当前目录是 PR 头的完整检出时，直接读文件；某个文件读不到，只根据下面这些材料判，不要因为读不到就当成没做到。`,
     '你只做一件事：逐条判「怎么算做完」在这些材料里成不成立。',
-    `- 材料里看得出做到了：成立。材料里看得出没做到，或这一条本该在 diff 里看得见却找不到：写进「## 问题」（${BLOCKER_KINDS[0]}），不要凭想象放行。这一句只管 diff 能看见的内容，不包括只要求测试、检查、构建或类型检查通过的条目。`,
-    '- 这一条要 diff 以外的证据才判得了（截图、页面现场、线上或法国的数据、审计结果、人手操作的结果），或只靠标了「跳过」的文件才判得了：',
-    '  不算没做到，写进「## 不归我验」，引擎转给人验。',
+    `- 材料里看得出做到了：成立。只有「某条验收条在 diff 或测试输出里明明看得到没做到」才写进「## 问题」（${BLOCKING_KIND}）。这一句只管 diff 能看见的内容（测试输出里明确写出的失败也算），不包括只要求测试、检查、构建或类型检查通过的条目。`,
+    '- 这一条要 diff 以外的证据才判得了（截图、页面现场、线上或法国的数据、审计结果、人手操作的结果、没给你看的运行结果），或只靠标了「跳过」的文件才判得了：',
+    '  不算没做到，不许判不过，写进「## 不归我验」，引擎转给人验。你只是推测、担心、觉得边界没覆盖到的，写进「## 建议」，同样不挡。',
     '- 验收条原文写明「只算建议」「不挡」「可选」的：不挡，有意见写进「## 建议」。',
     '- PR 正文是写代码的会话自己写的说明，只当线索、不当做到了的证据；验收条没要求 PR 正文写什么，就不许拿「PR 正文没写」挡。',
     '- 「怎么算做完」里只要求「某某测试/检查/构建/类型检查通过」的条目，一律由合并闸的 CI 保证，你不核对、不因测试输出里没出现它判不过；只有测试输出里明确出现失败时才作为问题写出。输出里写「没跑」「跳过」、或没有这一条的输出，不算失败，不写进问题。',
@@ -631,12 +638,11 @@ function renderPrompt(
     diff.diffText,
     '```',
     '',
-    '## 判法（只有三种能挡）',
-    '**只有三种**能写进「## 问题」：',
-    `- ${BLOCKER_KINDS[0]}：「怎么算做完」的某一条，单子要 A、材料里是 B（或没做）。只要求测试、检查、构建或类型检查通过的不在此列：不因测试输出里没出现它写，只有测试输出里明确出现失败才写`,
-    `- ${BLOCKER_KINDS[1]}：diff 里有证据显示这次改动弄坏了原有功能`,
-    `- ${BLOCKER_KINDS[2]}：diff 里有证据显示安全或丢数据的问题`,
-    '风格、命名、设计好不好、「最好再加个……」**不许写**进「## 问题」，放「## 建议」，不影响结论。',
+    '## 判法（只有一种能挡）',
+    '**只有一种**能写进「## 问题」：',
+    `- ${BLOCKING_KIND}：「怎么算做完」的某一条，单子要 A、diff 或测试输出里看得到是 B（或没做）。只要求测试、检查、构建或类型检查通过的不在此列：不因测试输出里没出现它写，只有测试输出里明确出现失败才写`,
+    '验收条以外的一切（担心弄坏原有功能、安全或丢数据的猜测、并发或精确性的边界、风格、命名、设计好不好、「最好再加个……」）**不许写**进「## 问题」，放「## 建议」：建议会原样带进 PR 评论，但不影响结论、不挡合并。',
+    `确有 diff 里的实证、发现这次改动弄坏了原有功能或有安全、丢数据问题的，也写进「## 建议」，开头用「${BLOCKER_KINDS[1]}」或「${BLOCKER_KINDS[2]}」并带证据位置。`,
     '每条问题都要带验收条编号，写成「第 N 条」（N 是上面「怎么算做完」的序号，从 1 起）。没有编号算格式错。',
     ...(recheck
       ? [
@@ -646,7 +652,7 @@ function renderPrompt(
       : []),
     '',
     '## 输出形状',
-    `先写一段「## 问题」（每行一条，以 \`- ${BLOCKER_KINDS[0]}：第 N 条：\`、\`- ${BLOCKER_KINDS[1]}：第 N 条：\` 或 \`- ${BLOCKER_KINDS[2]}：第 N 条：\` 开头，N 是「怎么算做完」的序号；没有编号算格式错；没有问题就留空）；`,
+    `先写一段「## 问题」（每行一条，以 \`- ${BLOCKING_KIND}：第 N 条：\` 开头，N 是「怎么算做完」的序号；没有编号算格式错；没有问题就留空）；`,
     '再写「## 不归我验」（每行一条，`- 第 N 条：要什么证据、为什么 diff 里看不出`；没有就留空）；',
     '可以写「## 建议」段（不挡，不影响结论）；',
     '**最后一行写** `verdict: pass` 或 `verdict: fail`（不许别的话、不许两个都写）。只有「## 问题」里有条目才写 fail；',
@@ -714,8 +720,8 @@ function parseStdout(stdout: string): {
   const nonEmpty = lines.map((l) => l.trim()).filter((l) => l !== '');
   const verdictLine = nonEmpty.at(-1) ?? '';
   const raw = sectionItems(lines, /^##\s+问题/);
-  const keep = raw.filter((p) => BLOCKER_KINDS.some((k) => p.startsWith(k)));
-  const dropped = raw.filter((p) => !BLOCKER_KINDS.some((k) => p.startsWith(k)));
+  const keep = raw.filter((p) => p.startsWith(BLOCKING_KIND));
+  const dropped = raw.filter((p) => !p.startsWith(BLOCKING_KIND));
   return {
     verdictLine,
     problems: keep,
@@ -895,25 +901,25 @@ function judgeVerifierSession(
   const notes: string[] = [who];
   if (stdoutPieces.droppedStyleNotes > 0) {
     notes.push(
-      `模型另外在「## 问题」里写了 ${stdoutPieces.droppedStyleNotes} 条不属于三种能挡的意见，按 specs/555 不许算挡，已挪进建议`,
+      `模型另外在「## 问题」里写了 ${stdoutPieces.droppedStyleNotes} 条不是「${BLOCKING_KIND}」的意见，按决定 0094 不挡合并，已挪进建议`,
     );
   }
   const { outOfScope, suggestions } = stdoutPieces;
   if (outOfScope.length > 0) notes.push(`不归我验 ${outOfScope.length} 条（要 diff 以外的证据，转给人）`);
-  if (word === 'fail' && stdoutPieces.problems.length === 0 && outOfScope.length > 0) {
-    // 只写了「不归我验」却给了 fail：那几条不算没做到（决定 0093），按过算，那几条转给人
-    notes.push('模型写了 verdict: fail，但只有「不归我验」、没有算挡的问题：按过算');
+  if (
+    word === 'fail' &&
+    stdoutPieces.problems.length === 0 &&
+    (outOfScope.length > 0 || stdoutPieces.droppedStyleNotes > 0)
+  ) {
+    // 只写了「不归我验」或验收条以外的意见却给了 fail：不算没做到（决定 0093 / 0094），按过算；不归我验的转给人，意见进建议
+    notes.push('模型写了 verdict: fail，但没有「没做到验收条」的问题（只有不归我验或建议）：按过算');
     return { kind: 'verdict', passed: true, problems: [], outOfScope, suggestions, notes, session };
   }
   if (word === 'fail' && stdoutPieces.problems.length === 0) {
     // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——算这一条没验成，换下一个候选
     return {
       kind: 'miss',
-      why: `结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
-        stdoutPieces.droppedStyleNotes > 0
-          ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
-          : '它一条都没写'
-      }）`,
+      why: `结论写了 fail，但「## 问题」里没有一条以「${BLOCKING_KIND}」开头的（它一条都没写）`,
     };
   }
   if (word === 'pass' && stdoutPieces.problems.length > 0) {
