@@ -2290,6 +2290,36 @@ describe('本机退回法国队列的单（#3461）：重新派、法国接不�
     expect(h.comments.map((c) => c.key)).toContain(r.notices[0]?.key);
   });
 
+  it('撤「留给本机」的提醒：这一轮贴上「本机做」的和本来就贴着的单号留着，其余的交给撤', async () => {
+    const r = returned();
+    const settled: number[][] = [];
+    const h = harness(
+      {
+        ...r.over,
+        async settleLocalKept({ keep }) {
+          settled.push([...keep].sort((a, b) => a - b));
+        },
+      },
+      { issues: [issue({ body: offDiffBody }), issue({ number: 30, labels: ['需求', '本机做'] })] },
+    );
+    await runIntakeJob(h.deps);
+    expect(settled).toEqual([[12, 30]]);
+  });
+
+  it('撤「留给本机」的提醒没成：这一轮记没查成，别的照做', async () => {
+    const h = harness(
+      {
+        async settleLocalKept() {
+          throw new Error('库连不上');
+        },
+      },
+      { issues: [issue()] },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(run.outcome).toBe('partial');
+    expect(whyOf(h)).toContain('留给本机的提醒没撤成');
+  });
+
   it('没退回过的单验收要 diff 外证据：照旧只留一条改写的话，不贴「本机做」、不通知', async () => {
     const r = returned({ returnedAt: new Date('2026-10-02T05:00:00.000Z'), endedAt: T_END });
     const plain = harness(

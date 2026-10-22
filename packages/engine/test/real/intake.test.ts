@@ -27,7 +27,13 @@ import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@te
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../../src/jobs/dispatch-standing.ts';
 import { INTAKE_JOB, runIntakeJob } from '../../src/jobs/intake.ts';
-import { type IntakeGitHub, intakeJob, reportIntakeProfile, toolchainProbe } from '../../src/real/intake.ts';
+import {
+  type IntakeGitHub,
+  intakeJob,
+  reportIntakeProfile,
+  settleLocalKept,
+  toolchainProbe,
+} from '../../src/real/intake.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -1282,6 +1288,30 @@ describe('reportIntakeProfile · 仓档案没就绪的提醒（#2839）', () => 
   it('一上来就报 null → 不报错，表里没有这一行', async () => {
     await expect(reportIntakeProfile(t.db, repo, null)).resolves.toBeUndefined();
     expect(await alertByKey(t.db, KEY)).toBeNull();
+  });
+});
+
+describe('settleLocalKept · 留给本机的提醒跟着单子走', () => {
+  const repo = { owner: 'acme', name: 'demo' };
+  const key = (n: number, repoName = 'demo') =>
+    `local-kept:acme/${repoName}#${n}:intake-returned-blocked:2026-10-20T16:38:03.775Z`;
+
+  it('单号不在 keep（单关了或标签摘了）的撤掉，在 keep 里的、别的仓的、别的前缀的不动', async () => {
+    for (const dedupeKey of [key(12), key(13), key(12, 'other'), 'intake-profile:acme/demo']) {
+      await upsertAlert(t.db, { dedupeKey, level: 'alert', taskId: null, title: 'x', body: 'y' });
+    }
+    await settleLocalKept(t.db, repo, new Set([13]));
+    expect((await alertByKey(t.db, key(12)))?.resolvedAt).not.toBeNull();
+    expect((await alertByKey(t.db, key(12)))?.body).toContain('已撤：#12');
+    expect((await alertByKey(t.db, key(13)))?.resolvedAt).toBeNull();
+    expect((await alertByKey(t.db, key(12, 'other')))?.resolvedAt).toBeNull();
+    expect((await alertByKey(t.db, 'intake-profile:acme/demo'))?.resolvedAt).toBeNull();
+  });
+
+  it('撤过的再跑一遍不报错', async () => {
+    await upsertAlert(t.db, { dedupeKey: key(12), level: 'alert', taskId: null, title: 'x', body: 'y' });
+    await settleLocalKept(t.db, repo, new Set());
+    await expect(settleLocalKept(t.db, repo, new Set())).resolves.toBeUndefined();
   });
 });
 

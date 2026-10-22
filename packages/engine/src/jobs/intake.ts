@@ -539,6 +539,11 @@ export interface IntakeDeps {
     title: string;
     body: string;
   }): Promise<void>;
+  /**
+   * 撤掉「留给本机」的提醒（notifyLocal 报的那些）：这个仓里开着、贴着「本机做」的单号在 keep 里，其余单号（单关了、或标签摘了）的提醒撤掉。
+   * 写不进照抛：这一轮记没查成，下一轮重来。不给（测试）就不撤。
+   */
+  settleLocalKept?(input: { repo: IntakeRepo; keep: ReadonlySet<number> }): Promise<void>;
   /** 在单子上留言（同一个键只留一条）；以前留过回 created: false。 */
   comment(input: {
     repo: IntakeRepo;
@@ -1252,15 +1257,32 @@ async function prepareRepo(
     t.unchecked.push(...swept.unchecked);
   }
 
+  // 这一轮贴上（或试着贴上）「本机做」的单：贴的那步写不成也算留着，别让下面撤提醒把刚报给本机的话撤了
+  const labelled = new Set(listed.issues.filter((i) => i.labels.includes(LOCAL_LABEL)).map((i) => i.number));
+  const tracked: IntakeDeps = {
+    ...deps,
+    markLocal: (input) => {
+      labelled.add(input.issueNumber);
+      return deps.markLocal(input);
+    },
+  };
   const admitted: Candidate[] = [];
   for (const issue of listed.issues) {
     t.scanned += 1;
     try {
-      const c = await admitIssue(deps, repo, issue, ctx, whitelist, prClaims, t);
+      const c = await admitIssue(tracked, repo, issue, ctx, whitelist, prClaims, t);
       if (c) admitted.push(c);
     } catch (err) {
       // 这张单没处理成（读历史、留言、贴标签出错）：记下，别的单照做
       t.unchecked.push(`${slug}#${issue.number}：${errMessage(err)}`);
+    }
+  }
+  // 「留给本机」的提醒跟着单子走：单关了、或「本机做」摘掉了（要引擎做的那一步），这条提醒的条件就不成立了，撤掉
+  if (deps.settleLocalKept) {
+    try {
+      await deps.settleLocalKept({ repo, keep: labelled });
+    } catch (err) {
+      t.unchecked.push(`${slug}：留给本机的提醒没撤成：${errMessage(err)}`);
     }
   }
   return { repo, admitted, skippedBefore };
