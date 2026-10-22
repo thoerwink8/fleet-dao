@@ -3,6 +3,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   carpoolSubscription,
+  type EstimateWindowSpec,
+  estimateWindows,
   findUsageReport,
   type QuotaErrorCode,
   readAllQuotas,
@@ -11,12 +13,31 @@ import {
   readingsFromPeriodUsage,
   readingsFromRelayFrame,
   readingsFromUsageReport,
+  recordFromDailyTokenFile,
 } from '../../src/quota/index.ts';
 import { blockNetwork, fakeDeps, fixture, fixtureJson } from './helpers.ts';
 
 blockNetwork();
 
 const readAt = '2026-09-24T19:00:00.000Z';
+
+/** 428343 tokens × 0.042 美元/百万 = 今天这窗的估算用量。夹具里的数，测试不另写一份。 */
+const ESTIMATE_DAY_USD = (428343 * 0.042) / 1e6;
+const estimateDay: EstimateWindowSpec = {
+  label: 'day_usd',
+  window: 'period_usd',
+  unit: 'usd',
+  periodHours: 24,
+  anchor: '2026-01-01T00:00:00.000Z',
+  limit: 0.3,
+};
+const estimatePool = {
+  poolId: 'jev',
+  channelId: 'jev',
+  reader: 'estimate' as const,
+  windows: [estimateDay],
+  usage: { type: 'daily-token-files' as const, dir: '/srv/ledger/judge-spend', usdPerMTok: 0.042 },
+};
 
 /** 解析函数抛出的 QuotaReadError 的码和原因；没抛就返回 undefined。 */
 function failure(parse: () => unknown): { code: QuotaErrorCode; message: string } | undefined {
@@ -71,6 +92,36 @@ describe('读取器回包夹具：认得的格式读出数字', () => {
     expect(windows.map((w) => w.label)).toEqual(['5h', '7d', '7d_claude', '7d_fable']);
     expect(windows[0]).toMatchObject({ used: 1140.30619063, limit: 143528 });
   });
+
+  it('estimate：日账夹具 428343 tokens → 今天 0.017990406 美元', async () => {
+    const doc = fixtureJson('estimate-daily-2026-09-24.json');
+    const record = recordFromDailyTokenFile('2026-09-24.json', doc, 0.042, 'jev');
+    expect(record).toMatchObject({
+      inputTokens: 428343,
+      at: '2026-09-24T00:00:00.000Z',
+      costUsd: expect.closeTo(ESTIMATE_DAY_USD, 12),
+    });
+    const { windows } = estimateWindows([estimateDay], [record], { poolId: 'jev', now: new Date(readAt) });
+    expect(windows[0]).toMatchObject({
+      reading: 'estimated',
+      source: 'estimate',
+      used: expect.closeTo(ESTIMATE_DAY_USD, 12),
+      limit: 0.3,
+    });
+    const report = await readAllQuotas(
+      { pools: [estimatePool] },
+      fakeDeps({
+        listDir: async () => ['2026-09-24.json'],
+        readFile: async () => fixture('estimate-daily-2026-09-24.json'),
+      }),
+    );
+    const r = report.results[0];
+    expect(r?.ok && r.windows[0]).toMatchObject({
+      reading: 'estimated',
+      used: expect.closeTo(ESTIMATE_DAY_USD, 12),
+      limit: 0.3,
+    });
+  });
 });
 
 describe('读取器回包夹具：上游改了字段名 → bad_response 带原因，不写 0', () => {
@@ -123,32 +174,22 @@ describe('读取器回包夹具：上游改了字段名 → bad_response 带原�
     expect(f?.message).toContain('认不出');
   });
 
-  it('estimate：日账文件缺 tokens 字段 → bad_response（经读取层，不当 0 用量）', async () => {
+  it('estimate：tokens 改名的夹具 → bad_response 带原因，不写 0（整轮记 unknown）', async () => {
+    const doc = fixtureJson('estimate-daily-renamed.json');
+    const f = failure(() => recordFromDailyTokenFile('2026-09-24.json', doc, 0.042, 'jev'));
+    expect(f).toMatchObject({ code: 'bad_response' });
+    expect(f?.message).toContain('认不出');
+    expect(f?.message).toContain('不当成用了 0');
     const report = await readAllQuotas(
-      {
-        pools: [
-          {
-            poolId: 'jev',
-            channelId: 'jev',
-            reader: 'estimate',
-            windows: [
-              {
-                label: 'day_usd',
-                window: 'period_usd',
-                unit: 'usd',
-                periodHours: 24,
-                anchor: '2026-01-01T00:00:00.000Z',
-                limit: 0.3,
-              },
-            ],
-            usage: { type: 'daily-token-files', dir: '/srv/ledger/judge-spend', usdPerMTok: 0.042 },
-          },
-        ],
-      } as never,
-      fakeDeps({ listDir: async () => ['2026-09-24.json'], readFile: async () => '{"calls":3}' }),
+      { pools: [estimatePool] },
+      fakeDeps({
+        listDir: async () => ['2026-09-24.json'],
+        readFile: async () => fixture('estimate-daily-renamed.json'),
+      }),
     );
     const r = report.results[0];
-    expect(r && !r.ok && r.error.code).toBe('bad_response');
-    expect(r && !r.ok && r.error.message).not.toBe('');
+    expect(r && !r.ok && r.error).toMatchObject({ code: 'bad_response' });
+    expect(r && !r.ok && r.error.message).toContain('认不出');
+    expect(r?.ok).toBe(false);
   });
 });
