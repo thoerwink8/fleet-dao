@@ -126,54 +126,12 @@ describe('看门狗盯法国指挥官', () => {
     expect(r.open.size).toBe(0);
   });
 
-  it('合并超过 30 分钟但验收责任没有认领：用验收专属键报警', async () => {
-    const acceptance: CommanderWatchTask = {
-      taskId: 'task-acceptance',
-      owner: 'acme',
-      name: 'fleet-dao',
-      issueNumber: 3483,
-      title: '验收责任',
-      workflowId: 'wf-acceptance',
-      prNumber: 88,
-      head: 'a'.repeat(40),
-      mergedAt: new Date(NOW.getTime() - (COMMANDER_AFTER_MINUTES + 1) * 60_000),
-      mergeCommit: 'b'.repeat(40),
-      duties: [],
-      kind: 'acceptance',
-      commanderSeen: false,
-      stalledAt: new Date(NOW.getTime() - (COMMANDER_AFTER_MINUTES + 1) * 60_000),
-      retry: null,
-    };
-    const r = rig([acceptance]);
-    const result = await watchCommander(r.deps, NOW);
-    expect(result).toMatchObject({ scanned: 1, found: 1, problems: [] });
+  it('验收责任不再盯（#3630）：以前报的验收专属卡撤掉，不再报新的', async () => {
+    const r = rig([]);
     const key = `${COMMANDER_ALERT_PREFIX}task-acceptance:acceptance:88`;
-    expect(r.open.get(key)?.body).toContain('PR #88');
-    expect(r.open.get(key)?.body).toContain('验收责任');
-  });
-
-  it('验收责任已经认领：撤掉对应看门狗卡', async () => {
-    const acceptance: CommanderWatchTask = {
-      taskId: 'task-acceptance',
-      owner: 'acme',
-      name: 'fleet-dao',
-      issueNumber: 3483,
-      title: '验收责任',
-      workflowId: 'wf-acceptance',
-      prNumber: 88,
-      head: 'a'.repeat(40),
-      mergedAt: new Date(NOW.getTime() - (COMMANDER_AFTER_MINUTES + 1) * 60_000),
-      mergeCommit: 'b'.repeat(40),
-      duties: [],
-      kind: 'acceptance',
-      commanderSeen: true,
-      stalledAt: new Date(NOW.getTime() - (COMMANDER_AFTER_MINUTES + 1) * 60_000),
-      retry: null,
-    };
-    const r = rig([acceptance]);
-    const key = `${COMMANDER_ALERT_PREFIX}task-acceptance:acceptance:88`;
-    r.open.set(key, { title: '旧卡', body: '旧正文', resolvedAt: null, resolvedBy: null });
-    await watchCommander(r.deps, NOW);
+    r.open.set(key, { title: '旧卡', body: 'PR #88 验收责任', resolvedAt: null, resolvedBy: null });
+    expect(await watchCommander(r.deps, NOW)).toMatchObject({ scanned: 0, found: 0, problems: [] });
     expect(r.open.get(key)).toMatchObject({ resolvedBy: 'engine:watchdog' });
+    expect([...r.open.keys()]).toEqual([key]);
   });
 });

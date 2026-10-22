@@ -1,4 +1,3 @@
-import { acceptanceGate } from './acceptance-gate.ts';
 // pnpm issue:close <号>（#241；#654 起证据改了）：一张单做完了，关的时候要留下「凭什么算做完」——
 //   ① 有合并了的 PR 提到它（时间线上的交叉引用，GitHub 自己记的）；② 它下面的子单都关了（母单）；
 //   ③ 关的人写一句 --note（没有 PR 的事：配置、手工操作）。三样都没有就拒关。
@@ -36,7 +35,6 @@ export class CloseUnchecked extends Error {
 
 export interface IssueCloseDeps {
   gh: Gh;
-  acceptance?: typeof acceptanceGate;
   managed?: typeof managedCloseGate;
 }
 
@@ -77,13 +75,12 @@ export async function issueClose(argv: readonly string[], deps: IssueCloseDeps):
     return { outcome: 'already', number: n, issueUrl: issue.url, stateReason: issue.stateReason };
   }
 
+  // 验收责任账不再挡关单（#3630，决定 0113 第二片）：旧行已一次性交回原单，这里只剩受管工作的关单门。
   try {
     await (deps.managed ?? managedCloseGate)(gh, issue.repoUrl, n);
-    const pending = await (deps.acceptance ?? acceptanceGate)(gh, issue.repoUrl, n);
-    if (pending) throw new CloseRefused(pending);
   } catch (e) {
     if (e instanceof CloseRefused) throw e;
-    throw new CloseUnchecked(`最终验收责任没查成，没关：${e instanceof Error ? e.message : String(e)}`);
+    throw new CloseUnchecked(`受管工作没查成，没关：${e instanceof Error ? e.message : String(e)}`);
   }
   const subs = await subIssues(gh, n);
   const openSubs = subs.filter((s) => s.state === 'open').map((s) => s.number);
@@ -233,7 +230,7 @@ function parseArgs(argv: readonly string[]): ParsedCloseArgs {
         note = value.trim();
       } else {
         const m = /^#?([1-9]\d*)$/.exec(value.trim());
-        if (!m || !m[1]) {
+        if (!m?.[1]) {
           throw new CloseRefused(`--superseded-by 要给存在的单号（读到：${value}）。${CLOSE_USAGE}`);
         }
         supersededBy = Number(m[1]);
@@ -242,7 +239,7 @@ function parseArgs(argv: readonly string[]): ParsedCloseArgs {
     }
     if (a.startsWith('-') || number !== undefined) bad();
     const m = /^#?([1-9]\d*)$/.exec(a.trim());
-    if (!m || !m[1]) {
+    if (!m?.[1]) {
       throw new CloseRefused(`参数不对（${args.join(' ')}）。${CLOSE_USAGE}`);
     }
     number = Number(m[1]);

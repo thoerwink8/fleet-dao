@@ -10,7 +10,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 | 装应用、挂路由（驾驶舱 `/auth`、`/api`、`/github`，命令接口 `/agent/v1`；新路由在这里挂） | `src/app.ts` |
 | 地址、端口、密钥（都从环境变量读） | `src/config.ts` |
 | 真实 GitHub 装配；CI 策略读桥 | `github-mirror.ts`；`ci-policy-bridge.ts`、`ci-policy-public.ts`（协议在 shared 的 `ci-policy-bridge.ts`） |
-| 法国上的管理命令 `fleet-api`（用法见 ops 第九节「发布应用（deploy/release.sh）」前后） | `packages/api/bin/`；`historical-audit`、`checkout-history`、`acceptance`、`task correct-merged`、`quote`、`node-key`、`project` 等子命令的逻辑在 `src/*-cli.ts` 与同名模块 |
+| 法国上的管理命令 `fleet-api`（用法见 ops 第九节「发布应用（deploy/release.sh）」前后） | `packages/api/bin/`；`historical-audit`、`checkout-history`、`task correct-merged`、`quote`、`node-key`、`project` 等子命令的逻辑在 `src/*-cli.ts` 与同名模块 |
 | `attention --json` | `runningIdle` 是版本化即时只读结论（完整 `listRunningEngineTasks` + core 唯一 idle 判据），与按推送白名单到点的 `notes` 不能互相替代；读取失败退出 1 |
 
 ## 必须守的不变量
@@ -26,7 +26,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - 看门狗提醒的受控修复（`src/alert-repair.ts`）：动作读时现算，不存；点的时候只收服务端动作编号 + incident + `requestId`，条件变了、已撤、incident 对不上、过期、上一次在途或未知一律 409 不发副作用；`accepted` 与 `verified`（要重读原条件）分开，读不到保持未修好；同一 incident 在执行、未知、待核验时其它动作也被挡；不替看门狗撤原通知；开修复单固定调 `engine/src/bin/dispatch-issue.ts`，不拼 shell。
 - 看门狗改了提醒键、标题、撤卡口径，`alert-repair.ts` 的 `IDLE_PREFIX`、`RELEASE_KEY` 要一起改；其测试跑引擎真看门狗，所以 api 的 `devDependencies` 有 engine（只有测试用，`src` 不许引 engine；`tsconfig.json` include 带 `../engine/src`）。
 - 关联已有单（`POST /api/notifications/:id/repair/link`）：只收受管仓 + 单号 + 关联版本 + incident + `requestId`，多一个字段 400；服务端现读必须是开着的 issue，读不到、错仓、已关闭一律拒绝，不回退成开单。线上契约不加枚举，关联存成设置表内部记录，通知卡按旧枚举取 `PHASE_META[state]`，新枚举会让它崩溃（`alert-repair.test.ts` 有照抄旧消费者的检查）。
-- 私有 ops 写入（`acceptance settle|merge`、`task correct-merged`、`checkout-history --archive`、`quote put`）：不挂普通 HTTP，没经 `bin/fleet-api`（无 `FLEET_OPS_OPERATOR`）不许执行；`settle` 必须精确责任 id、generation、PR/head 和证据，旧代次不能结清新增项；`correct-merged` 默认只读预检，执行必须带预检打印的 `--task`/`--seen`；错误不回显 payload 或数据库明细。
+- 私有 ops 写入（`task correct-merged`、`checkout-history --archive`、`quote put`）：不挂普通 HTTP，没经 `bin/fleet-api`（无 `FLEET_OPS_OPERATOR`）不许执行；验收责任的管理命令已删（#3630），旧开着的行只由 `fleet-api acceptance-handback-once` 转给引擎包一次性交回；`correct-merged` 默认只读预检，执行必须带预检打印的 `--task`/`--seen`；错误不回显 payload 或数据库明细。
 - 历史/检出归档证据只认服务端鲜读的完整有界 Temporal 历史（`acceptance-execution-reader.ts`、`checkout-execution-reader.ts`），不追 latest，不接上传 history/proof，不用旧 runs 的 NULL 列或会话号授权；`conclusion` 只许 `historical_unproven`，不能当正常队列账或创始人批准。
 
 ## 测试

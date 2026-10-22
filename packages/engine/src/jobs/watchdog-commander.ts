@@ -1,8 +1,9 @@
-// 看门狗盯法国指挥官（#3295）：停下超过 30 分钟，或 PR 合并超过 30 分钟仍有 open 验收责任，
-// 且还没有 commander.claim 的任务，报 watchdog:commander:<taskId>。指挥官一认领，这张卡自动撤；
-// 这里仍只负责发现「指挥官自己断了」，不执行验收或停下任务动作。
+// 看门狗盯法国指挥官（#3295）：停下超过 30 分钟、还没有 commander.claim 的任务，报 watchdog:commander:<taskId>。
+// 指挥官一认领，这张卡自动撤；这里只负责发现「指挥官自己断了」，不执行停下任务动作。
+// 验收责任不再盯（#3630，决定 0113 第二片）：旧行一次性交回原单，指挥官不再核验；以前报的
+// watchdog:commander:<taskId>:acceptance:<PR> 不在当前清单里，下一轮按「任务已经不再是当前停下的任务」撤掉。
 
-import type { CommanderAcceptanceTask, CommanderStalledTask } from '@fleet-dao/db';
+import type { CommanderStalledTask } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { WatchdogAlerts } from './watchdog.ts';
 
@@ -10,14 +11,7 @@ export const COMMANDER_ALERT_PREFIX = 'watchdog:commander:';
 export const COMMANDER_AFTER_MINUTES = 30;
 export const COMMANDER_LINK = '/tasks';
 
-export type CommanderWatchTask =
-  | CommanderStalledTask
-  | (CommanderAcceptanceTask & {
-      kind: 'acceptance';
-      commanderSeen: boolean;
-      stalledAt: Date;
-      retry: null;
-    });
+export type CommanderWatchTask = CommanderStalledTask;
 
 export interface CommanderWatchDeps {
   tasks(now: Date): Promise<CommanderWatchTask[]>;
@@ -32,12 +26,7 @@ export interface CommanderWatchResult {
 }
 
 const refOf = (task: CommanderWatchTask) => `${task.owner}/${task.name}#${task.issueNumber}`;
-const isAcceptance = (
-  task: CommanderWatchTask,
-): task is Extract<CommanderWatchTask, { kind: 'acceptance' }> =>
-  'kind' in task && task.kind === 'acceptance';
-const keyOf = (task: CommanderWatchTask) =>
-  `${COMMANDER_ALERT_PREFIX}${task.taskId}${isAcceptance(task) ? `:acceptance:${task.prNumber}` : ''}`;
+const keyOf = (task: CommanderWatchTask) => `${COMMANDER_ALERT_PREFIX}${task.taskId}`;
 
 function raiseOnce(
   alerts: CommanderWatchDeps['alerts'],
@@ -59,8 +48,6 @@ function whyUnseen(task: CommanderWatchTask, open: ReadonlySet<string>): string 
     return `原因：指挥官 24 小时内的认领到了熔断上限（见提醒 ${COMMANDER_CAP_KEY}，里面有等着的单和下一个名额什么时候空出来），名额空出来之前不再看新的停下。`;
   if (open.has(COMMANDER_NO_MODEL_KEY))
     return `原因：路由用途「指挥官」没配模型（见提醒 ${COMMANDER_NO_MODEL_KEY}），指挥官会话起不来。`;
-  if (isAcceptance(task))
-    return `原因：PR #${task.prNumber} 已合并超过 30 分钟，但这张单仍有验收责任 open，指挥官还没有记验收认领。`;
   if (task.retry)
     return `原因：指挥官会话没起成${task.retry.attempt === null ? '' : `（第 ${task.retry.attempt} 次）`}：${task.retry.why}；这一次停下不算处理过，下一轮再看，同一次停下最多试 3 次，第 3 次还没起成按默认动作执行。`;
   return '原因：没查出原因（没有上限、没配模型、没有「会话没起成」的记录）；查 park-triage 定时任务这几轮的结果和日志，看指挥官开关（设置 engine.commander）是不是关着。';
@@ -71,9 +58,7 @@ function watchBody(task: CommanderWatchTask, open: ReadonlySet<string>): { title
   return {
     title: `停下的任务没人看：${ref}`,
     body: [
-      isAcceptance(task)
-        ? `任务 ${ref} 的 PR #${task.prNumber} 已合并超过 30 分钟，法国指挥官还没看验收责任。`
-        : `任务 ${ref} 已停下（停下于 ${task.stalledAt.toISOString()}），超过 30 分钟，法国指挥官还没看过。`,
+      `任务 ${ref} 已停下（停下于 ${task.stalledAt.toISOString()}），超过 30 分钟，法国指挥官还没看过。`,
       whyUnseen(task, open),
       '看驾驶舱任务页和指挥官会话；指挥官认领这一次停下后，这张提醒自动撤。',
     ].join('\n'),

@@ -5,7 +5,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CloseRefused, CloseUnchecked, issueClose } from '../src/issue-close.ts';
 import type { GhResult } from '../src/issue-new.ts';
 import { runChild } from './child.ts';
@@ -93,7 +93,7 @@ function world(over: Partial<World> = {}): World & { gh: (args: string[]) => Pro
     if (page?.[1]) return ok(w.timeline[Number(page[1]) - 1] ?? []);
     return fail(`假 gh 不认得：${args.join(' ')}`);
   };
-  return Object.assign(w, { gh, acceptance: async () => undefined });
+  return Object.assign(w, { gh });
 }
 
 const run = (w: ReturnType<typeof world>, ...argv: string[]) => issueClose(argv.length ? argv : ['241'], w);
@@ -463,29 +463,19 @@ describe('入口的退出码', { timeout: 0 }, () => {
   });
 });
 
-describe('最终现场验收标准门', () => {
-  it('--note及不做了都不能吞掉未结清责任', async () => {
-    for (const args of [
-      ['241', '--note', '我验好了'],
-      ['241', '--reason', 'not_planned'],
-    ]) {
+describe('验收责任账不再挡关单（#3630，决定 0113 第二片）', () => {
+  it('--note 照常关，不读验收责任读口', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    try {
       const w = world();
-      await expect(issueClose(args, { ...w, acceptance: async () => '责任仍未结清' })).rejects.toBeInstanceOf(
-        CloseRefused,
-      );
-      expect(closeCalls(w)).toEqual([]);
+      expect(await issueClose(['241', '--note', '我验好了'], w)).toMatchObject({
+        outcome: 'closed',
+        number: 241,
+      });
+      expect(closeCalls(w)).toHaveLength(1);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
     }
-  });
-  it('真实账不可达明确unknown，不发关单写入', async () => {
-    const w = world();
-    await expect(
-      issueClose(['241', '--note', 'done'], {
-        ...w,
-        acceptance: async () => {
-          throw new Error('DB unavailable');
-        },
-      }),
-    ).rejects.toBeInstanceOf(CloseUnchecked);
-    expect(closeCalls(w)).toEqual([]);
   });
 });
