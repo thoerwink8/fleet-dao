@@ -744,7 +744,13 @@ describe('GitHub 对账：定时任务只报告、不挡 PR，也不进必过检
     expect(yml).not.toMatch(/^ {2}push:/m);
     expect(yml).toMatch(/^ {2}schedule:/m);
     expect(yml).toMatch(/^ {2}workflow_dispatch:/m);
-    expect(yml).toMatch(/run: node packages\/conventions\/src\/bin\/github-audit\.ts --comment --alarm\s*$/m);
+    expect(yml).toMatch(/run: node packages\/conventions\/src\/bin\/github-audit\.ts --comment\s*$/m);
+    expect(yml).not.toContain('--alarm');
+    // 对账红了只靠这一步红（决定 0113）：有断裂退出 1、没查成退出 2，入口不再开单
+    const bin = read('packages/conventions/src/bin/github-audit.ts');
+    expect(bin).toContain('if (notQueried.length) process.exitCode = 2;');
+    expect(bin).toContain('else if (r.findings.length) process.exitCode = 1;');
+    expect(bin).not.toContain('alarm');
   });
 
   it('收口任务（#2683）在同一份定时工作流里：每天跟着跑、也能手动触发，能写里程碑（issues: write）', () => {
