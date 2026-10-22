@@ -22,7 +22,7 @@
 // - 执行的操作都记在 engine:commander 名下（操作记录 target=commander），诊断文字（理由、白名单核对结果、空转判断）带进发出的提醒。
 
 import { createHash } from 'node:crypto';
-import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import { LOCAL_LABEL, type OffDiffHold } from '@fleet-dao/conventions';
 import type { AcceptanceDutyRow, CommanderAcceptanceTask, ScheduleResult } from '@fleet-dao/db';
 import {
   type AcceptanceCoverage,
@@ -369,6 +369,14 @@ export interface ParkTriageDeps {
   ): Promise<{ number: number }>;
   /** 给单子贴标签（改标准的停下贴「本机做」）。 */
   addLabel(repo: IntakeRepo, issueNumber: number, label: string): Promise<void>;
+  /**
+   * 重做之前先过诊断判据（#3602，和拉单同一份 offDiffHoldOf）：这张单的「怎么算做完」要 diff 外证据就回判决，不重做，
+   * 交回本机（handBack：留言 + 贴「本机做」）。读不到照抛：这一张记没执行成功，不当成没命中。不给（老装配、测试）就不判。
+   */
+  offDiffHold?: {
+    check(row: ParkedRetryRow): Promise<OffDiffHold | null>;
+    handBack(repo: IntakeRepo, issueNumber: number, hold: OffDiffHold): Promise<void>;
+  };
   /** 记一条执行（commander.act，actor = engine:commander）。执行之前写；写不进照抛，这一张不执行。 */
   audit(entry: CommanderActEntry): Promise<void>;
   acceptanceAudit?: (entry: {
@@ -877,6 +885,18 @@ async function execute(
       return done([`已执行：继续${plan.widenBudget ? '，并把这张单的额度预算放宽一档（没有空转）' : ''}。`]);
     }
     if (plan.action === 'redo') {
+      // 诊断型 / diff 外验收条的单重做也是空转（#3602）：不叫停、不起新一代，交回本机
+      const hold = deps.offDiffHold ? await deps.offDiffHold.check(item.row) : null;
+      if (hold && deps.offDiffHold) {
+        await deps.offDiffHold.handBack(repo, item.row.issueNumber, hold);
+        return {
+          acted: null,
+          left: `交回本机·${hold.why}`,
+          text: text([`没有重做：${hold.why}。已留言并给 ${ref} 贴了「${LOCAL_WORK_LABEL}」，任务没动。`]),
+          level: 'daily',
+          title: `指挥官把 ${ref} 交本机：诊断型验收条，不重做`,
+        };
+      }
       const journal: RedoJournal = (rec) =>
         deps.redoJournal({ row: item.row, workflowId: item.workflowId, parkSeq: item.park.seq, rec });
       const redone = await deps.redoTask(item.row, item.workflowId, journal);

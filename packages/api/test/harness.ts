@@ -155,6 +155,8 @@ export interface HarnessOptions {
   releaseRequest?: Deps['releaseRequest'];
   /** 「要你拍」拍完往进度单、任务单留言的替身（#1915）；不给就是没接上。 */
   decisionCommenter?: Deps['decisionCommenter'];
+  /** 诊断型验收条的单被继续、重做时交回本机（#3602）。 */
+  localHold?: Deps['localHold'];
   /** 「要你拍」选完要本机做的事；不给时删树、重查回「没接上」。 */
   decisionCapabilities?: Deps['decisionCapabilities'];
   /** 两个机器人已经装上的仓；不给就是没接上（导入列表回原因，不拿空列表冒充没有仓）。 */
@@ -212,6 +214,7 @@ function wire<S extends Store>(
     ...(options.releaseCard ? { releaseCard: options.releaseCard } : {}),
     ...(options.releaseRequest ? { releaseRequest: options.releaseRequest } : {}),
     ...(options.decisionCommenter ? { decisionCommenter: options.decisionCommenter } : {}),
+    ...(options.localHold ? { localHold: options.localHold } : {}),
     ...(options.decisionCapabilities ? { decisionCapabilities: options.decisionCapabilities } : {}),
     ...(options.installationRepos ? { installationRepos: options.installationRepos } : {}),
     feishu: options.feishu === null ? null : feishu.auth,

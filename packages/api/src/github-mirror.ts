@@ -1,3 +1,4 @@
+import { LOCAL_LABEL } from '@fleet-dao/conventions';
 import { type Db, findRepoPolicyByGithubId, findRepoProfile, raiseMergedReviewEvent } from '@fleet-dao/db';
 import {
   createGitHub,
@@ -14,6 +15,7 @@ import { createCiPolicyBridge, withPolicySource } from './ci-policy-bridge.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
 import { githubAppMissing } from './github.ts';
+import type { LocalHoldPort } from './local-hold.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { currentMilestoneOf, type RequestIssuePort } from './request-issue.ts';
 
@@ -49,6 +51,8 @@ export function githubMirror(
   releaseFacts: ReleaseFactsReader;
   /** 「要你拍」拍完往进度单、任务单留言（#1915）；凭据没读到就没有，答案照存、回包写没接上。 */
   decisionCommenter?: DecisionCommenter;
+  /** 诊断型验收条的单被继续、重做时交回本机（#3602）：留言 + 贴「本机做」；凭据没读到就没有。 */
+  localHold?: LocalHoldPort;
   /** 重查 GitHub App。凭据没读到就没有，重查报「凭据没读到」。 */
   selfCheck?: (repos: RepoRef[]) => Promise<SelfCheckItem[]>;
   /** 提需求（#2060）开单、写回评论、读单子状态，都用「引擎」机器人；凭据没读到就没有，开单回 503，不假装开了。 */
@@ -105,6 +109,15 @@ export function githubMirror(
         const got = await gh.commentIssue(input);
         return { url: got.url };
       },
+    },
+    localHold: async (input) => {
+      await gh.commentIssue({
+        repo: input.repo,
+        issueNumber: input.issueNumber,
+        key: input.key,
+        body: input.comment,
+      });
+      await gh.addIssueLabel({ repo: input.repo, issueNumber: input.issueNumber, label: LOCAL_LABEL });
     },
     selfCheck: (repos) => gh.selfCheck(repos),
     installationRepos: {

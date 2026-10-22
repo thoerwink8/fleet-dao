@@ -14,6 +14,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { continueSignals } from './continue-signals.ts';
 import type { TaskRedoPort } from './deps.ts';
 import type { HistoricalAuditSource } from './historical-audit-cli.ts';
+import { holdOffDiff, type LocalHoldPort } from './local-hold.ts';
 import type { Store, TaskSignal, WorkflowControl } from './ports.ts';
 import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableError } from './ports.ts';
 import { correctMerged } from './task-correct-merged.ts';
@@ -185,6 +186,11 @@ export interface TaskRunDeps {
   pulls?: HistoricalAuditSource | undefined;
   /** 真装配是 connectTemporal().taskRedo（temporal.ts 的 createTemporalTaskRedo）。没给就拒绝重做，不假装另起。 */
   taskRedo: TaskRedoPort;
+  /**
+   * 「继续」「重做」遇到诊断型 / diff 外验收条的单时，留言并贴「本机做」交回本机（#3602）。
+   * 没给就只拒绝、在原因里请人手动贴。
+   */
+  localHold?: LocalHoldPort | undefined;
   /** 谁跑的（FLEET_OPS_OPERATOR）。写进操作记录，也放进信号的 by。 */
   operator: string;
 }
@@ -383,6 +389,13 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
     if (task.state !== 'stopped' && task.state !== 'stalled') {
       return refuse(ref, `这张单现在是${task.state}，只有已叫停或挂起的才能重做`, task.id);
     }
+    const held = await holdOffDiff(
+      task,
+      { repo: { owner: repo.owner, name: repo.name }, issueNumber: task.issueNumber },
+      'task.redo',
+      deps.localHold,
+    );
+    if (held) return refuse(ref, held.why, task.id);
     let outcome: Awaited<ReturnType<TaskRedoPort['redo']>>;
     try {
       outcome = await deps.taskRedo.redo({
@@ -431,6 +444,13 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
   if (args.action === 'continue') {
     const exhausted = continueExhausted(task.stalled?.why);
     if (exhausted) return refuse(ref, exhausted, task.id);
+    const held = await holdOffDiff(
+      task,
+      { repo: { owner: repo.owner, name: repo.name }, issueNumber: task.issueNumber },
+      'continue',
+      deps.localHold,
+    );
+    if (held) return refuse(ref, held.why, task.id);
   }
 
   let workflowId: string;

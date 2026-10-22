@@ -171,8 +171,11 @@ export {
 export {
   describeOffDiff,
   OFF_DIFF_REWRITE,
+  type OffDiffHold,
+  type OffDiffHoldAction,
   type OffDiffItem,
   offDiffAcceptanceItems,
+  offDiffHoldOf,
   offDiffItems,
   offDiffWords,
   splitAcceptanceItems,
