@@ -171,6 +171,17 @@ export async function settleLocalKept(
   }
 }
 
+/** 还开着的「本机退回的单、引擎接不了」提醒（local-kept:<仓>#<单号>:intake-returned-blocked:…）对应的单号。 */
+export async function keptReturnedIssues(db: Db, repo: { owner: string; name: string }): Promise<number[]> {
+  const prefix = `local-kept:${repo.owner}/${repo.name}#`;
+  const out = new Set<number>();
+  for (const alert of await openAlertsByPrefix(db, prefix)) {
+    const m = /^(\d+):intake-returned-blocked:/.exec(alert.dedupeKey.slice(prefix.length));
+    if (m) out.add(Number(m[1]));
+  }
+  return [...out];
+}
+
 export interface IntakeWiring {
   db: Db;
   gh: IntakeGitHub;
@@ -228,6 +239,14 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         });
       },
       settleLocalKept: ({ repo, keep }) => settleLocalKept(w.db, repo, keep),
+      keptReturned: (repo) => keptReturnedIssues(w.db, repo),
+      async unmarkLocal({ repo, issueNumber }) {
+        await w.gh.removeIssueLabel({
+          repo: { owner: repo.owner, name: repo.name },
+          issueNumber,
+          label: LOCAL_LABEL,
+        });
+      },
       toolchainReady: w.toolchainReady ?? missingToolchain,
       standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),

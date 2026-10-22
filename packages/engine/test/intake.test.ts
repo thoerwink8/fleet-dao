@@ -2306,6 +2306,95 @@ describe('本机退回法国队列的单（#3461）：重新派、法国接不�
     expect(settled).toEqual([[12, 30]]);
   });
 
+  it('报给本机成了、留言没成：这张单号也算留着，刚建的提醒不被撤', async () => {
+    const r = returned();
+    const settled: number[][] = [];
+    const h = harness(
+      {
+        ...r.over,
+        async comment({ key }) {
+          // 拉单先留一句「要 diff 外证据」的改写，那条照常；报给本机之后的这条退回留言写不进
+          if (key.startsWith('intake-returned-blocked:')) throw new Error('GitHub 写不进');
+          return { created: true };
+        },
+        async settleLocalKept({ keep }) {
+          settled.push([...keep]);
+        },
+      },
+      { issues: [issue({ body: offDiffBody })] },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(r.notices).toHaveLength(1);
+    expect(h.localMarked).toEqual([]);
+    expect(settled).toEqual([[12]]);
+    expect(run.outcome).toBe('partial');
+  });
+
+  /** 单子贴着「本机做」、是本机退回来没人接的行，库里还挂着「引擎接不了」的提醒；挡着的地方改好没有看 body。 */
+  function keptReturned(body: string, over: Partial<IntakeDeps> = {}) {
+    const r = returned();
+    const unmarked: number[] = [];
+    const settled: number[][] = [];
+    const h = harness(
+      {
+        ...r.over,
+        async keptReturned() {
+          return [12];
+        },
+        async unmarkLocal({ issueNumber }) {
+          unmarked.push(issueNumber);
+        },
+        async settleLocalKept({ keep }) {
+          settled.push([...keep]);
+        },
+        ...over,
+      },
+      { issues: [issue({ body, labels: ['需求', '本机做'] })] },
+    );
+    return { h, r, unmarked, settled };
+  }
+
+  it('挡着的地方改好了（引擎现在接得了）：摘「本机做」、提醒跟着撤，这一轮不重新贴、不重复通知', async () => {
+    const k = keptReturned(BODY);
+    await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([12]);
+    expect(k.settled).toEqual([[]]);
+    expect(k.h.localMarked).toEqual([]);
+    expect(k.r.notices).toEqual([]);
+  });
+
+  it('还挡着（验收仍要 diff 外证据）：不摘「本机做」、提醒留着', async () => {
+    const k = keptReturned(offDiffBody);
+    await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+  });
+
+  it('改好了但这张单已经有人接着（本机重新领了）：不摘', async () => {
+    const k = keptReturned(BODY, {
+      async issueTask(): Promise<IssueTaskRow | null> {
+        return { id: 'claimed', state: 'running', executor: 'local' };
+      },
+      async taskGenerations(): Promise<TaskGenerationFacts> {
+        return { ok: true, lives: [] };
+      },
+    });
+    await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+  });
+
+  it('摘标签写不成：这一轮记没查成，标签和提醒都留着', async () => {
+    const k = keptReturned(BODY, {
+      async unmarkLocal() {
+        throw new Error('GitHub 写不进');
+      },
+    });
+    const run = await runIntakeJob(k.h.deps);
+    expect(run.outcome).toBe('partial');
+    expect(k.settled).toEqual([[12]]);
+  });
+
   it('撤「留给本机」的提醒没成：这一轮记没查成，别的照做', async () => {
     const h = harness(
       {

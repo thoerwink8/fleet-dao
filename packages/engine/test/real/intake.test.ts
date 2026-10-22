@@ -30,6 +30,7 @@ import { INTAKE_JOB, runIntakeJob } from '../../src/jobs/intake.ts';
 import {
   type IntakeGitHub,
   intakeJob,
+  keptReturnedIssues,
   reportIntakeProfile,
   settleLocalKept,
   toolchainProbe,
@@ -1306,6 +1307,15 @@ describe('settleLocalKept · 留给本机的提醒跟着单子走', () => {
     expect((await alertByKey(t.db, key(13)))?.resolvedAt).toBeNull();
     expect((await alertByKey(t.db, key(12, 'other')))?.resolvedAt).toBeNull();
     expect((await alertByKey(t.db, 'intake-profile:acme/demo'))?.resolvedAt).toBeNull();
+  });
+
+  it('keptReturnedIssues 只认还开着、本仓、退回单挡住的那一类提醒', async () => {
+    const lease = 'local-kept:acme/demo#14:local-lease-kept:2026-10-20T16:38:03.775Z';
+    for (const dedupeKey of [key(12), key(13), key(12, 'other'), lease]) {
+      await upsertAlert(t.db, { dedupeKey, level: 'alert', taskId: null, title: 'x', body: 'y' });
+    }
+    await settleLocalKept(t.db, repo, new Set([12]));
+    expect(await keptReturnedIssues(t.db, repo)).toEqual([12]);
   });
 
   it('撤过的再跑一遍不报错', async () => {
