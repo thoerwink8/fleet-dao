@@ -49,11 +49,13 @@ import { execGit, type GitRunner } from './git.ts';
 import {
   addIssueLabel,
   type GroomFacts,
+  type GroomIssue,
   type GroomLabelEvent,
   type IssueComment,
   readGroomFacts,
   readIssueComments,
   readIssueLabelEvents,
+  readIssuesCreatedBetween,
   removeIssueLabel,
   setIssueMilestone,
 } from './groom.ts';
@@ -277,6 +279,14 @@ export interface GitHub {
    * 加全部里程碑（含关了的，判版本交接用）。读不到、认不出、翻不完抛错，不拿「一张都没有」顶。
    */
   readGroomFacts(input: { repo: RepoRef; signal?: AbortSignal | undefined }): Promise<GroomFacts>;
+  /** 窗口 [from, to) 里新开的单（开着的、关了的都算，不含 PR），可按标签筛（#3618 名额判档数「机器开的自身缺陷单」）。读不到、翻不完抛错。 */
+  readIssuesCreatedBetween(input: {
+    repo: RepoRef;
+    from: Date;
+    to: Date;
+    label?: string | undefined;
+    signal?: AbortSignal | undefined;
+  }): Promise<GroomIssue[]>;
   /** 一张单标签加/摘的时间线（#448）：判「类别标签是不是被人摘过」「过时是什么时候贴上的」。读不到、翻不完抛错。 */
   readIssueLabelEvents(input: {
     repo: RepoRef;
@@ -395,6 +405,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     readIssueStates: (input) => readIssueStates(client, input),
     readGroomFacts: (input) => readGroomFacts(deps, input),
+    readIssuesCreatedBetween: (input) => readIssuesCreatedBetween(deps, input),
     readIssueLabelEvents: (input) => readIssueLabelEvents(deps, input),
     readIssueComments: (input) => readIssueComments(deps, input),
     async addIssueLabel(input, ctx = {}) {

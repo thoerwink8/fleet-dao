@@ -108,6 +108,7 @@ export {
   readGroomFacts,
   readIssueComments,
   readIssueLabelEvents,
+  readIssuesCreatedBetween,
   removeIssueLabel,
   setIssueMilestone,
 } from './groom.ts';

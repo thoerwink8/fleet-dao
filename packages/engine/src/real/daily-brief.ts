@@ -33,7 +33,7 @@ const SELF_SHARE_ACTOR = 'engine:daily-brief';
 
 export function dailyBriefJob(w: {
   db: Db;
-  gh: Pick<GitHub, 'releaseFacts' | 'commentIssue' | 'readIssue' | 'readGroomFacts'>;
+  gh: Pick<GitHub, 'releaseFacts' | 'commentIssue' | 'readIssue' | 'readIssuesCreatedBetween'>;
   releasesDir?: string;
   now?: () => Date;
   log?: DailyBriefDeps['log'];
@@ -69,21 +69,18 @@ export function dailyBriefJob(w: {
     flowModeHealth: (to) => flowModeHealth(w.db, to),
     selfShare: {
       mainRedMinutes: (to) => mainRedMinutes(w.db, to),
-      // 只能数还开着的单（readGroomFacts 不读关了的）：开了又很快关掉的缺陷单这里数不到，数偏小
+      // 窗口里新开的单，开着的、关了的都数（开了又很快关掉的缺陷单也算新开）
       async selfDefectIssues(from, to) {
         const repo = await repoByName(w.db, SELF_REPO_NAME);
         if (!repo) throw new Error(`受管的仓里没有 ${SELF_REPO_NAME}`);
-        const facts = await w.gh.readGroomFacts({ repo: { owner: repo.owner, name: repo.name } });
-        return facts.issues.filter((i) => {
-          const created = Date.parse(i.createdAt);
-          return (
-            i.authorIsBot &&
-            i.labels.includes('缺陷') &&
-            !/e2e/i.test(i.title) &&
-            created >= from.getTime() &&
-            created < to.getTime()
-          );
-        }).length;
+        const issues = await w.gh.readIssuesCreatedBetween({
+          repo: { owner: repo.owner, name: repo.name },
+          from,
+          to,
+          label: '缺陷',
+        });
+        return issues.filter((i) => i.authorIsBot && i.labels.includes('缺陷') && !/e2e/i.test(i.title))
+          .length;
       },
       offReasonDecisions: () => offReasonDecisions(w.db),
       read: () => readSelfShare(w.db),

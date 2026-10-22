@@ -3,7 +3,13 @@
 import { describe, expect, it } from 'vitest';
 import type { GhRequest, GhResponse, GitHubClient } from '../src/client.ts';
 import { isGitHubError } from '../src/errors.ts';
-import { addIssueLabel, readGroomFacts, readIssueLabelEvents, setIssueMilestone } from '../src/groom.ts';
+import {
+  addIssueLabel,
+  readGroomFacts,
+  readIssueLabelEvents,
+  readIssuesCreatedBetween,
+  setIssueMilestone,
+} from '../src/groom.ts';
 
 const repo = { owner: 'o', name: 'r' };
 const BOT_USER = { login: 'fleet-dao-engine[bot]', id: 9, type: 'Bot' };
@@ -309,5 +315,47 @@ describe('setIssueMilestone：给单挂里程碑', () => {
     await expect(setIssueMilestone({ client }, { repo, issueNumber: 12, milestone: 3 })).rejects.toThrow(
       '回了 422',
     );
+  });
+});
+
+describe('readIssuesCreatedBetween：窗口里新开的单（开着的、关了的都算）', () => {
+  const from = new Date('2026-10-08T00:00:00Z');
+  const to = new Date('2026-10-15T00:00:00Z');
+
+  it('state=all、since=窗口起点、按标签筛；开单时刻在窗口外的滤掉，PR 不要', async () => {
+    const { client, calls } = fakeClient({
+      issues: [
+        issueRow({
+          number: 1,
+          created_at: '2026-10-10T00:00:00Z',
+          user: BOT_USER,
+          labels: [{ name: '缺陷' }],
+        }),
+        // 已关的单：state=all 的列表里照样会回，数得到
+        issueRow({
+          number: 2,
+          created_at: '2026-10-09T00:00:00Z',
+          user: BOT_USER,
+          labels: [{ name: '缺陷' }],
+        }),
+        // 更早开的、近期有动静
+        issueRow({ number: 3, created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-12T00:00:00Z' }),
+        // 窗口终点（不含）
+        issueRow({ number: 4, created_at: '2026-10-15T00:00:00Z' }),
+        issueRow({ number: 5, created_at: '2026-10-10T00:00:00Z', pull_request: {} }),
+      ],
+    });
+    const got = await readIssuesCreatedBetween({ client, bots }, { repo, from, to, label: '缺陷' });
+    expect(got.map((i) => i.number)).toEqual([1, 2]);
+    expect(got.every((i) => i.authorIsBot)).toBe(true);
+    expect(calls[0]).toMatchObject({
+      path: '/repos/o/r/issues',
+      query: { state: 'all', since: '2026-10-08T00:00:00.000Z', labels: '缺陷', per_page: 100 },
+    });
+  });
+
+  it('【故意造出的失败】读不到：抛错，不当成一张都没有', async () => {
+    const { client } = fakeClient({ issues: new Error('回了 500') });
+    await expect(readIssuesCreatedBetween({ client, bots }, { repo, from, to })).rejects.toThrow('回了 500');
   });
 });

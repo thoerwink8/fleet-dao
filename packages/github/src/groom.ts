@@ -103,10 +103,20 @@ export async function readGroomFacts(
     },
     (d) => d,
   );
+  return { milestones, issues: groomIssuesOf(deps, slug, '开着的单', issueRows) };
+}
+
+/** 列表里的行认成 GroomIssue（PR 不要）；形状认不出抛错。 */
+function groomIssuesOf(
+  deps: Pick<ReadDeps, 'bots'>,
+  slug: string,
+  what: string,
+  rows: unknown[],
+): GroomIssue[] {
   const issues: GroomIssue[] = [];
-  for (const raw of issueRows) {
+  for (const raw of rows) {
     const p = IssueRow.safeParse(raw);
-    if (!p.success) throw unexpected(`读 ${slug} 开着的单`, raw);
+    if (!p.success) throw unexpected(`读 ${slug} ${what}`, raw);
     const i = p.data;
     if (i.pull_request !== undefined && i.pull_request !== null) continue; // PR：这个功能不管
     issues.push({
@@ -124,7 +134,48 @@ export async function readGroomFacts(
       milestone: i.milestone && { number: i.milestone.number, title: i.milestone.title },
     });
   }
-  return { milestones, issues };
+  return issues;
+}
+
+/**
+ * 窗口 [from, to) 里新开的单（开着的、关了的都算，不含 PR），可按标签筛（「引擎」机器人现读，#3618）：
+ * 数「近 7 天新开了几张」要这个，readGroomFacts 只读开着的，开了又关掉的单它数不到。
+ * GitHub 的 since 按更新时刻筛，新开的单更新时刻不早于开单时刻，所以不漏；开单时刻在窗口外的（更早开、近期有动静的）在这里滤掉。
+ * 读不到、认不出、翻不完抛错。
+ */
+export async function readIssuesCreatedBetween(
+  deps: ReadDeps,
+  input: {
+    repo: RepoRef;
+    from: Date;
+    to: Date;
+    label?: string | undefined;
+    signal?: AbortSignal | undefined;
+  },
+): Promise<GroomIssue[]> {
+  const { repo, from, to, label, signal } = input;
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    throw new Error('readIssuesCreatedBetween: 时刻不是有效日期');
+  }
+  const rows = await deps.client.all(
+    {
+      method: 'GET',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues`,
+      auth: { as: 'engine' as const, repo },
+      query: {
+        state: 'all',
+        since: from.toISOString(),
+        per_page: 100,
+        ...(label !== undefined ? { labels: label } : {}),
+      },
+      signal,
+    },
+    (d) => d,
+  );
+  return groomIssuesOf(deps, repoSlug(repo), '近期新开的单', rows).filter((i) => {
+    const created = Date.parse(i.createdAt);
+    return created >= from.getTime() && created < to.getTime();
+  });
 }
 
 // —— 标签时间线：判「人摘过类别标签」「过时是什么时候贴的」都吃这个 ——
