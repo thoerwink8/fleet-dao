@@ -1,6 +1,7 @@
 // 已结束任务的 checkout 失败卡：受管历史归档契约。内存版和 Postgres 版过同一套（入口见 store.memory.test.ts / store.pg.test.ts）。
 // 只归档通知并记审计，不是「检出恢复」证明：不写 cold_verify.checkout_full、不改任务/run/其他通知。
 import { beforeEach, describe, expect, it } from 'vitest';
+import { observedCheckoutSource } from '../src/checkout-source.ts';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import type { HistoricalCheckoutArchiveInput, NewAuditEntry, Store } from '../src/ports.ts';
@@ -10,7 +11,7 @@ const NID = 'f0000000-0000-4000-8000-000000000099';
 const LEGACY_NID = 'f0000000-0000-4000-8000-000000000098';
 const OTHER_NID = 'f0000000-0000-4000-8000-000000000097';
 const RUN_ID = 'd1000000-0000-4000-8000-000000013099';
-const TEMPORAL_RUN_ID = 'temporal-checkout-history-1';
+const TEMPORAL_RUN_ID = '00000000-0000-4000-8000-000000000002';
 const WF = 'task:example/canary#13';
 const HEAD = 'b'.repeat(40);
 const RAISED_AT = '2026-10-19T03:10:00.000Z';
@@ -113,6 +114,7 @@ const baseInput = (over: Partial<HistoricalCheckoutArchiveInput> = {}): Historic
   workflowId: WF,
   runId: RUN_ID,
   temporalRunId: TEMPORAL_RUN_ID,
+  executionRunId: TEMPORAL_RUN_ID,
   runSegment: 'verify',
   runStartedAt: '2026-10-19T03:00:00.000Z',
   runEndedAt: '2026-10-19T03:10:00.000Z',
@@ -145,16 +147,45 @@ const auditFor = (input: HistoricalCheckoutArchiveInput): NewAuditEntry => ({
     workflowId: input.workflowId,
     runId: input.runId,
     temporalRunId: input.temporalRunId,
+    executionRunId: input.executionRunId,
     pr: input.pr,
     head: input.head,
   },
   after: {
     ...input,
+    checkoutSource: sourceFor(input),
     originalTitle: '冷验收放不进 PR 头的完整检出（从镜像 git archive）',
     runFailureReason: '缺对象',
     conclusion: 'historical_unproven',
   },
 });
+
+const sourceFor = (input: HistoricalCheckoutArchiveInput) =>
+  observedCheckoutSource({
+    namespace: 'test',
+    workflowId: input.workflowId,
+    executionRunId: input.executionRunId,
+    taskId: input.taskId,
+    repo: input.repo,
+    issueNumber: input.issueNumber,
+    pr: input.pr,
+    head: input.head,
+    runId: input.runId,
+    runStartedAt: input.runStartedAt,
+    runEndedAt: input.runEndedAt,
+    scheduled: '2',
+    started: '3',
+    completed: '4',
+    scheduledAt: '2026-10-19T02:59:00.000Z',
+    startedAt: '2026-10-19T02:59:01.000Z',
+    completedAt: '2026-10-19T03:50:00.000Z',
+    inputHash: 'a'.repeat(64),
+    resultHash: 'b'.repeat(64),
+    startHash: 'c'.repeat(64),
+    closeEvent: '5',
+  });
+const archive = (store: Store, input: HistoricalCheckoutArchiveInput, entry: NewAuditEntry) =>
+  store.archiveHistoricalCheckout(input, entry, sourceFor(input));
 
 async function notificationOf(store: Store, id: string) {
   const found = (await store.listNotifications({ status: 'all', limit: 100 })).items.find((n) => n.id === id);
@@ -180,14 +211,57 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       expect(await auditsOf(store, id)).toEqual([]);
     };
 
+    it('没有可信来源或JSON冒充能力：即使全部DB事实一致也不归档', async () => {
+      const input = baseInput(),
+        audit = auditFor(input),
+        source = sourceFor(input);
+      expect(await store.archiveHistoricalCheckout(input, audit)).toBe('conflict');
+      expect(await store.archiveHistoricalCheckout(input, audit, JSON.parse(JSON.stringify(source)))).toBe(
+        'conflict',
+      );
+      expect(Object.isFrozen(source)).toBe(true);
+      await untouched();
+    });
+
+    it('来源必须核完整run/活动身份，不能复用另一个run或后来head的来源', async () => {
+      const input = baseInput(),
+        audit = auditFor(input);
+      for (const patch of [
+        { runId: OPEN_RUN_ID },
+        { head: 'a'.repeat(40) },
+        { executionRunId: '00000000-0000-4000-8000-000000000004' },
+        { workflowId: `${WF}:r2` },
+        { taskId: IDS.task12 },
+        { repo: 'other/repo' },
+        { issueNumber: 14 },
+        { pr: 40 },
+        { runStartedAt: '2026-10-19T03:00:00.001Z' },
+        { runEndedAt: '2026-10-19T03:10:00.001Z' },
+      ]) {
+        const source = observedCheckoutSource({ ...sourceFor(input), ...patch });
+        expect(await store.archiveHistoricalCheckout(input, audit, source)).toBe('conflict');
+      }
+      await untouched();
+    });
+
+    it('raisedAt只核通知事故代次，不再替代当前正文对应活动时间', async () => {
+      const other = await make(data({ notification: { raisedAt: '2026-10-18T00:00:00.000Z' } }));
+      const input = baseInput({ raisedAt: '2026-10-18T00:00:00.000Z' });
+      expect((await other.store.readHistoricalCheckoutCandidate(input)).notification.raisedAt).toBe(
+        input.raisedAt,
+      );
+      expect(await archive(other.store, input, auditFor(input))).toBe('ok');
+      expect((await notificationOf(other.store, NID)).raisedAt).toBe(input.raisedAt);
+    });
+
     it('成功：只撤这一张旧卡并记审计，不写 checkout_full、不改任务/run/其他通知', async () => {
-      const facts = await store.readHistoricalCheckout(baseInput());
+      const facts = await store.readHistoricalCheckoutCandidate(baseInput());
       expect(facts.activeRunIds).toEqual([]);
       expect(facts.run.id).toBe(RUN_ID);
       const taskBefore = await store.getTask(IDS.task13);
       const runsBefore = await store.listSegmentRuns(IDS.task13);
       const input = baseInput();
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('ok');
+      expect(await archive(store, input, auditFor(input))).toBe('ok');
       const archived = await notificationOf(store, NID);
       expect(archived.resolvedBy).toBe('ops:checkout-history');
       expect(archived.resolvedAt).toBeDefined();
@@ -236,9 +310,9 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
     ];
     for (const [label, over] of wrongIdentity) {
       it(`身份不符拒绝（${label}）：预检读不到，归档 conflict，什么都不写`, async () => {
-        await expect(store.readHistoricalCheckout(baseInput(over))).rejects.toThrow();
+        await expect(store.readHistoricalCheckoutCandidate(baseInput(over))).rejects.toThrow();
         const input = baseInput(over);
-        expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+        expect(await archive(store, input, auditFor(input))).toBe('conflict');
         await untouched();
         await untouched(over.notificationId ?? NID);
       });
@@ -255,7 +329,7 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         { runPrNumber: 40 },
       ] as Partial<HistoricalCheckoutArchiveInput>[]) {
         const input = baseInput(over);
-        expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+        expect(await archive(store, input, auditFor(input))).toBe('conflict');
       }
       await untouched();
     });
@@ -270,14 +344,14 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         { ...good, via: 'cockpit' as const },
         { ...good, ok: false, error: 'x' },
       ]) {
-        expect(await store.archiveHistoricalCheckout(input, bad)).toBe('conflict');
+        expect(await archive(store, input, bad)).toBe('conflict');
       }
       await untouched();
     });
 
     it('未知通知 not_found；非报警级别或标题/正文不像检出失败卡：不归档', async () => {
       const unknown = baseInput({ notificationId: 'f0000000-0000-4000-8000-0000000000aa' });
-      expect(await store.archiveHistoricalCheckout(unknown, auditFor(unknown))).toBe('not_found');
+      expect(await archive(store, unknown, auditFor(unknown))).toBe('not_found');
       const variants: NotificationPatch[] = [
         { level: 'daily' },
         { title: '别的报警' },
@@ -296,8 +370,8 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       for (const notification of variants) {
         const other = await make(data({ notification }));
         const input = baseInput({ notificationBody: notification.body ?? alertBody() });
-        await expect(other.store.readHistoricalCheckout(input)).rejects.toThrow();
-        expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+        await expect(other.store.readHistoricalCheckoutCandidate(input)).rejects.toThrow();
+        expect(await archive(other.store, input, auditFor(input))).toBe('conflict');
         expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
       }
     });
@@ -313,15 +387,15 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         const body = `${prefix}${alertBody()}`;
         const other = await make(data({ notification: { body } }));
         const input = baseInput({ notificationBody: body });
-        expect((await other.store.readHistoricalCheckout(input)).notification.body).toBe(body);
+        expect((await other.store.readHistoricalCheckoutCandidate(input)).notification.body).toBe(body);
         const audit = auditFor(input);
-        expect(await other.store.archiveHistoricalCheckout(input, audit)).toBe('ok');
+        expect(await archive(other.store, input, audit)).toBe('ok');
         const archived = await notificationOf(other.store, NID);
         expect(archived.body).toBe(body);
         expect(archived.resolvedBy).toBe('ops:checkout-history');
         const [record] = await auditsOf(other.store, NID);
         expect(record?.after).toMatchObject({ notificationBody: body });
-        expect(await other.store.archiveHistoricalCheckout(input, audit)).toBe('already_archived');
+        expect(await archive(other.store, input, audit)).toBe('already_archived');
       }
     });
 
@@ -336,8 +410,8 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       ]) {
         const other = await make(data({ notification: { body } }));
         const input = baseInput({ notificationBody: body });
-        await expect(other.store.readHistoricalCheckout(input)).rejects.toThrow();
-        expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+        await expect(other.store.readHistoricalCheckoutCandidate(input)).rejects.toThrow();
+        expect(await archive(other.store, input, auditFor(input))).toBe('conflict');
         expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
         expect(await auditsOf(other.store, NID)).toEqual([]);
       }
@@ -349,32 +423,27 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         { link: 'https://github.com/example/canary/pull/40' },
       ] as NotificationPatch[]) {
         const other = await make(data({ notification }));
-        await expect(other.store.readHistoricalCheckout(baseInput())).rejects.toThrow();
-        expect(await other.store.archiveHistoricalCheckout(baseInput(), auditFor(baseInput()))).toBe(
-          'conflict',
-        );
+        await expect(other.store.readHistoricalCheckoutCandidate(baseInput())).rejects.toThrow();
+        expect(await archive(other.store, baseInput(), auditFor(baseInput()))).toBe('conflict');
         expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
       }
     });
 
-    it('原 run 不是 verify 段 / 没有终态 / 不是失败收场 / 不是同一 PR / 报警不在它起止内：拒绝', async () => {
+    it('候选 run 不是 verify 段 / 没有终态 / 没进到检出 / 不是同一 PR：拒绝', async () => {
       for (const run of [
         { segment: 'manual' },
         { endedAt: undefined, outcome: undefined },
         // 没进到放检出那一步、切号重跑的段都不是这张检出失败卡的原执行
         { outcome: 'admission_blocked' },
         { outcome: 'org_switch' },
-        // 报警时刻在这一段之外：别的段报的（起点前只容忍一分钟）
-        { startedAt: '2026-10-19T03:11:00.001Z', endedAt: '2026-10-19T03:20:00.000Z' },
-        { startedAt: '2026-10-19T02:00:00.000Z', endedAt: '2026-10-19T03:09:59.999Z' },
         { issueNumber: 12 },
         { prNumber: 38 },
         { workflowId: 'task:example/canary#13:r2' },
       ] as RunPatch[]) {
         const other = await make(data({ run }));
-        await expect(other.store.readHistoricalCheckout(baseInput())).rejects.toThrow();
+        await expect(other.store.readHistoricalCheckoutCandidate(baseInput())).rejects.toThrow();
         const input = baseInput();
-        expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+        expect(await archive(other.store, input, auditFor(input))).toBe('conflict');
         expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
       }
     });
@@ -399,13 +468,13 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
     it('#3067 真实形状（outcome=done、temporal_run_id 为空、报警早于 run 起点 46ms）：预检可归档，归档写出完整记录', async () => {
       const other = await make(data({ run: REAL_3067_RUN }));
       const input = real3067Input();
-      const facts = await other.store.readHistoricalCheckout(input);
+      const facts = await other.store.readHistoricalCheckoutCandidate(input);
       expect(facts.run).toMatchObject({ id: RUN_ID, outcome: 'done' });
       expect(facts.run.temporalRunId ?? '').toBe('');
       expect(facts.activeRunIds).toEqual([]);
       const entry = auditFor(input);
       entry.after = { ...(entry.after as object), runFailureReason: null };
-      expect(await other.store.archiveHistoricalCheckout(input, entry)).toBe('ok');
+      expect(await archive(other.store, input, entry)).toBe('ok');
       const archived = await notificationOf(other.store, NID);
       expect(archived.resolvedBy).toBe('ops:checkout-history');
       expect(archived.body).toBe(alertBody());
@@ -425,43 +494,43 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         },
       });
       // 重放同一份完整请求幂等
-      expect(await other.store.archiveHistoricalCheckout(input, entry)).toBe('already_archived');
+      expect(await archive(other.store, input, entry)).toBe('already_archived');
     });
 
     it('旧 run 没记 temporal_run_id 时，处置输入也只能是空串；run 记了编号就必须对上', async () => {
       const legacy = await make(data({ run: REAL_3067_RUN }));
       const claimed = real3067Input();
       claimed.temporalRunId = TEMPORAL_RUN_ID;
-      await expect(legacy.store.readHistoricalCheckout(claimed)).rejects.toThrow();
-      expect(await legacy.store.archiveHistoricalCheckout(claimed, auditFor(claimed))).toBe('conflict');
+      await expect(legacy.store.readHistoricalCheckoutCandidate(claimed)).rejects.toThrow();
+      expect(await archive(legacy.store, claimed, auditFor(claimed))).toBe('conflict');
       expect((await notificationOf(legacy.store, NID)).resolvedAt).toBeUndefined();
       const recorded = await make(data());
       const blank = baseInput({ temporalRunId: '' });
-      await expect(recorded.store.readHistoricalCheckout(blank)).rejects.toThrow();
-      expect(await recorded.store.archiveHistoricalCheckout(blank, auditFor(blank))).toBe('conflict');
+      await expect(recorded.store.readHistoricalCheckoutCandidate(blank)).rejects.toThrow();
+      expect(await archive(recorded.store, blank, auditFor(blank))).toBe('conflict');
     });
 
     it('别的失败收场（超时、被杀、起不来）的原执行同样可归档', async () => {
       for (const outcome of ['timeout', 'killed', 'spawn_failed'] as const) {
         const other = await make(data({ run: { outcome } }));
         const input = baseInput({ runOutcome: outcome });
-        expect((await other.store.readHistoricalCheckout(input)).run.outcome).toBe(outcome);
-        expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('ok');
+        expect((await other.store.readHistoricalCheckoutCandidate(input)).run.outcome).toBe(outcome);
+        expect(await archive(other.store, input, auditFor(input))).toBe('ok');
       }
     });
 
     it('幂等重放必须是同一份完整审计，篡改 before 或结论证据都拒绝', async () => {
       const input = baseInput();
       const audit = auditFor(input);
-      expect(await store.archiveHistoricalCheckout(input, audit)).toBe('ok');
+      expect(await archive(store, input, audit)).toBe('ok');
       expect(
-        await store.archiveHistoricalCheckout(input, {
+        await archive(store, input, {
           ...audit,
           before: { ...(audit.before as Record<string, unknown>), head: 'c'.repeat(40) },
         }),
       ).toBe('conflict');
       expect(
-        await store.archiveHistoricalCheckout(input, {
+        await archive(store, input, {
           ...audit,
           after: { ...(audit.after as Record<string, unknown>), evidence: '另一份证据' },
         }),
@@ -472,8 +541,8 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
     it('任务还有活执行（task_id 记了的 / 老兼容未记 task_id 的 / 重做代次的）：预检列出、归档 conflict', async () => {
       const input = baseInput();
       await h.addRun({ id: OPEN_RUN_ID, taskId: IDS.task13, workflowId: WF });
-      expect((await store.readHistoricalCheckout(input)).activeRunIds).toEqual([OPEN_RUN_ID]);
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+      expect((await store.readHistoricalCheckoutCandidate(input)).activeRunIds).toEqual([OPEN_RUN_ID]);
+      expect(await archive(store, input, auditFor(input))).toBe('conflict');
       await untouched();
 
       for (const [id, workflowId] of [
@@ -482,8 +551,8 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       ] as const) {
         const other = await make(data());
         await other.addRun({ id, workflowId });
-        expect((await other.store.readHistoricalCheckout(input)).activeRunIds).toEqual([id]);
-        expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+        expect((await other.store.readHistoricalCheckoutCandidate(input)).activeRunIds).toEqual([id]);
+        expect(await archive(other.store, input, auditFor(input))).toBe('conflict');
         expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
       }
     });
@@ -491,21 +560,21 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
     it('别的任务的活执行不挡；任务复活（不再是终态）则预检拒绝、归档 conflict', async () => {
       const input = baseInput();
       await h.addRun({ id: OPEN_RUN_ID, taskId: IDS.task12, workflowId: 'task:example/canary#12' });
-      expect((await store.readHistoricalCheckout(input)).activeRunIds).toEqual([]);
+      expect((await store.readHistoricalCheckoutCandidate(input)).activeRunIds).toEqual([]);
       await h.setTaskState(IDS.task13, 'running');
-      await expect(store.readHistoricalCheckout(input)).rejects.toThrow();
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+      await expect(store.readHistoricalCheckoutCandidate(input)).rejects.toThrow();
+      expect(await archive(store, input, auditFor(input))).toBe('conflict');
       await untouched();
       await h.setTaskState(IDS.task13, 'done');
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('ok');
+      expect(await archive(store, input, auditFor(input))).toBe('ok');
     });
 
     it('预检后通知换代（同键重开、raisedAt 变了）：归档 conflict，新事故保持打开', async () => {
       const input = baseInput();
-      await store.readHistoricalCheckout(input);
+      await store.readHistoricalCheckoutCandidate(input);
       const newer = '2026-10-19T04:00:00.000Z';
       await h.reopen(NID, newer);
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+      expect(await archive(store, input, auditFor(input))).toBe('conflict');
       const n = await notificationOf(store, NID);
       expect(n.resolvedAt).toBeUndefined();
       expect(n.raisedAt).toBe(newer);
@@ -514,40 +583,40 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
 
     it('已归档后同键重开新事故：旧请求重放 conflict，不撤新事故，不当成已落账', async () => {
       const input = baseInput();
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('ok');
+      expect(await archive(store, input, auditFor(input))).toBe('ok');
       await h.reopen(NID, '2026-10-19T06:00:00.000Z');
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+      expect(await archive(store, input, auditFor(input))).toBe('conflict');
       expect((await notificationOf(store, NID)).resolvedAt).toBeUndefined();
       expect(await auditsOf(store, NID)).toHaveLength(1);
     });
 
     it('幂等：同一完整已落账操作重放 already_archived；内容不同或不是我们撤的则 conflict', async () => {
       const input = baseInput();
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('ok');
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('already_archived');
+      expect(await archive(store, input, auditFor(input))).toBe('ok');
+      expect(await archive(store, input, auditFor(input))).toBe('already_archived');
       const changed = baseInput({ evidence: '换了一份证据' });
-      expect(await store.archiveHistoricalCheckout(changed, auditFor(changed))).toBe('conflict');
+      expect(await archive(store, changed, auditFor(changed))).toBe('conflict');
       expect(await auditsOf(store, NID)).toHaveLength(1);
 
       // 通知已 resolved 但不是这条审计撤的（手工/通用 resolve）：不能凭「已处理」就假成功
       const manual = await make(
         data({ notification: { resolvedAt: '2026-10-19T04:30:00.000Z', resolvedBy: 'someone' } }),
       );
-      expect(await manual.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+      expect(await archive(manual.store, input, auditFor(input))).toBe('conflict');
       expect(await auditsOf(manual.store, NID)).toEqual([]);
       const spoof = await make(
         data({
           notification: { resolvedAt: '2026-10-19T04:30:00.000Z', resolvedBy: 'ops:checkout-history' },
         }),
       );
-      expect(await spoof.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+      expect(await archive(spoof.store, input, auditFor(input))).toBe('conflict');
     });
 
     it('并发：两个相同请求恰一个 ok、一个 already_archived，只一条审计', async () => {
       const input = baseInput();
       const results = await Promise.all([
-        store.archiveHistoricalCheckout(input, auditFor(input)),
-        store.archiveHistoricalCheckout(input, auditFor(input)),
+        archive(store, input, auditFor(input)),
+        archive(store, input, auditFor(input)),
       ]);
       expect([...results].sort()).toEqual(['already_archived', 'ok']);
       expect(await auditsOf(store, NID)).toHaveLength(1);
@@ -556,10 +625,7 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
     it('并发：内容不同的两个请求恰一个 ok、另一个 conflict，只一条审计', async () => {
       const a = baseInput({ reason: '甲' });
       const b = baseInput({ reason: '乙' });
-      const results = await Promise.all([
-        store.archiveHistoricalCheckout(a, auditFor(a)),
-        store.archiveHistoricalCheckout(b, auditFor(b)),
-      ]);
+      const results = await Promise.all([archive(store, a, auditFor(a)), archive(store, b, auditFor(b))]);
       expect([...results].sort()).toEqual(['conflict', 'ok']);
       expect(await auditsOf(store, NID)).toHaveLength(1);
     });
@@ -567,7 +633,7 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
     it('并发：归档与新增活执行竞争，要么归档在前（活执行随后才来）要么 conflict，不出现「有活执行却已归档且当时可见」', async () => {
       const input = baseInput();
       const [result] = await Promise.all([
-        store.archiveHistoricalCheckout(input, auditFor(input)),
+        archive(store, input, auditFor(input)),
         h.addRun({ id: OPEN_RUN_ID, workflowId: WF }),
       ]);
       const n = await notificationOf(store, NID);
@@ -579,10 +645,10 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       if (!h.failAuditWrites) return;
       const input = baseInput();
       const restore = await h.failAuditWrites();
-      await expect(store.archiveHistoricalCheckout(input, auditFor(input))).rejects.toThrow();
+      await expect(archive(store, input, auditFor(input))).rejects.toThrow();
       await untouched();
       await restore();
-      expect(await store.archiveHistoricalCheckout(input, auditFor(input))).toBe('ok');
+      expect(await archive(store, input, auditFor(input))).toBe('ok');
     });
   });
 }

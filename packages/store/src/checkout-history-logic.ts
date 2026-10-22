@@ -1,3 +1,4 @@
+import { type CheckoutSource, isObservedCheckoutSource } from './checkout-source.ts';
 import type { HistoricalCheckoutArchiveInput, HistoricalCheckoutFacts, NewAuditEntry } from './ports.ts';
 
 // 历史 checkout 卡处置的共用判断：内存版和 Postgres 版都调，两边口径一致。
@@ -150,17 +151,7 @@ export function checkoutNotificationProblem(
  */
 export const CHECKOUT_RUN_OUTCOMES_REJECTED: readonly string[] = ['admission_blocked', 'org_switch'];
 
-/**
- * 报警比这一段起点早的容忍：检出在 prepareCwd 里失败，runs 行在这之后才写，起点会晚于报警几十毫秒（#3067 晚了 46ms）。
- * 只放宽到一分钟，再早就是别的段报的。
- */
-export const CHECKOUT_RAISED_BEFORE_RUN_TOLERANCE_MS = 60_000;
-
-/**
- * 原执行必须是这个任务这个 PR 的、已终态的 verify 段（冷验收放检出的那一段），
- * 且这条报警的事故时刻（raisedAt）落在这一段起止之内（起点前允许 CHECKOUT_RAISED_BEFORE_RUN_TOLERANCE_MS）：别的段、没进到放检出那步的段都不是这张卡的原执行。
- * 旧 run 的 temporal_run_id 可以为空：此时处置输入的 temporalRunId 也必须是空串，不能拿别的 run 编号去配。
- */
+/** 只核 DB 候选段的结构和终态。raisedAt 只作通知代次 CAS；run/head 关联必须另核可信活动来源。 */
 export function checkoutRunProblem(
   run: {
     segment?: string | undefined;
@@ -173,7 +164,6 @@ export function checkoutRunProblem(
     startedAt?: string | undefined;
   },
   target: { workflowId: string; temporalRunId: string; issueNumber: number; pr: number },
-  raisedAt: string | undefined,
 ): string | undefined {
   if (run.segment !== 'verify') return '原执行不是 verify 段';
   if (run.workflowId !== target.workflowId || (run.temporalRunId ?? '') !== target.temporalRunId)
@@ -183,10 +173,13 @@ export function checkoutRunProblem(
   if (CHECKOUT_RUN_OUTCOMES_REJECTED.includes(run.outcome))
     return `原执行结局是 ${run.outcome}，没进到放检出那一步或没有收场`;
   if (run.prNumber !== target.pr) return '原执行的 PR 关联不匹配';
-  const raised = raisedAt === undefined ? Number.NaN : Date.parse(raisedAt);
-  const started = run.startedAt === undefined ? Number.NaN : Date.parse(run.startedAt);
-  if (!(started - CHECKOUT_RAISED_BEFORE_RUN_TOLERANCE_MS <= raised && raised <= Date.parse(run.endedAt)))
-    return '报警时刻不在原执行起止之内，不是这一段报的';
+  if (
+    !run.startedAt ||
+    !Number.isFinite(Date.parse(run.startedAt)) ||
+    !Number.isFinite(Date.parse(run.endedAt)) ||
+    Date.parse(run.startedAt) > Date.parse(run.endedAt)
+  )
+    return '原执行起止不完整';
   return undefined;
 }
 
@@ -195,7 +188,9 @@ export function checkoutAuditProblem(
   input: HistoricalCheckoutArchiveInput,
   facts: HistoricalCheckoutFacts,
   entry: NewAuditEntry,
+  source?: CheckoutSource,
 ): string | undefined {
+  if (checkoutSourceProblem(input, facts, source)) return '可信活动来源没有绑定这份候选事实';
   if (
     entry.actor.kind !== 'ops' ||
     entry.actor.id !== 'ops:checkout-history' ||
@@ -230,6 +225,7 @@ export function checkoutAuditProblem(
     workflowId: input.workflowId,
     runId: input.runId,
     temporalRunId: input.temporalRunId,
+    executionRunId: input.executionRunId,
     pr: input.pr,
     head: input.head,
   };
@@ -241,7 +237,40 @@ export function checkoutAuditProblem(
     runFailureReason: facts.run.failureReason ?? null,
     conclusion: 'historical_unproven',
   };
+  if (
+    !afterRecord.checkoutSource ||
+    Object.entries(source!).some(
+      ([key, value]) => (afterRecord.checkoutSource as Record<string, unknown>)[key] !== value,
+    )
+  )
+    return '历史 checkout 可信活动来源审计不完整';
   if (Object.entries(afterFields).some(([key, value]) => afterRecord[key] !== value))
     return '历史 checkout 处置结论或证据不完整';
+  return undefined;
+}
+
+/** 锁内重核服务端凭据与当前 DB 候选绑定；不在事务中读网络。 */
+export function checkoutSourceProblem(
+  input: Pick<HistoricalCheckoutArchiveInput, 'workflowId' | 'executionRunId' | 'repo'>,
+  facts: HistoricalCheckoutFacts,
+  source?: CheckoutSource,
+): string | undefined {
+  if (!isObservedCheckoutSource(source)) return '缺少服务端可信活动来源';
+  const fields = {
+    workflowId: input.workflowId,
+    executionRunId: input.executionRunId,
+    taskId: facts.task.id,
+    repo: input.repo,
+    issueNumber: facts.task.issueNumber,
+    pr: facts.pullRequest.number,
+    head: facts.pullRequest.headSha,
+    runId: facts.run.id,
+    runStartedAt: facts.run.startedAt,
+    runEndedAt: facts.run.endedAt,
+  };
+  if (Object.entries(fields).some(([key, value]) => source[key as keyof CheckoutSource] !== value))
+    return '可信活动来源身份或原执行快照不匹配';
+  if (facts.run.temporalRunId && facts.run.temporalRunId !== source.executionRunId)
+    return '可信原 execution 与已记录 Temporal run 不匹配';
   return undefined;
 }

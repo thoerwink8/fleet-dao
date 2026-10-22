@@ -43,3 +43,5 @@
 - 看门狗提醒的受控修复状态（#3033）不加表、不改 Store 接口：存在设置表 `alert.repair:<提醒编号>`，靠 `putSetting` 的 `expectedVersion` 做 CAS（先写 executing 再动手）；`listSettings` 里这类键不在 `SETTING_SCHEMAS`，设置页不显示。读写在 `packages/api/src/alert-repair.ts`。
 
 - 修复核验结算用 `putSetting.expectedNotification` 在同一事务锁住原通知 `raisedAt` 并核对；代次和设置版本任一不符都返回 conflict，不写值、不记成功审计。不能用 updatedAt 代替 raisedAt（开放期间重复报警会更新前者）。
+
+- checkout 历史处置：`readHistoricalCheckoutCandidate` 只读 DB 候选事实，不能当作预检授权。`archiveHistoricalCheckout` 另须服务端原 execution reader 产生的冻结标量 `CheckoutSource` 能力（JSON 复制不认）；事务内锁通知/任务/目标 PR 与 runs，重核任务、原 run 起止、PR/head、来源绑定及通知 body/raisedAt CAS，审计失败一起回滚。`raisedAt` 保持事故代次，不拿它代替当前正文活动时间；DB 旧 `temporalRunId` 空串不补写，来源用独立 `executionRunId`。来源摘要只有确定的原 execution、活动事件和载荷 hash，不含读取时间或随机编号，完整同请求重读可幂等。Store 不联网、不改任务/run/验收责任，也不写检出恢复结论。
