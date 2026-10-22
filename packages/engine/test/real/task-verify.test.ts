@@ -168,6 +168,8 @@ function rig(
     pickRouteError?: Error;
     /** 给了就接上留言口（「不归我验」转人用）；comments 记下每次留的言。 */
     commentIssue?: (input: { issueNumber: number; key: string; body: string }) => Promise<void>;
+    /** 给了就接上贴标签口（转人后贴「本机做」，#3601）。 */
+    addIssueLabel?: (input: { issueNumber: number; label: string }) => Promise<void>;
     /** 收发目录和「引擎要走了」的信号（#2848）：给了，执行方式支持的验收会话脱开引擎跑。 */
     handoff?: SessionHandoff;
     deps?: Partial<ColdVerifyActivityDeps>;
@@ -228,6 +230,13 @@ function rig(
           async commentIssue(i: { issueNumber: number; key: string; body: string }) {
             await opts.commentIssue?.(i);
             return { commentId: 1, url: 'https://example.test/c/1', created: true };
+          },
+        }
+      : {}),
+    ...(opts.addIssueLabel
+      ? {
+          async addIssueLabel(i: { issueNumber: number; label: string }) {
+            await opts.addIssueLabel?.(i);
           },
         }
       : {}),
@@ -2063,6 +2072,67 @@ describe('材料带 PR 正文和测试输出；「不归我验」留言到单上
     expect(got.outOfScope).toHaveLength(1);
     expect(got.notes).toContain('没留成言');
     expect(got.notes).toContain('GitHub 503');
+  });
+
+  it('转人：留言和贴「本机做」都发生（#3601），贴标签在留言之后', async () => {
+    const calls: string[] = [];
+    const labels: { issueNumber: number; label: string }[] = [];
+    const r = rig({
+      driverRun: async () => report(OUT_OF_SCOPE),
+      commentIssue: async () => {
+        calls.push('comment');
+      },
+      addIssueLabel: async (i) => {
+        calls.push('label');
+        labels.push(i);
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    expect(calls).toEqual(['comment', 'label']);
+    expect(labels).toMatchObject([{ issueNumber: 12, label: '本机做' }]);
+    expect(got.notes).toContain('已贴「本机做」');
+  });
+
+  it('【故意造出的失败】转人后贴「本机做」失败：照实抛可重试错误，不吞', async () => {
+    const r = rig({
+      driverRun: async () => report(OUT_OF_SCOPE),
+      commentIssue: async () => undefined,
+      addIssueLabel: async () => {
+        throw new Error('GitHub 403');
+      },
+    });
+    await expect(r.run(r.input(), ctx())).rejects.toMatchObject({
+      code: 'COLD_VERIFY_HANDOFF_LABEL_FAILED',
+      retryable: true,
+    });
+  });
+
+  it('留言失败也照样贴「本机做」：标签才是队列看得到这张单的东西', async () => {
+    const labels: string[] = [];
+    const r = rig({
+      driverRun: async () => report(OUT_OF_SCOPE),
+      commentIssue: async () => {
+        throw new Error('GitHub 503');
+      },
+      addIssueLabel: async (i) => {
+        labels.push(i.label);
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.notes).toContain('没留成言');
+    expect(labels).toEqual(['本机做']);
+  });
+
+  it('没有「不归我验」：不贴「本机做」', async () => {
+    let labelled = 0;
+    const r = rig({
+      addIssueLabel: async () => {
+        labelled += 1;
+      },
+    });
+    await r.run(r.input(), ctx());
+    expect(labelled).toBe(0);
   });
 
   it('没有「不归我验」：不留言', async () => {

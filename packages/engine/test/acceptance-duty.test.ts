@@ -107,14 +107,14 @@ describe('验收责任（#3037）：租约过期 → 法国接管 → 代码过�
     const back = await taskRow(taskId);
     expect(back).toMatchObject({ state: 'stopped', executor: 'engine' });
 
-    // 2. 法国接管同一行：冷验收过了，「不归我验」转给人（handOff 记的那一份）。转人的留言写明代码照合、单子留着
+    // 2. 法国接管同一行：冷验收过了，「不归我验」转给人。这里直接用 recordAcceptanceDuties 造一行历史责任（#3591 起引擎不再写这个账）
     const handed = await recordAcceptanceDuties(
       t.db,
       { taskId, repo: REPO_REF, issueNumber: 2994, record: [{ prNumber: 3031, head: HEAD, items: FIELD }] },
       NOW,
     );
     expect(handed).toHaveLength(1);
-    // #3591 起冷验收不再记库，留言也不再说「验收责任已记下」：只写转人、代码照合、单子留着等人贴证据
+    // 转人的留言只写转人、代码照合、单子留着等人贴证据，不提验收责任账
     expect(handoffBody({ prNumber: 3031, headSha: HEAD }, FIELD)).not.toContain('验收责任已记下');
     expect(handoffBody({ prNumber: 3031, headSha: HEAD }, FIELD)).toContain('这张单留着不关');
     expect(handoffBody({ prNumber: 3031, headSha: HEAD }, FIELD)).toContain(HEAD);

@@ -362,6 +362,17 @@ export function withoutFamilies(avoid: Avoid): Avoid {
   return { routeIds: avoid.routeIds, poolIds: avoid.poolIds, modelIds: avoid.modelIds };
 }
 
+/** 这条路由被这份避让挡着没有（路由、池、模型、族任一命中）。CI 红返工点名上一段路由前查（#3603）：这张单要避开的不点名。 */
+export function avoidHits(avoid: Avoid, route: RouteChoice): boolean {
+  const family = avoidableFamily(route);
+  return (
+    avoid.routeIds.includes(route.routeId) ||
+    avoid.poolIds.includes(route.poolId) ||
+    avoid.modelIds.includes(route.modelId) ||
+    (family !== null && (avoid.families ?? []).includes(family))
+  );
+}
+
 /**
  * 动手一轮跑完没有提交：下一轮避开这条路由。
  * streak 是连着没提交的轮数（含这一轮）；到第 2 轮起，再避开这一轮的模型。早先避开的路由留着，直到「继续」清掉。

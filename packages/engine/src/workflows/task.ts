@@ -71,6 +71,7 @@
 // - 返工续会话（决定 0093，patched('rework-resume')）：CI 红、验收没过、冲突、没提交……下一轮动手续上一轮跑成的那个会话
 //   （同一棵树；同一路由的执行方式、池、会话用户由 planSegmentResume 判），提示词只补返工意见。连着 RESUME_STREAK_LIMIT 轮续着改
 //   还没过，下一轮开新会话，返工意见精炼过（freshSessionFeedback）。轮数用尽点「继续」重读单子后也开新会话。
+//   CI 红返工不受 RESUME_STREAK_LIMIT 限制（#3603，patched('ci-rework-keep-resume')），选路点名上一段的路由（task-session.ts）。
 // - 冲突引擎先自己并（决定 0093，patched('conflict-self-sync')）：上一轮因「和主线有冲突」返工、树里没留冲突标记时，
 //   动手前并最新主线并干净了（git 自动合并）就直接推上去重跑 CI，不派模型、不算一轮；并不干净才交给会话解。
 // - 自测（决定 0093，patched('self-check')）：会话交活、交付核对过了，推之前引擎在会话的树里跑仓的测试命令和 tsc（selfCheck）。
@@ -173,6 +174,7 @@ import {
   reworkCauseOf,
   roundOutcomeOf,
   SELF_CHECK_RED_LINE,
+  type SegmentCauseNote,
   SKIP_CI_PR_VERIFIED,
   SKIP_CI_SELF_VERIFY,
   selfCheckText,
@@ -767,7 +769,7 @@ class TaskFlow {
     }
     // 这一轮第一笔动手为什么起（#3140）：上一轮留下了问题就是返工，按问题认哪一类；方案那几笔另记「出方案」
     const startCause = reworkCauseOf(rt.status.lastProblem, rt.feedback);
-    this.planReworkResume();
+    this.planReworkResume(startCause);
     // 重活第一轮先出方案（#2755）。老历史没有这个标记，照旧直接动手
     if (tier.tier === 'heavyweight' && rt.round === 1 && !this.planTried && patched('plan-first-heavy')) {
       await this.planFirst(brief, tier, wt);
@@ -1174,13 +1176,20 @@ class TaskFlow {
   /**
    * 返工轮续上一轮跑成的会话（决定 0093）：只定续谁，能不能续由 writeSession 问 planSegmentResume。
    * 连着 RESUME_STREAK_LIMIT 轮续着改还没过：这一轮开新会话，返工意见精炼过。上一段被暂停、已经记了要续的，不覆盖。
+   * CI 红返工（cause=rework_ci）不受这个上限限制（#3603）。
    */
-  private planReworkResume(): void {
+  private planReworkResume(cause: SegmentCauseNote): void {
     const rt = this.rt;
     const last = rt.lastSession;
     if (!last || rt.resumeFrom !== null || !patched('rework-resume')) return;
     // 全程的单（#2826）一直续同一个会话：不按「连着续两轮开新会话」清空；续不上由 writeSession 开新会话、带同样的意见
-    if (rt.resumeStreak >= RESUME_STREAK_LIMIT && rt.flowMode !== 'full') {
+    // CI 红返工（#3603，patched('ci-rework-keep-resume')）也不清：修的是同一处失败，原会话读过的代码和上下文最有用。
+    // 标记只在「到了上限、又是 CI 红」这一刻才问：老历史在这一刻没有标记，重放为假，照旧清空开新会话。
+    if (
+      rt.resumeStreak >= RESUME_STREAK_LIMIT &&
+      rt.flowMode !== 'full' &&
+      !(cause.cause === 'rework_ci' && patched('ci-rework-keep-resume'))
+    ) {
       rt.resumeStreak = 0;
       rt.feedback = freshSessionFeedback(rt.feedback);
       return;

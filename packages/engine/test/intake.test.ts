@@ -1734,6 +1734,26 @@ describe('准入 · 正文里的「前置：」（#2783）', () => {
     expect(run.why).toContain('#5');
   });
 
+  it('作者不在白名单的单，正文里的前置号不进批量读', async () => {
+    const h = harness(
+      {},
+      {
+        issues: [
+          issue({ number: 12, body: withPre('前置：#40') }),
+          issue({
+            number: 13,
+            author: { login: 'stranger', id: 99, type: 'User' },
+            body: withPre('前置：#41、#42'),
+          }),
+        ],
+        prereqStates: { 40: 'closed', 41: 'open', 42: 'open' },
+      },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.prereqReads).toEqual([[40]]);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
   it('日期前置：北京时间到那天之前不拉，原因写「等到 2026-10-03」，不读 GitHub；到了那天照常拉', async () => {
     const h = harness({}, { issues: [issue({ number: 12, body: withPre('前置：2026-10-03 复查日') })] });
     await runIntakeJob(h.deps); // NOW = 2026-10-02 22:00（北京时间）
@@ -2330,8 +2350,18 @@ describe('本机退回法国队列的单（#3461）：重新派、法国接不�
     expect(run.outcome).toBe('partial');
   });
 
-  /** 单子贴着「本机做」、是本机退回来没人接的行，库里还挂着「引擎接不了」的提醒；挡着的地方改好没有看 body。 */
-  function keptReturned(body: string, over: Partial<IntakeDeps> = {}) {
+  /** 场景段开头加一行前置。 */
+  const pre = (line: string) => BODY.replace('## 场景\n\n', `## 场景\n\n${line}\n\n`);
+
+  /**
+   * 单子贴着「本机做」、是本机退回来没人接的行，库里还挂着「引擎接不了」的提醒；挡着的地方改好没有看 body。
+   * 交还与否只看有没有摘标签、号还在不在 keep、结局是不是 ok：不拿错误原文判定。
+   */
+  function keptReturned(
+    body: string,
+    over: Partial<IntakeDeps> = {},
+    extra: { issue?: Partial<IntakeIssue>; prereqStates?: Record<number, 'open' | 'closed'> } = {},
+  ) {
     const r = returned();
     const unmarked: number[] = [];
     const settled: number[][] = [];
@@ -2349,7 +2379,10 @@ describe('本机退回法国队列的单（#3461）：重新派、法国接不�
         },
         ...over,
       },
-      { issues: [issue({ body, labels: ['需求', '本机做'] })] },
+      {
+        issues: [issue({ body, labels: ['需求', '本机做'], ...extra.issue })],
+        ...(extra.prereqStates ? { prereqStates: extra.prereqStates } : {}),
+      },
     );
     return { h, r, unmarked, settled };
   }
@@ -2379,9 +2412,119 @@ describe('本机退回法国队列的单（#3461）：重新派、法国接不�
         return { ok: true, lives: [] };
       },
     });
-    await runIntakeJob(k.h.deps);
+    const run = await runIntakeJob(k.h.deps);
     expect(k.unmarked).toEqual([]);
     expect(k.settled).toEqual([[12]]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('贴着「要人拍」：按合同不摘，这一轮是查成了的 ok', async () => {
+    const k = keptReturned(BODY, {}, { issue: { labels: ['需求', '本机做', '要人拍'] } });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+    expect(run.outcome).toBe('ok');
+    expect(k.h.started).toEqual([]);
+  });
+
+  it('前置确知还开着：查询成功后按交还合同摘「本机做」，不起任务，结局 ok', async () => {
+    const k = keptReturned(pre('前置：#40'), {}, { prereqStates: { 40: 'open' } });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.h.prereqReads).toEqual([[40]]);
+    expect(k.unmarked).toEqual([12]);
+    expect(k.settled).toEqual([[]]);
+    expect(k.h.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('日期没到：不读前置单，按交还合同摘「本机做」，结局 ok', async () => {
+    const k = keptReturned(pre('前置：2026-10-03'));
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.h.prereqReads).toEqual([]);
+    expect(k.unmarked).toEqual([12]);
+    expect(k.settled).toEqual([[]]);
+    expect(k.h.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('前置全部 closed：查询成功后按交还合同摘「本机做」，结局 ok', async () => {
+    const k = keptReturned(pre('前置：#40'), {}, { prereqStates: { 40: 'closed' } });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.h.prereqReads).toEqual([[40]]);
+    expect(k.unmarked).toEqual([12]);
+    expect(k.settled).toEqual([[]]);
+    expect(k.h.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('【故意造出的失败】退回单前置查询抛错：不摘「本机做」，号留在 keep，试判错误进外层且结局不是 ok', async () => {
+    // 错误原文写成 closed：不能靠这句话像不像失败来决定交不交还。
+    const k = keptReturned(pre('前置：#40'), {
+      async prerequisiteStates() {
+        throw new Error('closed');
+      },
+    });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+    expect(k.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+  });
+
+  it('【故意造出的失败】退回单前置结果缺号：不摘「本机做」，号留在 keep，结局不是 ok', async () => {
+    const k = keptReturned(pre('前置：#40、#41'), {
+      async prerequisiteStates(_repo, numbers) {
+        return new Map(numbers.filter((n) => n === 40).map((n) => [n, 'closed' as const]));
+      },
+    });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+    expect(k.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+  });
+
+  it('【故意造出的失败】接手的退回行（没有任何一代）前置查询抛错：同样不摘、号留在 keep', async () => {
+    const k = keptReturned(pre('前置：#40'), {
+      async taskGenerations(): Promise<TaskGenerationFacts> {
+        return { ok: true, lives: [], lastEndedAt: null };
+      },
+      async prerequisiteStates() {
+        throw new Error('closed');
+      },
+    });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+  });
+
+  it('【故意造出的失败】派出状态 uncertain：不摘、号留在 keep，原因进外层 unchecked', async () => {
+    const k = keptReturned(BODY, {
+      async taskGenerations(): Promise<TaskGenerationFacts> {
+        return { ok: false, why: 'temporal-down' };
+      },
+    });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+    expect(k.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+    expect(run.why).toContain('temporal-down');
+  });
+
+  it('【故意造出的失败】开单时间认不出：试判没查成，不摘、不把这一轮记成 ok', async () => {
+    const k = keptReturned(BODY, {}, { issue: { createdAt: '昨天' } });
+    const run = await runIntakeJob(k.h.deps);
+    expect(k.unmarked).toEqual([]);
+    expect(k.settled).toEqual([[12]]);
+    expect(k.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
   });
 
   it('摘标签写不成：这一轮记没查成，标签和提醒都留着', async () => {
@@ -2449,7 +2592,17 @@ describe('本机租约到期、退回之前先判法国接不接得了（#3461�
     ['1. 页面上能看到「验收中」', '2. 带 1366、390 两张截图'],
   );
 
-  function withLease(body: string) {
+  const pre = (line: string) => BODY.replace('## 场景\n\n', `## 场景\n\n${line}\n\n`);
+
+  function withLease(
+    body: string,
+    over: Partial<IntakeDeps> = {},
+    data: {
+      prereqStates?: Record<number, 'open' | 'closed'>;
+      labels?: string[];
+      createdAt?: string;
+    } = {},
+  ) {
     const steps: string[] = [];
     const notices: { key: string; body: string }[] = [];
     const localLeases: LocalLeaseDeps = {
@@ -2479,8 +2632,18 @@ describe('本机租约到期、退回之前先判法国接不接得了（#3461�
         async notifyLocal(n) {
           notices.push({ key: n.key, body: n.body });
         },
+        ...over,
       },
-      { issues: [issue({ body, labels: ['需求', '本机做'] })] },
+      {
+        issues: [
+          issue({
+            body,
+            labels: data.labels ?? ['需求', '本机做'],
+            ...(data.createdAt === undefined ? {} : { createdAt: data.createdAt }),
+          }),
+        ],
+        ...(data.prereqStates ? { prereqStates: data.prereqStates } : {}),
+      },
     );
     return { h, steps, notices };
   }
@@ -2508,5 +2671,80 @@ describe('本机租约到期、退回之前先判法国接不接得了（#3461�
     await runIntakeJob(w.h.deps);
     expect(w.h.localMarked).toEqual([]);
     expect(w.h.started).toEqual([]);
+  });
+
+  it('贴着「要人拍」：不摘、不退回，通知留给本机，结局 ok', async () => {
+    const w = withLease(BODY, {}, { labels: ['需求', '本机做', '要人拍'] });
+    const run = await runIntakeJob(w.h.deps);
+    expect(w.steps).toEqual([]);
+    expect(w.notices).toHaveLength(1);
+    expect(w.h.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('前置确知还开着：租约照旧摘「本机做」并退回，结局 ok', async () => {
+    const w = withLease(pre('前置：#40'), {}, { prereqStates: { 40: 'open' } });
+    const run = await runIntakeJob(w.h.deps);
+    expect(w.h.prereqReads).toEqual([[40]]);
+    expect(w.steps).toEqual(['unmark', 'settle returned']);
+    expect(w.notices).toEqual([]);
+    expect(w.h.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('日期没到：不读前置单，租约照旧摘「本机做」并退回，结局 ok', async () => {
+    const w = withLease(pre('前置：2026-10-03'));
+    const run = await runIntakeJob(w.h.deps);
+    expect(w.h.prereqReads).toEqual([]);
+    expect(w.steps).toEqual(['unmark', 'settle returned']);
+    expect(w.notices).toEqual([]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('前置全部 closed：租约照旧摘「本机做」并退回，结局 ok', async () => {
+    const w = withLease(pre('前置：#40'), {}, { prereqStates: { 40: 'closed' } });
+    const run = await runIntakeJob(w.h.deps);
+    expect(w.h.prereqReads).toEqual([[40]]);
+    expect(w.steps).toEqual(['unmark', 'settle returned']);
+    expect(w.notices).toEqual([]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('【故意造出的失败】租约试判时前置查询抛错：不摘、不退回、不报接不了，结局不是 ok', async () => {
+    const w = withLease(pre('前置：#40'), {
+      async prerequisiteStates() {
+        throw new Error('closed');
+      },
+    });
+    const run = await runIntakeJob(w.h.deps);
+    expect(w.steps).toEqual([]);
+    expect(w.notices).toEqual([]);
+    expect(w.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+  });
+
+  it('【故意造出的失败】租约试判时前置结果缺号：不摘、不退回、不报接不了，结局不是 ok', async () => {
+    const w = withLease(pre('前置：#40、#41'), {
+      async prerequisiteStates(_repo, numbers) {
+        return new Map(numbers.filter((n) => n === 40).map((n) => [n, 'open' as const]));
+      },
+    });
+    const run = await runIntakeJob(w.h.deps);
+    expect(w.steps).toEqual([]);
+    expect(w.notices).toEqual([]);
+    expect(w.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+  });
+
+  it('【故意造出的失败】开单时间认不出：不摘、不退回、不报接不了，结局不是 ok', async () => {
+    const w = withLease(BODY, {}, { createdAt: '昨天' });
+    const run = await runIntakeJob(w.h.deps);
+    expect(w.steps).toEqual([]);
+    expect(w.notices).toEqual([]);
+    expect(w.h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
   });
 });
