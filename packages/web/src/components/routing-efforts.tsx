@@ -14,7 +14,7 @@
 // - 没接上（开发环境内存版）和没读成是两回事：前者整块写 unavailable，后者写「没读成」和原因。都不画空表冒充「都没配」。
 // - 能配的按家族展开；配不了、未分类默认折叠（#1756）。未分类用人读名，原始编号放悬停。
 
-import { Brain, ChevronDown, Info } from 'lucide-react';
+import { Brain, Info } from 'lucide-react';
 import { type ReactNode, useId, useState } from 'react';
 import { errorText, useRoutingEfforts, useUpdateRouteEffort } from '../api/client';
 import type { EffortModel, RouteEffort, SessionEffort } from '../api/types';
@@ -32,17 +32,20 @@ import {
   readableModelName,
 } from '../lib/efforts';
 import { TIME } from '../lib/format';
-import { cn } from '../lib/utils';
 import { EmptyState } from './layout/empty-state';
-import { List, RowFrame } from './layout/list';
+import { InfoTip } from './layout/info-tip';
+import { List, RowDetail, RowFrame } from './layout/list';
 import { LoadError, LoadingRows } from './layout/load-state';
+import { FoldBar } from './layout/row-button';
 import { SearchInput } from './layout/search-input';
 import { Section } from './layout/section';
+import { Select } from './layout/select';
+import { Stack } from './layout/stack';
 import { StatusBadge } from './layout/status-badge';
+import { Switch } from './layout/switch';
+import { Text } from './layout/text';
 import { Toolbar } from './layout/toolbar';
-import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Switch } from './ui/switch';
+import { RowItem } from './layout/windowed';
 
 /** 页签顶上一行说明；其余细节收进旁边的「ⓘ」（#1821）。 */
 const SUMMARY = '每条路起会话想多深，改了下个会话就照新的';
@@ -80,30 +83,26 @@ function EffortSelect({
   route: r,
   fallback,
   label,
-  className,
+  width,
 }: {
   edit: EffortEdit;
   route: RouteEffort;
   fallback: SessionEffort;
   label: string;
-  className?: string;
+  width: 'sm' | 'md';
 }) {
   return (
-    <Select value={edit.shown ?? DEFAULT_VALUE} onValueChange={edit.change} disabled={edit.update.isPending}>
-      <SelectTrigger size="sm" className={cn('w-full', className)} aria-label={label}>
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent position="popper" align="end">
-        <SelectItem value={DEFAULT_VALUE} title={`没配，用默认档 ${fallback}`}>
-          默认
-        </SelectItem>
-        {r.choices.map((e) => (
-          <SelectItem key={e} value={e} title={EFFORT_HINT[e]} className="num">
-            {e}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <Select
+      value={edit.shown ?? DEFAULT_VALUE}
+      onValueChange={edit.change}
+      disabled={edit.update.isPending}
+      width={width}
+      aria-label={label}
+      options={[
+        { value: DEFAULT_VALUE, label: '默认', title: `没配，用默认档 ${fallback}` },
+        ...r.choices.map((e) => ({ value: e, label: e, title: EFFORT_HINT[e], numeric: true })),
+      ]}
+    />
   );
 }
 
@@ -119,13 +118,13 @@ function EffortNow({
 }) {
   const effective = effectiveEffort(r, fallback);
   return (
-    <span className="num text-body" aria-live="polite">
+    <span className="num" aria-live="polite">
       {edit.update.isPending ? (
-        <span className="text-muted-foreground">改着…</span>
+        <Text tone="muted">改着…</Text>
       ) : effective?.configured ? (
-        <span className="font-medium">{effective.effort}</span>
+        <Text strong>{effective.effort}</Text>
       ) : (
-        <span className="text-muted-foreground">默认（{effective?.effort ?? fallback}）</span>
+        <Text tone="muted">默认（{effective?.effort ?? fallback}）</Text>
       )}
     </span>
   );
@@ -134,9 +133,9 @@ function EffortNow({
 function EffortFailed({ edit }: { edit: EffortEdit }) {
   if (!edit.update.isError) return null;
   return (
-    <p role="alert" className="mt-1.5 text-body text-ink-fail">
-      没改成：{errorText(edit.update.error)}
-    </p>
+    <span role="alert">
+      <Text tone="danger">没改成：{errorText(edit.update.error)}</Text>
+    </span>
   );
 }
 
@@ -174,18 +173,18 @@ export function RouteEffortField({
   const { data, error, isLoading } = useRoutingEfforts();
   let body: ReactNode;
   if (error) {
-    body = <span className="text-ink-fail">思考档位没读成：{errorText(error)}</span>;
+    body = <Text tone="danger">思考档位没读成：{errorText(error)}</Text>;
   } else if (isLoading || !data) {
-    body = <span className="text-muted-foreground">读着…</span>;
+    body = <Text tone="muted">读着…</Text>;
   } else if (data.unavailable) {
-    body = <span className="text-muted-foreground">{data.unavailable}</span>;
+    body = <Text tone="muted">{data.unavailable}</Text>;
   } else {
     const r = findRouteEffort(data.models, modelId, routeId);
     body = !r ? (
-      <span className="text-muted-foreground">目录里没有这条路由的档位</span>
+      <Text tone="muted">目录里没有这条路由的档位</Text>
     ) : r.fixed !== undefined ? (
-      <span data-effort-fixed className="text-muted-foreground">
-        配不了：{r.fixed}
+      <span data-effort-fixed>
+        <Text tone="muted">配不了：{r.fixed}</Text>
       </span>
     ) : (
       <RouteEffortEditor
@@ -197,11 +196,13 @@ export function RouteEffortField({
     );
   }
   return (
-    <div data-route-effort className="min-w-0">
-      <div className="text-meta text-muted-foreground" title={DETAILS}>
-        思考档位（这条路的上限）
-      </div>
-      <div className="mt-1 text-body">{body}</div>
+    <div data-route-effort>
+      <Stack gap="sm">
+        <Text size="meta" tone="muted" title={DETAILS}>
+          思考档位（这条路的上限）
+        </Text>
+        <Text as="div">{body}</Text>
+      </Stack>
     </div>
   );
 }
@@ -219,13 +220,13 @@ function RouteEffortEditor({
 }) {
   const edit = useRouteEffortEdit(modelId, route);
   return (
-    <>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <EffortSelect edit={edit} route={route} fallback={fallback} label={label} className="w-36" />
+    <Stack gap="sm">
+      <Stack direction="horizontal" gap="md" align="center" wrap>
+        <EffortSelect edit={edit} route={route} fallback={fallback} label={label} width="md" />
         <EffortNow edit={edit} route={route} fallback={fallback} />
-      </div>
+      </Stack>
       <EffortFailed edit={edit} />
-    </>
+    </Stack>
   );
 }
 
@@ -250,19 +251,19 @@ export function RouteEffortInline({
       data-route-effort
       data-effort-fixed={fixed ? '' : undefined}
       title={title}
-      className="shrink-0 text-meta whitespace-nowrap text-muted-foreground"
+      className="shrink-0 whitespace-nowrap"
     >
-      {text}
+      <Text size="meta" tone="muted">
+        {text}
+      </Text>
     </span>
   );
   if (error) {
     return (
-      <span
-        data-route-effort
-        className="shrink-0 text-meta whitespace-nowrap text-ink-fail"
-        title={errorText(error)}
-      >
-        档位没读成
+      <span data-route-effort className="shrink-0 whitespace-nowrap" title={errorText(error)}>
+        <Text size="meta" tone="danger">
+          档位没读成
+        </Text>
       </span>
     );
   }
@@ -294,13 +295,17 @@ function InlineEffortEditor({
 }) {
   const edit = useRouteEffortEdit(modelId, route);
   return (
-    <span data-route-effort className="flex max-w-48 shrink-0 flex-col items-end">
-      <EffortSelect edit={edit} route={route} fallback={fallback} label={label} className="w-28" />
-      {edit.update.isError ? (
-        <span role="alert" className="mt-1 text-right text-meta text-ink-fail">
-          没改成：{errorText(edit.update.error)}
-        </span>
-      ) : null}
+    <span data-route-effort className="max-w-48 shrink-0">
+      <Stack gap="sm" align="end">
+        <EffortSelect edit={edit} route={route} fallback={fallback} label={label} width="sm" />
+        {edit.update.isError ? (
+          <span role="alert">
+            <Text size="meta" tone="danger">
+              没改成：{errorText(edit.update.error)}
+            </Text>
+          </span>
+        ) : null}
+      </Stack>
     </span>
   );
 }
@@ -361,9 +366,8 @@ export function EffortsTab() {
           />
         </Section>
       ) : (
-        <div className="space-y-4">
+        <>
           <Toolbar
-            className="mb-0"
             start={<Counts models={data.models} fallback={data.defaultEffort} />}
             end={
               <>
@@ -374,50 +378,50 @@ export function EffortsTab() {
                   aria-label="搜索模型或渠道"
                   className="sm:w-64"
                 />
-                {/* 整行是一个 label：手机上这一行 40 高，点字也能开关（开关本身 32×18，可点区域在 ui/switch 里往外撑）。 */}
-                <label
-                  htmlFor="efforts-only-configured"
-                  className="flex items-center gap-2 text-body max-md:min-h-10"
-                >
-                  <Switch
-                    id="efforts-only-configured"
-                    checked={onlyConfigured}
-                    onCheckedChange={setOnlyConfigured}
-                  />
-                  只看配过的
+                {/* 整行是一个 label：点字也能开关（开关本身的可点区域在 ui/switch 里往外撑）。 */}
+                <label htmlFor="efforts-only-configured">
+                  <Stack direction="horizontal" gap="sm" align="center">
+                    <Switch
+                      id="efforts-only-configured"
+                      checked={onlyConfigured}
+                      onCheckedChange={setOnlyConfigured}
+                    />
+                    <Text>只看配过的</Text>
+                  </Stack>
                 </label>
               </>
             }
           />
-
-          {families.length > 0 ? (
-            <Section flush>
-              {/* 不再有「模型 | 路由 | 当前档位 | 改档位」表头：一行两行字，右边就是档位（#1916） */}
-              {families.map((g) => (
-                <FamilyGroup key={g.family} label={g.label} rows={g.rows} fallback={data.defaultEffort} />
-              ))}
-            </Section>
-          ) : groups.configurable.length > 0 ? (
-            <Section flush>
-              <div role="status">
-                <EmptyState
-                  size="inline"
-                  title={`没有符合的路由${search.trim() ? `：「${search.trim()}」` : ''}${onlyConfigured ? '，筛选在「只看配过的」' : ''}`}
-                />
-              </div>
-            </Section>
-          ) : null}
-          {groups.fixed.total > 0 && !onlyConfigured ? (
-            <FixedFold total={groups.fixed.total} byReason={groups.fixed.byReason} search={search} />
-          ) : null}
-          {groups.uncategorized.length > 0 ? (
-            <UncategorizedFold
-              models={groups.uncategorized}
-              fallback={data.defaultEffort}
-              keep={filtering ? keep : undefined}
-            />
-          ) : null}
-        </div>
+          <Stack>
+            {families.length > 0 ? (
+              <Section flush>
+                {/* 不再有「模型 | 路由 | 当前档位 | 改档位」表头：一行两行字，右边就是档位（#1916） */}
+                {families.map((g) => (
+                  <FamilyGroup key={g.family} label={g.label} rows={g.rows} fallback={data.defaultEffort} />
+                ))}
+              </Section>
+            ) : groups.configurable.length > 0 ? (
+              <Section flush>
+                <div role="status">
+                  <EmptyState
+                    size="inline"
+                    title={`没有符合的路由${search.trim() ? `：「${search.trim()}」` : ''}${onlyConfigured ? '，筛选在「只看配过的」' : ''}`}
+                  />
+                </div>
+              </Section>
+            ) : null}
+            {groups.fixed.total > 0 && !onlyConfigured ? (
+              <FixedFold total={groups.fixed.total} byReason={groups.fixed.byReason} search={search} />
+            ) : null}
+            {groups.uncategorized.length > 0 ? (
+              <UncategorizedFold
+                models={groups.uncategorized}
+                fallback={data.defaultEffort}
+                keep={filtering ? keep : undefined}
+              />
+            ) : null}
+          </Stack>
+        </>
       )}
     </>
   );
@@ -427,41 +431,42 @@ export function EffortsTab() {
 function EffortsIntro() {
   return (
     // 一行不折（#1914 第 5 轮）：窄屏放不下截断，ⓘ 紧跟在后面不被挤走
-    <p className="mb-4 flex min-w-0 items-center gap-1.5 whitespace-nowrap text-body text-muted-foreground">
-      <span className="min-w-0 truncate" title={SUMMARY}>
-        {SUMMARY}
-      </span>
-      <Popover>
-        <PopoverTrigger asChild>
-          <button
-            type="button"
-            aria-label="档位怎么生效"
-            className="grid size-6 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground max-md:-my-2 max-md:size-10"
-          >
-            <Info className="size-4" aria-hidden />
-          </button>
-        </PopoverTrigger>
-        <PopoverContent align="start" className="w-72 text-body">
-          {DETAILS}
-        </PopoverContent>
-      </Popover>
-    </p>
+    <Toolbar
+      start={
+        <Stack direction="horizontal" gap="sm" align="center">
+          <Text tone="muted" truncate title={SUMMARY}>
+            {SUMMARY}
+          </Text>
+          <InfoTip label="档位怎么生效" content={DETAILS} />
+        </Stack>
+      }
+    />
   );
 }
 
 function Counts({ models, fallback }: { models: EffortModel[]; fallback: SessionEffort }) {
   const c = effortCounts(models);
   return (
-    <p className="text-body text-muted-foreground">
-      <span className="num font-medium text-foreground">{c.configured}</span> 条配了 ·{' '}
-      <span className="num font-medium text-foreground">{c.byDefault}</span> 条用默认 {fallback}
+    <Text tone="secondary">
+      <span className="num">
+        <Text strong>{c.configured}</Text>
+      </span>{' '}
+      条配了 ·{' '}
+      <span className="num">
+        <Text strong>{c.byDefault}</Text>
+      </span>{' '}
+      条用默认 {fallback}
       {c.fixed > 0 ? (
         <>
           {' '}
-          · <span className="num font-medium text-foreground">{c.fixed}</span> 条配不了
+          ·{' '}
+          <span className="num">
+            <Text strong>{c.fixed}</Text>
+          </span>{' '}
+          条配不了
         </>
       ) : null}
-    </p>
+    </Text>
   );
 }
 
@@ -478,20 +483,10 @@ function FoldButton({
 }) {
   return (
     <Section flush>
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={controls}
-        onClick={onToggle}
-        className="flex w-full items-center gap-1.5 whitespace-nowrap px-4 py-3 text-left text-body text-foreground hover:bg-accent max-md:min-h-11"
-      >
-        <ChevronDown
-          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', !open && '-rotate-90')}
-          aria-hidden
-        />
+      <FoldBar open={open} onToggle={onToggle} controls={controls}>
         {/* 一行不折：组头的原因放不下就截断（#1914 第 5 轮） */}
         <span className="min-w-0 truncate">{label}</span>
-      </button>
+      </FoldBar>
     </Section>
   );
 }
@@ -510,24 +505,14 @@ function FamilyGroup({
   const bodyId = useId();
   const configured = rows.filter((r) => r.route.effort !== undefined).length;
   return (
-    <div className="border-b last:border-b-0">
+    <div>
       {/* 家族组头：淡字小标题加条数，不再是灰底横条（样板：层级靠字重和灰度，不靠色块） */}
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={bodyId}
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 border-b px-4 pt-3 pb-2 text-left text-meta font-medium text-muted-foreground hover:text-foreground max-md:min-h-10"
-      >
-        <ChevronDown
-          className={cn('size-4 shrink-0 transition-transform', !open && '-rotate-90')}
-          aria-hidden
-        />
+      <FoldBar open={open} onToggle={() => setOpen((v) => !v)} controls={bodyId} size="group">
         <span>{label}</span>
-        <span className="num font-normal">
+        <span className="num">
           {rows.length} 条{configured > 0 ? `，已配 ${configured}` : ''}
         </span>
-      </button>
+      </FoldBar>
       {open ? (
         <List id={bodyId}>
           {rows.map(({ model, route }) => (
@@ -565,34 +550,38 @@ function FixedFold({
         controls={bodyId}
         label={
           <>
-            配不了 <span className="num">{total}</span> 条
-            <span
-              className="ml-2 text-meta font-normal text-muted-foreground"
-              data-fixed-why
-              title={FIXED_WHY}
-            >
-              {FIXED_WHY}
+            配不了 <span className="num">{total}</span> 条{' '}
+            <span data-fixed-why title={FIXED_WHY}>
+              <Text size="meta" tone="muted">
+                {FIXED_WHY}
+              </Text>
             </span>
           </>
         }
       />
       {open ? (
-        <div id={bodyId} className="mt-2 space-y-3">
-          {byReason.map((g) => {
-            const items = g.items.filter((i) => effortRowMatches(i, search));
-            if (items.length === 0) return null;
-            return (
-              <Section key={g.reason} flush>
-                {/* 原因是一段话：小字灰字写在这一组上面，不当大标题（#1916，原来用区块标题，手机上一大段粗字） */}
-                <p className="border-b px-4 pt-3 pb-2 text-meta text-muted-foreground">{g.reason}</p>
-                <List>
-                  {items.map(({ model, route }) => (
-                    <FixedRouteRow key={route.routeId} model={model} route={route} />
-                  ))}
-                </List>
-              </Section>
-            );
-          })}
+        <div id={bodyId}>
+          <Stack gap="md">
+            {byReason.map((g) => {
+              const items = g.items.filter((i) => effortRowMatches(i, search));
+              if (items.length === 0) return null;
+              return (
+                <Section key={g.reason} flush>
+                  {/* 原因是一段话：小字灰字写在这一组上面，不当大标题（#1916，原来用区块标题，手机上一大段粗字） */}
+                  <RowFrame>
+                    <Text size="meta" tone="muted">
+                      {g.reason}
+                    </Text>
+                  </RowFrame>
+                  <List>
+                    {items.map(({ model, route }) => (
+                      <FixedRouteRow key={route.routeId} model={model} route={route} />
+                    ))}
+                  </List>
+                </Section>
+              );
+            })}
+          </Stack>
         </div>
       ) : null}
     </section>
@@ -629,7 +618,7 @@ function UncategorizedFold({
         }
       />
       {open ? (
-        <Section flush className="mt-2">
+        <Section flush>
           <List id={bodyId}>
             {rows.map(({ model, route }) => (
               <EffortRouteRow
@@ -672,31 +661,29 @@ function EffortRowFrame({
 }) {
   const where = `${r.channelName} · ${r.poolId} · ${hostLabel[r.hostId]}`;
   return (
-    <li data-route={routeId} data-model={modelId} className="hover:bg-accent">
+    <RowItem divided={false} attrs={{ 'data-route': routeId, 'data-model': modelId }}>
       <RowFrame tall>
-        <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
-          <span className="flex min-w-0 items-center gap-2 whitespace-nowrap">
-            <span className="min-w-0 truncate text-body font-medium" title={nameTitle ?? name}>
+        <span className="flex min-w-0 flex-1 flex-col justify-center">
+          <Stack direction="horizontal" gap="sm" align="center">
+            <Text strong truncate title={nameTitle ?? name}>
               {name}
-            </span>
-            {r.enabled ? null : (
-              <span className="inline-flex shrink-0">
-                <StatusBadge tone="stop" label="关着" variant="dot" />
-              </span>
-            )}
-          </span>
+            </Text>
+            {r.enabled ? null : <StatusBadge status="machine:master:off" variant="dot" />}
+          </Stack>
           <span
             data-route-where
-            className="block truncate text-meta whitespace-nowrap text-muted-foreground"
             title={`${where} · ${r.routeId}`}
+            className="block truncate whitespace-nowrap"
           >
-            {where}
+            <Text size="meta" tone="muted">
+              {where}
+            </Text>
           </span>
         </span>
         {trailing}
       </RowFrame>
       {detail}
-    </li>
+    </RowItem>
   );
 }
 
@@ -738,7 +725,7 @@ function EffortRouteRow({
       nameTitle={rawModelId ?? modelName}
       route={r}
       trailing={
-        <span className="flex shrink-0 items-center gap-3">
+        <Stack direction="horizontal" gap="md" align="center">
           {/* 手机上下拉里已经写着这一档，「默认（high）」这句只在宽的时候写 */}
           <span className="max-md:sr-only">
             <EffortNow edit={edit} route={r} fallback={fallback} />
@@ -748,15 +735,15 @@ function EffortRouteRow({
             route={r}
             fallback={fallback}
             label={`${modelName} · ${title} 的思考档位`}
-            className="w-28 md:w-32"
+            width="sm"
           />
-        </span>
+        </Stack>
       }
       detail={
         edit.update.isError ? (
-          <div className="-mt-1 px-4 pb-2">
+          <RowDetail indent={false}>
             <EffortFailed edit={edit} />
-          </div>
+          </RowDetail>
         ) : null
       }
     />

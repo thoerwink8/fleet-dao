@@ -12,6 +12,33 @@ const items = [
   { result: 'fail', label: '10:45 不通' },
 ] as const;
 
+describe('ProbeCells 渠道状态页用的小变体（#3533）', () => {
+  test('id、kind 写进 data-cell、data-kind；label 为空的是补位格，不报给读屏', () => {
+    render(
+      <ProbeCells
+        items={[
+          { result: 'none', label: '' },
+          { result: 'warn', label: '10:30 额度耗尽', id: 7, kind: 'quota' },
+        ]}
+      />,
+    );
+    const real = screen.getByLabelText('10:30 额度耗尽');
+    expect(real.getAttribute('data-cell')).toBe('7');
+    expect(real.getAttribute('data-kind')).toBe('quota');
+    const pad = document.querySelector('[data-result="none"]');
+    expect(pad?.getAttribute('aria-hidden')).toBe('true');
+    expect(pad?.hasAttribute('data-cell')).toBe(false);
+  });
+
+  test('summary：整条是一张图，一句话念完，格子不单独报也不是按钮', () => {
+    render(<ProbeCells items={items} summary="近 4 次真探：通过 1" />);
+    const strip = screen.getByRole('img', { name: '近 4 次真探：通过 1' });
+    expect(strip.hasAttribute('data-strip-display')).toBe(true);
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(strip.querySelectorAll('[aria-hidden="true"]')).toHaveLength(4);
+  });
+});
+
 describe('ProbeCells', () => {
   test('每格有 aria-label、悬停字和 data-result；颜色不是唯一的信息', () => {
     render(<ProbeCells items={items} />);

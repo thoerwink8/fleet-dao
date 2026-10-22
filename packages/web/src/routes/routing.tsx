@@ -18,16 +18,20 @@ import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { usePoolHolds, useRoutingEfforts, useRoutingLayers } from '../api/client';
-import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
+import type { LivenessVerdict, RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabGroups, FilterTabNote, FilterTabs } from '../components/layout/filter-tabs';
-import { RowFrame } from '../components/layout/list';
+import { List, RowFrame } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Notice } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
+import { RowButton } from '../components/layout/row-button';
 import { Section, SectionGrid } from '../components/layout/section';
-import { StatusBadge, StatusDot } from '../components/layout/status-badge';
+import { Stack } from '../components/layout/stack';
+import { LevelDot, StatusBadge } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
+import { Text } from '../components/layout/text';
+import { Title } from '../components/layout/title';
 import { ManualTracks } from '../components/manual-tracks';
 import { ModelStrengthBadge } from '../components/model-strength-badge';
 import {
@@ -77,6 +81,7 @@ import {
 } from '../lib/routing';
 import { actualRanks, modelSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
 import { cn } from '../lib/utils';
+import type { StatusKey } from '../theme/status-dict';
 
 export function meta() {
   return [{ title: brand.title('路由') }];
@@ -86,7 +91,7 @@ export function meta() {
 const SUMMARY = '每个用途里模型和渠道怎么排先后，现在哪些派得出去。';
 
 const DESCRIPTION = (
-  <div className="space-y-2">
+  <Stack gap="sm">
     <p>
       每个用途按顺序排哪些模型、每个模型走哪几条路，现在派不派得出去。一条路接得上、额度够、没被禁令挡三件都过才算活。
     </p>
@@ -105,7 +110,7 @@ const DESCRIPTION = (
       活 = 接得上、额度够、没被禁令挡三件都过；不知道 =
       探针还没看过、额度没读成，不当活。引擎派活时另看账号池有没有空位（满了是等，不算故障）；探针的结论过期了，引擎照上一次的结论派、写明，这里标「探测过期」。
     </p>
-  </div>
+  </Stack>
 );
 
 const TABS = [
@@ -209,28 +214,28 @@ export default function Routing() {
         />
       }
     >
-      {error ? (
-        <div className="mb-4">
+      <Stack>
+        {error ? (
           <LoadError
             text={`路由两层刷新没读成，下面是上一次读到的：${errMessage(error)}`}
             error={error}
             onRetry={() => void refetch()}
           />
-        </div>
-      ) : null}
-      <RoutingEditProvider>
-        <div role="tabpanel" id="routing-panel" aria-labelledby={`routing-tab-${tab}`}>
-          {tab === 'models' ? <ModelCatalogTab layers={data} /> : null}
-          {tab === 'channels' ? <ChannelTab layers={data} /> : null}
-          {tab === 'efforts' ? <EffortsTab /> : null}
-          {tab === 'purposes' ? (
-            <div className="flex flex-col gap-8">
-              <ManualTracks data={data} />
-              <PurposesTab purposes={purposes} params={params} />
-            </div>
-          ) : null}
-        </div>
-      </RoutingEditProvider>
+        ) : null}
+        <RoutingEditProvider>
+          <div role="tabpanel" id="routing-panel" aria-labelledby={`routing-tab-${tab}`}>
+            {tab === 'models' ? <ModelCatalogTab layers={data} /> : null}
+            {tab === 'channels' ? <ChannelTab layers={data} /> : null}
+            {tab === 'efforts' ? <EffortsTab /> : null}
+            {tab === 'purposes' ? (
+              <Stack gap="xl">
+                <ManualTracks data={data} />
+                <PurposesTab purposes={purposes} params={params} />
+              </Stack>
+            ) : null}
+          </div>
+        </RoutingEditProvider>
+      </Stack>
     </Page>
   );
 }
@@ -249,40 +254,46 @@ function PurposesTab({ purposes, params }: { purposes: RoutingLayerPurpose[]; pa
     );
   }
   return (
-    <div className="flex flex-col gap-8">
+    <Stack gap="xl">
       <PurposeList purposes={purposes} selected={selected.purpose} params={params} />
       <div id="routing-purpose-detail" className="min-w-0 scroll-mt-4">
         <PurposeDetail key={selected.purpose} purpose={selected} />
       </div>
-    </div>
+    </Stack>
   );
 }
 
 /** 页头右上的一句汇总：派得出去几个；不知道、派不出去是 0 就不写（红灯数为 0 不显示红）。算的时刻在悬停里。 */
 function Summary({ purposes, asOf }: { purposes: RoutingLayerPurpose[]; asOf: string }) {
   const counts = countByVerdict(purposes);
-  const worst = counts.dead > 0 ? 'fail' : counts.unknown > 0 ? 'stall' : 'done';
+  const worst = counts.dead > 0 ? 'error' : counts.unknown > 0 ? 'warning' : 'success';
   return (
-    <p
-      data-routing-summary
-      title={`${formatClock(asOf)} 后端现算`}
-      className="flex items-center gap-2 text-body text-muted-foreground"
-    >
-      <StatusDot tone={worst} />
-      <span className="num text-foreground">{counts.live} 个派得出去</span>
-      {counts.unknown > 0 ? (
-        <>
-          <span aria-hidden>·</span>
-          <span className="num text-ink-stall">{counts.unknown} 个不知道</span>
-        </>
-      ) : null}
-      {counts.dead > 0 ? (
-        <>
-          <span aria-hidden>·</span>
-          <span className="num font-medium text-ink-fail">{counts.dead} 个派不出去</span>
-        </>
-      ) : null}
-    </p>
+    <div data-routing-summary title={`${formatClock(asOf)} 后端现算`}>
+      <Stack direction="horizontal" gap="sm" align="center">
+        <LevelDot level={worst} />
+        <span className="num">
+          <Text>{counts.live} 个派得出去</Text>
+        </span>
+        {counts.unknown > 0 ? (
+          <>
+            <span aria-hidden>·</span>
+            <span className="num">
+              <Text tone="warning">{counts.unknown} 个不知道</Text>
+            </span>
+          </>
+        ) : null}
+        {counts.dead > 0 ? (
+          <>
+            <span aria-hidden>·</span>
+            <span className="num">
+              <Text tone="danger" strong>
+                {counts.dead} 个派不出去
+              </Text>
+            </span>
+          </>
+        ) : null}
+      </Stack>
+    </div>
   );
 }
 
@@ -350,6 +361,13 @@ function PurposeList({
 
 const GROOM_HINT = '这里配指挥官用的模型';
 
+/** 用途这一层派不派得出去，对到状态字典的键（词和颜色等级从字典取）。 */
+const verdictStatus = {
+  live: 'route:purpose:live',
+  dead: 'route:purpose:dead',
+  unknown: 'route:unknown',
+} as const satisfies Record<LivenessVerdict, StatusKey>;
+
 /** 行高（桌面、平板）：名字一行加一行小字。只在超过 50 个模型、要开窗口时用；不到 50 个按内容高度、整页滚。 */
 const ORDER_ROW_HEIGHT = 48;
 /** 超过 50 个模型时窗口的高度：13 行，再多内部滚。 */
@@ -375,36 +393,44 @@ function PurposeHero({ purpose: p }: { purpose: RoutingLayerPurpose }) {
     notes.push(`${routeHost(first.route)} · ${routeSlots(first.route).text}`);
   }
   const noteText = notes.join(' · ');
-  const badge = <StatusBadge tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />;
+  const badge = <StatusBadge status={verdictStatus[p.verdict]} />;
   return (
     // 三行、每行都不折（#1914 第 5 轮，创始人看 390 宽「变成 2 行了」）：用途名一行；结论短话带状态标签一行
     // （短话放不下就截断、标签不挤走）；灰字补充一行（放不下截断，整句在悬停里）。
-    <header data-purpose-hero className="flex min-w-0 flex-col pt-2">
-      <div className="mb-3 flex min-w-0 items-baseline gap-2 whitespace-nowrap">
-        <h2 className="truncate text-title">{purposeLabel(p.purpose)}</h2>
-        <span className="shrink-0 text-meta text-muted-foreground">{p.purpose}</span>
-      </div>
-      {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
-      {p.models.length > 0 ? (
-        <p
-          data-hero-line
-          title={purposeLineFull(line)}
-          className="flex min-w-0 items-center gap-2.5 whitespace-nowrap text-heading font-normal"
-        >
-          {line.tone === 'done' ? null : <StatusDot tone={line.tone} className="shrink-0" />}
-          <span data-hero-text className="min-w-0 truncate">
-            {line.text}
+    // 一行一个状态（#3509）：结论前面不再另画一个状态点，状态只由后面的标签说一次。
+    <header data-purpose-hero>
+      <Stack gap="sm">
+        <Stack direction="horizontal" gap="sm" align="baseline">
+          <Title level={2} look={1} truncate>
+            {purposeLabel(p.purpose)}
+          </Title>
+          <span className="shrink-0">
+            <Text size="meta" tone="muted">
+              {p.purpose}
+            </Text>
           </span>
-          <span className="shrink-0">{badge}</span>
-        </p>
-      ) : (
-        <p>{badge}</p>
-      )}
-      {noteText ? (
-        <p data-hero-notes title={noteText} className="mt-1.5 truncate text-meta text-muted-foreground">
-          {noteText}
-        </p>
-      ) : null}
+        </Stack>
+        {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
+        {p.models.length > 0 ? (
+          <div data-hero-line title={purposeLineFull(line)} className="min-w-0 whitespace-nowrap">
+            <Stack direction="horizontal" gap="sm" align="center">
+              <span data-hero-text className="min-w-0 truncate">
+                <Text size="heading">{line.text}</Text>
+              </span>
+              <span className="shrink-0">{badge}</span>
+            </Stack>
+          </div>
+        ) : (
+          <div>{badge}</div>
+        )}
+        {noteText ? (
+          <span data-hero-notes title={noteText} className="block truncate">
+            <Text size="meta" tone="muted">
+              {noteText}
+            </Text>
+          </span>
+        ) : null}
+      </Stack>
     </header>
   );
 }
@@ -438,52 +464,54 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const currentPosition = current ? p.models.findIndex((m) => m.modelId === current.modelId) + 1 : 0;
   const currentOff = current !== undefined && modelIsOff(current);
   return (
-    <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`} className="flex flex-col gap-6">
-      <PurposeHero purpose={p} />
-      {edit.disabledWhy ? (
-        <Notice tone="info">{edit.disabledWhy}。先后、开关、添加和档位都不能改。</Notice>
-      ) : null}
-      {holds.error ? <Notice tone="fail">整池暂停没读成，路由先不能单独开。</Notice> : null}
-      {membershipError ? <Notice tone="fail">{membershipError}</Notice> : null}
-      {p.problems.length > 0 ? (
-        <Notice tone="fail">
-          <ul aria-label="配置缺口" className="space-y-1">
-            {p.problems.map((x) => (
-              <li key={x}>{x}</li>
-            ))}
-          </ul>
-        </Notice>
-      ) : null}
-      {p.models.length === 0 ? (
-        <Section>
-          <EmptyState
-            icon={RouteIcon}
-            title="这个用途还没排模型"
-            hint="从目录里挑一个，引擎就能往这里派"
-            action={<AddPurposeModel purpose={p} onError={setMembershipError} />}
-          />
-        </Section>
-      ) : (
-        // 桌面（xl）：左模型先后、右这个模型下的路由，并排，各按各的内容高度（items-start，不互相拉高）；
-        // 右边跟着页面滚动停在顶上（sticky），路由多了封顶在 routing-desk 高度、内部自己滚；窄屏纵向铺开
-        <SectionGrid cols={1} className="items-start xl:grid-cols-routing-desk">
-          <ModelPriority
-            purpose={p}
-            selectedId={current?.modelId}
-            onSelect={selectModel}
-            onError={setMembershipError}
-          />
-          {current ? (
-            <RoutesCard
-              model={current}
-              off={currentOff && foldOffRoutes}
-              position={currentPosition}
-              now={now}
-              firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
+    <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`}>
+      <Stack gap="xl">
+        <PurposeHero purpose={p} />
+        {edit.disabledWhy ? (
+          <Notice tone="info">{edit.disabledWhy}。先后、开关、添加和档位都不能改。</Notice>
+        ) : null}
+        {holds.error ? <Notice tone="fail">整池暂停没读成，路由先不能单独开。</Notice> : null}
+        {membershipError ? <Notice tone="fail">{membershipError}</Notice> : null}
+        {p.problems.length > 0 ? (
+          <Notice tone="fail">
+            <List divided={false} aria-label="配置缺口">
+              {p.problems.map((x) => (
+                <li key={x}>{x}</li>
+              ))}
+            </List>
+          </Notice>
+        ) : null}
+        {p.models.length === 0 ? (
+          <Section>
+            <EmptyState
+              icon={RouteIcon}
+              title="这个用途还没排模型"
+              hint="从目录里挑一个，引擎就能往这里派"
+              action={<AddPurposeModel purpose={p} onError={setMembershipError} />}
             />
-          ) : null}
-        </SectionGrid>
-      )}
+          </Section>
+        ) : (
+          // 桌面（xl）：左模型先后、右这个模型下的路由，并排，各按各的内容高度（items-start，不互相拉高）；
+          // 右边跟着页面滚动停在顶上（sticky），路由多了封顶在 routing-desk 高度、内部自己滚；窄屏纵向铺开
+          <SectionGrid cols={1} className="items-start xl:grid-cols-routing-desk">
+            <ModelPriority
+              purpose={p}
+              selectedId={current?.modelId}
+              onSelect={selectModel}
+              onError={setMembershipError}
+            />
+            {current ? (
+              <RoutesCard
+                model={current}
+                off={currentOff && foldOffRoutes}
+                position={currentPosition}
+                now={now}
+                firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
+              />
+            ) : null}
+          </SectionGrid>
+        )}
+      </Stack>
     </section>
   );
 }
@@ -518,7 +546,7 @@ function RoutesCard({
       flush
       className="flex min-h-0 scroll-mt-4 flex-col xl:sticky xl:top-6 xl:max-h-routing-desk *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
     >
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         {off ? (
           <CollapsibleOffModelRoutes
             key={model.modelId}
@@ -613,13 +641,11 @@ function ModelPriority({
         />
       ) : null}
       {shown.length === 0 ? (
-        <EmptyState size="inline" title="没有符合的模型：换个搜索词，或关掉「只看已开启」" className="py-6" />
+        <EmptyState size="inline" title="没有符合的模型：换个搜索词，或关掉「只看已开启」" />
       ) : (
-        <div className="relative min-h-0 flex-1 py-1">
+        <div className="relative min-h-0 flex-1">
           <SortableList
             ariaLabel="模型"
-            // 行和行之间一根极细的分隔线，不画框（#1914 第 4 轮）
-            className="divide-y divide-border"
             items={shown}
             itemId={(m) => m.modelId}
             itemLabel={(m) => `${m.displayName}（${purposeLabel(p.purpose)}里的先后）`}
@@ -627,9 +653,7 @@ function ModelPriority({
             busy={edit.busy}
             disabledWhy={why}
             {...(viewport ? { viewport } : {})}
-            rowClassName={(m) =>
-              m.modelId === selectedId ? 'bg-selected shadow-row-selected' : 'hover:bg-accent'
-            }
+            isSelected={(m) => m.modelId === selectedId}
             rowProps={(m) => ({ 'data-model': m.modelId })}
             onSave={(order, expected, movedId) =>
               edit.reorderModels({ purpose: p.purpose, movedId, order, expected })
@@ -690,69 +714,71 @@ function ModelRow({
   return (
     <RowFrame tall className={cn(fixedHeight && 'h-full')}>
       {controls.grip}
-      <span
-        data-position
-        title="配置里的先后"
-        className="num w-4 shrink-0 text-right text-body text-muted-foreground"
-      >
-        {position}
+      <span data-position title="配置里的先后" className="num w-4 shrink-0 text-right">
+        <Text tone="muted">{position}</Text>
       </span>
-      <button
-        type="button"
+      <RowButton
         onClick={onSelect}
-        aria-pressed={selected}
-        aria-label={`查看 ${m.displayName} 的路由`}
+        pressed={selected}
+        label={`查看 ${m.displayName} 的路由`}
         title={modelSummary(m)}
-        className={cn(
-          'flex min-h-10 min-w-0 flex-1 items-center gap-2.5 rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring md:min-h-0',
-          skipped && 'opacity-60',
-        )}
+        dim={skipped}
       >
-        <KindDot kind={kind} whyNot="一条路由都没有" className="shrink-0" />
+        <KindDot kind={kind} whyNot="一条路由都没有" />
         {/* 小字一行不折（#1914 第 5 轮，320 宽量到折行）：放不下截断，整句在悬停里。
             名字是认人的那一样，不截断：真长到放不下宁可换行（老规矩，test/routing-lists「名字可换行」） */}
         <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-center gap-x-2">
-            <span data-row-name className="text-body font-medium break-words">
-              {m.displayName}
+          <Stack direction="horizontal" gap="sm" align="center" wrap>
+            <span data-row-name className="break-words">
+              <Text strong>{m.displayName}</Text>
             </span>
             <ModelStrengthBadge strength={m.strength} />
             <FounderOnlyBadge modelId={m.modelId} family={m.family} displayName={m.displayName} />
-          </span>
+          </Stack>
           <span
             data-row-meta
             data-effort-tip={effortTitle ? '' : undefined}
             title={effortTitle ? `档位配不了：${effortTitle}` : `${meta} · ${word}`}
-            className="block truncate whitespace-nowrap text-meta text-muted-foreground"
+            className="block truncate whitespace-nowrap"
           >
-            {/* 手机上一行放不下名字、状态和开关：厂家不写，实际第几位挪到这行小字里 */}
-            <span className="max-md:hidden">{meta}</span>
-            <span aria-hidden className="md:hidden">
-              {[modelSummary(m), effort ? `档位 ${effort}` : null, word].filter(Boolean).join(' · ')}
-            </span>
+            <Text size="meta" tone="muted">
+              {/* 手机上一行放不下名字、状态和开关：厂家不写，实际第几位挪到这行小字里 */}
+              <span className="max-md:hidden">{meta}</span>
+              <span aria-hidden className="md:hidden">
+                {[modelSummary(m), effort ? `档位 ${effort}` : null, word].filter(Boolean).join(' · ')}
+              </span>
+            </Text>
           </span>
         </span>
-      </button>
+      </RowButton>
       <span
         data-slot-state={slot.state}
         title={word}
-        className={cn(
-          'shrink-0 text-meta max-md:sr-only',
-          !skipped && 'num text-muted-foreground',
-          !skipped && slot.rank !== position && 'font-medium text-foreground',
-        )}
+        className={cn('shrink-0 max-md:sr-only', !skipped && 'num')}
       >
-        {skipped ? <Tag>{word}</Tag> : word}
+        {skipped ? (
+          <Tag>{word}</Tag>
+        ) : (
+          <Text
+            size="meta"
+            tone={slot.rank !== position ? 'default' : 'muted'}
+            strong={slot.rank !== position}
+          >
+            {word}
+          </Text>
+        )}
       </span>
-      <span data-row-actions className="flex shrink-0 items-center gap-1">
-        <ModelSwitch
-          modelId={m.modelId}
-          modelName={m.displayName}
-          enabled={enabledRouteIds.length > 0}
-          expectedEnabled={enabledRouteIds}
-          unavailable={m.routes.length === 0}
-        />
-        <PurposeModelMenu purpose={purpose} model={m} onError={onError} moves={controls.moves} />
+      <span data-row-actions className="shrink-0">
+        <Stack direction="horizontal" gap="sm" align="center">
+          <ModelSwitch
+            modelId={m.modelId}
+            modelName={m.displayName}
+            enabled={enabledRouteIds.length > 0}
+            expectedEnabled={enabledRouteIds}
+            unavailable={m.routes.length === 0}
+          />
+          <PurposeModelMenu purpose={purpose} model={m} onError={onError} moves={controls.moves} />
+        </Stack>
       </span>
     </RowFrame>
   );

@@ -18,8 +18,14 @@ export function Drawer({
   description,
   width = 'md',
   footer,
+  side = 'right',
+  data,
   children,
 }: {
+  /** right（默认）从右边滑进来；bottom 从底部上来（手机上看详情）。 */
+  side?: 'right' | 'bottom';
+  /** 抽屉本体上的 data-* 标记（页面和测试认它）。 */
+  data?: { [K in `data-${string}`]?: string };
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   /** 点它打开抽屉（一个按钮元素）。 */
@@ -36,9 +42,10 @@ export function Drawer({
     <Sheet {...(open !== undefined ? { open } : {})} {...(onOpenChange ? { onOpenChange } : {})}>
       {trigger ? <SheetTrigger asChild>{trigger}</SheetTrigger> : null}
       <SheetContent
-        side="right"
+        side={side}
         data-width={width}
-        className={`${WIDTH[width]} gap-0 p-0`}
+        {...data}
+        className={`${side === 'bottom' ? 'max-h-9/10' : WIDTH[width]} gap-0 p-0`}
         {...(description ? {} : { 'aria-describedby': undefined })}
       >
         <div className="flex flex-col gap-1 border-b border-line py-4 pr-12 pl-5">

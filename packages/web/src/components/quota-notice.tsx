@@ -1,8 +1,10 @@
 // 额度页顶上只留的一条提醒：切号现状和拼车额度对账合在一起（原来是两条横幅各占一块）。
-import { Link } from 'react-router';
 import type { CarpoolReconcileView, OrgSwitchView } from '../api/types';
 import { carpoolReconcileSummary } from './carpool-reconcile';
+import { Button } from './layout/button';
 import { Notice, type NoticeTone } from './layout/notice';
+import { Stack } from './layout/stack';
+import { Text } from './layout/text';
 import { orgSwitchSummary } from './org-switch';
 
 const RANK: NoticeTone[] = ['info', 'stall', 'fail'];
@@ -40,21 +42,20 @@ export function QuotaNotice({
     <div data-testid="quota-notice">
       <Notice tone={tone} title={title}>
         {lines.length || org?.action ? (
-          <ul className="mt-1 space-y-0.5 text-meta text-muted-foreground">
+          <Stack gap="sm">
             {lines.map((line) => (
-              <li key={line}>{line}</li>
+              <Text key={line} size="meta" tone="secondary">
+                {line}
+              </Text>
             ))}
             {org?.action ? (
-              <li>
-                <Link
-                  to={org.action.to}
-                  className="inline-flex items-center underline underline-offset-2 max-md:min-h-10"
-                >
+              <span>
+                <Button variant="text" size="xs" href={org.action.to}>
                   {org.action.label}
-                </Link>
-              </li>
+                </Button>
+              </span>
             ) : null}
-          </ul>
+          </Stack>
         ) : null}
       </Notice>
     </div>

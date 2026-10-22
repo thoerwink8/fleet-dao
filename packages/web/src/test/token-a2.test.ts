@@ -9,28 +9,24 @@ import { scanFile } from '../../scripts/lint-design.ts';
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
-/** 一处写死尺寸和换上的 token 类名。from 是原来的任意值类名，to 是现在的 token 类名。 */
-const SITES = [
-  {
-    file: 'src/components/channel-status.tsx',
-    where: '故障说明',
-    from: 'grid-cols-[auto_1fr]',
-    to: 'grid-cols-auto-fr',
-  },
-  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
-  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
-] as const;
+/**
+ * 一处写死尺寸和换上的 token 类名。from 是原来的任意值类名，to 是现在的 token 类名。
+ * channel-status.tsx 在 #3533 迁到 layout 层（探针格换 ProbeCells、故障说明换 Descriptions），原来钉的三处类名不再在业务层写，不再钉；
+ * 任意尺寸仍由 R0 兜（最后一条用例）。
+ */
+const SITES: readonly { file: string; where: string; from: string; to: string }[] = [];
 
-const COUNTS: Record<string, number> = {
-  'src/components/channel-status.tsx': 3,
-};
+const COUNTS: Record<string, number> = {};
+
+/** 迁到 layout 层之后仍要保持 R0 一条没有的文件。 */
+const MIGRATED = ['src/components/channel-status.tsx'] as const;
 
 // 发版卡的一处（grid-cols-release）在片 7（#1853）改用 KeyValue，不再有写死的标签列宽，这一处不再钉。
 // 整池暂停面板删了之后，原来钉在 pool-holds.tsx 的那一处跟着去掉。
 // 老流程那一块删了（#2357、#2710 收尾）之后，usage.tsx、run-timeline.tsx 两个组件整个没了，钉在它俩身上的 13 处跟着去掉。
 describe('token A2：写死尺寸换成 token', () => {
   test('留下来的组件各对上钉住的处数', () => {
-    expect(SITES).toHaveLength(3);
+    expect(SITES).toHaveLength(0);
     for (const [file, n] of Object.entries(COUNTS)) {
       expect(SITES.filter((site) => site.file === file)).toHaveLength(n);
     }
@@ -49,6 +45,15 @@ describe('token A2：写死尺寸换成 token', () => {
         expect(source.includes(site.from), `${file} ${site.where} 还留着 ${site.from}`).toBe(false);
         expect(source.includes(site.to), `${file} ${site.where} 没用 ${site.to}`).toBe(true);
       }
+    }
+  });
+
+  test('迁到 layout 层的文件没有任意尺寸', () => {
+    for (const file of MIGRATED) {
+      expect(
+        scanFile(join(webRoot, file), file).filter((h) => h.rule === 'R0'),
+        file,
+      ).toEqual([]);
     }
   });
 });

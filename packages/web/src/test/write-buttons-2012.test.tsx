@@ -288,11 +288,16 @@ describe('渠道状态页「全部立即探测」', () => {
       return d.promise as never;
     });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude', api });
-    const probe = await screen.findByRole('button', { name: '全部立即探测' });
-    fireEvent.click(probe);
-    fireEvent.click(probe);
-    await waitFor(() => expect(probe.getAttribute('aria-busy')).toBe('true'));
-    fireEvent.click(probe);
+    // 「全部立即探测」收在渠道卡头的「更多」菜单里：选一次，菜单关；再打开看到那一项置灰，再选也发不出第二次
+    const openItem = async () => {
+      const trigger = await screen.findByRole('button', { name: '更多操作：渠道' });
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+      return screen.findByRole('menuitem', { name: /^全部立即探测/ });
+    };
+    fireEvent.click(await openItem());
+    const again = await openItem();
+    await waitFor(() => expect(again.getAttribute('aria-disabled')).toBe('true'));
+    fireEvent.click(again);
     expect(calls).toHaveLength(1);
     await act(async () => d.resolve({ ok: true }));
   });

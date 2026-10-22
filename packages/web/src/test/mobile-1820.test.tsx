@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // 手机端通用（#1820）：筛选标签 ≥40、页头说明收起成「ⓘ」、刷新是图标按钮、任务详情首屏一行摘要、
-// 通知操作和标题同一行、法国页「本台六项事实」一行一项、额度格点一下弹说明。
+// 通知操作和标题同一行、法国页「本台六项事实」一行一项、额度页展开一行看说明。
 // 屏宽用 matchMedia 假装：happy-dom 不认我们的断点，按宽度手算 min-width / max-width。
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { EnvResponse, QuotaWindowView } from '../api/types';
 import { factCells } from '../components/env-facts';
 import { Page } from '../components/layout/page';
-import { QuotaLine } from '../components/quota';
+import { QuotaDetail, QuotaUsage } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
 import NotificationsPage from '../routes/notifications';
 import TaskPage from '../routes/task';
@@ -229,7 +229,7 @@ describe('法国页本台六项事实：手机一行一项', () => {
   });
 });
 
-describe('额度窗口格点一下弹出说明', () => {
+describe('额度窗口展开一行看说明', () => {
   const NOW = Date.parse('2026-09-25T10:00:00Z');
   const w: QuotaWindowView = {
     window: '5h',
@@ -245,22 +245,22 @@ describe('额度窗口格点一下弹出说明', () => {
     statusRaw: 'allowed_warning',
   };
 
-  test('点格子才弹出说明：读数过期、上游状态、上游原话、读法都在；没点时没有', async () => {
-    render(<QuotaLine w={w} now={NOW} />);
+  test('展开一行才看到说明：读数过期、上游状态、上游原话、读法都在；没展开时没有', () => {
+    render(<QuotaUsage w={w} now={NOW} />);
     expect(document.querySelector('[data-quota-notes]')).toBeNull();
-    fireEvent.click(document.querySelector('[data-quota-line]') as HTMLElement);
-    const pop = await waitFor(() => {
-      const el = document.querySelector('[data-quota-notes]');
-      if (!el) throw new Error('还没弹出');
-      return el as HTMLElement;
-    });
+    cleanup();
+    render(<QuotaDetail w={w} now={NOW} />);
+    const pop = document.querySelector('[data-quota-notes]') as HTMLElement;
+    expect(pop).toBeTruthy();
     expect(pop.textContent).toContain('读数过期');
-    expect(pop.textContent).toContain('上游原话：allowed_warning');
+    expect(pop.textContent).toContain('上游提醒快满了');
+    expect(pop.textContent).toContain('上游原话');
+    expect(pop.textContent).toContain('allowed_warning');
     expect(pop.textContent).toContain('读法：claude-usage');
   });
 
   test('电脑上悬停的提示（title）照旧留着', () => {
-    render(<QuotaLine w={w} now={NOW} />);
+    render(<QuotaUsage w={w} now={NOW} />);
     expect(document.querySelector('[data-quota-line]')?.getAttribute('title')).toContain('读数过期');
   });
 });

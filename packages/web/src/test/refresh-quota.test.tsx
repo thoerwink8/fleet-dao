@@ -60,16 +60,17 @@ test('【故意造出的失败】读成过、刷新时失败：照旧画上一�
   const api = createMockApi({ live: false });
   const real = api.pools.bind(api);
   renderApp(<QuotaPage />, { api });
-  await screen.findByRole('rowheader', { name: /claude-a/ });
+  await waitFor(() => expect(document.querySelector('tr[data-row-key="claude-a"]')).toBeTruthy());
   api.pools = () => Promise.reject(new ApiError(503, 'pools_unreadable', '库连不上'));
   await waitFor(() =>
     expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBe('false'),
   );
   fireEvent.click(screen.getByRole('button', { name: '刷新' }));
   const alert = await screen.findByRole('alert', {}, { timeout: 4000 });
-  expect(alert.textContent).toContain('额度刷新没查成，下面是上一次读到的：库连不上');
+  expect(alert.textContent).toContain('额度刷新没成，下面是');
+  expect(alert.textContent).toContain('读到的：库连不上');
   // 看得到的没被清空：表和结论块都还在
-  expect(screen.getByRole('rowheader', { name: /claude-a/ })).toBeTruthy();
+  expect(document.querySelector('tr[data-row-key="claude-a"]')).toBeTruthy();
   expect(document.querySelector('[data-quota-hero]')).toBeTruthy();
   api.pools = real;
   fireEvent.click(within(alert).getByRole('button', { name: '重试' }));
@@ -114,12 +115,16 @@ test('新旧两张周窗时旧的收起', async () => {
     return { ...res, pools: [pool, ...res.pools.filter((p) => p.id !== pool.id)] };
   };
   renderApp(<QuotaPage />, { api });
-  const row = await screen.findByRole('rowheader', { name: /claude-solo/ });
-  const tr = row.closest('tr');
-  expect(tr).toBeTruthy();
-  // 周窗列：新读数仍是完整卡，旧的收成一行「旧读数，已过期」
+  await waitFor(() => expect(document.querySelector('tr[data-row-key="claude-solo"]')).toBeTruthy());
+  const tr = document.querySelector('tr[data-row-key="claude-solo"]');
+  // 周窗：新读数仍是完整一行，旧的收成窗口名下一句「旧读数，已过期」
   expect(within(tr as HTMLElement).getByText('旧读数，已过期')).toBeTruthy();
   expect(within(tr as HTMLElement).getByText('33%')).toBeTruthy();
-  // 过期那张不再以完整大格并排（没有 90% 的大号数字卡）
+  // 过期那张不再单占一行（这个池只有一行，没有 90% 的数字）
+  expect(
+    [...document.querySelectorAll('[data-quota-matrix] tr[data-row-key^="claude-solo"]')].map((r) =>
+      r.getAttribute('data-row-key'),
+    ),
+  ).toEqual(['claude-solo']);
   expect(within(tr as HTMLElement).queryByText('90%')).toBeNull();
 });

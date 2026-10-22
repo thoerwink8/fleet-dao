@@ -24,7 +24,7 @@ describe('路由页同一档', () => {
     open(within(row).getByRole('button', { name: /更多操作/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: '和上一条同一档' }));
     const line = await screen.findByText(/同一档：/);
-    expect(line.hasAttribute('data-route-share')).toBe(true);
+    expect(line.closest('[data-route-share]')).not.toBeNull();
     expect(line.textContent).toContain('50%');
     expect(line.textContent).toContain('权重 1');
     expect(line.textContent).toContain('还看不出均不均');

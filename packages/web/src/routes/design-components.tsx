@@ -11,28 +11,39 @@ import { Button } from '../components/layout/button';
 import { Chat, Composer } from '../components/layout/chat';
 import { Collapse } from '../components/layout/collapse';
 import { Descriptions } from '../components/layout/descriptions';
+import { Dialog } from '../components/layout/dialog';
 import { DisclosureRow } from '../components/layout/disclosure';
+import { DragHandle } from '../components/layout/drag-handle';
 import { Form, FormItem } from '../components/layout/form';
 import { Grid } from '../components/layout/grid';
 import { InfoTip } from '../components/layout/info-tip';
+import { RowFrame } from '../components/layout/list';
 import { ListFooter } from '../components/layout/list-footer';
 import { NativeSelect } from '../components/layout/native-select';
 import { Nest } from '../components/layout/nest';
 import { PickList } from '../components/layout/pick-list';
 import { type ProbeCell, ProbeCells } from '../components/layout/probe-cells';
 import { Progress } from '../components/layout/progress';
+import { DisclosureIcon, FoldBar, RowButton } from '../components/layout/row-button';
+import { ScrollRow } from '../components/layout/scroll-row';
 import { Section } from '../components/layout/section';
+import { Select } from '../components/layout/select';
 import { SidePanel } from '../components/layout/side-panel';
 import { Stack } from '../components/layout/stack';
 import { StatusBadge } from '../components/layout/status-badge';
 import { Steps } from '../components/layout/steps';
+import { Switch } from '../components/layout/switch';
 import { TabPanel } from '../components/layout/tab-panel';
 import { Table, type TableColumn } from '../components/layout/table';
 import { Tag } from '../components/layout/tag';
 import { Text } from '../components/layout/text';
+import { TextInput } from '../components/layout/text-input';
 import { TextLink } from '../components/layout/text-link';
 import { TimeBar } from '../components/layout/time-bar';
 import { Timeline } from '../components/layout/timeline';
+import { Title } from '../components/layout/title';
+import { Toggle } from '../components/layout/toggle';
+import { RowItem, WindowBox, WindowList } from '../components/layout/windowed';
 import { DOMAINS, STATUS_DICT, type StatusKey } from '../theme/status-dict';
 import { ControlsSection } from './design-controls';
 import { ConversationSection } from './design-conversation';
@@ -252,6 +263,18 @@ function TableSection() {
         <Block title="partial（一格没读到）" note="t3 的耗时读不到，写灰字「没读到」，不画 0">
           <Table columns={COLUMNS} rows={ROWS.slice(2, 4)} rowKey="id" />
         </Block>
+        <Block
+          title="分组行 groupRow + 附加行 subRow"
+          note="额度页的渠道组头（通栏、fill-1 底）和就地展开的原因表单；返回 null 的行不画"
+        >
+          <Table
+            columns={COLUMNS}
+            rows={ROWS.slice(0, 3)}
+            rowKey="id"
+            groupRow={(r) => (r.id === ROWS[0]?.id ? <Text strong>第一组</Text> : null)}
+            subRow={(r) => (r.id === ROWS[1]?.id ? <Text tone="secondary">就地展开的内容</Text> : null)}
+          />
+        </Block>
         <Block title="empty">
           <Table columns={COLUMNS} rows={[]} rowKey="id" empty={<Text tone="muted">这个仓还没有任务</Text>} />
         </Block>
@@ -355,6 +378,16 @@ function ProbeSection() {
           {sel === null ? '没选' : (PROBES[sel]?.label ?? '没选')}
         </Text>
         <ProbeCells items={PROBES.slice(0, 10)} />
+        {/* 渠道状态页的变体：补位格（label 为空）、data-cell/data-kind、手机上只做展示的整条（summary） */}
+        <ProbeCells
+          items={[
+            { result: 'none', label: '' },
+            { result: 'ok', label: '10:00 通过', id: 1, kind: 'passed' },
+            { result: 'warn', label: '10:15 连通但额度耗尽', id: 2, kind: 'quota' },
+            { result: 'fail', label: '10:30 不通', id: 3, kind: 'failed' },
+          ]}
+          summary="近 3 次真探：通过 1、连通但额度耗尽 1、不通 1"
+        />
       </Stack>
     </Section>
   );
@@ -645,6 +678,143 @@ function TaskPageParts() {
   );
 }
 
+/** 路由页用的小件（#3533）：开关、筛选钮、下拉、输入框、对话框、行按钮、折叠条、定高窗口行、拖动柄、横滑行、标题。 */
+function RoutingPartsSection() {
+  const [on, setOn] = useState(true);
+  const [pressed, setPressed] = useState(false);
+  const [pick, setPick] = useState('high');
+  const [text, setText] = useState('');
+  const [open, setOpen] = useState(false);
+  const [fold, setFold] = useState(false);
+  const [dialog, setDialog] = useState(false);
+  const [picked, setPicked] = useState('b');
+  return (
+    <Section
+      title="路由页的小件 Switch、Toggle、Select、RowButton、窗口行"
+      description="列表行里的开关、筛选钮、档位下拉、整块可点的行、定高窗口行、拖动柄。"
+    >
+      <Stack gap="lg">
+        <Block title="Switch" note="size=sm 给列表行；置灰时悬停写原因">
+          <Stack direction="horizontal" gap="md" align="center">
+            <Switch checked={on} onCheckedChange={setOn} aria-label="演示开关" />
+            <Switch checked={on} onCheckedChange={setOn} size="sm" aria-label="演示小开关" />
+            <Switch
+              checked={false}
+              onCheckedChange={() => {}}
+              disabled
+              title="去那台上操作"
+              aria-label="置灰"
+            />
+          </Stack>
+        </Block>
+        <Block title="Toggle" note="按下是品牌浅底">
+          <Stack direction="horizontal" gap="sm" align="center">
+            <Toggle pressed={pressed} onPressedChange={setPressed}>
+              只看已开启
+            </Toggle>
+            <Toggle pressed onPressedChange={() => {}}>
+              显示全部
+            </Toggle>
+          </Stack>
+        </Block>
+        <Block title="Select / TextInput / Title">
+          <Stack direction="horizontal" gap="md" align="center" wrap>
+            <Select
+              value={pick}
+              onValueChange={setPick}
+              aria-label="演示档位"
+              options={[
+                { value: 'default', label: '默认', title: '没配，用默认档 high' },
+                { value: 'high', label: 'high', numeric: true },
+                { value: 'xhigh', label: 'xhigh', numeric: true },
+              ]}
+            />
+            <TextInput
+              value={text}
+              onChange={setText}
+              placeholder="例如 claude-sonnet-x"
+              aria-label="演示输入"
+            />
+          </Stack>
+          <Title level={1}>动手</Title>
+          <Title level={3}>渠道里有、目录里还没有的模型</Title>
+        </Block>
+        <Block title="RowButton、FoldBar、DisclosureIcon" note="点名字看详情；折叠条整行可点">
+          <Stack gap="sm">
+            <RowFrame>
+              <RowButton onClick={() => setOpen((v) => !v)} expanded={open}>
+                <DisclosureIcon open={open} />
+                <Text strong>Opus 5.5</Text>
+              </RowButton>
+            </RowFrame>
+            <RowFrame>
+              <RowButton onClick={() => {}} dim>
+                <Text strong>关着的模型</Text>
+              </RowButton>
+            </RowFrame>
+            <FoldBar open={fold} onToggle={() => setFold((v) => !v)} controls="demo-fold">
+              配不了 3 条
+            </FoldBar>
+            <FoldBar open size="group" onToggle={() => {}} controls="demo-group">
+              Claude 3 条，已配 1
+            </FoldBar>
+          </Stack>
+        </Block>
+        <Block
+          title="WindowBox / WindowList / RowItem（定高窗口行）"
+          note="选中行换底；行高给定，只画看得见的几行"
+        >
+          <WindowBox height={96}>
+            <WindowList ariaLabel="演示窗口">
+              {['a', 'b', 'c'].map((id) => (
+                <RowItem key={id} selected={picked === id} height={48}>
+                  <RowFrame className="h-full">
+                    <RowButton onClick={() => setPicked(id)} pressed={picked === id}>
+                      <Text strong>模型 {id}</Text>
+                    </RowButton>
+                    <DragHandle
+                      label={`拖动 ${id}`}
+                      title="拖到新位置"
+                      draggable
+                      disabled={false}
+                      busy={false}
+                      onDragStart={() => {}}
+                      onDragEnd={() => {}}
+                      onKeyDown={() => {}}
+                    />
+                  </RowFrame>
+                </RowItem>
+              ))}
+            </WindowList>
+          </WindowBox>
+        </Block>
+        <Block title="ScrollRow / Dialog" note="筛选行放不下横滑；对话框放自己的内容">
+          <ScrollRow>
+            <Toggle pressed={false} onPressedChange={() => {}}>
+              只看已开启
+            </Toggle>
+            <Toggle pressed onPressedChange={() => {}}>
+              新发现
+            </Toggle>
+            <Button variant="text" size="sm" onClick={() => {}}>
+              清除筛选
+            </Button>
+          </ScrollRow>
+          <Button onClick={() => setDialog(true)}>打开对话框</Button>
+          <Dialog
+            open={dialog}
+            onOpenChange={setDialog}
+            title="往动手里加模型"
+            description="只列没排进来的。"
+          >
+            <Text tone="muted">这里放选择器。</Text>
+          </Dialog>
+        </Block>
+      </Stack>
+    </Section>
+  );
+}
+
 /** 「组件」一节。overlays 是确认框、抽屉的触发键，input 是输入框：它们只有基础件有，业务层摆不了，由陈列页自己传进来。 */
 export function ComponentsGallery({ overlays, input }: { overlays: ReactNode; input: DemoInput }) {
   return (
@@ -666,6 +836,7 @@ export function ComponentsGallery({ overlays, input }: { overlays: ReactNode; in
       <ProcessPartsSection />
       <TaskPageParts />
       <TranscriptSection />
+      <RoutingPartsSection />
       <MiscSection overlays={overlays} input={input} />
     </Stack>
   );

@@ -61,17 +61,21 @@ describe('作废预估', () => {
       .getAllByRole('columnheader')
       .map((h) => h.textContent);
     expect(heads).toEqual(['池', '窗口', '该用', '实际用了', 'ρ', '清零时预计剩']);
-    const cursor = table.querySelector('[data-pressure-pool="cursor"]') as HTMLElement;
+    const rowOf = (id: string) =>
+      table.querySelector(`[data-pressure-pool="${id}"]`)?.closest('tr') as HTMLElement;
+    const cursor = rowOf('cursor');
     const col = (row: HTMLElement, name: string) =>
       row.querySelector(`[data-pressure-col="${name}"]`)?.textContent;
     expect(col(cursor, 'expected')).toBe('97%');
     expect(col(cursor, 'used')).toBe('20%');
     expect(col(cursor, 'rho')).toBe('26.67');
     expect(col(cursor, 'left')).toBe('80%');
-    expect(cursor.querySelector('[data-pressure-col="left"]')?.className).toContain('text-ink-stall');
-    const mirasim = table.querySelector('[data-pressure-pool="mirasim"]') as HTMLElement;
+    expect(cursor.querySelector('[data-pressure-col="left"]')?.hasAttribute('data-waste')).toBe(true);
+    const mirasim = rowOf('mirasim');
     expect(col(mirasim, 'left')).toBe('剩 0 · 提前 540 小时用完');
-    const grok = table.querySelector('[data-pressure-pool="grok"]') as HTMLElement;
+    expect(mirasim.querySelector('[data-pressure-col="left"]')?.hasAttribute('data-waste')).toBe(false);
+    const grok = rowOf('grok');
+    expect(grok.querySelector('[data-pressure="unknown"]')).toBeTruthy();
     expect(grok.textContent).toContain('没读到（读数过期，不当现值）');
     expect(grok.textContent).not.toMatch(/\b0%/);
   });

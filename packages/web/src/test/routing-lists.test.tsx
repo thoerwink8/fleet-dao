@@ -438,7 +438,7 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     );
     // 开关是小滑块，不撑成圆：可点的范围用伪元素往外扩
     expect(classTokens(within(actions).getByRole('switch'))).toEqual(
-      expect.arrayContaining(['relative', 'after:absolute', 'after:-inset-y-3']),
+      expect.arrayContaining(['relative', 'max-md:before:absolute', 'max-md:before:-inset-3']),
     );
     // 上移、下移、置顶、置底、档位、移出、整池暂停都不在行里
     expect(within(row).queryByRole('button', { name: /^(上移|下移|置顶|置底) / })).toBeNull();
@@ -649,7 +649,7 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     expect(retired?.querySelector('[data-catalog-mark="retired"]')).toBeNull();
     const chip = retired?.querySelector('[data-status-word] span');
     expect(chip?.textContent).toContain('已下架');
-    expect(chip?.closest('[data-tone]')?.getAttribute('data-tone')).toBe('stop');
+    expect(chip?.closest('[data-status]')?.getAttribute('data-status')).toBe('route:retired');
   });
 });
 

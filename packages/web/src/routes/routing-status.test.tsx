@@ -79,6 +79,14 @@ const historyStrip = () => {
   return el;
 };
 
+/** 「全部立即探测」收在渠道卡头的「更多」菜单里：打开菜单，返回那一项。 */
+const allProbeItem = async () => {
+  const trigger = screen.getByRole('button', { name: '更多操作：渠道' });
+  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+  return screen.findByRole('menuitem', { name: /^全部立即探测/ });
+};
+const isBlocked = (el: HTMLElement) => el.getAttribute('aria-disabled') === 'true';
+
 const historyOf = (rows: ProbeHistoryCell[]): RouteProbeHistory => ({
   state: 'ok',
   ...probeHistoryStrips(rows),
@@ -218,7 +226,6 @@ describe('渠道状态页：渠道卡', () => {
     pinClock(10, 0); // 白天 10:00，100 分钟后还是当天，不随 CI 几点跑变
     const notice = await backoffNotice(100);
     expect(notice.textContent).toMatch(/^退避中，连着不通 6 次，下次约 \d{2}:\d{2}$/);
-    expect(notice.className).not.toContain('truncate');
     expect(routeRow('r-cursor').getAttribute('data-kind')).toBe('fault');
   });
 
@@ -287,11 +294,14 @@ describe('渠道状态页：渠道卡', () => {
     const row = routeRow('r-rl-kimi');
     expect(row.getAttribute('data-kind')).toBe('interrupted');
     expect(within(row).getByText('检测中断')).toBeTruthy();
-    expect(row.className).toContain('border-st-fail');
+    // 出问题的行只留状态标签（红底），不再画红边线、红框
+    expect(row.className).not.toContain('border-st-fail');
+    expect(within(row).getByText('检测中断').closest('[data-level]')?.getAttribute('data-level')).toBe(
+      'error',
+    );
     const next = row.querySelector('[data-probe-next]');
     expect(next?.getAttribute('data-probe-next')).toBe('fail');
     expect(next?.textContent).toMatch(/^检测中断：本该 \d{2}:\d{2} 探，已过 [67]\d 分钟没探$/);
-    expect(next?.className).toContain('text-ink-fail');
     // 同一个渠道里没晚的路由不受影响
     expect(routeRow('r-rl-gpt').getAttribute('data-kind')).toBe('live');
   });
@@ -416,9 +426,13 @@ describe('渠道状态页：每条路由', () => {
     const { qc } = renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-ds', api });
     await screen.findByRole('list', { name: '渠道状态' });
     await openQuiet();
-    fireEvent.click(screen.getByRole('button', { name: '全部立即探测' }));
+    fireEvent.click(await allProbeItem());
     await waitFor(() => expect(routeRow('r-ds').getAttribute('data-probe')).toBe('queued'));
-    expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
+    // 全部路由都在探：再打开菜单，那一项置灰并写明
+    const again = await allProbeItem();
+    expect(isBlocked(again)).toBe(true);
+    expect(again.textContent).toContain('全部路由正在探');
+    fireEvent.keyDown(again, { key: 'Escape' });
     t += 2_000;
     await act(() => qc.invalidateQueries({ queryKey: ['route-probe'] }));
     t += 5_000;
@@ -449,10 +463,13 @@ describe('渠道状态页：探不了要说清是哪样', () => {
       api: statusWith({ state: 'off', detail: '这台机器按配置没开引擎' }),
     });
     expect(await screen.findByText(/引擎按配置没开（这台机器按配置没开引擎）：探不了/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
+    const item = await allProbeItem();
+    expect(isBlocked(item)).toBe(true);
+    fireEvent.keyDown(item, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('menuitem')).toBeNull());
     await waitFor(() => routeRow('r-ca-opus'));
     const row = openRoute('r-ca-opus');
-    expect(within(row).getByRole('button', { name: '立即探测' })).toHaveProperty('disabled', true);
+    expect(isBlocked(within(row).getByRole('button', { name: '立即探测' }))).toBe(true);
     await waitFor(() => expect(document.querySelector('[data-history="strip"]')).toBeTruthy());
   });
 
@@ -486,7 +503,7 @@ describe('渠道状态页：探不了要说清是哪样', () => {
     });
     renderApp(<RoutingStatus />, { route: '/routing/status', api });
     expect(await screen.findByText(/立即探测的记录没读成：.*连不上库/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
+    expect(isBlocked(await allProbeItem())).toBe(true);
     expect(card('ch-claude')).toBeTruthy();
   });
 
@@ -558,12 +575,13 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     Object.assign(api, { routeProbeHistory: async () => cursorHistory() });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
     const strip = await waitFor(historyStrip);
-    expect(strip.querySelector('[data-result="passed"]')?.className).toContain('bg-st-done');
-    expect(strip.querySelector('[data-result="failed"]')?.className).toContain('bg-st-fail');
+    // 格子颜色只有灰（通过）、橙、红、空心四档（ProbeCells），细分类在 data-kind
+    expect(strip.querySelector('[data-kind="passed"]')?.getAttribute('data-result')).toBe('ok');
+    expect(strip.querySelector('[data-kind="failed"]')?.getAttribute('data-result')).toBe('fail');
     // #1748：没探的不画进色条、不进可用率，折在探测记录下面
-    expect(strip.querySelector('[data-result="not_probed"]')).toBeNull();
+    expect(strip.querySelector('[data-kind="not_probed"]')).toBeNull();
     expect(strip.querySelectorAll('[data-cell]')).toHaveLength(2);
-    expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(58);
+    expect(strip.querySelectorAll('[data-result="none"]')).toHaveLength(58);
     expect(strip.textContent).toContain('另有 1 条没真探');
     expect(document.querySelector('[data-probe-log="skipped"]')).toBeTruthy();
 
@@ -571,7 +589,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     const log = () => screen.getByRole('region', { name: '探测记录' });
     expect(log().querySelector('[data-field="request"]')).toBeNull();
 
-    const failed = strip.querySelector('[data-result="failed"]');
+    const failed = strip.querySelector('[data-kind="failed"]');
     if (!(failed instanceof HTMLElement)) throw new Error('没有不通的格子');
     fireEvent.click(failed);
     await waitFor(() => expect(within(log()).getByText(/上游断了/)).toBeTruthy());
@@ -579,7 +597,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     expect(within(log()).getByText('boom')).toBeTruthy();
     expect(within(log()).getByText('4.0 秒')).toBeTruthy();
 
-    const passed = strip.querySelector('[data-result="passed"]');
+    const passed = strip.querySelector('[data-kind="passed"]');
     if (!(passed instanceof HTMLElement)) throw new Error('没有通过的格子');
     fireEvent.click(passed);
     await waitFor(() => expect(within(log()).getByText('只回 OK')).toBeTruthy());
@@ -635,7 +653,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     expect(strip.querySelectorAll('[data-cell]')).toHaveLength(60);
     expect(strip.querySelector('[data-cell="1"]')).toBeNull();
     expect(strip.querySelector('[data-cell="61"]')).toBeTruthy();
-    expect(strip.querySelector('[data-result="empty"]')).toBeNull();
+    expect(strip.querySelector('[data-result="none"]')).toBeNull();
     // 探测记录默认只铺最近 10 条（#1837），点「再看」铺到 60 条为止
     const logButtons = () =>
       within(screen.getByRole('list', { name: '探测记录列表' })).getAllByRole('button');
@@ -672,7 +690,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     expect(strip.textContent).toContain('还没有真探');
     expect(strip.textContent).toContain('没量到');
     expect(strip.textContent).not.toContain('没查成');
-    expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(60);
+    expect(strip.querySelectorAll('[data-result="none"]')).toHaveLength(60);
     expect(strip.querySelector('[data-cell]')).toBeNull();
   });
 });
@@ -754,13 +772,13 @@ describe('渠道状态页：探测记录（#1638）', () => {
     expect(within(row).getByText('疑似换模型')).toBeTruthy();
     expect(document.body.textContent).not.toContain('疑似降智');
     const cell = historyStrip().querySelector('[data-cell="2"]');
-    expect(cell?.getAttribute('data-result')).toBe('doubt');
-    expect(cell?.className).toContain('bg-st-doubt');
+    expect(cell?.getAttribute('data-kind')).toBe('doubt');
+    expect(cell?.getAttribute('data-result')).toBe('warn');
     // 颜色图例只留一份（#1922）：格子条下面那行「绿通过 · 红不通 · 橙疑似换模型」并进探测记录的图例，
     // 图例里橙色色块就叫「疑似换模型」（原断言：格子条文字含「橙疑似换模型」）
     const legend = document.querySelector('[data-probe-log="legend"]') as HTMLElement;
     expect(legend.textContent).toContain('疑似换模型：身份题说出了旧答案');
-    expect(legend.querySelector('.bg-st-doubt')).toBeTruthy();
+    expect(legend.textContent).toContain('橙　疑似换模型');
   });
 
   test('身份题那一行展开：题、新答案、旧答案、实答、自报身份；折叠时不铺；连通那行没有题', async () => {
@@ -1164,7 +1182,7 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     expect(screen.getByText('没有可看的渠道，换个搜索词或筛选')).toBeTruthy();
     expect(screen.getByText(/没有符合的渠道：「zzz」/)).toBeTruthy();
     expect(screen.queryByRole('heading', { name: /Claude 订阅/ })).toBeNull();
-    expect(screen.queryByRole('heading', { level: 2 })).toBeNull();
+    expect(document.querySelector('[data-channel-detail]')).toBeNull();
     expect(screen.queryByRole('button', { name: '探这个渠道' })).toBeNull();
     expect(screen.queryByRole('list', { name: /的路由$/ })).toBeNull();
   });
@@ -1235,12 +1253,12 @@ describe('渠道状态页：连通但额度耗尽（#2939）', () => {
   test('探针历史：额度记录的格子单独一色，tooltip / 读屏带重置说明；展开能看 detail、重置时间和响应原文；普通成功对照没有', async () => {
     show(createMockApi({ live: false }));
     const strip = await waitFor(historyStrip);
-    const quotaCell = strip.querySelector('[data-result="quota"]');
+    const quotaCell = strip.querySelector('[data-kind="quota"]');
     if (!(quotaCell instanceof HTMLElement)) throw new Error('没有额度耗尽的格子');
-    expect(quotaCell.className).toContain('bg-st-wait');
+    expect(quotaCell.getAttribute('data-result')).toBe('warn');
     expect(quotaCell.title).toMatch(/连通但额度耗尽（预计 .+ 重置）/);
-    expect(quotaCell.querySelector('.sr-only')?.textContent).toContain('连通但额度耗尽');
-    expect(strip.querySelector('[data-result="passed"]')?.className).toContain('bg-st-done');
+    expect(quotaCell.getAttribute('aria-label')).toContain('连通但额度耗尽');
+    expect(strip.querySelector('[data-kind="passed"]')?.getAttribute('data-result')).toBe('ok');
     const log = () => screen.getByRole('region', { name: '探测记录' });
     expect(log().textContent).toContain('连通但额度耗尽：探通了，但上游说额度用完了');
     fireEvent.click(quotaCell);
@@ -1341,7 +1359,7 @@ describe('渠道状态页：连通但额度耗尽（#2939）', () => {
     show(old);
     await waitFor(() => routeRow('r-cb-opus'));
     expect(card('ch-claude').textContent).not.toContain('额度耗尽');
-    expect(document.querySelector('[data-result="quota"]')).toBeNull();
+    expect(document.querySelector('[data-kind="quota"]')).toBeNull();
   });
 
   test('失败（认证 / 网络 / 临时 429）不画成额度耗尽；历史读不到明确报没读成', async () => {
@@ -1355,7 +1373,7 @@ describe('渠道状态页：连通但额度耗尽（#2939）', () => {
     show(api);
     await waitFor(() => routeRow('r-cb-opus'));
     expect(card('ch-claude').textContent).not.toContain('额度耗尽');
-    expect(document.querySelector('[data-result="quota"]')).toBeNull();
+    expect(document.querySelector('[data-kind="quota"]')).toBeNull();
     cleanup();
     const broken = createMockApi({ live: false });
     Object.assign(broken, {

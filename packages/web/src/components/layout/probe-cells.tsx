@@ -9,6 +9,10 @@ export interface ProbeCell {
   result: ProbeResult;
   /** 这一格说什么：「10:42 通过」。读屏和悬停用。 */
   label: string;
+  /** 这一格的编号（探测记录的号）：写进 data-cell，页面和测试靠它认格子。 */
+  id?: number | string;
+  /** 比颜色更细的分类（通过、额度耗尽、疑似换模型……）：写进 data-kind；颜色只有四档。 */
+  kind?: string;
 }
 
 const CELL: Record<ProbeResult, string> = {
@@ -22,15 +26,23 @@ export function ProbeCells({
   items,
   selected,
   onSelect,
+  summary,
 }: {
   items: readonly ProbeCell[];
   /** 选中第几格（从 0 数）。 */
   selected?: number | null;
   onSelect?: (index: number) => void;
+  /** 只做展示的整条（手机上格子太窄点不准）：整条是一张图，读屏念这一句，格子不单独报。 */
+  summary?: string;
 }) {
+  const display = summary !== undefined && !onSelect;
   return (
-    // biome-ignore lint/a11y/useSemanticElements: fieldset 自带边框、内边距和最小宽，这里只要一个有名字的分组。
-    <div role="group" aria-label="近几次探测" className="flex h-6 items-stretch gap-0.5">
+    <div
+      {...(display
+        ? { role: 'img', 'aria-label': summary, 'data-strip-display': 'true' }
+        : { role: 'group', 'aria-label': '近几次探测' })}
+      className="flex h-6 items-stretch gap-0.5"
+    >
       {items.map((it, i) => {
         const on = selected === i;
         const cls = cn(
@@ -44,6 +56,8 @@ export function ProbeCells({
             key={i}
             type="button"
             data-result={it.result}
+            {...(it.id !== undefined ? { 'data-cell': it.id } : {})}
+            {...(it.kind !== undefined ? { 'data-kind': it.kind } : {})}
             aria-label={it.label}
             aria-pressed={on}
             title={it.label}
@@ -54,10 +68,13 @@ export function ProbeCells({
           <span
             // biome-ignore lint/suspicious/noArrayIndexKey: 格子的身份就是第几次。
             key={i}
-            role="img"
             data-result={it.result}
-            aria-label={it.label}
-            title={it.label}
+            {...(it.id !== undefined ? { 'data-cell': it.id } : {})}
+            {...(it.kind !== undefined ? { 'data-kind': it.kind } : {})}
+            {...(it.label === '' || display
+              ? { 'aria-hidden': true }
+              : { role: 'img', 'aria-label': it.label })}
+            {...(it.label !== '' ? { title: it.label } : {})}
             className={cls}
           />
         );

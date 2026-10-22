@@ -1,6 +1,8 @@
 // 额度页每个池一行的停用开关，和每个渠道组头上的整渠道暂停 / 放开。背后都是同一份 engine.poolHolds，不另开接口。
 // 关的时候只写一句原因，复查日期可不填；整渠道是一次把这个渠道下的池一起写进去（带设置版本号，撞了就提示重来）。
 // 引擎探到的封号、登录失效只在这一行标「封号」，不改开关，也不自动撤；整渠道放开同样碰不到它们，也碰不到认不出的项。
+// 表里一行一个状态（#3533）：池的暂停状态（没查成 / 封号 / 该复查）由 usePoolFlag 给，表格的状态列用它顶掉窗口自己的状态；
+// 开关和状态分开放：PoolSwitch 只有开关，原因写在池名下一行（PoolHoldNote）。
 import { acceptPoolHoldsWrite } from '@fleet-dao/shared';
 import { createContext, type ReactNode, useContext, useState } from 'react';
 import { toast } from 'sonner';
@@ -18,13 +20,15 @@ import {
   withPause,
   withPauseMany,
 } from '../lib/pool-holds';
+import type { StatusKey } from '../theme/status-dict';
+import { Button } from './layout/button';
+import { Form, FormItem } from './layout/form';
 import { Notice } from './layout/notice';
+import { Stack } from './layout/stack';
 import { StatusBadge } from './layout/status-badge';
-import type { LayoutTone } from './layout/tone';
-import { Button } from './ui/button';
-import { Input } from './ui/input';
-import { Label } from './ui/label';
-import { Switch } from './ui/switch';
+import { Switch } from './layout/switch';
+import { Text } from './layout/text';
+import { TextInput } from './layout/text-input';
 
 /** 同一时间只开一张表单：单个池（kind = pool，id 是池编号）或整个渠道（kind = channel，id 是渠道编号）。 */
 type OpenForm = { kind: 'pool' | 'channel'; id: string; mode: 'off' | 'on' };
@@ -42,6 +46,11 @@ export function PoolSwitchProvider({ children }: { children: ReactNode }) {
   const update = useUpdateSetting();
   const [open, setOpen] = useState<OpenForm | null>(null);
   return <Ctx.Provider value={{ open, setOpen, update }}>{children}</Ctx.Provider>;
+}
+
+/** 现在哪张表单开着（单个池或整渠道）；表格据此决定在哪一行下面摆表单。要在 PoolSwitchProvider 里用。 */
+export function usePoolSwitchOpen(): OpenForm | null {
+  return useSwitchCtx().open;
 }
 
 function useSwitchCtx(): SwitchCtx {
@@ -100,80 +109,120 @@ export function PoolHoldBanner() {
     });
   };
   return (
-    <div className="mb-3 space-y-2">
+    <Stack gap="sm">
       {v.holdAll ? (
         <Notice
-          tone="fail"
+          tone="stall"
           title="暂停设置没查成"
           action={
-            <Button type="button" size="sm" variant="outline" onClick={() => setOpen((x) => !x)}>
+            <Button variant="secondary" size="xs" onClick={() => setOpen((x) => !x)}>
               清空这份设置
             </Button>
           }
         >
-          整份认不出，引擎对所有池按暂停办。写上原因后清空，池就都打开。认不出的内容留不下来。
+          整份认不出，引擎对所有池按暂停办；下面的开关先不能动。写上原因后清空，池就都打开。认不出的内容留不下来。
           {open ? (
-            <div className="mt-2 flex flex-col gap-2">
-              <Label htmlFor="pool-hold-clear-reason">原因</Label>
-              <Input
-                id="pool-hold-clear-reason"
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                placeholder="比如：认不出的那份作废"
-              />
-              <div className="flex gap-2">
-                <Button type="button" size="sm" variant="outline" onClick={() => setOpen(false)}>
+            <Form aria-label="清空暂停设置">
+              <FormItem label="原因" required htmlFor="pool-hold-clear-reason" layout="vertical">
+                <TextInput
+                  id="pool-hold-clear-reason"
+                  aria-label="原因"
+                  value={reason}
+                  onChange={setReason}
+                  placeholder="比如：认不出的那份作废"
+                />
+              </FormItem>
+              <Stack direction="horizontal" gap="sm">
+                <Button variant="secondary" size="sm" onClick={() => setOpen(false)}>
                   取消
                 </Button>
                 <Button
-                  type="button"
+                  variant="outline"
                   size="sm"
                   loading={update.isPending}
-                  disabled={update.isPending || problem !== null}
+                  {...(problem !== null ? { disabledReason: problem } : {})}
                   onClick={clear}
                 >
                   确认清空
                 </Button>
-              </div>
-            </div>
+              </Stack>
+            </Form>
           ) : null}
         </Notice>
       ) : null}
       {v.legacyProblem ? (
-        <p data-pool-legacy-unreadable className="text-meta text-ink-stall">
-          封号这些提醒没读成：{v.legacyProblem}。这一行没标不代表没有。
-        </p>
+        <span data-pool-legacy-unreadable>
+          <Text size="meta" tone="warning">
+            封号这些提醒没读成：{v.legacyProblem}。这一行没标不代表没有。
+          </Text>
+        </span>
       ) : null}
-    </div>
+    </Stack>
   );
 }
 
-function rowFlag(
-  poolId: string,
-  holds: ReturnType<typeof usePoolHolds>,
-): { label: string; tone: LayoutTone; title: string } | null {
+/** 一个池的暂停状态：给表格状态列用的字典键、给 data-pool-flag 的短字、悬停说明。 */
+export interface PoolFlagInfo {
+  status: StatusKey;
+  label: string;
+  title: string;
+}
+
+function rowFlag(poolId: string, holds: ReturnType<typeof usePoolHolds>): PoolFlagInfo | null {
   const v = holds.data;
   const error = Boolean(holds.error);
   if (!v && !error) return null;
   if (poolSettingUnread(v, error, poolId)) {
-    return { label: '没查成', tone: 'stall', title: '暂停设置没查成，引擎按暂停办' };
+    return { status: 'quota:quota:fetch-failed', label: '没查成', title: '暂停设置没查成，引擎按暂停办' };
   }
   const legacy = v?.legacy.find((l) => l.poolId === poolId);
   if (legacy) {
     const label = legacyRowStatus(legacy.title);
     return {
+      status: label === '封号' ? 'route:pool:ban' : 'quota:quota:hold-other',
       label,
-      tone: label === '封号' ? 'fail' : 'stall',
       title: legacy.title,
     };
   }
   const hold = v?.holds.find((h) => h.poolId === poolId);
   const words = hold ? reviewWords(hold) : null;
-  if (hold && words) return { label: words, tone: 'fail', title: `${hold.reason}。${words}` };
+  if (hold && words) {
+    return { status: 'quota:quota:hold-review', label: words, title: `${hold.reason}。${words}` };
+  }
   return null;
 }
 
-/** 池名旁边：一个状态（没查成 / 封号 / 到期）和开关。开关不跟着引擎的封号动。 */
+/** 这个池的暂停状态（没查成 / 封号 / 该复查）；没有就是 null。 */
+export function usePoolFlag(poolId: string): PoolFlagInfo | null {
+  return rowFlag(poolId, usePoolHolds());
+}
+
+/** 状态列里画的那一个状态。 */
+export function PoolFlagBadge({ flag }: { flag: PoolFlagInfo }) {
+  return (
+    <span data-pool-flag={flag.label} title={flag.title}>
+      <StatusBadge status={flag.status} />
+    </span>
+  );
+}
+
+/** 池名下一行灰字：停用的原因和复查日期。没停用就没有。 */
+export function PoolHoldNote({ poolId }: { poolId: string }) {
+  const holds = usePoolHolds();
+  const hold = holds.data?.holds.find((h) => h.poolId === poolId);
+  if (!hold) return null;
+  const words = reviewWords(hold);
+  const text = `已停用：${hold.reason}${hold.reviewBy ? `　复查 ${hold.reviewBy}` : ''}${words ? `　${words}` : ''}`;
+  return (
+    <span data-pool-hold-note title={text}>
+      <Text size="meta" tone="muted" truncate>
+        {text}
+      </Text>
+    </span>
+  );
+}
+
+/** 表里「启用」那一格的开关。开关不跟着引擎的封号动。 */
 export function PoolSwitch({ poolId }: { poolId: string }) {
   const holds = usePoolHolds();
   const { open, setOpen, update } = useSwitchCtx();
@@ -200,27 +249,14 @@ export function PoolSwitch({ poolId }: { poolId: string }) {
     else setOpen({ kind: 'pool', id: poolId, mode: checked ? 'off' : 'on' });
   };
   return (
-    <>
-      {flag ? (
-        <span data-pool-flag={flag.label} title={flag.title} className="shrink-0">
-          <StatusBadge tone={flag.tone} label={flag.label} variant="dot" />
-        </span>
-      ) : null}
-      {recognized && !flag ? (
-        <span className="min-w-0 truncate text-meta text-muted-foreground" title={recognized.reason}>
-          {recognized.reason}
-        </span>
-      ) : null}
-      <Switch
-        size="sm"
-        checked={checked}
-        disabled={disabled}
-        title={title}
-        aria-label={`${poolId} 的开关`}
-        data-testid={`pool-switch-${poolId}`}
-        onCheckedChange={toggle}
-      />
-    </>
+    <Switch
+      size="sm"
+      checked={checked}
+      disabled={disabled}
+      title={title}
+      aria-label={`${poolId} 的开关`}
+      onCheckedChange={toggle}
+    />
   );
 }
 
@@ -245,7 +281,7 @@ function switchTitle(s: {
   return parts.join('。');
 }
 
-/** 点开关后在同一行下面展开的原因。确认之前开关不动。 */
+/** 点开关后在这个池下面展开的原因。确认之前开关不动。 */
 export function PoolSwitchForm({ poolId }: { poolId: string }) {
   const holds = usePoolHolds();
   const { open, setOpen, update } = useSwitchCtx();
@@ -290,33 +326,32 @@ export function PoolSwitchForm({ poolId }: { poolId: string }) {
     );
   };
   return (
-    <td className="quota-hold-form">
-      <HoldFields
-        idBase={poolId}
-        label={`${poolId} 的停用`}
-        mode={mode}
-        reason={reason}
-        reviewBy={reviewBy}
-        onReason={setReason}
-        onReviewBy={setReviewBy}
-        pending={update.isPending}
-        blocked={problem !== null}
-        confirmText={mode === 'off' ? '确认停用' : '确认打开'}
-        onCancel={close}
-        onConfirm={confirm}
-      >
-        {mode === 'off' && kept.length > 0 ? (
-          <p className="text-meta text-ink-stall">
-            {`${kept.join('、')} 的暂停认不出，这次会原样留着，不会放开。`}
-          </p>
-        ) : null}
-        {mode === 'on' && bad.length > 0 ? (
-          <p className="text-meta text-ink-stall">
-            {`认不出的有 ${bad.join('、')}。这次只动 ${poolId}，别的认不出的暂停原样留着。引擎现在仍按暂停办。`}
-          </p>
-        ) : null}
-      </HoldFields>
-    </td>
+    <HoldFields
+      idBase={poolId}
+      label={`${poolId} 的停用`}
+      mode={mode}
+      reason={reason}
+      reviewBy={reviewBy}
+      onReason={setReason}
+      onReviewBy={setReviewBy}
+      pending={update.isPending}
+      problem={problem}
+      confirmText={mode === 'off' ? '确认停用' : '确认打开'}
+      onCancel={close}
+      onConfirm={confirm}
+      help={mode === 'off' ? `只停 ${poolId}，其余池不动。` : `只放开 ${poolId}，其余池不动。`}
+    >
+      {mode === 'off' && kept.length > 0 ? (
+        <Text size="meta" tone="warning">
+          {`${kept.join('、')} 的暂停认不出，这次会原样留着，不会放开。`}
+        </Text>
+      ) : null}
+      {mode === 'on' && bad.length > 0 ? (
+        <Text size="meta" tone="warning">
+          {`认不出的有 ${bad.join('、')}。这次只动 ${poolId}，别的认不出的暂停原样留着。引擎现在仍按暂停办。`}
+        </Text>
+      ) : null}
+    </HoldFields>
   );
 }
 
@@ -330,10 +365,11 @@ function HoldFields({
   onReason,
   onReviewBy,
   pending,
-  blocked,
+  problem,
   confirmText,
   onCancel,
   onConfirm,
+  help,
   children,
 }: {
   idBase: string;
@@ -344,45 +380,58 @@ function HoldFields({
   onReason: (v: string) => void;
   onReviewBy: (v: string) => void;
   pending: boolean;
-  blocked: boolean;
+  /** 现在不能确认的原因；null = 能确认。 */
+  problem: string | null;
   confirmText: string;
   onCancel: () => void;
   onConfirm: () => void;
+  help?: ReactNode;
   children?: ReactNode;
 }) {
+  const reasonLabel = mode === 'off' ? '原因' : '为什么现在能开';
+  const reviewLabel = '复查日期（可不填）';
   return (
-    <fieldset
-      className="mt-2 flex min-w-0 max-w-lg flex-col gap-2 rounded-lg border-0 bg-muted p-3"
-      aria-label={label}
-    >
+    <Form aria-label={label}>
       {children}
-      <Label htmlFor={`pool-hold-reason-${idBase}`}>{mode === 'off' ? '原因' : '为什么现在能开'}</Label>
-      <Input
-        id={`pool-hold-reason-${idBase}`}
-        value={reason}
-        placeholder={mode === 'off' ? '比如：被封号' : '比如：号已解开'}
-        onChange={(e) => onReason(e.target.value)}
-      />
+      <FormItem label={reasonLabel} required htmlFor={`pool-hold-reason-${idBase}`} help={help}>
+        <TextInput
+          id={`pool-hold-reason-${idBase}`}
+          aria-label={reasonLabel}
+          value={reason}
+          placeholder={mode === 'off' ? '比如：被封号' : '比如：号已解开'}
+          onChange={onReason}
+        />
+      </FormItem>
       {mode === 'off' ? (
-        <>
-          <Label htmlFor={`pool-hold-review-${idBase}`}>复查日期（可不填）</Label>
-          <Input
+        <FormItem
+          label={reviewLabel}
+          htmlFor={`pool-hold-review-${idBase}`}
+          help="确认前开关和暂停状态都不会动。"
+        >
+          <TextInput
             id={`pool-hold-review-${idBase}`}
+            aria-label={reviewLabel}
             value={reviewBy}
             placeholder="YYYY-MM-DD，不填就不提醒"
-            onChange={(e) => onReviewBy(e.target.value)}
+            onChange={onReviewBy}
           />
-        </>
+        </FormItem>
       ) : null}
-      <div className="flex gap-2">
-        <Button type="button" size="sm" variant="outline" onClick={onCancel}>
+      <Stack direction="horizontal" gap="sm">
+        <Button variant="secondary" size="sm" onClick={onCancel}>
           取消
         </Button>
-        <Button type="button" size="sm" loading={pending} disabled={pending || blocked} onClick={onConfirm}>
+        <Button
+          variant="outline"
+          size="sm"
+          loading={pending}
+          {...(problem !== null ? { disabledReason: problem } : {})}
+          onClick={onConfirm}
+        >
           {confirmText}
         </Button>
-      </div>
-    </fieldset>
+      </Stack>
+    </Form>
   );
 }
 
@@ -416,57 +465,56 @@ export function ChannelHoldControls({
   const showPause = !s || s.free.length > 0;
   const showResume = !s || s.held.length > 0;
   const blockedTitle = channelBlockedTitle(!v, error);
+  const stopped = blocked ? blockedTitle : update.isPending ? '正在保存，等一下' : undefined;
   return (
-    <span className="ml-auto flex shrink-0 items-center gap-2" data-channel-controls={channelId}>
-      {s && s.state !== 'on' ? (
-        <span
-          data-channel-hold-state={s.state}
-          title={`${s.held.length + s.opaque.length}/${s.poolIds.length} 个池停着`}
-        >
-          <StatusBadge
-            tone="stall"
-            label={
-              s.state === 'paused'
+    <span data-channel-controls={channelId}>
+      <Stack direction="horizontal" gap="sm" align="center">
+        {s && s.state !== 'on' ? (
+          <span
+            data-channel-hold-state={s.state}
+            title={`${s.held.length + s.opaque.length}/${s.poolIds.length} 个池停着`}
+          >
+            <Text size="meta" tone="muted">
+              {s.state === 'paused'
                 ? '全部已停'
-                : `已停 ${s.held.length + s.opaque.length}/${s.poolIds.length}`
-            }
-            variant="dot"
-          />
-        </span>
-      ) : null}
-      {showPause ? (
-        <Button
-          type="button"
-          size="xs"
-          variant="outline"
-          disabled={blocked || update.isPending}
-          title={blocked ? blockedTitle : `给这个渠道下还开着的 ${s?.free.length} 个池写暂停`}
-          data-testid={`channel-pause-${channelId}`}
-          onClick={toggle('off')}
-        >
-          {pauseWord}
-        </Button>
-      ) : null}
-      {showResume ? (
-        <Button
-          type="button"
-          size="xs"
-          variant="outline"
-          disabled={blocked || update.isPending}
-          title={blocked ? blockedTitle : `撤掉这个渠道下 ${s?.held.length} 个池的暂停`}
-          data-testid={`channel-resume-${channelId}`}
-          onClick={toggle('on')}
-        >
-          {resumeWord}
-        </Button>
-      ) : null}
+                : `已停 ${s.held.length + s.opaque.length}/${s.poolIds.length}`}
+            </Text>
+          </span>
+        ) : null}
+        {showPause ? (
+          <Button
+            variant="text"
+            size="xs"
+            {...(stopped !== undefined
+              ? { disabledReason: stopped }
+              : { title: `给这个渠道下还开着的 ${s?.free.length} 个池写暂停` })}
+            data-testid={`channel-pause-${channelId}`}
+            onClick={toggle('off')}
+          >
+            {pauseWord}
+          </Button>
+        ) : null}
+        {showResume ? (
+          <Button
+            variant="text"
+            size="xs"
+            {...(stopped !== undefined
+              ? { disabledReason: stopped }
+              : { title: `撤掉这个渠道下 ${s?.held.length} 个池的暂停` })}
+            data-testid={`channel-resume-${channelId}`}
+            onClick={toggle('on')}
+          >
+            {resumeWord}
+          </Button>
+        ) : null}
+      </Stack>
     </span>
   );
 }
 
 const joinIds = (ids: readonly string[]): string => ids.join('、');
 
-/** 整渠道暂停 / 放开展开的原因表单：渠道组头下面一行。预览写明会动哪几个池、哪几个原样不动；确认前什么都不写。 */
+/** 整渠道暂停 / 放开展开的原因表单：渠道组头下面。预览写明会动哪几个池、哪几个原样不动；确认前什么都不写。 */
 export function ChannelHoldForm({
   channelId,
   channelName,
@@ -518,52 +566,62 @@ export function ChannelHoldForm({
     );
   };
   return (
-    <tr>
-      <td className="quota-hold-form px-4 pb-2" data-channel-form={channelId}>
-        <HoldFields
-          idBase={`channel-${channelId}`}
-          label={`${channelName} 的整渠道${mode === 'off' ? '暂停' : '放开'}`}
-          mode={mode}
-          reason={reason}
-          reviewBy={reviewBy}
-          onReason={setReason}
-          onReviewBy={setReviewBy}
-          pending={update.isPending}
-          blocked={problem !== null}
-          confirmText={mode === 'off' ? '确认暂停整渠道' : '确认放开整渠道'}
-          onCancel={close}
-          onConfirm={confirm}
-        >
-          <ChannelPreview mode={mode} s={s} />
-        </HoldFields>
-      </td>
-    </tr>
+    <div data-channel-form={channelId}>
+      <HoldFields
+        idBase={`channel-${channelId}`}
+        label={`${channelName} 的整渠道${mode === 'off' ? '暂停' : '放开'}`}
+        mode={mode}
+        reason={reason}
+        reviewBy={reviewBy}
+        onReason={setReason}
+        onReviewBy={setReviewBy}
+        pending={update.isPending}
+        problem={problem}
+        confirmText={mode === 'off' ? '确认暂停整渠道' : '确认放开整渠道'}
+        onCancel={close}
+        onConfirm={confirm}
+      >
+        <ChannelPreview mode={mode} s={s} />
+      </HoldFields>
+    </div>
   );
 }
 
 function ChannelPreview({ mode, s }: { mode: 'off' | 'on'; s: ChannelHoldSummary }) {
   const targets = mode === 'off' ? s.free : s.held;
   return (
-    <div data-channel-preview className="space-y-1 text-meta text-muted-foreground">
-      <p>
-        {targets.length === 0
-          ? mode === 'off'
-            ? '这个渠道下没有还开着的池。'
-            : '这个渠道下没有认得出的暂停可放开。'
-          : `${mode === 'off' ? '将暂停' : '将放开'} ${targets.length} 个池：${joinIds(targets)}。`}
-      </p>
-      {mode === 'off' && s.held.length > 0 ? (
-        <p>{`已经停着的 ${joinIds(s.held)} 原样不动（原因、复查日期保留）。`}</p>
-      ) : null}
-      {s.opaque.length > 0 ? (
-        <p className="text-ink-stall">
-          {`${joinIds(s.opaque)} 的暂停认不出，原样留着，不会放开；引擎仍按暂停办。`}
-        </p>
-      ) : null}
-      {mode === 'on' && s.legacy.length > 0 ? (
-        <p className="text-ink-stall">{`${joinIds(s.legacy)} 还挂着引擎探到的封号等提醒，不会因此解除。`}</p>
-      ) : null}
-      <p>别的渠道的池不动。</p>
+    <div data-channel-preview>
+      <Stack gap="sm">
+        <Text size="meta" tone="secondary" as="p">
+          {targets.length === 0
+            ? mode === 'off'
+              ? '这个渠道下没有还开着的池。'
+              : '这个渠道下没有认得出的暂停可放开。'
+            : `${mode === 'off' ? '将暂停' : '将放开'} ${targets.length} 个池：${joinIds(targets)}。`}
+        </Text>
+        {mode === 'off' && s.held.length > 0 ? (
+          <Text
+            size="meta"
+            tone="secondary"
+            as="p"
+          >{`已经停着的 ${joinIds(s.held)} 原样不动（原因、复查日期保留）。`}</Text>
+        ) : null}
+        {s.opaque.length > 0 ? (
+          <Text size="meta" tone="warning" as="p">
+            {`${joinIds(s.opaque)} 的暂停认不出，原样留着，不会放开；引擎仍按暂停办。`}
+          </Text>
+        ) : null}
+        {mode === 'on' && s.legacy.length > 0 ? (
+          <Text
+            size="meta"
+            tone="warning"
+            as="p"
+          >{`${joinIds(s.legacy)} 还挂着引擎探到的封号等提醒，不会因此解除。`}</Text>
+        ) : null}
+        <Text size="meta" tone="secondary" as="p">
+          别的渠道的池不动。
+        </Text>
+      </Stack>
     </div>
   );
 }

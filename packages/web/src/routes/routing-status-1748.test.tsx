@@ -47,15 +47,15 @@ describe('渠道状态页（#1748）', () => {
     open('ch-cursor');
     const strip = await waitFor(() => byAttr('data-history', 'strip'));
     expect(strip.querySelectorAll('[data-cell]')).toHaveLength(3);
-    expect(strip.querySelector('[data-result="doubt"]')).toBeTruthy();
-    expect(strip.querySelector('[data-result="not_probed"]')).toBeNull();
+    expect(strip.querySelector('[data-kind="doubt"]')).toBeTruthy();
+    expect(strip.querySelector('[data-kind="not_probed"]')).toBeNull();
     expect(strip.textContent).toContain('可用率 33.3%（1/3）');
   });
 
   test('中转站有没真探的记录：色条上不画，折起来，点开才看', async () => {
     open('ch-relay');
     const strip = await waitFor(() => byAttr('data-history', 'strip'));
-    expect(strip.querySelector('[data-result="not_probed"]')).toBeNull();
+    expect(strip.querySelector('[data-kind="not_probed"]')).toBeNull();
     const fold = byAttr('data-probe-log', 'skipped');
     expect(fold.textContent).toMatch(/条没真探的记录/);
     expect(document.querySelector('[aria-label="没真探的记录"]')).toBeNull();

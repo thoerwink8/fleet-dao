@@ -134,10 +134,10 @@ describe('思考档位页：看', () => {
     const off = row('r-rl-opus');
     expect(off.className).not.toContain('bg-muted');
     expect(off.querySelector('div[class*="bg-muted"]')).toBeNull();
-    const badge = off.querySelector('[data-tone="stop"]');
+    const badge = off.querySelector('[data-status]');
     expect(badge?.textContent).toBe('关着');
     // 开着的行没有这枚标签
-    expect(row('r-ca-opus').querySelector('[data-tone="stop"]')).toBeNull();
+    expect(row('r-ca-opus').querySelector('[data-status]')).toBeNull();
     // 路由号这类内部 id 只在悬停里，不写在行文字里（#1902）。
     // 池号 #1916 起改成看得见：同一模型常有两条同渠道的路（Claude 订阅 · claude-a、claude-b），只写渠道名分不出来。
     // 原断言「行文字里没有池号 relay」换成等价的新说法：行上写「渠道 · 池」，路由号仍不露。

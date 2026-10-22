@@ -41,9 +41,7 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'components/job-row.tsx', snippet: 'text-meta text-muted-foreground' },
   { file: 'components/job-row.tsx', snippet: 'num text-meta text-muted-foreground' },
   { file: 'components/job-row.tsx', snippet: 'text-meta text-ink-stall' },
-  { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
-  { file: 'routes/routing-status.tsx', snippet: 'lg:grid-cols-routing' },
-  { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-sm' },
+  // #3533：routing-status 的两处版式和 probe-log 的探针色点迁到 layout 层（Grid、ProbeCells），不再在业务层写类名，这三处不再钉。
   // #1851：提交行迁到 ListRow；照路由页样板重做后一行不折（标题截断、时间不让位），钉标题列那一段
   { file: 'routes/changelog.tsx', snippet: 'min-w-0 flex-1" data-commit-row' },
 ];
@@ -88,7 +86,7 @@ describe('#1445 五文件的尺寸 token', () => {
   });
 
   test('12 处写死值对应的 token 类名还在', () => {
-    expect(SPOTS).toHaveLength(12);
+    expect(SPOTS).toHaveLength(9);
     for (const spot of SPOTS) {
       expect(source(spot.file), `${spot.file} 缺少 ${spot.snippet}`).toContain(spot.snippet);
     }

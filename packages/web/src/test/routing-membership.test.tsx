@@ -81,7 +81,7 @@ describe('用途：添加、移出、档位', () => {
     const dialog = await screen.findByRole('dialog');
     const fable = await within(dialog).findByRole('button', { name: '把 Fable 5.1 加进用途' });
     expect(within(dialog).queryByRole('button', { name: '把 Opus 5.5 加进用途' })).toBeNull();
-    await waitFor(() => expect((fable as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect(fable.getAttribute('aria-disabled')).toBeNull());
     fireEvent.change(within(dialog).getByRole('searchbox', { name: '搜索要添加的模型' }), {
       target: { value: 'sonnet' },
     });
@@ -212,11 +212,11 @@ describe('模型目录：厂家、渠道、状态、变体', () => {
     expect(document.querySelector('li[data-catalog="grok-4.7-fast"]')).toBeNull();
     const folded = screen.getByRole('button', { name: '展开 Grok 4.7 的变体' });
     expect(folded.textContent).toMatch(/\d+ 个已开/);
-    expect(folded.querySelector('[data-variant-arrow]')?.getAttribute('data-variant-arrow')).toBe('closed');
+    expect(folded.querySelector('[data-disclosure]')?.getAttribute('data-disclosure')).toBe('closed');
     fireEvent.click(folded);
     await waitFor(() => expect(document.querySelector('li[data-catalog="grok-4.7-fast"]')).toBeTruthy());
     const opened = screen.getByRole('button', { name: '收起 Grok 4.7 的变体' });
-    expect(opened.querySelector('[data-variant-arrow]')?.getAttribute('data-variant-arrow')).toBe('open');
+    expect(opened.querySelector('[data-disclosure]')?.getAttribute('data-disclosure')).toBe('open');
     expect(opened.textContent).toMatch(/\d+ 个已开/);
     expect(document.querySelector('li[data-catalog="grok-4.7"]')).toBeTruthy();
     expect(document.querySelector('li[data-catalog-group]')).toBeTruthy();
@@ -259,7 +259,8 @@ describe('渠道：手工登记', () => {
     expect(screen.queryByPlaceholderText('撤一条以前登记的')).toBeNull();
     expect(register).toHaveBeenCalledWith('ch-claude', { modelKey: 'claude-sonnet-x' });
     const drop = within(list).getByRole('button', { name: '撤掉 claude-sonnet-x' });
-    expect(drop.className.split(/\s+/)).toEqual(expect.arrayContaining(['min-h-9', 'min-w-9']));
+    // 手机上可点区至少 40 高（版式组件 Button 的 xs 尺寸自带）
+    expect(drop.className.split(/\s+/)).toContain('max-md:min-h-10');
     fireEvent.click(drop);
     const dropDialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dropDialog).getByRole('button', { name: '撤掉' }));
@@ -279,7 +280,7 @@ describe('Fable 只有创始人能加', () => {
     fireEvent.click(screen.getByRole('button', { name: '添加模型' }));
     const dialog = await screen.findByRole('dialog');
     const fable = within(dialog).getByRole('button', { name: '把 Fable 5.1 加进用途' }) as HTMLButtonElement;
-    expect(fable.disabled).toBe(true);
+    expect(fable.getAttribute('aria-disabled')).toBe('true');
     expect(fable.getAttribute('title')).toContain('仅创始人可开');
   });
 });

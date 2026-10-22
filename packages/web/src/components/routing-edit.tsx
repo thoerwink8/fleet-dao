@@ -10,7 +10,6 @@
 // - 长列表（超过 50 行）只画窗口里的行；拖到容器上下沿时容器自己滚（lib/list-window.ts）。窗口化的行是定高的，行高由调用方给定。
 
 import { founderOnlyFor } from '@fleet-dao/shared';
-import { GripVertical } from 'lucide-react';
 import {
   createContext,
   type DragEvent,
@@ -41,22 +40,13 @@ import {
   windowRange,
 } from '../lib/list-window';
 import { useSelectedNodeId } from '../lib/node';
-import { cn } from '../lib/utils';
-import { RowMenuItem, revealOnRowHover } from './layout/row-menu';
+import { ConfirmDialog } from './layout/confirm-dialog';
+import { DragHandle } from './layout/drag-handle';
+import { RowMenuItem } from './layout/row-menu';
+import { Switch } from './layout/switch';
 import { Tag } from './layout/tag';
+import { RowItem, WindowBox, WindowList } from './layout/windowed';
 import { useSelectedNodeName } from './node-notice';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from './ui/alert-dialog';
-import { Button } from './ui/button';
-import { Switch } from './ui/switch';
 
 interface Ask {
   title: string;
@@ -240,29 +230,19 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
   return (
     <RoutingEditContext value={edit}>
       {children}
-      <AlertDialog open={asking !== null} onOpenChange={(open) => !open && setAsking(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{asking?.title}</AlertDialogTitle>
-            <AlertDialogDescription>{asking?.description}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction onConfirm={confirm}>{asking?.verb}</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={asking !== null}
+        onOpenChange={(open) => !open && setAsking(null)}
+        title={asking?.title ?? ''}
+        description={asking?.description}
+        confirmText={asking?.verb}
+        onConfirm={confirm}
+      />
     </RoutingEditContext>
   );
 }
 
 const HANDLE_TITLE = '拖到新位置；键盘：Alt+上下键挪一格，Alt+Home 置顶，Alt+End 置底';
-
-/** 手机上可点区域至少 36px（Tailwind 的 9）。宽屏收回原来的紧凑尺寸。 */
-export const TAP = 'min-h-9 min-w-9 md:min-h-0 md:min-w-0';
-
-/** 开关本身是个小滑块：手机上不把它撑成 36px 的圆，只把可点的范围用透明伪元素往外扩（宽屏收回）。 */
-export const SWITCH_TAP = 'relative after:absolute after:-inset-x-1.5 after:-inset-y-3 md:after:hidden';
 
 /** 一行的先后操作：拖动柄（桌面，键盘 Alt+方向键也在它上面）和「⋯」菜单里的挪动项。调用方决定摆在行里哪儿。 */
 export interface RowControls {
@@ -341,8 +321,7 @@ export function SortableList<T>({
   itemLabel,
   disabled,
   disabledWhy,
-  className,
-  rowClassName,
+  isSelected,
   rowProps,
   viewport,
   busy = false,
@@ -356,8 +335,8 @@ export function SortableList<T>({
   disabled: boolean;
   /** 不能拖的原因；能拖时手柄上写键盘怎么用。 */
   disabledWhy: string | null;
-  className?: string;
-  rowClassName?: (item: T) => string | undefined;
+  /** 选中的行（换底色）。 */
+  isSelected?: (item: T) => boolean;
   rowProps?: (item: T) => Record<string, string | undefined>;
   viewport?: SortViewport;
   /** 别的写还在进行（开关）：先后暂时点不动，但手柄不置灰，焦点不丢。 */
@@ -539,29 +518,18 @@ export function SortableList<T>({
           else pin(to);
         },
       },
+      // 桌面才拖（手机用「⋯」菜单挪）；鼠标设备上悬停这一行才露出，键盘聚焦时也露出
       grip: (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          // 桌面才拖（手机用「⋯」菜单挪）；鼠标设备上悬停这一行才露出，键盘聚焦时也露出。
-          // 浮在行左边的留白里（行是 relative），不占一列：平时不露出时左边不空一块
-          className={cn(
-            'absolute top-1/2 left-0 hidden -translate-y-1/2 cursor-grab text-muted-foreground md:inline-flex',
-            revealOnRowHover,
-            TAP,
-          )}
+        <DragHandle
+          label={`拖动 ${label}`}
+          title={disabledWhy ?? (saving ? '正在保存' : HANDLE_TITLE)}
           draggable={!off}
           disabled={disabled}
-          aria-disabled={saving || busy || undefined}
-          title={disabledWhy ?? (saving ? '正在保存' : HANDLE_TITLE)}
-          aria-label={`拖动 ${label}`}
+          busy={saving || busy}
           onDragStart={(e) => onDragStart(e, id)}
           onDragEnd={endDrag}
           onKeyDown={(e) => onKeyDown(e, id)}
-        >
-          <GripVertical aria-hidden />
-        </Button>
+        />
       ),
     };
   };
@@ -570,36 +538,26 @@ export function SortableList<T>({
     const id = itemId(item);
     const edge = drop?.id === id ? drop.edge : undefined;
     return (
-      <li
+      <RowItem
         key={id}
-        {...(rowProps?.(item) ?? {})}
-        data-drop={edge}
-        aria-posinset={viewport ? index + 1 : undefined}
-        aria-setsize={viewport ? shown.length : undefined}
-        style={
-          style
-            ? { position: 'absolute', left: 0, right: 0, top: style.top, height: style.height }
-            : undefined
-        }
-        className={cn(
-          'relative',
-          rowClassName?.(item),
-          edge === 'before' && 'border-t-2 border-t-foreground',
-          edge === 'after' && 'border-b-2 border-b-foreground',
-        )}
+        attrs={rowProps?.(item) ?? {}}
+        selected={isSelected?.(item) ?? false}
+        edge={edge}
+        {...(style ? { top: style.top, height: style.height } : {})}
+        {...(viewport ? { posinset: index + 1, setsize: shown.length } : {})}
         onDragOver={(e) => onDragOver(e, id)}
         onDrop={(e) => onDrop(e, id)}
       >
         {children(item, index, controlsFor(item))}
-      </li>
+      </RowItem>
     );
   };
 
   if (!viewport) {
     return (
-      <ol aria-label={ariaLabel} data-pending={preview ? 'true' : undefined} className={className}>
+      <WindowList as="ol" ariaLabel={ariaLabel} pending={preview !== null}>
         {shown.map((item, index) => rowEl(item, index))}
-      </ol>
+      </WindowList>
     );
   }
 
@@ -613,26 +571,21 @@ export function SortableList<T>({
   // 正在拖的行滚出窗口也不卸载：卸了浏览器收不到拖动结束
   if (draggedAt >= 0 && (draggedAt < range.start || draggedAt >= range.end)) rendered.push(draggedAt);
   return (
-    <div
-      ref={box}
-      data-sortable-box
-      data-windowed={shown.length > WINDOW_MIN_ROWS ? 'true' : undefined}
-      style={fill ? undefined : { height: Math.min(height, total) }}
-      className={cn('overflow-y-auto overscroll-contain', fill && 'h-full min-h-0')}
-      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+    <WindowBox
+      boxRef={box}
+      attrs={{ 'data-sortable-box': '' }}
+      windowed={shown.length > WINDOW_MIN_ROWS}
+      fill={fill}
+      height={Math.min(height, total)}
+      onScrollTop={setScrollTop}
     >
-      <ol
-        aria-label={ariaLabel}
-        data-pending={preview ? 'true' : undefined}
-        className={cn('relative', className)}
-        style={{ height: total }}
-      >
+      <WindowList as="ol" ariaLabel={ariaLabel} pending={preview !== null} total={total}>
         {rendered.flatMap((i) => {
           const item = shown[i];
           return item === undefined ? [] : [rowEl(item, i, { top: i * rowHeight, height: rowHeight })];
         })}
-      </ol>
-    </div>
+      </WindowList>
+    </WindowBox>
   );
 }
 
@@ -674,7 +627,6 @@ export function RouteSwitch({
       size="sm"
       checked={enabled}
       disabled={why !== null}
-      className={SWITCH_TAP}
       title={why ?? (enabled ? '关掉这条路由' : '打开这条路由')}
       aria-label={`${label} 的开关`}
       onCheckedChange={onToggle}
@@ -706,7 +658,6 @@ export function ModelSwitch({
       size="sm"
       checked={enabled}
       disabled={why !== null}
-      className={SWITCH_TAP}
       title={why ?? (enabled ? '关掉这个模型（所有用途都不派）' : '打开这个模型')}
       aria-label={`${modelName} 的开关`}
       onCheckedChange={() => edit.toggleModel({ modelId, modelName, enabled, expectedEnabled })}
@@ -730,7 +681,6 @@ export function ChannelSwitch({
       size="sm"
       checked={enabled}
       disabled={edit.disabledWhy !== null}
-      className={SWITCH_TAP}
       title={edit.disabledWhy ?? (enabled ? '关掉这个渠道' : '打开这个渠道')}
       aria-label={`${name} 的开关`}
       onCheckedChange={() => edit.toggleChannel({ channelId, channelName: name, enabled })}

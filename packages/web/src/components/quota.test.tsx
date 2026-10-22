@@ -1,11 +1,11 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import type { QuotaWindowView } from '../api/types';
 import QuotaPage from '../routes/quota';
-import { openSummary, renderApp } from '../test/harness';
-import { amountPair, QuotaCell, QuotaLine } from './quota';
+import { openSummary, renderApp, summaryCount } from '../test/harness';
+import { amountPair, QuotaCell, QuotaDetail } from './quota';
 
 afterEach(cleanup);
 
@@ -167,40 +167,39 @@ describe('额度格', () => {
   });
 });
 
-describe('额度页摘要卡', () => {
-  function card(title: string): HTMLElement {
-    const heading = screen.getByText(title);
-    const box = heading.closest('button') ? openSummary(title) : null;
-    if (!box) throw new Error(`找不到摘要卡：${title}`);
-    return box as HTMLElement;
-  }
+describe('额度页页签筛出的行', () => {
+  const tabRows = (box: HTMLElement) => [...box.querySelectorAll<HTMLElement>('tbody tr[data-row-key]')];
 
-  test('名字换行显示池名和窗口名，悬停是全文，不再单行截断', async () => {
+  test('页签上的数就是筛出来的行数；该先用的行写着池名（悬停是全文）和窗口名', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    await screen.findByText('先用它');
-    const hot = card('先用它');
-    const name = within(hot).getByTitle('Claude 订阅 · claude-b · 5 小时窗');
-    expect(name.className).not.toContain('truncate');
-    expect(name.className).toContain('break-words');
-    expect(name.textContent).toContain('Claude 订阅 · claude-b');
-    expect(name.textContent).toContain('5 小时窗');
-    const full = card('快用完');
-    for (const item of within(full).getAllByTitle(/·/)) {
-      expect(item.className).not.toContain('truncate');
-      expect(item.className).toContain('break-words');
+    await screen.findByRole('tab', { name: /^该先用/ });
+    const hot = openSummary('该先用');
+    expect(tabRows(hot)).toHaveLength(summaryCount('该先用'));
+    const name = within(hot).getByTitle('Claude 订阅 · claude-b');
+    expect(name.textContent).toContain('claude-b');
+    expect(within(name.closest('tr') as HTMLElement).getByText('5 小时窗')).toBeTruthy();
+    expect(within(name.closest('tr') as HTMLElement).getByText('该先用')).toBeTruthy();
+    const full = openSummary('快用完');
+    expect(tabRows(full)).toHaveLength(summaryCount('快用完'));
+    for (const row of tabRows(full)) {
+      expect(row.querySelector('[data-quota-line][data-full]')).toBeTruthy();
     }
-    const stale = card('读数过期或没查成');
-    for (const item of within(stale).getAllByTitle(/·/)) {
-      expect(item.className).not.toContain('truncate');
-    }
+    const stale = openSummary('读数过期或没查成');
+    expect(tabRows(stale)).toHaveLength(summaryCount('读数过期或没查成'));
+    expect(summaryCount('全部')).toBe(tabRows(openSummary('全部')).length);
   });
 
-  test('过期摘要里的估算窗口写「前算」，不写「前读」', async () => {
+  test('过期的行里，估算的窗口写「前算」，不写「前读」', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    await screen.findByText('读数过期或没查成');
-    const stale = card('读数过期或没查成');
+    await screen.findByRole('tab', { name: /^读数过期或没查成/ });
+    const stale = openSummary('读数过期或没查成');
     expect(stale.textContent).toContain('前算');
-    expect(stale.textContent).not.toContain('前读');
+    const estimated = tabRows(stale).filter((r) => r.textContent?.includes('前算'));
+    expect(estimated.length).toBeGreaterThan(0);
+    for (const row of estimated) {
+      expect(row.textContent).toContain('前算');
+      expect(row.textContent).not.toContain('前读');
+    }
   });
 });
 
@@ -216,8 +215,8 @@ describe('读数过期、凭据过期（#1748）', () => {
 
   test('Grok 令牌过期：额度页写原因和要人做什么，旧的 98% 不进「快用完」', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    await screen.findByText('读数过期或没查成');
-    expect(screen.getByText('快用完')).toBeTruthy();
+    await screen.findByRole('tab', { name: /^读数过期或没查成/ });
+    expect(summaryCount('快用完')).toBeGreaterThan(0);
     const full = openSummary('快用完');
     expect(full.textContent).not.toContain('supergrok');
     expect(full.textContent).not.toContain('Grok');
@@ -227,32 +226,23 @@ describe('读数过期、凭据过期（#1748）', () => {
     expect(line?.textContent).toContain('登录令牌已过期');
     expect(line?.textContent).toContain('先等 grok 下次运行自己续');
     expect(line?.textContent).not.toContain('不会自己好');
-    // 同一个池只出现一次：不再逐个列它的过期窗口
-    expect(staleBox.querySelectorAll('[data-pool="supergrok"]')).toHaveLength(1);
-    expect(staleBox.querySelectorAll('li')).toHaveLength(
-      new Set([...staleBox.querySelectorAll('li')].map((li) => li.textContent)).size,
-    );
+    // 同一个池的毛病只写一遍：写在池名下，不在它的每个过期窗口行上重复
+    expect(staleBox.querySelectorAll('[data-pool-problem][data-pool="supergrok"]')).toHaveLength(1);
   });
 });
 
 describe('额度页金额和窄表', () => {
   test('周期美元金额完整显示，金额元素不带省略号截断', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    const used = await screen.findByText('$61.20');
-    const amount = used.parentElement;
-    expect(amount).toBeTruthy();
-    expect(amount?.className ?? '').not.toContain('truncate');
-    expect(amount?.textContent).toContain('$61.20');
-    expect(amount?.textContent).toContain('/ $100');
+    const used = await screen.findByText(/^\$61\.20 \/ \$100/);
+    expect(used.textContent).toContain('61%');
     const cell = used.closest('[data-quota-line]');
     expect(cell).toBeTruthy();
     const badge = within(cell as HTMLElement).getByText('实读');
     expect(badge.closest('[data-source]')?.getAttribute('data-source')).toBe('relay-web');
-    // 别的池：月度美元仍是金额，估算标记还在；百分比窗不改成美元。
-    const month = screen.getByText('$12.50');
-    expect(month.parentElement?.className ?? '').not.toContain('truncate');
-    expect(month.parentElement?.textContent).toContain('/ $20.00');
-    // 这个池的读数过期了：不挂「估算」牌，换成「读数过期」（#1748）；估算的说明仍写在页脚
+    // 别的池：月度美元仍是金额；百分比窗不改成美元。
+    const month = screen.getByText(/^\$12\.50 \/ \$20\.00/);
+    // 这个池的读数过期了：不挂「估算」牌，换成「读数过期」（#1748）
     expect(within(month.closest('[data-quota-line]') as HTMLElement).getByText('读数过期')).toBeTruthy();
     expect(screen.getAllByText('18%').length).toBeGreaterThan(0);
   });
@@ -261,33 +251,39 @@ describe('额度页金额和窄表', () => {
     const api = createMockApi({ live: false });
     const { pools } = await api.pools();
     renderApp(<QuotaPage />, { api });
-    await screen.findByRole('columnheader', { name: '周期美元' });
+    await screen.findByRole('columnheader', { name: '启用' });
     const matrix = document.querySelector('[data-quota-matrix]') as HTMLElement;
     expect(matrix).toBeTruthy();
-    // 一个池一行；窗口各一格，不再有「向右滑动」提示、横向滚动容器和最小表宽
-    expect(matrix.querySelectorAll('tr.quota-pool')).toHaveLength(pools.length);
+    // 每个池有一个开关那一行；窗口各一行，列多了只在表自己的盒子里滚，页面不横滚
+    const firstRows = [...matrix.querySelectorAll<HTMLElement>('tbody tr[data-row-key]')].filter(
+      (r) => !(r.dataset.rowKey ?? '').includes('#'),
+    );
+    expect(firstRows).toHaveLength(pools.length);
     expect(matrix.querySelectorAll('[data-quota-line]')).toHaveLength(
       pools.reduce((n, p) => n + p.windows.length, 0),
     );
     expect(screen.queryByText('向右滑动，看其余窗口')).toBeNull();
-    expect(matrix.querySelector('.overflow-x-auto')).toBeNull();
+    expect(matrix.querySelector('[data-table-scroll]')).toBeTruthy();
     // 容器没有超出自己的宽度（happy-dom 不排版，两边都是 0；真宽度在点验里量）
     const table = matrix.querySelector('table') as HTMLElement;
     expect(table.scrollWidth).toBeLessThanOrEqual(table.clientWidth);
     expect(matrix.scrollWidth).toBeLessThanOrEqual(matrix.clientWidth);
   });
 
-  test('一个窗口一格：一行字（已用 / 上限 · 清零）加一根进度条，来源牌在条的旁边', async () => {
+  test('一个窗口一行：用量格是一根进度条（竖线标按时间该用到哪）加来源牌，清零在自己的列，消耗进度展开才看', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    const used = await screen.findByText('$61.20');
+    const used = await screen.findByText(/^\$61\.20 \/ \$100/);
     const line = used.closest('[data-quota-line]') as HTMLElement;
-    // 字一行（flex）、条一行、消耗进度一行（#2363）：格子里只有窗口名（宽屏藏）、这一行字、条、进度这四块
-    expect(line.children).toHaveLength(4);
-    expect(line.children[1]?.textContent).toContain('$61.20');
-    expect(line.children[1]?.textContent).toContain('/ $100');
-    expect(line.children[1]?.textContent).toContain('清零');
-    expect(within(line.children[2] as HTMLElement).getByText('实读')).toBeTruthy();
-    expect(line.children[3]?.textContent).toMatch(/^按时间该用 \d+%，实际 61%/);
+    expect(within(line).getByRole('progressbar')).toBeTruthy();
+    expect(line.querySelector('[data-progress-mark]')).toBeTruthy();
+    expect(within(line).getByText('实读')).toBeTruthy();
+    const tr = line.closest('tr') as HTMLElement;
+    const cells = tr.querySelectorAll('td');
+    // 展开箭头、池、窗口、用量、清零、状态、启用
+    expect(cells).toHaveLength(7);
+    expect(cells[4]?.textContent).toMatch(/后$/);
+    fireEvent.click(within(tr).getByRole('button', { name: '展开' }));
+    expect(document.querySelector('[data-quota-pace]')?.textContent).toMatch(/^按时间该用 \d+%，实际 61%/);
   });
 });
 
@@ -302,14 +298,14 @@ describe('消耗进度一行（#2363）', () => {
       readAt: at(-4),
       ...w,
     };
-    const { container } = render(<QuotaLine w={full} now={NOW} />);
-    return container.querySelector('[data-quota-pace]');
+    const { container } = render(<QuotaDetail w={full} now={NOW} />);
+    return container.querySelector<HTMLElement>('[data-quota-pace]');
   }
 
   test('周窗：已用 75%、过了 62%，写「按时间该用 62%，实际 75%」并标黄', () => {
     const el = line({ window: '7d', utilization: 0.75, resetsAt: at(0.38 * 7 * 1440) });
     expect(el?.textContent).toBe('按时间该用 62%，实际 75%');
-    expect(el?.className).toContain('text-ink-stall');
+    expect(el?.dataset.behind).toBe('true');
   });
 
   test('Cursor 桶推不出窗口长度：按 30 天估并写明', () => {
@@ -321,13 +317,14 @@ describe('消耗进度一行（#2363）', () => {
       resetsAt: at(0.02 * 30 * 1440),
     });
     expect(el?.textContent).toBe('按时间该用 98%，实际 13%（按 30 天估）');
-    expect(el?.className).not.toContain('text-ink-stall');
+    expect(el?.dataset.behind).toBeUndefined();
   });
 
-  test('额度页每个读到了用量和清零时刻的窗口都有这一行', async () => {
+  test('额度页每个读到了用量和清零时刻的窗口，条上有竖线，展开就有这一行', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    await screen.findByText('$61.20');
-    expect(document.querySelectorAll('[data-quota-pace]').length).toBeGreaterThan(0);
+    await screen.findByText(/^\$61\.20 \/ \$100/);
+    expect(document.querySelectorAll('[data-progress-mark]').length).toBeGreaterThan(0);
+    for (const b of screen.getAllByRole('button', { name: '展开' })) fireEvent.click(b);
     expect(screen.getAllByText(/^按时间该用 \d+%，实际 \d+%/).length).toBeGreaterThan(0);
   });
 
@@ -339,7 +336,7 @@ describe('消耗进度一行（#2363）', () => {
 });
 
 describe('窗口格子小标题', () => {
-  test('按模型组的周窗写出模型名，小标题换行，不再截成省略号', () => {
+  test('按模型组的周窗写出模型名，原名在悬停里', () => {
     const el = cell({
       window: '7d_model',
       scope: 'opus',
@@ -350,8 +347,6 @@ describe('窗口格子小标题', () => {
     });
     const title = within(el).getByText('周窗 · 单模型 · opus');
     expect(title.textContent).toBe('周窗 · 单模型 · opus');
-    expect(title.className).not.toContain('truncate');
-    expect(title.className).toContain('break-words');
     expect(title.getAttribute('title')).toBe('上游原名：7d_model');
   });
 
@@ -369,44 +364,43 @@ describe('窗口格子小标题', () => {
 });
 
 describe('额度页照路由页样板（#1921）', () => {
-  test('顶上结论块：池名一行、先用哪个窗一句加状态、灰字补充一行，三行都不折', async () => {
+  test('顶上结论只有一句：现在先用哪个池的哪个窗，哪个快用完；页签上有过期或没查成的数', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    const hero = (await screen.findByText('Claude 订阅 · claude-b')).closest(
-      '[data-quota-hero]',
-    ) as HTMLElement;
+    const line = (await screen.findByText(/^现在先用 Claude 订阅 · claude-b/)) as HTMLElement;
+    const hero = line.closest('[data-quota-hero]') as HTMLElement;
     expect(hero).toBeTruthy();
-    const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+    expect(hero.querySelector('[data-hero-line]')).toBe(line);
     expect(line.textContent).toContain('5 小时窗还剩 82%');
-    expect(line.textContent).toContain('该先用');
-    expect(line.className).toContain('whitespace-nowrap');
-    expect(line.getAttribute('title')).toContain('清零');
-    const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
-    expect(notes.className).toContain('truncate');
-    expect(notes.getAttribute('title')).toBe(notes.textContent);
-    expect(notes.textContent).toContain('个窗快用完');
-    expect(notes.textContent).toContain('过期或没查成的读数');
+    expect(line.textContent).toContain('清零');
+    expect(line.textContent).toContain('快用完，调度会先绕开');
+    expect(summaryCount('读数过期或没查成')).toBeGreaterThan(0);
   });
 
-  test('池行：在跑几个和到期并成一行灰字；池的毛病收成一行，整句在悬停里，摘要里照旧是整句', async () => {
+  test('池行：在跑几个和到期并成一行灰字；池的毛病收成一行，整句在悬停里，状态格写额度读不到', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    const row = (await screen.findByRole('rowheader', { name: /supergrok/ })) as HTMLElement;
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-quota-matrix] tr[data-row-key="supergrok"] [data-pool-problem]'),
+      ).toBeTruthy(),
+    );
+    const row = document.querySelector('[data-quota-matrix] tr[data-row-key="supergrok"]') as HTMLElement;
     const meta = row.querySelector('[data-pool-meta]') as HTMLElement;
     expect(meta.textContent).toMatch(/在跑 \d+\/\d+ · .*到期/);
-    expect(meta.className).toContain('whitespace-nowrap');
     const problem = row.querySelector('[data-pool-problem]') as HTMLElement;
     expect(problem.dataset.oneLine).toBe('true');
     expect(problem.getAttribute('title')).toContain('要人做');
-    const panel = openSummary('读数过期或没查成');
-    expect(panel.querySelector('[data-pool-problem]')?.hasAttribute('data-one-line')).toBe(false);
+    const status = row.querySelector('[data-status="quota:quota:unreadable"]') as HTMLElement;
+    expect(status.textContent).toBe('额度读不到');
+    expect(status.getAttribute('title')).toContain('要人做');
   });
 
-  test('先用它的格子不再描粗框，只铺淡底', async () => {
+  test('该先用的行：用量条在，状态格写「该先用」，不再描粗框', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
-    await screen.findByRole('rowheader', { name: /claude-b/ });
+    await screen.findByRole('tab', { name: /^该先用/ });
     const hot = document.querySelector('[data-quota-line][data-hot]') as HTMLElement;
     expect(hot).toBeTruthy();
-    expect(hot.className).toContain('bg-accent');
-    expect(hot.className).not.toContain('border-brand');
+    expect(hot.querySelector('[role="progressbar"]')).toBeTruthy();
+    expect(hot.closest('tr')?.querySelector('[data-status="quota:quota:use-first"]')).toBeTruthy();
   });
 });
 
@@ -460,22 +454,30 @@ describe('额度页观感（#1898）', () => {
     };
   }
 
-  test('没有任何额度窗的池整行折成一行「无额度窗」，不补一排「—」', async () => {
+  const matrixRows = (poolId: string) =>
+    [...document.querySelectorAll<HTMLElement>('[data-quota-matrix] tbody tr[data-row-key]')].filter(
+      (r) => r.dataset.rowKey === poolId || (r.dataset.rowKey ?? '').startsWith(`${poolId}#`),
+    );
+
+  test('没有任何额度窗的池只画一行：用量那格写「无额度窗」，没有进度条', async () => {
     renderApp(<QuotaPage />, { api: apiWith() });
-    const row = (await screen.findByText('carpool-empty')).closest('tr') as HTMLElement;
-    expect(within(row).getByText('无额度窗').hasAttribute('data-quota-empty')).toBe(true);
-    expect(row.querySelectorAll('td')).toHaveLength(0);
-    expect(row.textContent).not.toContain('—');
+    await waitFor(() => expect(matrixRows('carpool-empty')).toHaveLength(1));
+    const row = matrixRows('carpool-empty')[0] as HTMLElement;
+    expect(within(row).getByText('无额度窗').closest('[data-quota-empty]')).toBeTruthy();
+    expect(row.querySelector('[role="progressbar"]')).toBeNull();
+    expect(row.querySelector('[data-quota-line]')).toBeNull();
   });
 
-  test('窗口名一律中文：api_percent 变「指定模型额度」，认不出的写「未命名窗口」，原键只在说明里', async () => {
+  test('窗口名一律中文：api_percent 变「指定模型额度」，认不出的写「未命名窗口」，原键只在悬停和展开里', async () => {
     renderApp(<QuotaPage />, { api: apiWith() });
-    const row = (await screen.findByText('cursor-x')).closest('tr') as HTMLElement;
-    expect(within(row).getByText('指定模型额度')).toBeTruthy();
-    const unnamed = within(row).getByText('未命名窗口');
+    await waitFor(() => expect(matrixRows('cursor-x')).toHaveLength(2));
+    const rows = matrixRows('cursor-x');
+    const text = rows.map((r) => r.textContent).join('|');
+    expect(text).toContain('指定模型额度');
+    const unnamed = within(rows[1] as HTMLElement).getByText('未命名窗口');
     expect(unnamed.getAttribute('title')).toBe('上游原名：brand_new_key');
-    expect(row.textContent).not.toContain('api_percent');
-    expect(row.textContent).not.toContain('brand_new_key');
+    expect(text).not.toContain('api_percent');
+    expect(text).not.toContain('brand_new_key');
     expect(document.body.textContent).not.toContain('api_percent');
   });
 

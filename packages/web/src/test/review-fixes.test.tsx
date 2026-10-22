@@ -114,8 +114,8 @@ describe('额度：用量没读到不当 0%', () => {
     await screen.findByText('读数过期或没查成');
     const box = openSummary('读数过期或没查成');
     expect(within(box).getAllByText('用量没读到').length).toBeGreaterThan(0);
-    const hot = openSummary('先用它');
-    expect(within(hot).getByText('没有')).toBeTruthy();
+    const hot = openSummary('该先用');
+    expect(within(hot).getByText('这一栏下面没有账号池')).toBeTruthy();
     expect(screen.queryByText('0%')).toBeNull();
   });
 });

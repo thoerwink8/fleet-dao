@@ -12,12 +12,18 @@ export function Section({
   actions,
   flush,
   tight,
+  toolbar,
+  footer,
   variant = 'card',
   tone,
   children,
   className,
   ...rest
 }: {
+  /** flush 的区块里，头和列表之间一条带边的筛选区（搜索、分段筛选），左右留区块内边距。 */
+  toolbar?: ReactNode;
+  /** flush 的区块里，列表下面一条带上边线的说明区（「怎么看这些状态」），左右留区块内边距。 */
+  footer?: ReactNode;
   title?: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
@@ -73,7 +79,17 @@ export function Section({
           {actions ? <div className="flex shrink-0 items-center gap-3 text-body">{actions}</div> : null}
         </header>
       ) : null}
+      {toolbar ? (
+        <div data-section-toolbar className="border-b border-line px-section pb-3">
+          {toolbar}
+        </div>
+      ) : null}
       <div className={cn(card && tight && !flush && 'px-section py-1')}>{children}</div>
+      {footer ? (
+        <div data-section-footer className="border-t border-line px-section py-2">
+          {footer}
+        </div>
+      ) : null}
     </section>
   );
 }

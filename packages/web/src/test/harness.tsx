@@ -1,6 +1,6 @@
 // 组件测试的外壳：假后端（不开模拟器）+ React Query + 路由 + 主题 + 当前仓 + 快捷操作。
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, type RenderResult, render, screen } from '@testing-library/react';
+import { fireEvent, type RenderResult, render } from '@testing-library/react';
 import { Profiler, type ReactElement } from 'react';
 import { MemoryRouter } from 'react-router';
 import { ApiProvider, type FleetApi } from '../api/client';
@@ -55,12 +55,24 @@ export function renderApp<A extends FleetApi = MockApi>(
   return { api, qc, ...view };
 }
 
-/** 额度页顶上的摘要标签（FilterTabs 的按钮组，aria-pressed）：点开它，返回展开的明细（找不到就报错，不返回空）。一次只开一块。 */
+/** 额度页表上面的页签（全部 / 该先用 / 快用完 / 读数过期或没查成，FilterTabs 的页签，aria-selected）：点开它，返回筛过的表（找不到就报错，不返回空）。 */
 export function openSummary(title: string): HTMLElement {
-  const btn = screen.getByText(title).closest('button');
-  if (!btn) throw new Error(`找不到摘要标签：${title}`);
-  if (btn.getAttribute('aria-pressed') !== 'true') fireEvent.click(btn);
-  const panel = document.querySelector<HTMLElement>(`[data-quota-panel][aria-label="${title}"]`);
-  if (!panel) throw new Error(`摘要标签没有展开：${title}`);
-  return panel;
+  const tab = [...document.querySelectorAll<HTMLElement>('[data-quota-summary] [role="tab"]')].find((t) =>
+    (t.textContent ?? '').startsWith(title),
+  );
+  if (!tab) throw new Error(`找不到摘要标签：${title}`);
+  if (tab.getAttribute('aria-selected') !== 'true') fireEvent.click(tab);
+  const table = document.querySelector<HTMLElement>('[data-quota-matrix]');
+  if (!table) throw new Error(`摘要标签没有筛出表：${title}`);
+  return table;
+}
+
+/** 页签上的计数（「该先用」后面那个数）。 */
+export function summaryCount(title: string): number {
+  const tab = [...document.querySelectorAll<HTMLElement>('[data-quota-summary] [role="tab"]')].find((t) =>
+    (t.textContent ?? '').startsWith(title),
+  );
+  const n = tab?.querySelector('[data-tab-count]')?.textContent;
+  if (n === undefined || n === null) throw new Error(`找不到摘要标签的计数：${title}`);
+  return Number(n);
 }

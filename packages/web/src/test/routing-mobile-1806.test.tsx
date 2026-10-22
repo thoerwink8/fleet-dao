@@ -252,7 +252,7 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
         if (!el) throw new Error('标题块还没画');
         return el;
       })) as HTMLElement;
-      expect(classes(hero.querySelector('h2')?.parentElement ?? null)).toContain('whitespace-nowrap');
+      expect(classes(hero.querySelector('h2'))).toContain('truncate');
       const line = hero.querySelector('[data-hero-line]') as HTMLElement;
       expect(classes(line)).toEqual(expect.arrayContaining(['whitespace-nowrap', 'min-w-0']));
       expect(classes(line)).not.toContain('flex-wrap');
@@ -260,7 +260,7 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
         expect.arrayContaining(['truncate', 'min-w-0']),
       );
       // 状态标签不让位：放不下时截断的是短话，不是标签掉到下一行
-      expect(classes(line.querySelector('[data-variant]')?.parentElement ?? null)).toContain('shrink-0');
+      expect(classes(line.querySelector('[data-status]')?.parentElement ?? null)).toContain('shrink-0');
       expect(
         line.getAttribute('title')?.startsWith(line.querySelector('[data-hero-text]')?.textContent ?? '?'),
       ).toBe(true);

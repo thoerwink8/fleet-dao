@@ -87,9 +87,11 @@ describe('路由页：每一层现在活着吗', () => {
     // 标题块（#1914 第 4、5 轮）：用途名单独一行比页标题小一档；结论短话 15 正文字重、同一行跟结论标签；细节灰字在下面
     const hero = document.querySelector('[data-purpose-hero]') as HTMLElement;
     expect(within(hero).getByRole('heading', { level: 2 }).className).toContain('text-title');
-    const conclusion = within(hero).getByText('实际派 GPT 5.6 luna').closest('p') as HTMLElement;
-    expect(conclusion.className).toEqual(expect.stringContaining('text-heading font-normal'));
-    expect(conclusion.querySelector('[data-variant]')?.textContent).toContain('派得出去');
+    const conclusion = within(hero)
+      .getByText('实际派 GPT 5.6 luna')
+      .closest('[data-hero-line]') as HTMLElement;
+    expect(within(conclusion).getByText('实际派 GPT 5.6 luna').className).toContain('text-heading');
+    expect(conclusion.querySelector('[data-status]')?.textContent).toContain('派得出去');
     expect(conclusion.getAttribute('title')).toBe('实际派 GPT 5.6 luna：首选 Grok 4.7 不可用');
     const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
     expect(notes.textContent).toContain('首选 Grok 4.7 不可用');
@@ -315,7 +317,7 @@ describe('路由页：每一层现在活着吗', () => {
     renderApp(<RoutingPage />, { route: '/routing', api });
     await purposeLinks();
     // 派不出去的有数才写，红字；派得出去的 0 照写（不拿空冒充）
-    expect(screen.getByText('1 个派不出去').className).toContain('text-ink-fail');
+    expect(screen.getByText('1 个派不出去').className).toContain('text-fail-ink');
     expect(screen.getByText('0 个派得出去')).toBeTruthy();
     const a = routeItem('rt-a');
     expect(a.textContent).toMatch(/5h：1 小时 \d+ 分后清零|5h：1 小时后清零|5h：(89|90) 分钟后清零/);
