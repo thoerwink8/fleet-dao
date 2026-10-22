@@ -3,6 +3,7 @@
 // 流程健康（#2762：近 7 天每轮怎么收场的、按档一轮做成率和平均轮数、重活 PR 新增行 p90、冷验收拒绝占比，和再往前 7 天比），
 // 写成一行提醒（键 feishu:brief:<北京日期>，驾驶舱后端马上推飞书团队群），
 // 同时用引擎机器人在置顶进度单 #1055 发一条评论（GitHub 会通知创始人）。
+// 名额（#3618）：按近 7 天五项指标算一次档位（jobs/self-share.ts）写进设置 engine.selfShare，拉单读它给 fleet-dao 自身单留名额。
 // 一节最多列 15 条，多出来的只写「另 N 条」。发版开始、成功不再写通知（#2368），简报没有「日报」一节。
 // 简报自己那一行（feishu:brief:）是日报级，开满 48 小时由每小时对账收（jobs/alert-sweep.ts），飞书要它还开着才推。
 // 改这里之前必须知道：
@@ -34,10 +35,12 @@ import {
   type ReleaseKills,
   type RoundOutcome,
   type ScheduleResult,
+  type SelfShareRecord,
 } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import { clip, stamp } from './reconcile-common.ts';
+import { judgeSelfShare, selfShareLines } from './self-share.ts';
 
 export const DAILY_BRIEF_EVERY_MINUTES = 24 * 60;
 /** 每天 08:30（北京时间，UTC+8）= 00:30 UTC：从 epoch（00:00 UTC）起错开 30 分钟。 */
@@ -126,6 +129,21 @@ export interface DailyBriefDeps {
   releaseKills?(to: Date): Promise<ReleaseKills>;
   /** 截至 to 两种流程（全程 / 三段）的对照（@fleet-dao/db 的 flowModeHealth，决定 0105，#2827）。读不到照抛；没接上的不写这一栏。 */
   flowModeHealth?(to: Date): Promise<FlowModeHealth>;
+  /**
+   * 名额（#3618）：除一轮做成率、冷验收拒绝占比（用上面流程健康读到的）以外，判档还要的三项现值，加读上一档（连续 3 天要历史）、写这一档（settings engine.selfShare）。
+   * 每项读不到照抛：判档按「没过」算。没接上的不写「名额」一节、不写设置。
+   */
+  selfShare?: {
+    /** 窗口 [to - 7 天, to) 里主线 CI 红了多少分钟。 */
+    mainRedMinutes(to: Date): Promise<number>;
+    /** 窗口 [from, to) 里机器开的自身缺陷单（fleet-dao 仓贴「缺陷」、非 e2e 汇总单）有几张。 */
+    selfDefectIssues(from: Date, to: Date): Promise<number>;
+    /** 现在开着的、非掏钱非删数据原因的拍板卡有几张。 */
+    offReasonDecisions(): Promise<number>;
+    /** 设置里现有的那一行（没有是 null）。 */
+    read(): Promise<SelfShareRecord | null>;
+    write(rec: SelfShareRecord): Promise<void>;
+  };
   /** 当前仍停着的任务，以及指挥官已经看过多少。读不到照抛。 */
   commanderSummary(): Promise<CommanderStalledSummary>;
   /** 写那一行提醒（有就原地更新）。写不进照抛。 */
@@ -566,6 +584,50 @@ export function releaseKillsLine(now: ReleaseKills | string, before: ReleaseKill
   return `${head}：${total}${vs}，被叫停的段一共跑了 ${now.hours} 小时；按天：${days}`;
 }
 
+/**
+ * 六、名额（#3618）：算一次档位、写进设置、简报里写档位和每项现值。
+ * 一轮做成率＝近 7 天收场的轮里做成的占比，冷验收拒绝占比，都取上面流程健康读到的（那一块没查成、或窗口里一轮都没有，这两项按读不到算）。
+ * 另三项和上一档读不到，都按「没过」算（历史读不到当没有历史，不会判成健康），原因写进这一节、这一轮记 partial；档位写不进设置同样写明。
+ */
+export async function selfShareSection(
+  d: NonNullable<DailyBriefDeps['selfShare']>,
+  health: PipelineHealth | string,
+  now: Date,
+): Promise<BriefSection> {
+  const heading = '六、名额（按错误预算分，近 7 天）';
+  const { day, start: today } = beijingDay(now);
+  const from = new Date(today.getTime() - 7 * 24 * 3_600_000);
+  const why: string[] = [];
+  const read = async <T>(what: string, f: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await f();
+    } catch (err) {
+      why.push(`${what}：${errMessage(err)}`);
+      return null;
+    }
+  };
+  const done = typeof health === 'string' ? null : health.outcomes.find((o) => o.outcome === 'merged');
+  const metrics = {
+    oneRoundRate: done?.share ?? null,
+    verifyRejectShare: typeof health === 'string' ? null : health.verifyRejectShare,
+    mainRedMinutes: await read('读主线 CI 红的分钟数', () => d.mainRedMinutes(today)),
+    selfDefectIssues: await read('读机器开的自身缺陷单', () => d.selfDefectIssues(from, today)),
+    offReasonDecisions: await read('读非掏钱非删数据原因的拍板卡', () => d.offReasonDecisions()),
+  };
+  if (typeof health === 'string') why.push(`一轮做成率、冷验收拒绝占比：流程健康那一块没查成（${health}）`);
+  const before = await read('读上一档（连续天数）', () => d.read());
+  const rec = judgeSelfShare(metrics, before?.days ?? [], day, now);
+  const lines = selfShareLines(rec);
+  const unread: string[] = [...why];
+  try {
+    await d.write(rec);
+  } catch (err) {
+    unread.push(`档位没写进设置（拉单读不到新档位）：${errMessage(err)}`);
+  }
+  for (const w of unread) lines.push(`没查成：${w}`);
+  return { heading, lines, ...(unread.length > 0 ? { unread: unread.join('；') } : {}) };
+}
+
 /** 收齐的简报。 */
 export interface CollectedBrief {
   sections: BriefSection[];
@@ -603,6 +665,8 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
     : undefined;
   const flowModeHealth = deps.flowModeHealth;
   const flow = flowModeHealth ? await guard('读两种流程对照', () => flowModeHealth(today)) : undefined;
+  const shareDeps = deps.selfShare;
+  const share = shareDeps ? await selfShareSection(shareDeps, health, now) : undefined;
   const unread = (heading: string, why: string): BriefSection => ({
     heading,
     lines: [`没查成：${why}`],
@@ -620,6 +684,7 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
         : failuresSection(alerts, stopped, commander, now),
       metricsSection(typeof shipped === 'string' ? null : shipped.leadMinutes, stats),
       healthSection(health, healthBefore, kills, flow),
+      ...(share ? [share] : []),
     ],
   };
 }

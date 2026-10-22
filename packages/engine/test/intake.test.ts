@@ -2,7 +2,7 @@
 // 排序、容量、每小时限速、熔断、记账。
 // 每条失败路径都故意造一次：都不许记成 ok，都不许起工作流。
 
-import type { ScheduleResult } from '@fleet-dao/db';
+import type { ScheduleResult, SelfShareRecord } from '@fleet-dao/db';
 import { githubWhitelist } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import type { IssueTaskRow, TaskGenerationFacts } from '../src/jobs/dispatch-standing.ts';
@@ -2746,5 +2746,124 @@ describe('本机租约到期、退回之前先判法国接不接得了（#3461�
     expect(w.h.started).toEqual([]);
     expect(run.outcome).toBe('partial');
     expect(run.why).toContain('#12');
+  });
+});
+
+describe('名额按错误预算分（#3618）：fleet-dao 自身单和真实项目分在跑名额', () => {
+  const SELF: IntakeRepo = { ...REPO, id: 'r-self', owner: 'acme', name: 'fleet-dao' };
+  const REAL: IntakeRepo = { ...REPO, id: 'r-real', owner: 'acme', name: 'demo' };
+  const selfIssues = (n: number) => Array.from({ length: n }, (_, i) => issue({ number: 500 + i }));
+  const realIssues = (n: number) => Array.from({ length: n }, (_, i) => issue({ number: 600 + i }));
+  const rec = (tier: SelfShareRecord['tier'], over: Partial<SelfShareRecord> = {}): SelfShareRecord => ({
+    tier,
+    at: new Date(NOW.getTime() - 3_600_000),
+    day: '2026-10-02',
+    checks: [],
+    days: [],
+    ...over,
+  });
+
+  /** 两个仓：自己（fleet-dao）和一个真实项目；各给几张合格的单。 */
+  function twoRepos(
+    selfShare: IntakeDeps['selfShare'],
+    n: { self: number; real: number; selfWorking?: number; working?: number },
+  ) {
+    const startedRepos: string[] = [];
+    const h = harness(
+      {
+        repos: async () => [SELF, REAL],
+        openIssues: async (repo) => ({
+          issues: repo.name === SELF.name ? selfIssues(n.self) : realIssues(n.real),
+          openMilestones: [V1, V2],
+        }),
+        runningTasks: async () => ({
+          working: n.working ?? n.selfWorking ?? 0,
+          stalled: 0,
+          selfWorking: n.selfWorking ?? 0,
+        }),
+        async start({ repo }) {
+          startedRepos.push(repo.name);
+          return 'started';
+        },
+        ...(selfShare ? { selfShare } : {}),
+      },
+      {},
+    );
+    const count = (name: string) => startedRepos.filter((r) => r === name).length;
+    return { h, count };
+  }
+
+  it('健康：自身单最多占同时在跑上限的 30%（上限 6 条里 1 条），其余名额留给真实项目', async () => {
+    const { h, count } = twoRepos(async () => rec('healthy'), { self: 3, real: 2 });
+    const run = await runIntakeJob(h.deps);
+    expect(run.outcome).toBe('ok');
+    expect(count('fleet-dao')).toBe(1);
+    expect(count('demo')).toBe(2);
+    expect(h.logs.some((l) => l.text.includes('self_share_cap×2'))).toBe(true);
+  });
+
+  it('耗预算：自身单最多占 50%（3 条）；已经在跑的自身单也算进去', async () => {
+    const fresh = twoRepos(async () => rec('budget'), { self: 5, real: 0 });
+    await runIntakeJob(fresh.h.deps);
+    expect(fresh.count('fleet-dao')).toBe(3);
+    // 自身单已经在跑 1 条：只再起 2 条
+    const busy = twoRepos(async () => rec('budget'), { self: 5, real: 0, selfWorking: 1 });
+    await runIntakeJob(busy.h.deps);
+    expect(busy.count('fleet-dao')).toBe(2);
+    expect(busy.h.logs.some((l) => l.text.includes('self_share_cap×3'))).toBe(true);
+  });
+
+  it('健康但自身单已经占满 1 条：自身单一条都不再起，真实项目照拉', async () => {
+    const { h, count } = twoRepos(async () => rec('healthy'), { self: 2, real: 2, selfWorking: 1 });
+    await runIntakeJob(h.deps);
+    expect(count('fleet-dao')).toBe(0);
+    expect(count('demo')).toBe(2);
+  });
+
+  it('冻结：只拉 fleet-dao 自身单，其他仓不拉新单（在跑的照跑，不被叫停）', async () => {
+    const { h, count } = twoRepos(async () => rec('frozen'), { self: 2, real: 3, working: 2 });
+    const run = await runIntakeJob(h.deps);
+    expect(run.outcome).toBe('ok');
+    expect(count('fleet-dao')).toBe(2);
+    expect(count('demo')).toBe(0);
+    expect(h.logs.some((l) => l.text.includes('self_share_frozen×3'))).toBe(true);
+  });
+
+  it('【故意造出的失败】档位读不到（抛错）：照现行行为两个仓都拉，记一条日志，不记 partial', async () => {
+    const { h, count } = twoRepos(
+      async () => {
+        throw new Error('设置 engine.selfShare 的值认不出');
+      },
+      { self: 2, real: 2 },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(run.outcome).toBe('ok');
+    expect(count('fleet-dao')).toBe(2);
+    expect(count('demo')).toBe(2);
+    const warn = h.logs.filter((l) => l.level === 'warn' && l.text.includes('名额档位读不到'));
+    expect(warn).toHaveLength(1);
+    expect(warn[0]?.text).toContain('认不出');
+  });
+
+  it('【故意造出的失败】设置里还没有档位、或档位太久没更新：同样照现行行为拉，各记一条日志（冻结的旧档位不会一直挡着）', async () => {
+    const none = twoRepos(async () => null, { self: 1, real: 1 });
+    await runIntakeJob(none.h.deps);
+    expect(none.count('fleet-dao') + none.count('demo')).toBe(2);
+    expect(none.h.logs.filter((l) => l.text.includes('名额档位读不到'))).toHaveLength(1);
+    const stale = twoRepos(async () => rec('frozen', { at: new Date(NOW.getTime() - 4 * 86_400_000) }), {
+      self: 1,
+      real: 1,
+    });
+    await runIntakeJob(stale.h.deps);
+    expect(stale.count('demo')).toBe(1);
+    expect(stale.h.logs.filter((l) => l.text.includes('名额档位读不到'))).toHaveLength(1);
+  });
+
+  it('没接档位（deps.selfShare 不给）：不分名额、不记档位的日志', async () => {
+    const { h, count } = twoRepos(undefined, { self: 3, real: 2 });
+    await runIntakeJob(h.deps);
+    expect(count('fleet-dao')).toBe(3);
+    expect(count('demo')).toBe(2);
+    expect(h.logs.some((l) => l.text.includes('名额档位'))).toBe(false);
   });
 });

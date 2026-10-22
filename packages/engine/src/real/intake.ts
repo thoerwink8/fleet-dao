@@ -29,6 +29,7 @@ import {
   mergedPrForIssue,
   openAlertsByPrefix,
   readIntakeBreaker,
+  readSelfShare,
   recentEndedTasks,
   recordIntakeStart,
   requesterForRequestIssue,
@@ -58,6 +59,7 @@ import { type IntakeDeps, type IntakeRepo, prClaimedIssues } from '../jobs/intak
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
 import { liveLocalIssues } from '../jobs/local-leases.ts';
 import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
+import { SELF_REPO_NAME } from '../jobs/self-share.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
@@ -352,6 +354,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         const repoIds = new Map((await listIntakeRepos(w.db)).map((r) => [`${r.owner}/${r.name}`, r.id]));
         let working = 0;
         let stalled = 0;
+        let selfWorking = 0;
         for await (const wf of client.workflow.list({
           query: `WorkflowType = '${WORKFLOW_TYPES.task}' AND ExecutionStatus = 'Running'`,
         })) {
@@ -363,10 +366,14 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           }
           const row = await taskStateByIssue(w.db, repoId, Number(m[2]));
           if (row?.state === 'stalled') stalled += 1;
-          else working += 1;
+          else {
+            working += 1;
+            if (m[1]?.endsWith(`/${SELF_REPO_NAME}`)) selfWorking += 1;
+          }
         }
-        return { working, stalled };
+        return { working, stalled, selfWorking };
       },
+      selfShare: () => readSelfShare(w.db),
       failures: (repo, issueNumber) => taskFailureCount(w.db, repo.id, issueNumber),
       async startedSince(since) {
         // 老行的建出时刻不在这一小时里。接手成功才记 task.adopt，和新建的行加在一起，才是这一小时真正起了几条。

@@ -8,25 +8,32 @@ import {
   executorLineStats,
   finishScheduleRun,
   flowModeHealth,
+  mainRedMinutes,
+  offReasonDecisions,
   openBriefNotes,
   pipelineHealth,
   pullsByMergeSha,
+  readSelfShare,
   releaseKilledSessions,
   repoByName,
   startScheduleRun,
   stoppedTasksBetween,
   upsertAlert,
+  writeSelfShare,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import type { DailyBriefDeps } from '../jobs/daily-brief.ts';
+import { SELF_REPO_NAME } from '../jobs/self-share.ts';
 import { RELEASES_DIR } from './release-evidence.ts';
 
-/** fleet-dao 自己这个仓：在受管的仓里按名字认（和驾驶舱 self-repo.ts 同一个认法），owner 不写死。 */
-export const SELF_REPO_NAME = 'fleet-dao';
+export { SELF_REPO_NAME };
+
+/** 写 engine.selfShare 时记的操作人。 */
+const SELF_SHARE_ACTOR = 'engine:daily-brief';
 
 export function dailyBriefJob(w: {
   db: Db;
-  gh: Pick<GitHub, 'releaseFacts' | 'commentIssue' | 'readIssue'>;
+  gh: Pick<GitHub, 'releaseFacts' | 'commentIssue' | 'readIssue' | 'readGroomFacts'>;
   releasesDir?: string;
   now?: () => Date;
   log?: DailyBriefDeps['log'];
@@ -60,6 +67,28 @@ export function dailyBriefJob(w: {
     pipelineHealth: (to) => pipelineHealth(w.db, to),
     releaseKills: (to) => releaseKilledSessions(w.db, to),
     flowModeHealth: (to) => flowModeHealth(w.db, to),
+    selfShare: {
+      mainRedMinutes: (to) => mainRedMinutes(w.db, to),
+      // 只能数还开着的单（readGroomFacts 不读关了的）：开了又很快关掉的缺陷单这里数不到，数偏小
+      async selfDefectIssues(from, to) {
+        const repo = await repoByName(w.db, SELF_REPO_NAME);
+        if (!repo) throw new Error(`受管的仓里没有 ${SELF_REPO_NAME}`);
+        const facts = await w.gh.readGroomFacts({ repo: { owner: repo.owner, name: repo.name } });
+        return facts.issues.filter((i) => {
+          const created = Date.parse(i.createdAt);
+          return (
+            i.authorIsBot &&
+            i.labels.includes('缺陷') &&
+            !/e2e/i.test(i.title) &&
+            created >= from.getTime() &&
+            created < to.getTime()
+          );
+        }).length;
+      },
+      offReasonDecisions: () => offReasonDecisions(w.db),
+      read: () => readSelfShare(w.db),
+      write: (rec) => writeSelfShare(w.db, rec, SELF_SHARE_ACTOR),
+    },
     async publish(x) {
       await upsertAlert(w.db, { ...x, level: 'daily', taskId: null });
     },

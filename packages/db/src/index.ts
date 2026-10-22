@@ -52,6 +52,7 @@ export * from './queries/route-probe-now.ts';
 export * from './queries/run-transcript.ts';
 export * from './queries/runs.ts';
 export * from './queries/schedule.ts';
+export * from './queries/self-share.ts';
 export * from './queries/session-org.ts';
 export * from './queries/session-org-state.ts';
 export * from './queries/stalled-tasks.ts';
