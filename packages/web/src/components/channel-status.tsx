@@ -140,6 +140,7 @@ export function ChannelFilterBar({
       <FilterTabs
         mode="toggle"
         variant="segmented"
+        wrap
         aria-label="按状态筛选"
         value={filter}
         onChange={onFilter}

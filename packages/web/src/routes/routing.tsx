@@ -147,14 +147,12 @@ export default function Routing() {
           // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
           dataUpdatedAt: efforts.dataUpdatedAt > now ? now : efforts.dataUpdatedAt,
           staleAfterMs: EFFORTS_STALE_AFTER_MS,
-          variant: 'dot' as const,
         }
       : {
           onRefresh: () => void refetch(),
           isFetching,
           dataUpdatedAt,
           staleAfterMs: ROUTING_STALE_AFTER_MS,
-          variant: 'dot' as const,
         };
   const setTab = (id: TabId) =>
     setParams(

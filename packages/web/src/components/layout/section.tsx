@@ -80,7 +80,8 @@ export function Section({
         </header>
       ) : null}
       {toolbar ? (
-        <div data-section-toolbar className="border-b border-line px-section pb-3">
+        // 没有头的区块（筛选条就是第一行）：toolbar 自己留上边
+        <div data-section-toolbar className={cn('border-b border-line px-section pb-3', !head && 'pt-4')}>
           {toolbar}
         </div>
       ) : null}

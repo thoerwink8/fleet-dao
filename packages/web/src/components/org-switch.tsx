@@ -1,10 +1,12 @@
 import { ArrowLeftRight } from 'lucide-react';
-import { Link } from 'react-router';
 import { brand } from '#brand';
 import type { OrgSwitchView } from '../api/types';
 import { formatClock } from '../lib/format';
-import { cn } from '../lib/utils';
+import { Glyph } from './layout/glyph';
 import { Section } from './layout/section';
+import { Stack } from './layout/stack';
+import { Text, type TextTone } from './layout/text';
+import { TextLink } from './layout/text-link';
 
 // 两类账号叫什么走品牌文件（brand.terms.carpool / solo）。
 const carpool = () => brand.terms.carpool;
@@ -167,11 +169,11 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
   return { tone, headline, details, ...(action ? { action } : {}) };
 }
 
-const TONE_CLASS: Record<OrgSwitchTone, string> = {
-  muted: 'text-muted-foreground',
-  ok: 'text-foreground',
-  stall: 'text-ink-stall',
-  fail: 'text-ink-fail',
+const TEXT_TONE: Record<OrgSwitchTone, TextTone> = {
+  muted: 'muted',
+  ok: 'default',
+  stall: 'warning',
+  fail: 'danger',
 };
 
 /** 额度表顶上的一栏：怎么切号的现状（没有这项 = 老后端，不画）。 */
@@ -180,32 +182,36 @@ export function OrgSwitchBanner({ view }: { view: OrgSwitchView | undefined }) {
   const s = orgSwitchSummary(view);
   return (
     <Section
-      className="mb-3"
       data-tone={s.tone}
       data-testid="org-switch"
       {...(s.tone === 'stall' || s.tone === 'fail' ? { tone: s.tone } : {})}
     >
-      <div className="flex items-center gap-2">
-        <ArrowLeftRight className={cn('size-4 shrink-0', TONE_CLASS[s.tone])} aria-hidden />
-        <span className={cn('text-body font-medium', TONE_CLASS[s.tone])}>{s.headline}</span>
-      </div>
-      {s.details.length || s.action ? (
-        <ul className="mt-1.5 space-y-0.5 pl-6 text-meta text-muted-foreground">
-          {s.details.map((d) => (
-            <li key={d}>{d}</li>
-          ))}
-          {s.action ? (
-            <li>
-              <Link
-                to={s.action.to}
-                className="inline-flex items-center underline underline-offset-2 max-md:min-h-10"
-              >
-                {s.action.label}
-              </Link>
-            </li>
+      <Stack direction="horizontal" gap="sm" align="start">
+        <Glyph icon={ArrowLeftRight} tone={TEXT_TONE[s.tone]} />
+        <Stack gap="sm">
+          <Text strong tone={TEXT_TONE[s.tone]}>
+            {s.headline}
+          </Text>
+          {s.details.length || s.action ? (
+            <ul>
+              {s.details.map((d) => (
+                <li key={d}>
+                  <Text size="meta" tone="muted">
+                    {d}
+                  </Text>
+                </li>
+              ))}
+              {s.action ? (
+                <li>
+                  <Text size="meta" tone="muted">
+                    <TextLink href={s.action.to}>{s.action.label}</TextLink>
+                  </Text>
+                </li>
+              ) : null}
+            </ul>
           ) : null}
-        </ul>
-      ) : null}
+        </Stack>
+      </Stack>
     </Section>
   );
 }

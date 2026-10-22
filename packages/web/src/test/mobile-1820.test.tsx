@@ -85,7 +85,7 @@ describe('页头说明与刷新', () => {
     expect(document.querySelector('[data-description-hint]')).toBeNull();
   });
 
-  test('手机：刷新是图标按钮（名字留给读屏），「最后更新」还在；电脑是带字的按钮', () => {
+  test('手机和电脑同一种：刷新是图标按钮（名字留给读屏），「最后更新」灰字还在', () => {
     viewport(390);
     const onRefresh = vi.fn();
     const { unmount } = render(
@@ -97,7 +97,6 @@ describe('页头说明与刷新', () => {
       />,
     );
     const icon = screen.getByRole('button', { name: '刷新' });
-    expect(icon.hasAttribute('data-refresh-icon')).toBe(true);
     expect(icon.textContent).toBe('');
     expect(screen.getByRole('status').textContent).toContain('最后更新');
     fireEvent.click(icon);
@@ -113,9 +112,10 @@ describe('页头说明与刷新', () => {
         staleAfterMs={60_000}
       />,
     );
-    const word = screen.getByRole('button', { name: '刷新' });
-    expect(word.hasAttribute('data-refresh-icon')).toBe(false);
-    expect(word.textContent).toBe('刷新');
+    // 验收修正：电脑和手机同一种，都是灰色图标按钮，不再有带字的蓝框按钮
+    const desktop = screen.getByRole('button', { name: '刷新' });
+    expect(desktop.textContent).toBe('');
+    expect(screen.getByRole('status').textContent).toContain('最后更新');
   });
 });
 

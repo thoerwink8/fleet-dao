@@ -245,6 +245,9 @@ describe('外壳按屏宽重排', () => {
     const aside = document.querySelector('aside') as HTMLElement;
     expect(aside.dataset.menu).toBe('open');
     expect(aside.className.split(' ')).toContain('w-sidebar');
+    // 菜单不许收缩（正文再宽也不挤窄它），正文区才是能收缩的那个；实际量宽在 e2e/specs/13-shell-menu-width
+    expect(aside.className.split(' ')).toContain('shrink-0');
+    expect(document.querySelector('main')?.className.split(' ')).toContain('min-w-0');
   });
 
   test('点底部的收起 / 展开：记在本地，刷新后照人选的', async () => {

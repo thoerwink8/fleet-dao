@@ -28,9 +28,12 @@ export function Stack({
   align,
   justify,
   wrap,
+  padded,
   children,
   ...data
 }: DataAttrs & {
+  /** 四周留区块内边距（20）：放在贴边（flush）的区块里，给不带自己边距的内容（加载骨架、读失败条）留边。 */
+  padded?: boolean;
   /** vertical（默认）一列往下排，horizontal 一行往右排。 */
   direction?: 'vertical' | 'horizontal';
   /** 间距：sm 8、md 12、lg 16（默认）、xl 24。 */
@@ -52,6 +55,7 @@ export function Stack({
         align && ALIGN[align],
         justify && JUSTIFY[justify],
         wrap && 'flex-wrap',
+        padded && 'p-section',
       )}
     >
       {children}

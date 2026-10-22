@@ -9,6 +9,7 @@ import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { AUDIT_PAGE_SIZE, useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
 import type { AuditEntry } from '../api/types';
+import { Breadcrumb } from '../components/layout/breadcrumb';
 import { Button } from '../components/layout/button';
 import { Collapse } from '../components/layout/collapse';
 import { Descriptions } from '../components/layout/descriptions';
@@ -307,6 +308,7 @@ export default function Audit() {
   return (
     <Page
       title="操作记录"
+      breadcrumb={<Breadcrumb items={[{ label: '法国', href: '/france' }, { label: '操作记录' }]} />}
       description={`谁在什么时候做了什么：人、${brand.terms.marshal}、引擎的动作都记在这里，只追加、不改。`}
       // 刷新走页头的固定槽位（#1940）。共用秒表一拍最多慢 1 秒：刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
       refresh={{
@@ -318,80 +320,95 @@ export default function Audit() {
     >
       <Stack>
         {audit.error && audit.data ? <LoadStale what="操作记录" error={audit.error} /> : null}
-        <Toolbar
-          start={
-            <>
-              <FilterTabs aria-label="按谁做的" items={FILTERS} value={filter} onChange={setFilter} />
-              {target ? (
-                // 只看某个对象：一个描边按钮写着对象名，点一下取消
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setTarget(null)}
-                  aria-label="不再只看这个对象"
-                  title="不再只看这个对象"
-                  data-audit-target
-                >
-                  只看 {targetLabel(target, tasks, notifications)}
-                  <X aria-hidden />
-                </Button>
-              ) : null}
-            </>
+        <Section
+          flush
+          footer={
+            audit.data && rows.length > 0 && hasOlder ? (
+              <Stack align="center">
+                <OlderRecordsButton pending={audit.isFetchingNextPage} onClick={loadOlder} />
+              </Stack>
+            ) : undefined
           }
-          end={
-            <>
-              <NativeSelect
-                aria-label="按来路筛选"
-                value={via}
-                onChange={(e) => setVia(e.target.value as typeof via)}
-              >
-                <option value="all">全部来路</option>
-                {(Object.keys(viaLabel) as AuditEntry['via'][]).map((v) => (
-                  <option key={v} value={v}>
-                    经{viaLabel[v]}
-                  </option>
-                ))}
-              </NativeSelect>
-              <SearchInput
-                value={q}
-                onChange={setQ}
-                inline
-                placeholder="搜人、动作、对象、理由"
-                aria-label="搜索操作记录"
-              />
-            </>
+          toolbar={
+            <Toolbar
+              flush
+              start={
+                <>
+                  <FilterTabs
+                    aria-label="按谁做的"
+                    variant="segmented"
+                    items={FILTERS}
+                    value={filter}
+                    onChange={setFilter}
+                  />
+                  {target ? (
+                    // 只看某个对象：一个描边按钮写着对象名，点一下取消
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setTarget(null)}
+                      aria-label="不再只看这个对象"
+                      title="不再只看这个对象"
+                      data-audit-target
+                    >
+                      只看 {targetLabel(target, tasks, notifications)}
+                      <X aria-hidden />
+                    </Button>
+                  ) : null}
+                </>
+              }
+              end={
+                <>
+                  <NativeSelect
+                    aria-label="按来路筛选"
+                    value={via}
+                    onChange={(e) => setVia(e.target.value as typeof via)}
+                  >
+                    <option value="all">全部来路</option>
+                    {(Object.keys(viaLabel) as AuditEntry['via'][]).map((v) => (
+                      <option key={v} value={v}>
+                        经{viaLabel[v]}
+                      </option>
+                    ))}
+                  </NativeSelect>
+                  <SearchInput
+                    value={q}
+                    onChange={setQ}
+                    inline
+                    placeholder="搜人、动作、对象、理由"
+                    aria-label="搜索操作记录"
+                  />
+                </>
+              }
+            />
           }
-        />
-        {audit.error && !audit.data ? (
-          <LoadError what="操作记录" error={audit.error} />
-        ) : (
-          <Section flush>
-            {audit.isLoading ? (
+        >
+          {audit.error && !audit.data ? (
+            <Stack padded>
+              <LoadError what="操作记录" error={audit.error} />
+            </Stack>
+          ) : audit.isLoading ? (
+            <Stack padded>
               <LoadingRows rows={6} />
-            ) : !audit.data ? (
+            </Stack>
+          ) : !audit.data ? (
+            <Stack padded>
               <Text tone="danger">没读到操作记录，这里空着不代表没人操作过</Text>
-            ) : (
-              <>
-                <Table
-                  caption="操作记录"
-                  columns={columns}
-                  rows={rows}
-                  rowKey="id"
-                  empty={empty}
-                  expandable={{
-                    render: (r) => <RecordDetails row={r} routeNames={routeNames} onTarget={setTarget} />,
-                    rowExpandable: () => true,
-                  }}
-                />
-                {rows.length > 0 && hasOlder ? (
-                  <Stack align="center">
-                    <OlderRecordsButton pending={audit.isFetchingNextPage} onClick={loadOlder} />
-                  </Stack>
-                ) : null}
-              </>
-            )}
-          </Section>
-        )}
+            </Stack>
+          ) : (
+            <Table
+              caption="操作记录"
+              columns={columns}
+              rows={rows}
+              rowKey="id"
+              empty={empty}
+              expandable={{
+                render: (r) => <RecordDetails row={r} routeNames={routeNames} onTarget={setTarget} />,
+                rowExpandable: () => true,
+              }}
+            />
+          )}
+        </Section>
       </Stack>
     </Page>
   );

@@ -268,7 +268,7 @@ function TableSection() {
         </Block>
         <Block
           title="分组行 groupRow + 附加行 subRow"
-          note="额度页的渠道组头（通栏、fill-1 底）和就地展开的原因表单；返回 null 的行不画"
+          note="额度页的渠道组头（通栏、fill-1 底）和就地展开的原因表单；这一行不要的就不画"
         >
           <Table
             columns={COLUMNS}

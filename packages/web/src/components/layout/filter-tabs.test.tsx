@@ -102,6 +102,37 @@ describe('FilterTabs', () => {
     expect(screen.getByRole('button', { name: /全部/ }).getAttribute('aria-pressed')).toBe('false');
   });
 
+  test('segmented wrap：窄栏里折行、每项平分，不出横向滚动条；不传 wrap 时和原来一样', () => {
+    const { rerender } = render(
+      <FilterTabs
+        mode="toggle"
+        variant="segmented"
+        wrap
+        aria-label="窄栏"
+        items={items}
+        value="run"
+        onChange={() => {}}
+      />,
+    );
+    const group = screen.getByRole('group');
+    expect(group.className).toContain('flex-wrap');
+    expect(group.className).toContain('overflow-x-visible');
+    expect(group.className).not.toContain('w-fit');
+    expect(screen.getByRole('button', { name: /在跑/ }).className).toContain('flex-1');
+    rerender(
+      <FilterTabs
+        mode="toggle"
+        variant="segmented"
+        aria-label="窄栏"
+        items={items}
+        value="run"
+        onChange={() => {}}
+      />,
+    );
+    expect(screen.getByRole('group').className).toContain('w-fit');
+    expect(screen.getByRole('group').className).not.toContain('flex-wrap');
+  });
+
   test('segmented：平的分段控件（样稿 .seg）——灰底槽、选中白底品牌色字，不浮起、不带阴影和描边', () => {
     render(
       <FilterTabs

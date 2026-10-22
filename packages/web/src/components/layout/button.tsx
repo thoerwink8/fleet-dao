@@ -20,6 +20,7 @@ export function Button({
   external,
   native,
   loading,
+  loadingText,
   disabledReason,
   onClick,
   title,
@@ -44,6 +45,8 @@ export function Button({
   native?: boolean | undefined;
   /** 正在发写请求：转圈、点不动。 */
   loading?: boolean | undefined;
+  /** 忙的时候按钮上改写的字（没图标的按钮盖在字上换成它）；不写＝转圈盖在原字上。 */
+  loadingText?: ReactNode;
   /** 现在点不了的原因：给了就置灰、悬停写这句话，点击不触发。 */
   disabledReason?: string | undefined;
   onClick?: (() => unknown) | undefined;
@@ -87,6 +90,7 @@ export function Button({
       {...(hover ? { title: hover } : {})}
       {...(blocked ? { 'aria-disabled': true } : {})}
       {...(loading !== undefined && !blocked ? { loading } : {})}
+      {...(loadingText !== undefined && !blocked ? { loadingText } : {})}
       onClick={blocked ? (e) => e.preventDefault() : onClick ? () => onClick() : undefined}
       {...aria}
     >

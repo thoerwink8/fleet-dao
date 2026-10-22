@@ -6,8 +6,11 @@ export function Toolbar({
   start,
   end,
   sticky,
+  flush,
   className,
 }: {
+  /** 下面不留 16 的空（工具条自己就是区块里最后一样时）。 */
+  flush?: boolean;
   start?: ReactNode;
   end?: ReactNode;
   /** 滚动时钉在顶栏下面。 */
@@ -19,7 +22,8 @@ export function Toolbar({
       role="toolbar"
       data-sticky={sticky || undefined}
       className={cn(
-        'mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-3',
+        !flush && 'mb-4',
+        'flex flex-wrap items-center justify-between gap-x-4 gap-y-3',
         sticky && 'sticky top-topbar z-10 -mx-1 bg-page px-1 py-2',
         className,
       )}

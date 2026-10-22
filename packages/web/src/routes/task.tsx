@@ -83,7 +83,7 @@ const DETAIL = (
   </Stack>
 );
 
-/** 从任务列表点进来的（链接带 ?from=/tasks?…）回列表并带回筛选；别处进来的照旧回主页。 */
+/** 从任务列表点进来的（链接带 ?from=/tasks?…）回列表并带回筛选；别处进来的回不带筛选的 /tasks。 */
 function Crumbs({ d }: { d: TaskDetail | undefined }) {
   const [params] = useSearchParams();
   const list = backToList(params.get(FROM_PARAM));
@@ -91,9 +91,10 @@ function Crumbs({ d }: { d: TaskDetail | undefined }) {
     <Breadcrumb
       items={[
         {
-          label: list ? '任务列表' : '主页',
-          href: list ?? '/',
-          ariaLabel: list ? '回任务列表' : '回主页',
+          // 上一级永远是「任务」；从列表点进来的带回筛选，别处进来的回不带筛选的列表
+          label: '任务',
+          href: list ?? '/tasks',
+          ariaLabel: '回任务列表',
         },
         { label: d ? `#${d.task.issueNumber}` : '任务' },
       ]}
