@@ -1,11 +1,20 @@
 // pnpm check 那一层子进程的生命周期：旧的同步执行在直接子进程先退后留着孙进程；
-// 检查入口要在拒绝、抛异常、部分退出、父进程先死时把整组收掉。这里起的都是真进程，不用计数器代替。
+// 检查入口要在拒绝、抛异常、部分退出、父进程先死时把整组收掉。看守自己被杀掉时，旧实现也留着孙进程。
+// 这里起的都是真进程，不用计数器代替。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { killProcessGroup, runCheckedChild, runSupervised } from '../src/step-process.ts';
+import {
+  killProcessGroup,
+  PID_ENV,
+  procStartTicks,
+  reapIfSameStart,
+  runCheckedChild,
+  runSupervised,
+  SUPERVISED_ENV,
+} from '../src/step-process.ts';
 import { runChild } from './child.ts';
 
 const superviseBin = fileURLToPath(new URL('../src/bin/step-supervise.ts', import.meta.url));
@@ -99,6 +108,39 @@ grand.on('spawn', () => {
   if (process.argv[4] === 'sigint') process.kill(process.ppid, 'SIGINT');
 });
 setInterval(() => {}, 1000);
+`,
+    );
+    writeFileSync(
+      join(dir, 'lead.mjs'),
+      `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const child = spawn(process.execPath, [process.argv[3]], { stdio: 'ignore', detached: true });
+child.on('spawn', () => {
+  writeFileSync(process.argv[2], String(child.pid));
+  child.unref();
+});
+`,
+    );
+    writeFileSync(
+      join(dir, 'killsup.mjs'),
+      `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const grand = spawn(process.execPath, [process.argv[3]], { stdio: 'ignore' });
+let stay;
+const timer = setTimeout(() => {
+  if (stay) clearInterval(stay);
+  process.exitCode = 2;
+}, 8000);
+stay = setInterval(() => {}, 1000);
+grand.on('spawn', () => {
+  clearTimeout(timer);
+  writeFileSync(process.argv[2], String(grand.pid));
+  writeFileSync(process.argv[4], process.env[${JSON.stringify(PID_ENV)}] ?? '');
+  // 只杀看守自己。命令已经脱离会话，孙进程不在检查进程组里，看守的处理函数也跑不到。
+  process.kill(process.ppid, 'SIGKILL');
+});
 `,
     );
     writeFileSync(
@@ -250,6 +292,54 @@ const timer = setInterval(() => {
     const sup = remember(supFile);
     expect(waitUntil(() => procState(grand) === undefined, 4000)).toBe(true);
     expect(waitUntil(() => procState(sup) === undefined, 4000)).toBe(true);
+  });
+
+  it('看守自己被信号杀掉：旧实现留着孙进程，检查入口按记下的 pid 和启动时刻收掉', () => {
+    scripts();
+    const pidFile = join(dir, 'grand.pid');
+    const seen = join(dir, 'seen-pid-env');
+    const env = { ...process.env };
+    delete env[SUPERVISED_ENV];
+    const result = runCheckedChild(
+      process.execPath,
+      [join(dir, 'killsup.mjs'), pidFile, join(dir, 'sleep.mjs'), seen],
+      { stdio: 'ignore', env },
+    );
+    const grand = remember(pidFile);
+    expect(readFileSync(seen, 'utf8')).toBe('');
+    expect(result.status).toBeNull();
+    expect(result.signal).toBe('SIGKILL');
+    expect(waitUntil(() => procState(grand) === undefined, 3000)).toBe(true);
+  });
+
+  it('启动时刻是 stat 第 22 段，切分用父进程号锚住', () => {
+    const text = readFileSync(`/proc/${process.pid}/stat`, 'utf8');
+    const rest = text
+      .slice(text.lastIndexOf(')') + 1)
+      .trim()
+      .split(/\s+/);
+    // 第 4 段是父进程号。这一段对得上，后面的下标才没有切偏。
+    expect(rest[1]).toBe(String(process.ppid));
+    expect(procStartTicks(process.pid)).toBe(rest[19]);
+    expect(procStartTicks(0)).toBeUndefined();
+    expect(() => reapIfSameStart(0, '1')).not.toThrow();
+  });
+
+  it('记下的启动时刻对不上就不收，对得上才收', () => {
+    scripts();
+    const pidFile = join(dir, 'lead.pid');
+    const sleeper = join(dir, 'sleep.mjs');
+    // 短命父进程退出后，脱离的命令过继走。测试进程不是它的父进程，收掉之后 /proc 会消失，而不是停在僵尸。
+    expect(runChild(process.execPath, [join(dir, 'lead.mjs'), pidFile, sleeper]).status).toBe(0);
+    const pid = remember(pidFile);
+    expect(waitUntil(() => procState(pid) === 'S', 2000)).toBe(true);
+    const start = procStartTicks(pid);
+    expect(start).toMatch(/^\d+$/);
+    reapIfSameStart(pid, undefined);
+    reapIfSameStart(pid, '0');
+    expect(procState(pid)).toBe('S');
+    reapIfSameStart(pid, start);
+    expect(waitUntil(() => procState(pid) === undefined, 3000)).toBe(true);
   });
 
   it('退出码原样交回', () => {
