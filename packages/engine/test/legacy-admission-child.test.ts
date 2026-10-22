@@ -28,6 +28,7 @@ function request(port: number, budgetMs = 700) {
       workflowType: 'taskWorkflow',
       taskQueue: 'fixture',
       generation: 1,
+      operation: 'legacy_first_limits',
       inputCanonical: '{}',
       inputHash: 'a'.repeat(64),
     },

@@ -52,6 +52,12 @@ export function describeExecutionSchema(name: string, setup: () => Promise<TestD
         "phase='dispatching'",
         "phase='admitted'",
         "phase='resolved', resolved_at=now()",
+        // 关闭原因必须是已知终态，且 run 绑定、派发/接纳时刻齐全；reserved 行没有 run，不能直接 run_*。
+        "phase='resolved', resolved_reason='run_completed', resolved_at=now()",
+        "phase='resolved', resolved_reason='run_exploded', resolved_at=now(), admitted_run_id='r', dispatched_at=now(), admitted_at=now()",
+        "phase='resolved', resolved_reason='run_completed', resolved_at=now(), admitted_run_id=' ', dispatched_at=now(), admitted_at=now()",
+        "phase='resolved', resolved_reason='run_completed', resolved_at=now(), admitted_run_id='r'",
+        "phase='resolved', resolved_reason='cancelled_before_dispatch', resolved_at=now(), admitted_run_id='r', dispatched_at=now(), admitted_at=now()",
         "phase='admitted', dispatched_at=now(), admitted_at=now(), admitted_run_id=' '",
         "node_id=' '",
         "namespace=' '",
@@ -147,6 +153,8 @@ export function describeExecutionSchema(name: string, setup: () => Promise<TestD
       });
       for (const change of [
         'schema_version=2',
+        "operation='redo'",
+        'operation=null',
         'generation=0',
         'generation=21',
         "namespace=' '",

@@ -220,6 +220,89 @@ export function describeExecutionContract(name: string, make: MakeExecutionFixtu
       });
       expect(await f.audits()).toHaveLength(3);
     });
+    it('精确 run 的真实终态释放 admitted：CAS+审计同事务，幂等，错 run/错终态/dispatching/时钟都不释放', async () => {
+      await f.store.reserveExecution(input, executionAudit);
+      await f.store.dispatchExecution(input, executionAudit);
+      // dispatching 没有 run 绑定：任何终态证明都不能释放。
+      expect(
+        await f.store.closeExecutionRun({ ...input, runId: 'run-a', terminal: 'completed' }, executionAudit),
+      ).toEqual({ kind: 'rejected', reason: 'proof_required' });
+      await f.store.admitExecution({ ...input, runId: 'run-a' }, executionAudit);
+      for (const bad of [
+        { ...input, runId: 'run-b', terminal: 'completed' },
+        { ...input, runId: '  ', terminal: 'completed' },
+        { ...input, runId: 'run-a', terminal: 'running' },
+        { ...input, runId: 'run-a', terminal: 'continued_as_new' },
+        { ...input, runId: 'run-a' },
+      ] as const)
+        expect(await f.store.closeExecutionRun(bad as never, executionAudit).then((r) => r.kind)).toBe(
+          'rejected',
+        );
+      expect(
+        await f.store.closeExecutionRun(
+          { ...input, nodeId: 'other', runId: 'run-a', terminal: 'failed' },
+          executionAudit,
+        ),
+      ).toMatchObject({ kind: 'rejected' });
+      // 时钟和重建 Store 不释放。
+      const rebuilt = f.rebuild(new Date('2099-01-01T00:00:00Z'));
+      expect(await rebuilt.getExecutionControl(input.taskId)).toMatchObject({
+        current: { phase: 'admitted', admittedRunId: 'run-a' },
+      });
+      expect(await f.audits()).toHaveLength(3);
+      expect(
+        await f.store.closeExecutionRun({ ...input, runId: 'run-a', terminal: 'timed_out' }, executionAudit),
+      ).toMatchObject({
+        kind: 'applied',
+        operation: { phase: 'resolved', resolvedReason: 'run_timed_out', admittedRunId: 'run-a' },
+      });
+      expect(await f.audits()).toHaveLength(4);
+      expect(await f.store.getExecutionControl(input.taskId)).toMatchObject({
+        kind: 'managed',
+        control: { revision: 1, currentOperationId: null },
+        current: null,
+      });
+      // 同终态重放幂等不再写审计；换终态/换 run 是冲突，不改写已落的释放事实。
+      expect(
+        await f.store.closeExecutionRun({ ...input, runId: 'run-a', terminal: 'timed_out' }, executionAudit),
+      ).toMatchObject({ kind: 'replayed' });
+      for (const [runId, terminal] of [
+        ['run-a', 'completed'],
+        ['run-b', 'timed_out'],
+      ] as const)
+        expect(await f.store.closeExecutionRun({ ...input, runId, terminal }, executionAudit)).toEqual({
+          kind: 'rejected',
+          reason: 'identity_conflict',
+        });
+      expect(await f.audits()).toHaveLength(4);
+      // 释放后下一 revision 才能再预留；旧请求重放不复活旧资格。
+      expect(
+        await f.store.reserveExecution(executionInput({ revision: 2, expectedRevision: 1 }), executionAudit),
+      ).toMatchObject({
+        kind: 'applied',
+      });
+      expect((await f.operations()).map((o) => o.resolvedReason).sort()).toEqual([null, 'run_timed_out']);
+    });
+    it('每种真实终态都对应固定原因；reserved 与已撤销操作不能被终态证明改写', async () => {
+      await f.store.reserveExecution(input, executionAudit);
+      expect(
+        await f.store.closeExecutionRun({ ...input, runId: 'run-a', terminal: 'completed' }, executionAudit),
+      ).toEqual({ kind: 'rejected', reason: 'phase_conflict' });
+      await f.store.resolveExecution({ ...input, reason: 'cancelled_before_dispatch' }, executionAudit);
+      expect(
+        await f.store.closeExecutionRun({ ...input, runId: 'run-a', terminal: 'completed' }, executionAudit),
+      ).toMatchObject({ kind: 'rejected' });
+      for (const [i, terminal] of (['completed', 'failed', 'cancelled', 'terminated'] as const).entries()) {
+        const next = executionInput({ revision: 2 + i, expectedRevision: 1 + i });
+        // 每轮：预留→派发→接纳→终态；revision 只在预留时 +1，resolved 不回退。
+        await f.store.reserveExecution(next, executionAudit);
+        await f.store.dispatchExecution(next, executionAudit);
+        await f.store.admitExecution({ ...next, runId: `run-${terminal}` }, executionAudit);
+        expect(
+          await f.store.closeExecutionRun({ ...next, runId: `run-${terminal}`, terminal }, executionAudit),
+        ).toMatchObject({ operation: { resolvedReason: `run_${terminal}` } });
+      }
+    });
     it('非法身份与非法审计都在修改前拒绝', async () => {
       for (const revision of [NaN, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])
         expect(await f.store.reserveExecution({ ...input, revision }, executionAudit)).toMatchObject({

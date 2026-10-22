@@ -7,7 +7,7 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - `packages/db/src/schema/`：全部表和枚举；`packages/db/src/queries/`：查询函数；`packages/db/src/index.ts`：对外导出。
 - 验收候选读取：两个引擎消费者先显式 `maintainAcceptanceCandidates`，再调用纯读 `listCommanderAcceptanceTasks`。派生组账不是验收状态或关单授权；初始化/dirty未完或超预算报 `unknown`，不返回截断成功。预算与判法升级见 [验收候选索引](../../docs/acceptance-candidates.md)。
 - `src/queries/admission-alerts.ts`：独立准入未知事件的专用 insert-once/read-back，复用 notifications，不新增表；全局 identity 与首码分离，不更新原通知的时间、处理状态或交付记录，不用会重开通知的 `upsertAlert`。调用宿主仍须核外层 COMMIT/close，函数返回本身不是渠道送达证明。
-- `src/schema/task-execution.ts`：未接生产的持久执行资格、原子出生与 legacy 责任表；控制行缺失就是未受管，不回填、不自动初始化。当前指针组合外键绑定任务、操作、epoch和revision，出生组合外键绑定control/task/epoch；birthRequest全局唯一，legacy的namespace/runId唯一且不按任务限制责任行数。完整 canonical 仅进私有库，不进实时推送或审计正文。历史操作和epoch都不是受管覆盖证明；真实竞争夹具只在 `@fleet-dao/db/testing` 创建随机克隆库和独立连接。新增复合unique被后续新表FK引用时，分两次正规生成迁移，保证unique先落库，再建引用表。
+- `src/schema/task-execution.ts`：未接生产的持久执行资格、原子出生与 legacy 责任表；控制行缺失就是未受管，不回填、不自动初始化。当前指针组合外键绑定任务、操作、epoch和revision，出生组合外键绑定control/task/epoch；birthRequest全局唯一，legacy的namespace/runId唯一且不按任务限制责任行数。完整 canonical 仅进私有库，不进实时推送或审计正文。`task_execution_operations.resolved_reason` 除 `cancelled_before_dispatch` 外只允许 `run_*` 终态原因，且必带 admitted_run_id/派发/接纳时刻（`phase_fields` CHECK，迁移 0103）；legacy 表 `operation` 列带默认值、CHECK 只允许 `legacy_first_limits`，旧代码照写。历史操作和epoch都不是受管覆盖证明；真实竞争夹具只在 `@fleet-dao/db/testing` 创建随机克隆库和独立连接。新增复合unique被后续新表FK引用时，分两次正规生成迁移，保证unique先落库，再建引用表。
 - `packages/db/migrations/`：迁移，drizzle-kit 生成的和手写的（触发器等，如 `0001_triggers.sql`）放在一起，按编号走。
 - `packages/db/drizzle.config.ts`：只用来生成迁移，不连库。
 - `@fleet-dao/db/migration-budget`：发布版固定子进程只核 PG7 snapshot JSON 与独立生成 SQL 的字节一致性，不加载候选 schema/config；完整已知形状、journal链和重复键先核，未知或超时明确失败。TS 与快照的漂移仍由 `schema-drift.test.ts` 核验。

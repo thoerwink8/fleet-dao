@@ -1,5 +1,12 @@
+import type { ExecutionRunCloseReason } from '@fleet-dao/db';
 import type { Task } from '@fleet-dao/shared';
 import type { NewAuditEntry, NewIssueTask } from './ports.ts';
+
+export type { ExecutionRunCloseReason };
+/** legacy 责任绑定的操作（与 db 的 LEGACY_EXECUTION_OPERATION 同值，store 测试钉住）：新 run 首个 decide('limits')。 */
+export const LEGACY_FIRST_LIMITS_OPERATION = 'legacy_first_limits';
+/** 精确 run 在 Temporal 的真实关闭状态（不含仍会续跑的 ContinuedAsNew）；由可信适配层从 DescribeWorkflowExecution 取得。 */
+export type ExecutionRunTerminalStatus = 'completed' | 'failed' | 'cancelled' | 'terminated' | 'timed_out';
 
 /** 仅存储候选身份；生产可信 Start 核验和启动入口尚未接线。 */
 export interface ManagedTaskBirthV1 {
@@ -41,6 +48,8 @@ export interface LegacyExecutionIdentityV1 {
   workflowType: 'taskWorkflow';
   taskQueue: string;
   generation: number;
+  /** 责任所属操作；没有它的候选不是本合同的准入输入。 */
+  operation: typeof LEGACY_FIRST_LIMITS_OPERATION;
   inputCanonical: string;
   inputHash: string;
 }
@@ -85,7 +94,7 @@ export interface ExecutionIdentity {
 export interface ExecutionOperation extends ExecutionIdentity {
   phase: 'reserved' | 'dispatching' | 'admitted' | 'resolved';
   admittedRunId: string | null;
-  resolvedReason: 'cancelled_before_dispatch' | null;
+  resolvedReason: 'cancelled_before_dispatch' | ExecutionRunCloseReason | null;
   createdAt: string;
   updatedAt: string;
   dispatchedAt: string | null;
@@ -144,9 +153,17 @@ export interface TaskExecutionStore {
     input: ExecutionIdentity & { runId: string },
     audit: ExecutionAudit,
   ): Promise<ExecutionResult>;
-  /** 本片只撤销reserved；dispatching/admitted没有可信终态释放口。 */
+  /** 只撤销reserved；dispatching/admitted 只能经 closeExecutionRun 凭精确 run 的真实终态释放。 */
   resolveExecution(
     input: ExecutionIdentity & { reason: 'cancelled_before_dispatch' },
+    audit: ExecutionAudit,
+  ): Promise<ExecutionResult>;
+  /**
+   * 凭精确 run 的真实关闭状态释放 admitted：同事务 CAS（phase=admitted、admittedRunId 相等、control 当前指针/epoch/revision 不变）+ 审计。
+   * dispatching 没有 run 绑定，永远 proof_required；Store 不联网，terminal 只能来自 engine 的 Temporal 终态核验器。
+   */
+  closeExecutionRun(
+    input: ExecutionIdentity & { runId: string; terminal: ExecutionRunTerminalStatus },
     audit: ExecutionAudit,
   ): Promise<ExecutionResult>;
 }

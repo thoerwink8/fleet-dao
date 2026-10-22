@@ -17,6 +17,18 @@ import {
 import { tasks } from './work.ts';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
+/** 精确 run 已在 Temporal 关闭且不会续跑（不含 ContinuedAsNew）的终态；resolved 的 run_* 原因只能由它们产生。 */
+export const EXECUTION_RUN_CLOSE_REASONS = [
+  'run_completed',
+  'run_failed',
+  'run_cancelled',
+  'run_terminated',
+  'run_timed_out',
+] as const;
+export type ExecutionRunCloseReason = (typeof EXECUTION_RUN_CLOSE_REASONS)[number];
+/** legacy 责任绑定的操作：taskWorkflow 新 run 的首个 decide('limits')；之后的 redo/managed 操作另立，不复用。 */
+export const LEGACY_EXECUTION_OPERATION = 'legacy_first_limits';
+const closeReasons = sql.raw(EXECUTION_RUN_CLOSE_REASONS.map((r) => `'${r}'`).join(', '));
 export const taskExecutionOperations = pgTable(
   'task_execution_operations',
   {
@@ -36,7 +48,7 @@ export const taskExecutionOperations = pgTable(
     inputHash: text('input_hash').notNull(),
     phase: text('phase').$type<'reserved' | 'dispatching' | 'admitted' | 'resolved'>().notNull(),
     admittedRunId: text('admitted_run_id'),
-    resolvedReason: text('resolved_reason').$type<'cancelled_before_dispatch'>(),
+    resolvedReason: text('resolved_reason').$type<'cancelled_before_dispatch' | ExecutionRunCloseReason>(),
     createdAt: timestamp('created_at', tz).notNull(),
     updatedAt: timestamp('updated_at', tz).notNull(),
     dispatchedAt: timestamp('dispatched_at', tz),
@@ -65,7 +77,8 @@ export const taskExecutionOperations = pgTable(
     (${t.phase} = 'reserved' and ${t.admittedRunId} is null and ${t.resolvedReason} is null and ${t.dispatchedAt} is null and ${t.admittedAt} is null and ${t.resolvedAt} is null)
     or (${t.phase} = 'dispatching' and ${t.admittedRunId} is null and ${t.resolvedReason} is null and ${t.dispatchedAt} is not null and ${t.admittedAt} is null and ${t.resolvedAt} is null)
     or (${t.phase} = 'admitted' and length(btrim(${t.admittedRunId})) > 0 and ${t.admittedRunId} is not null and ${t.dispatchedAt} is not null and ${t.admittedAt} is not null and ${t.resolvedReason} is null and ${t.resolvedAt} is null)
-    or (${t.phase} = 'resolved' and ${t.resolvedReason} = 'cancelled_before_dispatch' and ${t.resolvedReason} is not null and ${t.resolvedAt} is not null and ${t.admittedRunId} is null and ${t.dispatchedAt} is null and ${t.admittedAt} is null)`,
+    or (${t.phase} = 'resolved' and ${t.resolvedReason} = 'cancelled_before_dispatch' and ${t.resolvedReason} is not null and ${t.resolvedAt} is not null and ${t.admittedRunId} is null and ${t.dispatchedAt} is null and ${t.admittedAt} is null)
+    or (${t.phase} = 'resolved' and ${t.resolvedReason} in (${closeReasons}) and ${t.resolvedReason} is not null and length(btrim(${t.admittedRunId})) > 0 and ${t.dispatchedAt} is not null and ${t.admittedAt} is not null and ${t.resolvedAt} is not null)`,
     ),
   ],
 );
@@ -142,6 +155,10 @@ export const taskLegacyExecutionAdmissions = pgTable(
     workflowType: text('workflow_type').$type<'taskWorkflow'>().notNull(),
     taskQueue: text('task_queue').notNull(),
     generation: integer('generation').notNull(),
+    operation: text('operation')
+      .$type<typeof LEGACY_EXECUTION_OPERATION>()
+      .notNull()
+      .default(LEGACY_EXECUTION_OPERATION),
     inputCanonical: text('input_canonical').notNull(),
     inputHash: text('input_hash').notNull(),
     admittedAt: timestamp('admitted_at', tz).notNull(),
@@ -149,6 +166,10 @@ export const taskLegacyExecutionAdmissions = pgTable(
   (t) => [
     unique('task_legacy_execution_admissions_run_unique').on(t.namespace, t.runId),
     check('task_legacy_execution_admissions_schema_known', sql`${t.schemaVersion} = 1`),
+    check(
+      'task_legacy_execution_admissions_operation_known',
+      sql`${t.operation} = ${sql.raw(`'${LEGACY_EXECUTION_OPERATION}'`)}`,
+    ),
     check(
       'task_legacy_execution_admissions_generation_range',
       sql`${t.generation} between 1 and ${sql.raw(String(MAX_TASK_GENERATION))}`,

@@ -10,7 +10,7 @@
 - `packages/store/src/*-logic.ts`（`task-logic.ts`、`credentials-logic.ts` 等）：两套实现共用的判断，两边都调它。
 - `packages/store/src/policy-source.ts`：API webhook 与 engine replay/poll 共用 source publisher/wrapper，intake 白名单门通过后先发布、再 accepted；核受管数字仓身份、当前 open 同仓非 fork 精确 head，发布后 head 变更失败。
 - `packages/store/src/testing.ts`：测试用的种库（`seedPg`）。
-- `src/task-execution.ts` 与 `task-execution-logic.ts`：未接生产的执行资格合同和共用判断，两适配在 `task-execution-memory.ts` / `task-execution-pg.ts`。UUID仅接受规范小写，generation沿用正整数1到 `MAX_TASK_GENERATION`；同请求完整身份永久幂等，reserved可撤销留墓碑，dispatching/admitted只能返回proof_required。没有生产初始化或终态证明入口，不替代后续可信Temporal身份核验。
+- `src/task-execution.ts` 与 `task-execution-logic.ts`：未接生产的执行资格合同和共用判断，两适配在 `task-execution-memory.ts` / `task-execution-pg.ts`。UUID仅接受规范小写，generation沿用正整数1到 `MAX_TASK_GENERATION`；同请求完整身份永久幂等，reserved可撤销留墓碑，dispatching/admitted只能返回proof_required。没有生产初始化入口，不替代后续可信Temporal身份核验。`closeExecutionRun` 是 admitted 的唯一释放口：同事务 CAS（phase=admitted、admittedRunId 相等、控制行不变）+ 审计，resolved 原因是 `run_completed/failed/cancelled/terminated/timed_out`；同 run 同终态幂等，换终态/换 run 冲突，dispatching 永远 proof_required。Store 不联网，终态只能来自 engine 的 Temporal 终态核验器（`engine/src/real/execution-run-terminal.ts`，结构测试钉住调用方）。legacy 身份带固定 `operation`（`legacy_first_limits`，与 db 常量同值），缺失或别的值 invalid_identity；legacy 责任仍没有释放入口。
 - `src/task-admission-*.ts`：未接生产的原子出生与 legacy 持久责任。新 task/control/birth/audit 同事务；已有 task 永不管理化，同出生请求比较完整不可变 canonical，不能按当前可变任务镜像重算。legacy 按 namespace/runId 唯一并核完整输入；不同 run 的责任可并存，不按 TTL、owner 或 endedAt 释放。输入只是候选身份，不能当作已经可信核验的 Temporal 来源。canonical 只进私有库，审计只存身份摘要。新 Birth/Legacy 成功结果的 `postCommitWarnings` 明示本层通知异常；通知失败不伪装成事务失败，空列表也不证明送达或旧通知已恢复。
 
 ## 测试

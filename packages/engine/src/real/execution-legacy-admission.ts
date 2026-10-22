@@ -6,6 +6,7 @@ import {
   type ExecutionAudit,
   executionInputHash,
   isUuid,
+  LEGACY_FIRST_LIMITS_OPERATION,
   type LegacyAdmissionResult,
   type LegacyExecutionIdentityV1,
 } from '@fleet-dao/store';
@@ -82,6 +83,8 @@ function legacyCandidate(
     typeof input.title !== 'string'
   )
     return { kind: 'denied', code: 'invalid_start_input' };
+  // 生产 Start 输入本身不带 generation（taskWorkflow 自己也是 parseTaskWorkflowId(workflowId) 取代次）：
+  // 代次只信 Temporal 给的 workflowId，且要和输入里的 repo/issue 重建出的 workflowId 逐字相等；输入若自带 generation 必须一致。
   const parsed = parseTaskWorkflowId(observed.workflowId);
   if (
     !parsed ||
@@ -103,6 +106,7 @@ function legacyCandidate(
       taskQueue: observed.taskQueue,
       workflowType: 'taskWorkflow',
       generation: parsed.generation,
+      operation: LEGACY_FIRST_LIMITS_OPERATION,
       inputCanonical,
       inputHash: executionInputHash(inputCanonical),
     };

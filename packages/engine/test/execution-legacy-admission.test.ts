@@ -192,6 +192,7 @@ describe('可信 legacy 来源适配器（未接生产）', () => {
       namespace: 'test',
       runId: RUN,
       generation: 1,
+      operation: 'legacy_first_limits',
       workflowId: 'task:example/canary#12',
       workflowType: 'taskWorkflow',
       taskQueue: 'legacy',

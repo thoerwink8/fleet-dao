@@ -105,6 +105,7 @@ it('真实服务：无参 Local Activity 从实际 Start 准入；同 run 幂等
           taskQueue,
           workflowType: 'taskWorkflow',
           generation,
+          operation: 'legacy_first_limits',
           inputCanonical: canonicalExecutionInput(input),
         });
       }

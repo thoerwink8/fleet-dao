@@ -25,6 +25,7 @@ export const LegacyIdentitySchema = z.strictObject({
   workflowType: z.literal('taskWorkflow'),
   taskQueue: text(1024),
   generation: z.number().int().min(1).max(20),
+  operation: z.literal('legacy_first_limits'),
   inputCanonical: text(LEGACY_CANONICAL_MAX_BYTES),
   inputHash: z.string().regex(/^[a-f0-9]{64}$/),
 });

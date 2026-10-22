@@ -13,7 +13,12 @@ import {
 } from '@temporalio/worker';
 import { createActivities, type EngineJobs, type EngineTasks } from './activities.ts';
 import type { EngineActivities } from './activity-options.ts';
-import { type AdmittingDecideDeps, createAdmittingDecide } from './decisions/admitting-decide.ts';
+import {
+  type AdmissionAlertTransferer,
+  type AdmittingDecideDeps,
+  createAdmittingDecide,
+  startAdmissionAlertTransfer,
+} from './decisions/admitting-decide.ts';
 import { createDecide, type Decide, type FailureTriage } from './decisions/index.ts';
 import {
   createEngineDrain,
@@ -97,7 +102,10 @@ export interface CreateEngineWorkerOptions {
   /** 整个换掉判断入口（演练「判断出错」用）；不给就是 createDecide({ triage })。 */
   decide?: Decide;
   /** 执行资格兼容准入（未接生产：默认不传＝不准入，行为与旧版完全一致）。传了就在 decide('limits') 前核 Start 来源。 */
-  admission?: Pick<AdmittingDecideDeps, 'admit' | 'alert'>;
+  admission?: Pick<AdmittingDecideDeps, 'admit' | 'alert'> & {
+    /** 未知报警的移交：随 worker.run 起、结束即停，一个 Worker 只起一次；不给就只落本地 spool，不报已送达。 */
+    transfer?: { sink: AdmissionAlertTransferer; intervalMs: number };
+  };
   /** 包一层活动（演练用：让某个活动卡在半路，看叫停、换工人时的先后）；不给就是原样。 */
   wrapActivities?: (activities: EngineActivities) => EngineActivities;
   /** 缓存几条工作流；0 = 不缓存、每个工作流任务都从历史重放（换工人、换代码演练用）。 */
@@ -111,9 +119,11 @@ export const SHUTDOWN_FORCE_EXTRA_SECONDS = 30;
 function admittingDecide(options: CreateEngineWorkerOptions): Decide {
   const decide = options.decide ?? createDecide(options.triage ? { triage: options.triage } : {});
   if (!options.admission) return decide;
+  const { admit, alert } = options.admission;
   return createAdmittingDecide({
     decide,
-    ...options.admission,
+    admit,
+    alert,
     ...(options.log ? { log: options.log } : {}),
   });
 }
@@ -126,7 +136,7 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
   }
   const connection = options.connection ?? (await NativeConnection.connect({ address: config.address }));
   const activities = createActivities(options.ports, options.jobs, options.tasks);
-  return Worker.create({
+  const worker = await Worker.create({
     connection,
     namespace: config.namespace,
     taskQueue: config.taskQueue,
@@ -142,6 +152,26 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
     maxConcurrentActivityTaskExecutions: config.maxConcurrentActivities,
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
   });
+  const transfer = options.admission?.transfer;
+  if (transfer) {
+    // 与 Worker 同生命周期：run 开始时起一次，run 结束（正常、异常、runUntil 收场）必停；不新增常驻实例或调度器。
+    const run = worker.run.bind(worker);
+    let started = false;
+    worker.run = async () => {
+      if (started) return run();
+      started = true;
+      const stop = startAdmissionAlertTransfer(transfer.sink, {
+        intervalMs: transfer.intervalMs,
+        log: options.log ?? (() => undefined),
+      });
+      try {
+        return await run();
+      } finally {
+        stop();
+      }
+    };
+  }
+  return worker;
 }
 
 /** 端口用哪一套：real = 真仓、真会话、真 GitHub；fake = 假实现（联调、演练，不碰真东西）。没配、配错都不起。 */

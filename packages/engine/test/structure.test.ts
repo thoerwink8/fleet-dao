@@ -130,7 +130,7 @@ const START_CALL = /\bworkflow\s*\.\s*(?:start|signalWithStart|execute)\s*\(/g;
 const EXECUTION_KEY = /\bexecution\s*:/;
 const START_SITES = ['api/src/temporal.ts', 'engine/src/real/intake.ts', 'engine/src/real/park-triage.ts'];
 
-function startSites(): { file: string; text: string }[] {
+function packageSources(): string[] {
   // 只读各包的 src，不递归进 node_modules。
   return readdirSync(PACKAGES, { withFileTypes: true })
     .filter((d) => d.isDirectory() && existsSync(`${PACKAGES}${d.name}/src`))
@@ -139,11 +139,14 @@ function startSites(): { file: string; text: string }[] {
         (f) => `${d.name}/src/${f}`,
       ),
     )
-    .filter((f) => /\.(ts|mts|mjs)$/.test(f) && !f.includes('node_modules'))
-    .flatMap((file) => {
-      const code = codeOnly(readFileSync(`${PACKAGES}${file}`, 'utf8'));
-      return [...code.matchAll(START_CALL)].map((m) => ({ file, text: code.slice(m.index, m.index + 1500) }));
-    });
+    .filter((f) => /\.(ts|mts|mjs)$/.test(f) && !f.includes('node_modules'));
+}
+
+function startSites(): { file: string; text: string }[] {
+  return packageSources().flatMap((file) => {
+    const code = codeOnly(readFileSync(`${PACKAGES}${file}`, 'utf8'));
+    return [...code.matchAll(START_CALL)].map((m) => ({ file, text: code.slice(m.index, m.index + 1500) }));
+  });
 }
 
 describe('Start 入口的结构检查', () => {
@@ -157,6 +160,20 @@ describe('Start 入口的结构检查', () => {
         .filter((s) => EXECUTION_KEY.test(s.text))
         .map((s) => s.file),
     ).toEqual([]);
+  });
+
+  // 终态释放的可信边界：closeExecutionRun 只经 engine 的 Temporal 终态核验器（real/execution-run-terminal.ts）调用，
+  // 别处（含 api、jobs、活动）直接调 Store 的释放口就是绕过精确 run 终态证明。
+  it('closeExecutionRun 只被 Store 自己的实现和终态核验器引用', () => {
+    const users = packageSources().filter((file) =>
+      /\bcloseExecutionRun\b/.test(codeOnly(readFileSync(`${PACKAGES}${file}`, 'utf8'))),
+    );
+    expect(users.sort()).toEqual([
+      'engine/src/real/execution-run-terminal.ts',
+      'store/src/task-execution-memory.ts',
+      'store/src/task-execution-pg.ts',
+      'store/src/task-execution.ts',
+    ]);
   });
 
   it('这两道检查真能红：代码里的 start 与 execution 键算，注释里的不算', () => {

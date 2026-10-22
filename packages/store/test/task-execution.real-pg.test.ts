@@ -189,11 +189,57 @@ describe.runIf(Boolean(url))('真实PG执行资格（同随机隔离库/独立ba
         await rebuilt.admitExecution({ ...input, runId: winner.operation.admittedRunId }, executionAudit),
       ).toMatchObject({ kind: 'replayed' });
     });
-    for (const action of ['reserve', 'dispatch', 'admit', 'resolve'] as const)
+    it('两个不同终态证明竞争 admitted：只提交一个释放，另一个冲突，审计只有一条', async () => {
+      const input = executionInput();
+      await stores[0].reserveExecution(input, executionAudit);
+      await stores[0].dispatchExecution(input, executionAudit);
+      await stores[0].admitExecution({ ...input, runId: 'run-a' }, executionAudit);
+      const results = await compete([
+        () =>
+          stores[0].closeExecutionRun({ ...input, runId: 'run-a', terminal: 'completed' }, executionAudit),
+        () => stores[1].closeExecutionRun({ ...input, runId: 'run-a', terminal: 'failed' }, executionAudit),
+      ]);
+      expect(results.filter((r) => r.kind === 'applied')).toHaveLength(1);
+      expect(results.filter((r) => r.kind === 'rejected')).toHaveLength(1);
+      expect(
+        (
+          await t.client.query<{ n: number }>(
+            "select count(*)::int as n from audit_log where action='task_execution.close'",
+          )
+        ).rows[0]?.n,
+      ).toBe(1);
+      const reasons = await t.client.query<{ r: string }>(
+        'select resolved_reason as r from task_execution_operations',
+      );
+      expect(reasons.rows).toHaveLength(1);
+      expect(['run_completed', 'run_failed']).toContain(reasons.rows[0]?.r);
+    });
+    it('终态证明与晚到的另一 run admit 竞争：admit 不能覆盖已释放的墓碑', async () => {
+      const input = executionInput();
+      await stores[0].reserveExecution(input, executionAudit);
+      await stores[0].dispatchExecution(input, executionAudit);
+      await stores[0].admitExecution({ ...input, runId: 'run-a' }, executionAudit);
+      await stores[0].closeExecutionRun({ ...input, runId: 'run-a', terminal: 'terminated' }, executionAudit);
+      expect(await stores[1].admitExecution({ ...input, runId: 'run-b' }, executionAudit)).toMatchObject({
+        kind: 'rejected',
+      });
+      expect(
+        await stores[1].closeExecutionRun(
+          { ...input, runId: 'run-b', terminal: 'terminated' },
+          executionAudit,
+        ),
+      ).toEqual({
+        kind: 'rejected',
+        reason: 'identity_conflict',
+      });
+    });
+    for (const action of ['reserve', 'dispatch', 'admit', 'resolve', 'close'] as const)
       it(`真实审计INSERT trigger失败：${action}整笔回滚`, async () => {
         const input = executionInput();
         if (action !== 'reserve') await stores[0].reserveExecution(input, executionAudit);
-        if (action === 'admit') await stores[0].dispatchExecution(input, executionAudit);
+        if (action === 'admit' || action === 'close')
+          await stores[0].dispatchExecution(input, executionAudit);
+        if (action === 'close') await stores[0].admitExecution({ ...input, runId: 'run-a' }, executionAudit);
         const before = await stores[0].getExecutionControl(input.taskId);
         const operationsBefore = await t.client.query('select * from task_execution_operations order by id');
         const auditBefore = await t.client.query('select * from audit_log order by id');
@@ -208,10 +254,15 @@ describe.runIf(Boolean(url))('真实PG执行资格（同随机隔离库/独立ba
                 ? stores[0].dispatchExecution(input, executionAudit)
                 : action === 'admit'
                   ? stores[0].admitExecution({ ...input, runId: 'run-a' }, executionAudit)
-                  : stores[0].resolveExecution(
-                      { ...input, reason: 'cancelled_before_dispatch' },
-                      executionAudit,
-                    );
+                  : action === 'close'
+                    ? stores[0].closeExecutionRun(
+                        { ...input, runId: 'run-a', terminal: 'completed' },
+                        executionAudit,
+                      )
+                    : stores[0].resolveExecution(
+                        { ...input, reason: 'cancelled_before_dispatch' },
+                        executionAudit,
+                      );
           await expect(call).rejects.toThrow();
           expect(await stores[1].getExecutionControl(input.taskId)).toEqual(before);
           expect(await t.client.query('select * from task_execution_operations order by id')).toEqual(

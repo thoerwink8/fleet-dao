@@ -159,5 +159,6 @@ export function pgTaskExecution(db: Db, now: () => Date): TaskExecutionStore {
     dispatchExecution: (input, audit) => mutate('dispatch', input, audit),
     admitExecution: (input, audit) => mutate('admit', input, audit),
     resolveExecution: (input, audit) => mutate('resolve', input, audit),
+    closeExecutionRun: (input, audit) => mutate('close', input, audit),
   };
 }

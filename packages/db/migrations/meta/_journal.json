@@ -722,6 +722,13 @@
       "when": 1792624039335,
       "tag": "0102_acceptance_candidate_triggers",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1792688544613,
+      "tag": "0103_complete_shen",
+      "breakpoints": true
     }
   ]
 }

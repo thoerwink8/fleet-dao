@@ -9,14 +9,23 @@ import type {
   ExecutionOperation,
   ExecutionRead,
   ExecutionResult,
+  ExecutionRunTerminalStatus,
   ReserveExecutionInput,
 } from './task-execution.ts';
 
-export type ExecutionAction = 'reserve' | 'dispatch' | 'admit' | 'resolve';
+export type ExecutionAction = 'reserve' | 'dispatch' | 'admit' | 'resolve' | 'close';
+export const EXECUTION_RUN_TERMINALS: readonly ExecutionRunTerminalStatus[] = [
+  'completed',
+  'failed',
+  'cancelled',
+  'terminated',
+  'timed_out',
+];
 export type ExecutionInput = ExecutionIdentity & {
   expectedRevision?: number;
   runId?: string;
   reason?: string;
+  terminal?: ExecutionRunTerminalStatus;
 };
 export interface ExecutionPlan {
   result: ExecutionResult;
@@ -81,6 +90,11 @@ export function planExecution(
   if (action === 'reserve' && existing) return { result: { kind: 'replayed', operation: existing } };
   if (action === 'resolve' && existing?.phase === 'resolved' && input.reason === 'cancelled_before_dispatch')
     return { result: { kind: 'replayed', operation: existing } };
+  if (action === 'close' && existing?.phase === 'resolved' && existing.resolvedReason?.startsWith('run_'))
+    // 同一精确 run、同一终态的重放幂等；换 run 或换终态是冲突，绝不改写已落的释放事实。
+    return existing.admittedRunId === input.runId && existing.resolvedReason === `run_${input.terminal}`
+      ? { result: { kind: 'replayed', operation: existing } }
+      : reject('identity_conflict');
   if (control.coverageEpoch !== input.coverageEpoch) return reject('stale');
   let operation: ExecutionOperation;
   if (action === 'reserve') {
@@ -123,6 +137,21 @@ export function planExecution(
         phase: 'admitted',
         admittedRunId: input.runId,
         admittedAt: at,
+        updatedAt: at,
+      };
+    } else if (action === 'close') {
+      if (typeof input.runId !== 'string' || !input.runId.trim()) return reject('invalid_identity');
+      if (!input.terminal || !EXECUTION_RUN_TERMINALS.includes(input.terminal))
+        return reject('invalid_identity');
+      // dispatching 没有 run 绑定：发送后是否已被 Temporal 接收未知，终态证明无处落脚。
+      if (existing.phase === 'dispatching') return reject('proof_required');
+      if (existing.phase !== 'admitted') return reject('phase_conflict');
+      if (existing.admittedRunId !== input.runId) return reject('identity_conflict');
+      operation = {
+        ...existing,
+        phase: 'resolved',
+        resolvedReason: `run_${input.terminal}`,
+        resolvedAt: at,
         updatedAt: at,
       };
     } else {

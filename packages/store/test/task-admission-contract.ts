@@ -52,6 +52,7 @@ export function legacyInput(
     workflowType: 'taskWorkflow',
     taskQueue: 'legacy',
     generation,
+    operation: 'legacy_first_limits',
     inputCanonical,
     inputHash: executionInputHash(inputCanonical),
     ...over,
@@ -349,6 +350,9 @@ export function describeAdmissionContract(name: string, make: () => Promise<Admi
         { ...input, generation: 21 },
         { ...input, runId: 'bad' },
         { ...input, schemaVersion: 2 },
+        // 操作缺失或不是首个 limits：不是本合同的准入输入，不能靠默认值悄悄补成 legacy。
+        { ...input, operation: undefined },
+        { ...input, operation: 'redo' },
       ])
         expect(
           await f.store.admitLegacyExecution(invalid as LegacyExecutionIdentityV1, executionAudit),

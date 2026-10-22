@@ -52,6 +52,7 @@ describe.runIf(Boolean(url))('legacy独立宿主真实PG（随机库/独立obser
       workflowType: 'taskWorkflow',
       taskQueue: 'legacy',
       generation: 1,
+      operation: 'legacy_first_limits',
       inputCanonical,
       inputHash: executionInputHash(inputCanonical),
       ...over,

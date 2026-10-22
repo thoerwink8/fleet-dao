@@ -3,6 +3,7 @@
 // 未接生产：只有 createEngineWorker 显式传 admission 才装配，默认不启用。
 import { AdmissionAlertCodeSchema, type AdmissionAlertObservation } from '@fleet-dao/db';
 import { Context } from '@temporalio/activity';
+import { CancelledFailure } from '@temporalio/common';
 import { admissionDenied, admissionUnknown } from '../execution-admission-failure.ts';
 import {
   ALERT_TOTAL_MS,
@@ -27,7 +28,7 @@ export interface AdmittingDecideDeps {
   log?: (message: string) => void;
 }
 
-/** 被取消只说明工人在收场，不是准入真相的异常，不报警。 */
+/** 码本身说取消、但活动信号并未取消（读取器自己的取消）：仍是未知、要重试，只是不报警。 */
 const QUIET_UNKNOWN = new Set(['cancelled', 'start_cancelled']);
 
 async function recordUnknown(
@@ -72,12 +73,17 @@ export function createAdmittingDecide(deps: AdmittingDecideDeps): Decide {
     }
     // 只管 taskWorkflow 的 Start 之后第一问；其它工作流类型不经此门。无 Context 时仍交给 admit，由它 failclosed。
     if (context && context.info.workflowType !== 'taskWorkflow') return deps.decide(kind, input);
+    // 活动真被取消（工作流取消、超时、工人收场）：按 SDK 约定以 CancelledFailure 结束，不当成准入未知去重试或报警。
+    // 已持久的责任不因此回滚；放行只发生在 allowed 之后，取消时不会再往下走业务。
+    const cancelledNow = () => context?.cancellationSignal.aborted === true;
     let result: LegacySourceAdmission;
     try {
       result = await deps.admit();
     } catch {
+      if (cancelledNow()) throw new CancelledFailure('执行资格准入被取消');
       result = { kind: 'unknown', code: 'store_unavailable' };
     }
+    if (cancelledNow()) throw new CancelledFailure('执行资格准入被取消');
     if (result.kind === 'allowed') return deps.decide(kind, input);
     if (result.kind === 'denied') throw admissionDenied(result.code);
     // 未知：可重试失败，由工作流 judgeRetrying 按 15s 起翻倍封顶 600s 退避；每次尝试都重新核，不缓存放行。

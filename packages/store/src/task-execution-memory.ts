@@ -60,5 +60,6 @@ export function memoryTaskExecution(
     dispatchExecution: (input, audit) => mutate('dispatch', input, audit),
     admitExecution: (input, audit) => mutate('admit', input, audit),
     resolveExecution: (input, audit) => mutate('resolve', input, audit),
+    closeExecutionRun: (input, audit) => mutate('close', input, audit),
   };
 }

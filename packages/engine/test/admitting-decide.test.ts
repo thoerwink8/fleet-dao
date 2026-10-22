@@ -1,4 +1,4 @@
-import { ApplicationFailure } from '@temporalio/common';
+import { ApplicationFailure, CancelledFailure } from '@temporalio/common';
 import { MockActivityEnvironment } from '@temporalio/testing';
 import { describe, expect, it, vi } from 'vitest';
 import { createAdmittingDecide, startAdmissionAlertTransfer } from '../src/decisions/admitting-decide.ts';
@@ -116,10 +116,39 @@ describe('兼容准入包装的 decide', () => {
     expect(s.inner).not.toHaveBeenCalled();
   });
 
-  it('取消不报警；admit 抛错按 store_unavailable 未知处理', async () => {
+  it('活动真被取消：以 CancelledFailure 结束，不报警不放行；信号没取消时 admit 抛错才按 store_unavailable 未知处理', async () => {
+    // 取消发生在 admit 返回 allowed 之后也不放行（信号已取消）。
+    const late = setup(allowed);
+    const slow = createAdmittingDecide({
+      decide: late.inner as never,
+      admit: async () => {
+        late.env.cancel();
+        return allowed;
+      },
+      alert: late.alert,
+    });
+    expect(
+      await late.env.run(async () => slow('limits', {} as never)).catch((e: unknown) => e),
+    ).toBeInstanceOf(CancelledFailure);
+    expect(late.inner).not.toHaveBeenCalled();
+    const aborted = setup(new Error('x'));
+    const throwing = createAdmittingDecide({
+      decide: aborted.inner as never,
+      admit: async () => {
+        aborted.env.cancel();
+        throw new Error('connection reset');
+      },
+      alert: aborted.alert,
+    });
+    expect(
+      await aborted.env.run(async () => throwing('limits', {} as never)).catch((e: unknown) => e),
+    ).toBeInstanceOf(CancelledFailure);
+    expect(aborted.alert.record).not.toHaveBeenCalled();
+    // 码说取消但信号未取消：仍是可重试未知，只是不报警。
     const cancelled = setup({ kind: 'unknown', code: 'cancelled' });
     const a = (await cancelled.run('limits', {} as never).catch((e: unknown) => e)) as ApplicationFailure;
     expect(a.details).toEqual(['cancelled', 'not_needed']);
+    expect(a.nonRetryable).toBe(false);
     expect(cancelled.alert.record).not.toHaveBeenCalled();
     const thrown = setup(new Error('x'));
     const b = (await thrown.run('limits', {} as never).catch((e: unknown) => e)) as ApplicationFailure;

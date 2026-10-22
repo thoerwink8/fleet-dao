@@ -3,7 +3,12 @@ import { AuditEntrySchema, type Task } from '@fleet-dao/shared';
 import { MAX_TASK_GENERATION } from '@fleet-dao/shared/task-redo';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { NewAuditEntry } from './ports.ts';
-import type { ExecutionAudit, LegacyExecutionIdentityV1, ManagedTaskBirthV1 } from './task-execution.ts';
+import {
+  type ExecutionAudit,
+  LEGACY_FIRST_LIMITS_OPERATION,
+  type LegacyExecutionIdentityV1,
+  type ManagedTaskBirthV1,
+} from './task-execution.ts';
 import { canonicalExecutionUuid } from './task-execution-logic.ts';
 
 const object = (v: unknown): v is Record<string, unknown> =>
@@ -79,6 +84,7 @@ export function validLegacyIdentity(input: LegacyExecutionIdentityV1): boolean {
     !object(input) ||
     input.schemaVersion !== 1 ||
     input.workflowType !== 'taskWorkflow' ||
+    input.operation !== LEGACY_FIRST_LIMITS_OPERATION ||
     ![input.taskId, input.runId].every(canonicalExecutionUuid) ||
     ![input.namespace, input.workflowId, input.taskQueue].every(nonempty) ||
     !Number.isInteger(input.generation) ||
@@ -133,6 +139,7 @@ const legacyKeys = [
   'workflowType',
   'taskQueue',
   'generation',
+  'operation',
   'inputCanonical',
   'inputHash',
 ] as const;
