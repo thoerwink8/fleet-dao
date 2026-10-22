@@ -71,6 +71,8 @@ test.describe('后端不可用', () => {
     await expect(all).toBeVisible();
     await request.post(`${stack.controlOrigin}/mode/error`);
     await all.click();
+    // 定时任务数据在法国页已读过、进页不会自己重读：点页头刷新才读到这次的 500
+    await page.getByRole('button', { name: /刷新/ }).first().click();
     const alert = page
       .getByRole('alert')
       .filter({ hasText: /没读成|没查成/ })

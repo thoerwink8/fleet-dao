@@ -130,7 +130,7 @@ test.describe('其余页面', () => {
 
   test('定时任务：额度读取跑成了、每小时对账上次没查全且已过期，分开显示', async ({ page, shot }) => {
     await page.goto('/schedules');
-    await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: '定时任务' })).toBeVisible();
     // 任务是表里默认收起的行（#1805，#3509 起是表），摘要行里就有名字、上次结果和「过期」
     await expect(page.getByRole('row').filter({ hasText: '额度读取' })).toContainText('跑成了');
     const reconcile = page.getByRole('row').filter({ hasText: '每小时对账' });
@@ -201,7 +201,7 @@ test.describe('其余页面', () => {
     page,
   }) => {
     await page.goto('/schedules');
-    await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: '定时任务' })).toBeVisible();
     const header = await page.locator('main').evaluate((_m) => {
       const top = document.querySelector('header')?.getBoundingClientRect().height; // 顶栏是文档里的第一个 header（页头在正文区里，在它后面）
       const side = document.querySelector('aside')?.getBoundingClientRect().width;
