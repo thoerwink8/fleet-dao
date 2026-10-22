@@ -17,7 +17,8 @@
 //    「条件不再成立」：缺证据不可逆，那句会诱导按 PR 号或分支名豁免来清卡。验收改为真实来源与完整回执按现规则核实，或缺证据
 //    标 historical_unproven、走已有可信 ops 历史审计（精确身份、证据、缺口、后续责任）。别的类别照旧。
 //    本机留着的单（local-kept:<仓>#<号>:…，拉单报的「本机退回的单，引擎接不了」）不立案：那张单已贴「本机做」留给本机领，
-//    再开提醒单只会验收只剩「条件不再成立」、被拉单判 acceptance_off_diff 退回再报。它不在自己会撤的清单里，没人动就按过期兜底收。
+//    再开提醒单只会验收只剩「条件不再成立」、被拉单判 acceptance_off_diff 退回再报。条件现读那张单（RULES 的「本机留着的单」）：
+//    单关了、或「本机做」被摘掉交回引擎了就撤；还贴着就留着（要人跟进的事，有了判法就不走 3 天过期兜底）。
 //    读不到合并时刻不跳过，记没查成。立案前再自检：单的「怎么算做完」只有「提醒的条件不再成立」一条、且类别不在自己会撤的
 //    清单里，不开单，提醒正文写「没有可做的事，已跳过立案」。
 //
@@ -194,6 +195,12 @@ export interface AlertSweepDeps {
    * 读不到照抛，不当成没有。真装配一定接上；没接上的当没查成，不撤。
    */
   lateReviews?(repo: AlertRepo, number: number): Promise<readonly number[]>;
+  /**
+   * 本机留着的单（local-kept: 提醒挂着的那张）此刻的样子：closed = 单关了；released = 单开着但「本机做」被摘掉了（交回引擎了）；
+   * held = 单开着、还贴着「本机做」。读不到、单开着却不在开着的单列表里照抛，不当成摘了。
+   * 真装配一定接上；没接上的当没查成，不撤。
+   */
+  localKept?(repo: AlertRepo, number: number): Promise<'closed' | 'released' | 'held'>;
   /** 单测换立案单「怎么算做完」的条目（带「- 」）。生产不接。 */
   doneItems?(key: string): readonly string[];
   now: () => Date;
@@ -374,6 +381,17 @@ export const RULES: readonly Rule[] = [
         : { resolve: `review ${id} 已经不是还没解决的「要求改」了（被撤了，或审查者后来通过了）` };
     },
   },
+  {
+    name: '本机留着的单',
+    pattern: /^local-kept:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+):/,
+    async judge(deps, _alert, m) {
+      if (!deps.localKept) throw new Error('本机留着的单判不了：没接上读单的口子');
+      const kept = await deps.localKept({ owner: m[1] as string, name: m[2] as string }, Number(m[3]));
+      if (kept === 'closed') return { resolve: `#${m[3]} 已经关了，不用再留给本机` };
+      if (kept === 'released') return { resolve: `#${m[3]} 的「本机做」已经摘掉，交回引擎了` };
+      return { keep: true };
+    },
+  },
 ];
 
 /** 拉单把单子留给本机时报的提醒键前缀（real/intake.ts 的 notifyLocal）。 */
@@ -395,7 +413,7 @@ export function eligibleToFile(key: string): boolean {
   // 交给法国指挥官（jobs/park-triage.ts）拍板；它也看不了的，原因写在它那条提醒的正文里。
   if (isTaskParkAlertKey(key) || /^commander:.+:park:\d+$/.test(key)) return false;
   // 本机留着的单（拉单 notifyLocal 报的）：那张单已经贴了「本机做」，开提醒单验收只剩「条件不再成立」，引擎拉单判 acceptance_off_diff
-  // 接不了，退回再报，没人做。不在自己会撤的清单里，没人动就按过期兜底收。
+  // 接不了，退回再报，没人做。条件还在不在由 RULES 的「本机留着的单」现读判。
   if (key.startsWith(LOCAL_KEPT_PREFIX)) return false;
   if (key.startsWith('reconcile:')) return true;
   return !resolvesItself(key);

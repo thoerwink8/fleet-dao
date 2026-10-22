@@ -612,6 +612,17 @@ export function hourlyReconcileJob(
         return (await read(repo, number)).map((r) => r.reviewId);
       }
     : undefined;
+  // 本机留着的单（local-kept: 提醒）条件还在不在：单关了、或「本机做」被摘掉（交回引擎）就撤。
+  // 开着却不在开着的单列表里（没列全）抛，不当成摘了；没带 readGroomFacts（单测外壳）只能判关没关。
+  const localKept: HourlyReconcileJobDeps['localKept'] = async (repo, number) => {
+    const st = await w.gh.readIssueState({ repo, issueNumber: number });
+    if (st.state === 'closed') return 'closed';
+    const read = w.gh.readGroomFacts;
+    if (!read) return 'held';
+    const issue = (await read.call(w.gh, { repo })).issues.find((i) => i.number === number);
+    if (!issue) throw new Error(`${repo.owner}/${repo.name}#${number} 开着，却不在开着的单列表里`);
+    return issue.labels.includes(LOCAL_LABEL) ? 'held' : 'released';
+  };
   // 立案（#1406）：没人处理超过 24 小时的卡住报警开一张未排期的缺陷单。仓优先用提醒挂着的任务的仓，
   // 没有任务再从键和链接里认；认不出不猜。单状态的关单时刻 GitHub 这个口子不给，关了先记看见的时刻。
   const filing: HourlyReconcileJobDeps['filing'] = {
@@ -850,6 +861,7 @@ export function hourlyReconcileJob(
       handling,
       filing,
       ...(lateReviews ? { lateReviews } : {}),
+      localKept,
       // 历史事实类（reconcile:pr、reconcile:ledger）要合并时刻才知道该不该跳过。镜像没写上再问 GitHub；都没有就抛，上面记没查成、不跳过。
       prMergedAt: async (repo, number) => {
         const mirrored = await pullMergedAt(w.db, repo.owner, repo.name, number);
