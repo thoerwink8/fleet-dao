@@ -326,8 +326,8 @@ describe('放宽：把旧的拒绝撤了、同一条改放行（retiredDeny）',
 });
 
 // 决定 0092：Mirasim 见到 ~/.claude/settings.json 的 env 里有改模型的键（含子代理默认模型），又有 reclaude 的回环代理、又设了启动命令，
-// 就判 claude 走拦截、不给跟随全局的会话注入平台网关。装了 mirasim-reclaude 启动器的桌面机上不写这个键、已有的删掉，别的机器照旧。
-describe('装了 mirasim-reclaude 启动器的桌面机（决定 0092）', () => {
+// 就判 claude 走拦截、不给跟随全局的会话注入平台网关。启动命令是 reclaude 的桌面机上不写这个键、已有的删掉，别的机器照旧。
+describe('启动命令是 reclaude 的桌面机（决定 0092）', () => {
   /** reclaude 写的那几项：删子代理默认模型时它们一个不能动 */
   const RECLAUDE_ENV = { HTTPS_PROXY: 'http://127.0.0.1:8899', NODE_EXTRA_CA_CERTS: '/x/ca.pem' };
 
@@ -355,12 +355,14 @@ describe('装了 mirasim-reclaude 启动器的桌面机（决定 0092）', () =>
     const check = m.check();
     expectKind(check, KEY, 'ok');
     expect(textOf(check)).toContain(
-      '这台装了 mirasim-reclaude 启动器，env.CLAUDE_CODE_SUBAGENT_MODEL 不写（决定 0092）',
+      '这台 Mirasim 的 claude 启动命令是 reclaude，env.CLAUDE_CODE_SUBAGENT_MODEL 不写（决定 0092）',
     );
   });
 
   it('【故意造出的失败】这类机器上键已经写进去了：--check 报漂移，写的时候删掉（不论值是什么），说清删了什么、为什么，env 里别的一个不动', () => {
     for (const [os, command, value] of [
+      ['darwin', '/Users/x/.local/bin/reclaude', 'claude-opus-5-5'],
+      ['win32', 'C:\\Users\\x\\.local\\bin\\reclaude.exe', 'claude-sonnet-5-5'],
       ['darwin', '/opt/mirasim-reclaude', 'claude-opus-5-5'],
       ['win32', 'C:\\Users\\x\\mirasim-reclaude.exe', 'claude-sonnet-5-5'],
       ['darwin', '/Applications/reclaude-mirasim', 'haiku'],
@@ -416,7 +418,7 @@ describe('装了 mirasim-reclaude 启动器的桌面机（决定 0092）', () =>
       put(m.home, '.claude/settings.json', JSON.stringify({ env: RECLAUDE_ENV }));
       const applied = m.apply();
       expectKind(applied, KEY, 'changed');
-      expect(textOf(applied)).not.toContain('mirasim-reclaude 启动器');
+      expect(textOf(applied)).not.toContain('启动命令是 reclaude');
       expect(m.settings().env, `${os} ${setting}`).toEqual({
         ...RECLAUDE_ENV,
         CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5',
@@ -448,13 +450,13 @@ describe('装了 mirasim-reclaude 启动器的桌面机（决定 0092）', () =>
       const m = desk('darwin', setting);
       const applied = m.apply();
       expectKind(applied, KEY, 'changed');
-      expect(textOf(applied)).toContain('没查成这台装没装 mirasim-reclaude 启动器');
+      expect(textOf(applied)).toContain('没查成这台 Mirasim 的 claude 启动命令是不是 reclaude');
       expect(textOf(applied)).toContain(why);
       expect(textOf(applied)).toContain('按没装处理');
       expect(m.settings().env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5' });
       const check = m.check();
       expectKind(check, KEY, 'ok');
-      expect(textOf(check)).toContain('没查成这台装没装 mirasim-reclaude 启动器');
+      expect(textOf(check)).toContain('没查成这台 Mirasim 的 claude 启动命令是不是 reclaude');
       expect(exitCode(check)).toBe(0);
     });
   }

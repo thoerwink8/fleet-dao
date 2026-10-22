@@ -33,9 +33,7 @@ import { syncBuiltinESMExports } from 'node:module';
 const note = (kind) => appendFileSync(${JSON.stringify(trace)}, JSON.stringify(kind)+'\\n');
 const kindOf = (args) => {
   const script = String(args?.[0] ?? '').replaceAll('\\\\','/');
-  if (script.endsWith('/mirasim-reclaude/bin/migrate')) return 'migrate';
   if (script.endsWith('/local-sessions/install.mjs')) return 'refresh';
-  if (script.endsWith('/mirasim-reclaude/bin/health')) return 'health';
   throw Error('测试拒绝未隔离的维护调用');
 };
 cp.execFileSync = (_command,args) => { note(kindOf(args)); return ''; };
@@ -76,7 +74,7 @@ syncBuiltinESMExports();
 }
 
 describe('无附带维护模式', { timeout: 120_000 }, () => {
-  it('真入口仍同步所有目标并读回，三项维护零调用；默认入口仍调用原维护', () => {
+  it('真入口仍同步所有目标并读回，维护零调用；默认入口仍调用原维护', () => {
     const m = machine();
     const applied = m.direct('--apply', '--no-maintenance');
     expect(applied.status, applied.stderr).toBe(0);
@@ -92,7 +90,7 @@ describe('无附带维护模式', { timeout: 120_000 }, () => {
     expect(applied.stdout).toContain('仍同步全部目标');
     const defaultApply = m.direct('--apply');
     expect(defaultApply.status, defaultApply.stderr).toBe(0);
-    expect(m.calls()).toEqual(process.platform === 'linux' ? ['refresh'] : ['migrate', 'refresh', 'health']);
+    expect(m.calls()).toEqual(['refresh']);
   });
 
   it('check/help、无维护模式的坏参数、读源失败和写锁冲突均不执行维护', () => {

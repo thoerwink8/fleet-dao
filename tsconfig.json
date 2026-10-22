@@ -44,9 +44,6 @@
       "path": "packages/agents-sync"
     },
     {
-      "path": "packages/mirasim-reclaude"
-    },
-    {
       "path": "packages/agent-eval"
     }
   ]
