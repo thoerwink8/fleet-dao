@@ -1,11 +1,11 @@
 // PR 头的完整检出、第 2 轮增量 diff：用临时镜像，不碰本机的引擎镜像。
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import { checkoutNotificationProblem } from '@fleet-dao/store';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   type CheckoutBlockedAlert,
   type CheckoutReceipt,
@@ -14,10 +14,23 @@ import {
   checkoutAlertKey,
   checkoutBlockedAlert,
   checkoutPrHead,
+  type IncrementalDiffArgs,
   incrementalDiffAtHead,
   placeVerifyCheckout,
   VERIFY_CHECKOUT_FALLBACK,
 } from '../src/cold-verify-run.ts';
+import {
+  type AttributionFixture,
+  buildAttributionFixture,
+  deleteFetchedMainline,
+  FIXTURE_REPO,
+  gitText,
+  LAUNCHER_GO,
+  LAUNCHER_YML,
+  PACKAGE_JSON_PATH,
+  setFetchedMainline,
+  WORKFLOW_ID,
+} from './attribution-fixture.ts';
 
 const gitEnv = {
   ...process.env,
@@ -109,6 +122,40 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(diff.changedFiles).toEqual(['hello.txt']);
     expect(diff.diffText).toContain('+world');
     expect(diff.diffText).not.toContain('diff --git a/hello.txt b/hello.txt\nnew file');
+  });
+
+  it('提交不在镜像里：仍报读不到增量 diff，不改口成归属失败', async () => {
+    const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+    await expect(
+      incrementalDiffAtHead({
+        workflowId: 'task:acme/demo#12',
+        sinceSha: 'd'.repeat(40),
+        headSha: head,
+      }),
+    ).rejects.toThrow('读不到增量 diff');
+  });
+
+  it('给了可信主线的线性区间仍只含作者这次改动', async () => {
+    const { head, first } = await mirrorWith([
+      { path: 'hello.txt', text: 'hello\n' },
+      { path: 'hello.txt', text: 'hello\nworld\n' },
+    ]);
+    const bare = join(state, 'mirrors', 'acme', 'demo.git');
+    await git(bare, ['update-ref', 'refs/fleet/main', first]);
+    const diff = await incrementalDiffAtHead({
+      workflowId: 'task:acme/demo#12',
+      sinceSha: first,
+      headSha: head,
+      repo: { owner: 'acme', name: 'demo' },
+      prNumber: 42,
+      issueNumber: 12,
+      baseSha: first,
+      mainlineSha: first,
+    });
+    expect(diff.changedFiles).toEqual(['hello.txt']);
+    expect(diff.diffText).toContain('+world');
+    expect(diff.diffText).toContain('# 本单返工');
+    expect(diff.diffText).toContain('与用来拆归属的主线相同');
   });
 
   it('目录本来可写：直接检出，不修、不报警', async () => {
@@ -870,5 +917,269 @@ describe('历史 checkout 归档认的报警格式和引擎写的一致（store 
     ];
     for (const n of forged) expect(checkoutNotificationProblem(n, { workflowId, head })).toBeDefined();
     expect(checkoutNotificationProblem(real, { workflowId: 'task:acme/demo#13', head })).toBeDefined();
+  });
+});
+
+function omitKey<T extends object, K extends keyof T>(value: T, key: K): Omit<T, K> {
+  const { [key]: _dropped, ...rest } = value;
+  return rest;
+}
+
+function between(text: string, start: string, end?: string): string {
+  const from = text.indexOf(start);
+  expect(from, start).toBeGreaterThanOrEqual(0);
+  const rest = text.slice(from + start.length);
+  if (end === undefined) return rest;
+  const to = rest.indexOf(end);
+  expect(to, end).toBeGreaterThanOrEqual(0);
+  return rest.slice(0, to);
+}
+
+const AUTHOR_FILES = ['occupancy.txt', 'regression.txt', 'shared.txt'];
+
+describe('第 2 轮增量把主线同步和本单返工拆开', () => {
+  let fx: AttributionFixture;
+  let stateDir = '';
+  const prev = process.env.FLEET_GITHUB_STATE_DIR;
+
+  beforeAll(async () => {
+    stateDir = mkdtempSync(join(tmpdir(), 'fleet-attr-'));
+    process.env.FLEET_GITHUB_STATE_DIR = stateDir;
+    fx = await buildAttributionFixture(stateDir);
+  });
+
+  afterEach(async () => {
+    if (fx !== undefined) await setFetchedMainline(fx.bare, fx.m1);
+  });
+
+  afterAll(() => {
+    if (prev === undefined) delete process.env.FLEET_GITHUB_STATE_DIR;
+    else process.env.FLEET_GITHUB_STATE_DIR = prev;
+    if (stateDir !== '') rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  const bound = (over: Partial<IncrementalDiffArgs> = {}): IncrementalDiffArgs => ({
+    workflowId: WORKFLOW_ID,
+    sinceSha: fx.v1,
+    headSha: fx.merged,
+    repo: FIXTURE_REPO,
+    prNumber: 42,
+    issueNumber: 12,
+    baseSha: fx.m0,
+    mainlineSha: fx.m1,
+    ...over,
+  });
+
+  it('修前两头 diff 把主线删除算进本单；修后只留下返工，主线同步和完整范围仍在正文里', async () => {
+    const naive = (await gitText(fx.bare, ['diff', '--name-only', '--no-ext-diff', `${fx.v1}..${fx.merged}`]))
+      .split('\n')
+      .filter((line) => line !== '');
+    const mainlineTouched = (await gitText(fx.bare, ['diff', '--name-only', fx.m0, fx.m1]))
+      .split('\n')
+      .filter((line) => line !== '');
+    // 修前 incrementalDiffAtHead 就是这两条参数。主线独立删掉的模块会进 changedFiles。
+    expect(naive).toEqual(
+      expect.arrayContaining([LAUNCHER_GO, LAUNCHER_YML, PACKAGE_JSON_PATH, 'shared.txt']),
+    );
+    expect(mainlineTouched).toEqual(expect.arrayContaining(['shared.txt', LAUNCHER_GO]));
+
+    const diff = await incrementalDiffAtHead(bound());
+    expect(diff.changedFiles).toEqual(AUTHOR_FILES);
+    expect(diff.changedFiles).not.toContain(LAUNCHER_GO);
+    expect(diff.changedFiles).not.toContain('verified.txt');
+    expect(diff.diffText).toContain(`# 仓 acme/demo  PR #42  单 #12`);
+    expect(diff.diffText).toContain(`# 旧验收头 ${fx.v1}`);
+    expect(diff.diffText).toContain(`# 当前头 ${fx.merged}`);
+    expect(diff.diffText).toContain(`# 可信主线 ${fx.m1}（refs/fleet/main）`);
+    expect(diff.diffText).toContain(`# 记录的基线 ${fx.m0}（是旧基线，不用它拆归属）`);
+    expect(diff.diffText).toContain('当前头含有这条主线尖');
+    expect(diff.diffText).toContain('不要要求本单恢复主线已删除的模块');
+
+    const author = between(diff.diffText, '# 本单返工', '# 主线同步');
+    expect(author).toContain('occupancy.txt');
+    expect(author).toContain('regression.txt');
+    expect(author).toContain('new-bug');
+    expect(author).toContain('+author-line-rewritten');
+    expect(author).toContain('主线也改过、作者仍有分歧：shared.txt');
+    expect(author).not.toContain('+mainline-line-moved');
+    expect(author).not.toContain(LAUNCHER_GO);
+
+    const context = between(diff.diffText, '# 主线同步', '# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(context).toContain(LAUNCHER_GO);
+    expect(context).toContain(LAUNCHER_YML);
+    expect(context).toContain(PACKAGE_JSON_PATH);
+    expect(context).toContain('+mainline-line-moved');
+
+    const guard = between(diff.diffText, '# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(guard).toContain('occupancy.txt');
+    expect(guard).toContain('regression.txt');
+    expect(guard).toContain('shared.txt');
+    expect(guard).toContain('verified.txt');
+    expect(guard).not.toContain('mirasim-launcher');
+
+    const dest = join(fx.stateDir, 'head-checkout');
+    await checkoutPrHead(dest, fx.merged, WORKFLOW_ID);
+    expect(readFileSync(join(dest, 'occupancy.txt'), 'utf8')).toContain('round2');
+    expect(readFileSync(join(dest, 'keep.txt'), 'utf8')).toBe('stable\n');
+    expect(existsSync(join(dest, LAUNCHER_GO))).toBe(false);
+  });
+
+  it('变基到新主线后旧验收头不再是祖先：有可信主线仍只算本单返工，没有就失败', async () => {
+    expect(await gitText(fx.bare, ['rev-parse', `${fx.rebased}^{tree}`])).toBe(
+      await gitText(fx.bare, ['rev-parse', `${fx.merged}^{tree}`]),
+    );
+    await expect(
+      incrementalDiffAtHead({ workflowId: WORKFLOW_ID, sinceSha: fx.v1, headSha: fx.rebased }),
+    ).rejects.toThrow('没有可信主线就不能拆归属');
+    const diff = await incrementalDiffAtHead(bound({ headSha: fx.rebased }));
+    expect(diff.changedFiles).toEqual(AUTHOR_FILES);
+    expect(diff.diffText).toContain('# 主线同步');
+    expect(between(diff.diffText, '# 主线同步', '# 当前 PR')).toContain(LAUNCHER_GO);
+    expect(diff.changedFiles).not.toContain(LAUNCHER_GO);
+  });
+
+  it('只同步主线、作者没有新返工：增量文件为空，正文仍留下主线同步和整张 PR 的范围', async () => {
+    const diff = await incrementalDiffAtHead(bound({ headSha: fx.syncOnly }));
+    expect(diff.changedFiles).toEqual([]);
+    expect(diff.diffText.trim()).not.toBe('');
+    expect(diff.diffText).toContain('没有还能证明是本单新增');
+    expect(between(diff.diffText, '# 主线同步', '# 当前 PR')).toContain(LAUNCHER_GO);
+    const guard = between(diff.diffText, '# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(guard).toContain('occupancy.txt');
+    expect(guard).toContain('verified.txt');
+    expect(guard).not.toContain('mirasim-launcher');
+  });
+
+  it('作者把主线已删文件按原字节加回，或改掉另一个已删文件：都不能按文件名放过', async () => {
+    const naive = (await gitText(fx.bare, ['diff', '--name-only', '--no-ext-diff', `${fx.v1}..${fx.tamper}`]))
+      .split('\n')
+      .filter((line) => line !== '');
+    expect(naive).not.toContain(LAUNCHER_GO);
+    expect(naive).toEqual(expect.arrayContaining([LAUNCHER_YML, PACKAGE_JSON_PATH]));
+    const diff = await incrementalDiffAtHead(bound({ headSha: fx.tamper }));
+    expect(diff.changedFiles).toEqual([
+      LAUNCHER_GO,
+      'occupancy.txt',
+      PACKAGE_JSON_PATH,
+      'regression.txt',
+      'shared.txt',
+    ]);
+    expect(diff.changedFiles).not.toContain(LAUNCHER_YML);
+    const author = between(diff.diffText, '# 本单返工', '# 主线同步');
+    expect(author).toContain(LAUNCHER_GO);
+    expect(author).toContain(PACKAGE_JSON_PATH);
+    expect(author).not.toContain(LAUNCHER_YML);
+    const guard = between(diff.diffText, '# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(guard).toContain(LAUNCHER_GO);
+    expect(guard).toContain(PACKAGE_JSON_PATH);
+    expect(guard).not.toContain(LAUNCHER_YML);
+  });
+
+  it('当前头还没含主线尖：按头里真正有的那截拆，不把尖上的新文件算进本单', async () => {
+    await setFetchedMainline(fx.bare, fx.m2);
+    const diff = await incrementalDiffAtHead(bound({ mainlineSha: fx.m2 }));
+    expect(diff.diffText).toContain(`# 可信主线 ${fx.m2}（refs/fleet/main）`);
+    expect(diff.diffText).toContain(`# 当前头含有的主线 ${fx.m1}（当前头还没含主线尖，按两边的分叉点拆）`);
+    expect(diff.changedFiles).toEqual(AUTHOR_FILES);
+    expect(diff.diffText).not.toContain('later.txt');
+    expect(diff.changedFiles).not.toContain(LAUNCHER_GO);
+  });
+
+  it('合并或变基却没给可信主线：失败，不退回把主线删除算进本单的两头 diff', async () => {
+    await expect(
+      incrementalDiffAtHead({ workflowId: WORKFLOW_ID, sinceSha: fx.v1, headSha: fx.merged }),
+    ).rejects.toThrow('没有可信主线就不能拆归属');
+    await expect(
+      incrementalDiffAtHead({ workflowId: WORKFLOW_ID, sinceSha: fx.v1, headSha: fx.rebased }),
+    ).rejects.toThrow('没有可信主线就不能拆归属');
+  });
+
+  it('身份、对象、引用或历史对不上就抛，不回空 diff', async () => {
+    const base = bound();
+    const cases: { name: string; args: IncrementalDiffArgs; message: string; ref?: string | null }[] = [
+      { name: '没绑 PR', args: omitKey(base, 'prNumber'), message: '增量归属没绑 PR' },
+      { name: 'PR 号不是正整数', args: { ...base, prNumber: 0 }, message: '增量归属没绑 PR' },
+      { name: '没绑单号', args: omitKey(base, 'issueNumber'), message: '增量归属没绑单号' },
+      { name: '没绑仓', args: omitKey(base, 'repo'), message: '增量归属没绑仓' },
+      {
+        name: '仓对不上',
+        args: { ...base, repo: { owner: 'other', name: 'demo' } },
+        message: '增量归属的仓对不上',
+      },
+      { name: '单号对不上', args: { ...base, issueNumber: 99 }, message: '增量归属的单号对不上' },
+      {
+        name: '主线不是完整提交号',
+        args: { ...base, mainlineSha: 'abc' },
+        message: '可信主线要是完整提交号',
+      },
+      { name: '基线不是完整提交号', args: { ...base, baseSha: 'abc' }, message: '记录的基线要是完整提交号' },
+      {
+        name: '主线和引用不一致',
+        args: { ...base, mainlineSha: fx.m0 },
+        message: '给出的可信主线和镜像里的 refs/fleet/main 不一致',
+      },
+      {
+        name: '引用不在',
+        args: base,
+        ref: null,
+        message: '镜像里没有可信主线 refs/fleet/main',
+      },
+      {
+        name: '没有旧验收头',
+        args: { ...base, sinceSha: 'd'.repeat(40) },
+        message: '镜像里没有旧验收头',
+      },
+      {
+        name: '没有当前头',
+        args: { ...base, headSha: 'e'.repeat(40) },
+        message: '镜像里没有当前头',
+      },
+      {
+        name: '没有记录的基线',
+        args: { ...base, baseSha: 'f'.repeat(40) },
+        message: '镜像里没有记录的基线',
+      },
+      {
+        name: '基线不在主线上',
+        args: { ...base, baseSha: fx.v1 },
+        message: '记录的基线不在可信主线的历史上',
+      },
+      {
+        name: '基线不在当前头上',
+        args: { ...base, baseSha: fx.m2, mainlineSha: fx.m2 },
+        ref: fx.m2,
+        message: '记录的基线不在当前头的历史上',
+      },
+      {
+        name: '历史被回退',
+        args: { ...base, sinceSha: fx.merged, headSha: fx.v1 },
+        message: '当前头是旧验收头的祖先，历史被回退改写了',
+      },
+      {
+        name: '没有共同历史',
+        args: { ...base, mainlineSha: fx.orphan },
+        ref: fx.orphan,
+        message: '当前头和可信主线没有共同历史',
+      },
+      {
+        name: '合并的另一侧不是主线',
+        args: { ...base, headSha: fx.bad },
+        message: '的另一侧不在可信主线上，归属证明不了',
+      },
+    ];
+    const failures: string[] = [];
+    for (const item of cases) {
+      if (item.ref === null) await deleteFetchedMainline(fx.bare);
+      else if (item.ref !== undefined) await setFetchedMainline(fx.bare, item.ref);
+      else await setFetchedMainline(fx.bare, fx.m1);
+      try {
+        const got = await incrementalDiffAtHead(item.args);
+        failures.push(`${item.name}: 回了 diff（${got.changedFiles.join(',')}）`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes(item.message)) failures.push(`${item.name}: ${message}`);
+      }
+    }
+    expect(failures).toEqual([]);
   });
 });

@@ -1628,6 +1628,8 @@ describe('第 2 轮只复核上轮没过的条和增量', () => {
     expect(prompt).toContain('- 第 2 条：2. 还把 B 留着');
     expect(prompt).toContain('## 这一轮的增量 diff（unified patch）');
     expect(prompt).toContain('只复核上轮没过的条和增量里的改动，新提出的、不在增量里的问题只记备注、不拒');
+    expect(prompt).toContain('标了「主线同步」的是可信主线进入这棵树的变动，留作上下文，不是本单新增');
+    expect(prompt).toContain('不要要求本单把主线已经删掉的模块加回去');
   });
 
   it('新提出的、不在上轮没过的条里、也没标增量：只记备注、不拒', async () => {

@@ -1,13 +1,13 @@
 // 任务工作流的冷验收（real/task-verify.ts，#632 S2-5b）：读 PR 和文件（假 GitHub）→ 选路（假选路，按族）→ 一次性会话
 // （假驱动，不起真执行体）→ 贴 cold-verify 状态 → 结局整理成工作流要的形状。每条做不出来、要等、被叫停、贴不上的路径故意造一次。
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
 import type { RouteLaunchFacts } from '@fleet-dao/db';
 import type { PullFacts } from '@fleet-dao/github';
 import { hardBanFor } from '@fleet-dao/shared';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createEngineDrain, waitDrained } from '../../src/drain.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../../src/ports.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
@@ -35,6 +35,14 @@ import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not
 import { requirementContract } from '../../src/runner/task-brief.ts';
 import type { ColdVerifyInput } from '../../src/task-contract.ts';
 import { FAMILY_ORDER, type ModelFamily } from '../../src/verifier-invoke.ts';
+import {
+  type AttributionFixture,
+  buildAttributionFixture,
+  deleteFetchedMainline,
+  LAUNCHER_GO,
+  LAUNCHER_YML,
+  setFetchedMainline,
+} from '../attribution-fixture.ts';
 import { BODY as CONTRACT_BODY } from '../task-script.ts';
 import { fakeTrees } from './fixtures.ts';
 
@@ -2076,5 +2084,191 @@ describe('材料带 PR 正文和测试输出；「不归我验」留言到单上
     expect(body).toContain('fffffff');
     expect(body).toContain('- 第 2 条：要线上数据');
     expect(body).not.toContain('建议');
+  });
+});
+
+describe('第 2 轮装配按可信主线拆增量', () => {
+  let fx: AttributionFixture;
+  let stateDir = '';
+  const prev = process.env.FLEET_GITHUB_STATE_DIR;
+
+  beforeAll(async () => {
+    stateDir = mkdtempSync(join(tmpdir(), 'fleet-attr-verify-'));
+    process.env.FLEET_GITHUB_STATE_DIR = stateDir;
+    fx = await buildAttributionFixture(stateDir);
+  });
+
+  afterEach(async () => {
+    if (fx !== undefined) await setFetchedMainline(fx.bare, fx.m1);
+  });
+
+  afterAll(() => {
+    if (prev === undefined) delete process.env.FLEET_GITHUB_STATE_DIR;
+    else process.env.FLEET_GITHUB_STATE_DIR = prev;
+    if (stateDir !== '') rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  const round2 = (head: string) => ({
+    round: 2 as const,
+    baseSha: fx.m0,
+    headSha: head,
+    howToFinish: ['第一条还没做好', '第二条别引入新回归'],
+    recheck: {
+      failedCriteria: [1],
+      sinceSha: fx.v1,
+      priorProblems: ['没做到验收条：第 1 条：上一轮的问题还没修好'],
+    },
+  });
+
+  it('提示词只把本单返工当增量文件，主线删除留在正文里；完整检出仍是当前头', async () => {
+    let sawHead = false;
+    const r = rig({
+      pull: { headSha: fx.merged },
+      driverRun: async (spec) => {
+        expect(readFileSync(join(spec.cwd, 'occupancy.txt'), 'utf8')).toContain('round2');
+        expect(existsSync(join(spec.cwd, LAUNCHER_GO))).toBe(false);
+        sawHead = true;
+        return report(MODEL_PASS);
+      },
+    });
+    const fetched: string[] = [];
+    r.gh.fetchMainline = async () => ({ head: fx.m1, defaultBranch: 'main' });
+    r.gh.fetchCommitHead = async ({ headSha }) => {
+      fetched.push(headSha);
+    };
+    const got = await r.run(r.input(round2(fx.merged)), ctx());
+    expect(got).toMatchObject({ pass: true, problems: [] });
+    expect(sawHead).toBe(true);
+    expect(fetched.slice(0, 3)).toEqual([fx.merged, fx.v1, fx.m0]);
+    const prompt = r.specs[0]?.prompt ?? '';
+    const files = prompt.split('## 改了哪些文件')[1]?.split('## ')[0] ?? '';
+    expect(files).toContain('- occupancy.txt');
+    expect(files).toContain('- regression.txt');
+    expect(files).toContain('- shared.txt');
+    expect(files).not.toContain(LAUNCHER_GO);
+    expect(files).not.toContain('verified.txt');
+    expect(prompt).toContain('## 上一轮没过的条');
+    expect(prompt).toContain('上一轮的问题还没修好');
+    expect(prompt).toContain('不要要求本单把主线已经删掉的模块加回去');
+    expect(prompt).toContain('# 主线同步');
+    expect(prompt).toContain(LAUNCHER_GO);
+    expect(prompt).toContain(LAUNCHER_YML);
+    expect(prompt).toContain('# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(prompt).toContain('verified.txt');
+    expect(r.posted.at(-1)?.state).toBe('success');
+    expect(r.posted.at(-1)?.sha).toBe(fx.merged);
+  });
+
+  it('模型把主线删除写成增量文件不算拒；上轮没过的条和本单新回归仍拒', async () => {
+    const oldProblem = '没做到验收条：第 1 条：上一轮的问题还没修好';
+    const launcherFalse = `弄坏了原有功能：第 2 条：增量文件：\`${LAUNCHER_GO}\`，启动器被删了`;
+    const realRegression = '弄坏了原有功能：第 2 条：增量文件：`regression.txt`，新写了 new-bug';
+    const stdout = [
+      '## 问题',
+      `- ${oldProblem}`,
+      `- ${launcherFalse}`,
+      `- ${realRegression}`,
+      '',
+      'verdict: fail',
+    ].join('\n');
+    const r = rig({
+      pull: { headSha: fx.merged },
+      driverRun: async () => report(stdout),
+    });
+    r.gh.fetchMainline = async () => ({ head: fx.m1, defaultBranch: 'main' });
+    const got = await r.run(r.input(round2(fx.merged)), ctx());
+    expect(got.pass).toBe(false);
+    expect(got.unavailable).toBeUndefined();
+    expect(got.problems).toEqual([oldProblem, realRegression]);
+    expect(got.problems.join('\n')).not.toContain('mirasim-launcher');
+    expect(got.notes).toContain('只记备注、不拒');
+    expect(r.posted.at(-1)?.state).toBe('failure');
+    expect(r.posted.some((p) => p.state === 'success')).toBe(false);
+  });
+
+  it('可信主线和镜像引用不一致：未核，不起会话，不贴 success', async () => {
+    const r = rig({ pull: { headSha: fx.merged } });
+    r.gh.fetchMainline = async () => ({ head: fx.m0, defaultBranch: 'main' });
+    const got = await r.run(r.input(round2(fx.merged)), ctx());
+    expect(got.pass).toBe(false);
+    expect(got.unavailable).toContain('给出的可信主线和镜像里的 refs/fleet/main 不一致');
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted.at(-1)?.state).toBe('failure');
+    expect(r.posted.some((p) => p.state === 'success')).toBe(false);
+  });
+
+  it('镜像里没有可信主线引用：未核，不起会话', async () => {
+    await deleteFetchedMainline(fx.bare);
+    const r = rig({ pull: { headSha: fx.merged } });
+    r.gh.fetchMainline = async () => ({ head: fx.m1, defaultBranch: 'main' });
+    const got = await r.run(r.input(round2(fx.merged)), ctx());
+    expect(got.unavailable).toContain('镜像里没有可信主线 refs/fleet/main');
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted.some((p) => p.state === 'success')).toBe(false);
+  });
+
+  it('没接现读主线：同一活动上一次的 success 不会被这一轮复用', async () => {
+    const r = rig();
+    const first = await r.run(r.input(), ctx());
+    expect(first.pass).toBe(true);
+    const got = await r.run(
+      r.input({
+        round: 2,
+        recheck: {
+          failedCriteria: [1],
+          sinceSha: 'c'.repeat(40),
+          priorProblems: ['没做到验收条：第 1 条：旧问题'],
+        },
+      }),
+      ctx(),
+    );
+    expect(got.pass).toBe(false);
+    expect(got.unavailable).toContain('没有可信主线来源');
+    expect(r.specs).toHaveLength(1);
+    expect(r.posted.at(-1)?.state).toBe('failure');
+    expect(r.posted.filter((p) => p.state === 'success')).toHaveLength(1);
+  });
+
+  it('现读主线抛 PortError：活动失败重试，不贴 success，也不当成没过', async () => {
+    const r = rig();
+    r.gh.fetchMainline = async () => {
+      throw new PortError('GITHUB_UNAVAILABLE', '主线读不到', { retryable: true });
+    };
+    await expect(
+      r.run(
+        r.input({
+          round: 2,
+          recheck: {
+            failedCriteria: [1],
+            sinceSha: 'c'.repeat(40),
+            priorProblems: ['旧问题'],
+          },
+        }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({ name: 'PortError', code: 'GITHUB_UNAVAILABLE' });
+    expect(r.posted).toEqual([]);
+    expect(r.specs).toHaveLength(0);
+  });
+
+  it('第 2 轮头已经不是要验的头：仍回 headMoved，不贴 success', async () => {
+    const moved = 'c'.repeat(40);
+    const r = rig({ pull: { headSha: moved } });
+    r.gh.fetchMainline = async () => ({ head: 'b'.repeat(40), defaultBranch: 'main' });
+    const got = await r.run(
+      r.input({
+        round: 2,
+        recheck: {
+          failedCriteria: [1],
+          sinceSha: 'd'.repeat(40),
+          priorProblems: ['旧问题'],
+        },
+      }),
+      ctx(),
+    );
+    expect(got.headMoved).toBe(moved);
+    expect(got.pass).toBe(false);
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted.some((p) => p.state === 'success')).toBe(false);
   });
 });
