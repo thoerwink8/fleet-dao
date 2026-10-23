@@ -937,6 +937,155 @@ function between(text: string, start: string, end?: string): string {
 
 const AUTHOR_FILES = ['occupancy.txt', 'regression.txt', 'shared.txt'];
 
+describe('受管推送合回精确旧验收头的增量归属（#3657）', () => {
+  let fx: AttributionFixture;
+  let stateDir = '';
+  let head = '';
+  let syncHead = '';
+  const prev = process.env.FLEET_GITHUB_STATE_DIR;
+
+  // 真 Git 对象与父图；commit-tree 只用于构造恶意边和合并时新增的分歧，不替换任何读取端口。
+  const commitTree = async (treeAt: string, parents: string[], message: string) =>
+    gitText(fx.bare, [
+      'commit-tree',
+      await gitText(fx.bare, ['rev-parse', `${treeAt}^{tree}`]),
+      ...parents.flatMap((parent) => ['-p', parent]),
+      '-m',
+      message,
+    ]);
+  const bound = (over: Partial<IncrementalDiffArgs> = {}): IncrementalDiffArgs => ({
+    workflowId: WORKFLOW_ID,
+    sinceSha: fx.syncOnly,
+    headSha: head,
+    repo: FIXTURE_REPO,
+    prNumber: 42,
+    issueNumber: 12,
+    baseSha: fx.m0,
+    mainlineSha: fx.m2,
+    ...over,
+  });
+
+  beforeAll(async () => {
+    stateDir = mkdtempSync(join(tmpdir(), 'fleet-bound-baseline-'));
+    process.env.FLEET_GITHUB_STATE_DIR = stateDir;
+    fx = await buildAttributionFixture(stateDir);
+    const work = join(stateDir, 'work');
+    // 旧验收头含 m1；本轮返工再并入 m2；受管推送把旧头作为第二父合回。
+    await gitText(work, ['checkout', '-B', 'nested-delivery', fx.merged]);
+    await gitText(work, ['merge', '--no-ff', '-m', 'sync newer mainline', fx.m2]);
+    await gitText(work, ['merge', '--no-ff', '-m', 'recover remote verified head', fx.syncOnly]);
+    head = await gitText(work, ['rev-parse', 'HEAD']);
+    await gitText(work, ['checkout', '-B', 'nested-sync', fx.v1]);
+    await gitText(work, ['merge', '--no-ff', '-m', 'sync only newer mainline', fx.m2]);
+    await gitText(work, ['merge', '--no-ff', '-m', 'recover same remote head', fx.syncOnly]);
+    syncHead = await gitText(work, ['rev-parse', 'HEAD']);
+    await gitText(work, ['push', 'origin', '--all']);
+    await setFetchedMainline(fx.bare, fx.m2);
+  });
+
+  afterEach(async () => {
+    if (fx !== undefined) await setFetchedMainline(fx.bare, fx.m2);
+  });
+  afterAll(() => {
+    if (prev === undefined) delete process.env.FLEET_GITHUB_STATE_DIR;
+    else process.env.FLEET_GITHUB_STATE_DIR = prev;
+    if (stateDir !== '') rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it('多层主线同步后合回绑定旧头：返工、主线上下文和完整 PR 范围均保留', async () => {
+    const parents = (await gitText(fx.bare, ['rev-list', '--parents', '-n', '1', head])).split(' ');
+    expect(parents).toHaveLength(3);
+    expect(parents[2]).toBe(fx.syncOnly);
+    const diff = await incrementalDiffAtHead(bound());
+    expect(diff.changedFiles).toEqual(AUTHOR_FILES);
+    const author = between(diff.diffText, '# 本单返工', '# 主线同步');
+    expect(author).toContain('+author-line-rewritten');
+    expect(author).toContain('new-bug');
+    expect(author).not.toContain('later-mainline');
+    const context = between(diff.diffText, '# 主线同步', '# 当前 PR');
+    expect(context).toContain('later.txt');
+    expect(context).toContain('later-mainline');
+    const full = between(diff.diffText, '# 当前 PR 相对当前头含有的主线的完整范围');
+    for (const path of [...AUTHOR_FILES, 'verified.txt']) expect(full).toContain(path);
+    expect(full).not.toContain(LAUNCHER_GO);
+  });
+
+  it('同图只有主线同步：没有作者返工也不能返回空白或丢掉整张 PR', async () => {
+    const diff = await incrementalDiffAtHead(bound({ headSha: syncHead }));
+    expect(diff.changedFiles).toEqual([]);
+    expect(between(diff.diffText, '# 主线同步', '# 当前 PR')).toContain('later-mainline');
+    const full = between(diff.diffText, '# 当前 PR 相对当前头含有的主线的完整范围');
+    expect(full).toContain('occupancy.txt');
+    expect(full).toContain('verified.txt');
+  });
+
+  it('合回旧头的 merge 自己加回主线已删模块并新增分歧：仍在作者段和完整范围', async () => {
+    const divergent = await commitTree(fx.tamper, [fx.merged, fx.syncOnly], 'merge resolution changes');
+    await setFetchedMainline(fx.bare, fx.m1);
+    const diff = await incrementalDiffAtHead(bound({ headSha: divergent, mainlineSha: fx.m1 }));
+    for (const section of [
+      between(diff.diffText, '# 本单返工', '# 主线同步'),
+      between(diff.diffText, '# 当前 PR 相对当前头含有的主线的完整范围'),
+    ]) {
+      expect(section).toContain(LAUNCHER_GO);
+      expect(section).toContain(PACKAGE_JSON_PATH);
+      expect(section).toContain('regression.txt');
+      expect(section).toContain('shared.txt');
+    }
+    const author = between(diff.diffText, '# 本单返工', '# 主线同步');
+    expect(author).toContain('new-bug');
+    expect(author).toContain('author-line-rewritten');
+  });
+
+  it('合回旧头后最终 blob 等于主线，作者曾改的中间补丁仍保留', async () => {
+    const coincided = await commitTree(fx.coincided, [fx.coincided, fx.syncOnly], 'recover coincided');
+    await setFetchedMainline(fx.bare, fx.mCoincide);
+    const diff = await incrementalDiffAtHead(bound({ headSha: coincided, mainlineSha: fx.mCoincide }));
+    expect(diff.changedFiles).toEqual(['coincide.txt', 'keep.txt']);
+    const author = between(diff.diffText, '# 本单返工', '# 主线同步');
+    expect(author).toContain('author-only-line');
+    expect(author).toContain('author-wrote-coincide');
+    expect(between(diff.diffText, '# 主线同步', '# 当前 PR')).toContain('only-mainline');
+  });
+
+  it.each(['ancestor', 'descendant', 'same-tree', 'side', 'octopus'])(
+    '%s 不属于精确旧基线边',
+    async (kind) => {
+      let other = fx.v1;
+      if (kind === 'ancestor') {
+        expect(await gitText(fx.bare, ['merge-base', fx.v1, fx.m2])).toBe(fx.m0);
+        expect(fx.v1).not.toBe(fx.m0);
+      }
+      if (kind === 'descendant') other = await commitTree(fx.syncOnly, [fx.syncOnly], kind);
+      if (kind === 'side' || kind === 'octopus') other = fx.side;
+      if (kind === 'same-tree') {
+        other = await commitTree(fx.syncOnly, [fx.v1, fx.m1], kind);
+        expect(other).not.toBe(fx.syncOnly);
+        expect(await gitText(fx.bare, ['rev-parse', `${other}^{tree}`])).toBe(
+          await gitText(fx.bare, ['rev-parse', `${fx.syncOnly}^{tree}`]),
+        );
+      }
+      const parents = kind === 'octopus' ? [fx.merged, fx.syncOnly, other] : [fx.merged, other];
+      const bad = await commitTree(fx.merged, parents, kind);
+      await expect(incrementalDiffAtHead(bound({ headSha: bad }))).rejects.toThrow('归属证明不了');
+    },
+  );
+
+  it('有合法旧基线边仍逐一拒绝其它未知 merge，包括旧头祖先里的未知边', async () => {
+    const extraAfter = await commitTree(head, [head, fx.side], 'unknown after allowed merge');
+    const extraBefore = await commitTree(head, [fx.bad, fx.syncOnly], 'allowed edge after unknown');
+    const badSince = await commitTree(fx.merged, [fx.bad, fx.m1], 'old head contains unknown merge');
+    const nestedBadSince = await commitTree(head, [fx.merged, badSince], 'exact but unsafe baseline');
+    for (const args of [
+      bound({ headSha: extraAfter }),
+      bound({ headSha: extraBefore }),
+      bound({ headSha: nestedBadSince, sinceSha: badSince }),
+    ]) {
+      await expect(incrementalDiffAtHead(args)).rejects.toThrow('归属证明不了');
+    }
+  });
+});
+
 describe('第 2 轮增量把主线同步和本单返工拆开', () => {
   let fx: AttributionFixture;
   let stateDir = '';

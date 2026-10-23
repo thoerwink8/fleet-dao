@@ -763,7 +763,12 @@ async function attributedIncrementalDiff(
     .filter(Boolean)) {
     const parents = await commitParents(mirror, merge);
     const other = parents[1];
-    if (parents.length !== 2 || other === undefined || !(await isAncestor(mirror, other, mainlineSha))) {
+    // 受管推送可把精确旧验收头合回；只认已绑定的这一条边，其余 merge 仍逐个核主线来源。
+    if (
+      parents.length !== 2 ||
+      other === undefined ||
+      (other !== args.sinceSha && !(await isAncestor(mirror, other, mainlineSha)))
+    ) {
       throw new Error(`合并 ${merge} 的另一侧不在可信主线上，归属证明不了`);
     }
   }
