@@ -137,6 +137,21 @@ function refOf(row: ParkedRetryRow): string {
   return `${row.owner}/${row.name}#${row.issueNumber}`;
 }
 
+/** SDK 外层错误不含 RPC 原因（#3659）；有界保留 cause，不展开任意对象或循环。 */
+function failureDetail(error: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  let current = error;
+  while ((current !== undefined || parts.length === 0) && !seen.has(current) && parts.length < 4) {
+    seen.add(current);
+    const message = errMessage(current);
+    parts.push(message.length > 240 ? `${message.slice(0, 239)}…` : message);
+    current =
+      typeof current === 'object' && current !== null && 'cause' in current ? current.cause : undefined;
+  }
+  return parts.join(' → ');
+}
+
 /** 判一张、要续就续。出错照抛，由调用方记进 problems。 */
 async function retryOne(
   deps: ParkedRetryDeps,
@@ -165,7 +180,7 @@ async function retryOne(
   try {
     await deps.audit({ row, workflowId, park, why });
   } catch (err) {
-    result.problems.push(`${refOf(row)} 操作记录没写进，没发继续，下一轮再试：${errMessage(err)}`);
+    result.problems.push(`${refOf(row)} 操作记录没写进，没发继续，下一轮再试：${failureDetail(err)}`);
     return;
   }
   const sent = await deps.continueTask(workflowId, { by: PARKED_RETRY_ACTOR, note: why, parkSeq: park.seq });
@@ -176,7 +191,7 @@ async function retryOne(
   try {
     await deps.resolveAlert({ row, workflowId, park, why });
   } catch (err) {
-    result.problems.push(`${refOf(row)} 已续，但这一次停下的提醒没撤掉：${errMessage(err)}`);
+    result.problems.push(`${refOf(row)} 已续，但这一次停下的提醒没撤掉：${failureDetail(err)}`);
   }
 }
 
@@ -190,7 +205,7 @@ export async function retryParkedTasks(deps: ParkedRetryDeps): Promise<ParkedRet
     try {
       await retryOne(deps, row, row.workflowId, release, result);
     } catch (err) {
-      result.problems.push(`${refOf(row)} 没判成：${errMessage(err)}`);
+      result.problems.push(`${refOf(row)} 没判成：${failureDetail(err)}`);
     }
   }
   return result;
@@ -219,7 +234,7 @@ export async function runParkedRetryJob(deps: ParkedRetryDeps): Promise<Schedule
         ? { outcome: 'partial', why: `${line}；${got.problems.slice(0, 3).join('；')}` }
         : { outcome: 'ok', scanned: Math.max(1, got.listed), found: got.continued.length, why: line };
   } catch (err) {
-    result = { outcome: 'failed', why: `引擎续停没跑成：${errMessage(err)}` };
+    result = { outcome: 'failed', why: `引擎续停没跑成：${failureDetail(err)}` };
   }
   await deps.runs.finish(runId, result, deps.now());
   if (result.outcome === 'failed') {
