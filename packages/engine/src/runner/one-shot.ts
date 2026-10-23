@@ -78,6 +78,8 @@ export interface OneShotInput {
   tier?: Tier;
   /** 跑在哪条 Temporal 工作流里（任务工作流：taskWorkflowId）；不在工作流里跑的不给。 */
   workflowId?: string;
+  /** 当前活动 SDK execution；本机会话不给。 */
+  temporalRunId?: string;
   /** 这一段对着的 PR；还没开 PR 的不给。 */
   prNumber?: number;
   /** 会话干活的分支。 */
@@ -300,6 +302,22 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   const attach = input.detach?.attach;
   if (attach && input.runId === undefined) {
     throw new OneShotError('BAD_RUN_INPUT', '接回会话要给原来那一次的 runId，没起会话、一行没写');
+  }
+  if (attach) {
+    if (!deps.runs.readSource) {
+      throw new OneShotError('BAD_RUN_INPUT', '接回会话无法读取原 runs 来源，没接会话、一行没写');
+    }
+    const source = await deps.runs.readSource(runId);
+    if (!source) {
+      throw new OneShotError('BAD_RUN_INPUT', `接回会话缺少原 runs 行（${runId}），没接会话、一行没写`);
+    }
+    // attach 属于原会话，不能把接回活动的 execution/workflow 混进首次来源（含历史 NULL）。
+    const { workflowId: _workflow, temporalRunId: _execution, ...rest } = input;
+    input = {
+      ...rest,
+      ...(source.workflowId !== null ? { workflowId: source.workflowId } : {}),
+      ...(source.temporalRunId !== null ? { temporalRunId: source.temporalRunId } : {}),
+    };
   }
   // 接回（#2238）：起的时刻照原来那一行，总时长照原来的起点算
   const startedAt = attach?.startedAt ?? (deps.now ?? (() => new Date()))().toISOString();
@@ -567,6 +585,7 @@ function runFields(input: OneShotInput, runId: string, startedAt: string): RunSt
     ...(input.causeSummary?.trim() ? { causeSummary: clipCauseSummary(input.causeSummary) } : {}),
     ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
     ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
+    ...(input.temporalRunId !== undefined ? { temporalRunId: input.temporalRunId } : {}),
     ...(input.prNumber !== undefined ? { prNumber: input.prNumber } : {}),
     ...(input.branch !== undefined ? { branch: input.branch } : {}),
     ...(input.cwd ? { worktreePath: input.cwd } : {}),

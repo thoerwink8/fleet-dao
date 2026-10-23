@@ -4,8 +4,8 @@
 //
 // 改这里之前必须知道：
 // - 写之前照合约的 zod 形状挡一道（和 NotWired 占位同一份）：形状不对的不碰库，抛 RunInputError。
-// - 收场是整行覆盖（db 的 startRun 按编号整行写）：记到谁名下的那几列（单子、单号、派工档、工作流、PR、分支，#216）
-//   开跑、收场两次都要写，漏一样就被冲成空。没给的写 NULL，不拿 0、空串顶。
+// - 收场补同一行：首次 workflowId/temporalRunId（含 NULL）由 db 原子保留，明确冲突拒绝。其余归属列（单子、单号、
+//   派工档、PR、分支，#216）开跑、收场两次都要写，漏一样就被冲成空。没给的写 NULL，不拿 0、空串顶。
 // - 带路由的开跑那一行就是占上池的名额（#757）：经 db 的 admitRun 写（锁住池、把选路时预占的名额换成这一行；没预占着、池又满了
 //   抛 PoolFullError，这里换成合约的 NoSlotError）。不带路由的（不经选路）照老样子直接写，不数名额——它连不到池。
 // - 预占谁来放：没开跑就收场的那一段（runSegment、coldVerify 收场时调 realReservations 的 release）；开跑了的已经在 start 里
@@ -16,6 +16,7 @@ import type { Db, RunInsert } from '@fleet-dao/db';
 import {
   admitRun,
   type ChannelAttemptWrite,
+  getRun,
   noteRunVerdict,
   observeRunSessionId,
   PoolFullError,
@@ -44,6 +45,10 @@ export interface RealRunsDeps {
 
 export function realRuns(deps: RealRunsDeps): RunsWriter {
   return {
+    async readSource(runId) {
+      const row = await getRun(deps.db, runId);
+      return row ? { workflowId: row.workflowId, temporalRunId: row.temporalRunId } : undefined;
+    },
     async start(input: RunStart, options: { reservationId?: string } = {}) {
       const run = parsed(RunStartSchema.safeParse(input), 'runs 开跑那一行');
       const row = columns(run);
@@ -146,6 +151,7 @@ function columns(run: RunStart): RunInsert {
     ...(run.causeSummary ? { causeSummary: run.causeSummary } : {}),
     ...(run.roundSeq !== undefined ? { roundSeq: run.roundSeq } : {}),
     workflowId: run.workflowId,
+    ...(run.temporalRunId !== undefined ? { temporalRunId: run.temporalRunId } : {}),
     prNumber: run.prNumber,
     branch: run.branch,
     worktreePath: run.worktreePath,

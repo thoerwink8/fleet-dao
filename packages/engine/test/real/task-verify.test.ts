@@ -277,6 +277,10 @@ function rig(
       ...(opts.handoff ? { handoff: opts.handoff } : {}),
     },
     runs: {
+      // 接回夹具模拟已有旧 runs 行；真实缺行与来源保存由 runs-writer 真库回归覆盖。
+      async readSource() {
+        return { workflowId: null, temporalRunId: null };
+      },
       async start(r, options) {
         started.push(r);
         startedWith.push(options?.reservationId);
@@ -375,7 +379,11 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
   });
   it('通过：先贴 pending 再贴 success（都在要验的头上）；会话在会话用户的空目录里起，收场就删；跑记到这张单名下', async () => {
     const r = rig();
-    const got = await r.run(r.input(), ctx());
+    const got = await r.run(r.input(), {
+      ...ctx(),
+      workflowId: 'task:acme/demo#12',
+      temporalRunId: 'execution-verify-real',
+    });
     expect(got).toMatchObject({ pass: true, problems: [], round: 1 });
     expect(got.unavailable).toBeUndefined();
     expect(r.posted.map((p) => [p.sha, p.context, p.state])).toEqual([
@@ -405,6 +413,7 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
       taskId: TASK_ID,
       issueNumber: 12,
       workflowId: 'task:acme/demo#12',
+      temporalRunId: 'execution-verify-real',
       prNumber: 42,
       branch: BRANCH,
     };

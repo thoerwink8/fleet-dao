@@ -5,8 +5,10 @@
 
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { getRun, startRun } from '../src/queries/runs.ts';
 import {
+  createConcurrentTestDb,
   createTestDb,
   createTestDbFromTemplate,
   dropDatabaseForce,
@@ -34,6 +36,54 @@ describe('真 Postgres 后端在 CI 里不许悄悄跳过', () => {
 });
 
 run('真 Postgres 后端（设了 FLEET_TEST_PG_URL 才跑，CI 的 db 分片）', () => {
+  it(
+    '首次 execution 真实两连接竞争：后写等待原事务后明确拒绝，原 pair 与整行不变（#3652）',
+    async () => {
+      const t = await createConcurrentTestDb();
+      const [a, b] = t.peers;
+      const row = {
+        id: randomUUID(),
+        segment: 'manual' as const,
+        model: 'opus-5.5',
+        workflowId: 'workflow-a',
+        temporalRunId: 'execution-a',
+      };
+      let competing: Promise<unknown> | undefined;
+      try {
+        const pid = (await b.client.query<{ pid: number }>('select pg_backend_pid() as pid')).rows[0]?.pid;
+        if (pid === undefined) throw new Error('竞争连接没有 backend pid');
+        await a.client.exec('begin');
+        await startRun(a.db, row);
+        const before = await getRun(a.db, row.id);
+        competing = startRun(b.db, {
+          ...row,
+          temporalRunId: 'execution-b',
+          outcome: 'done',
+          endedAt: new Date(),
+        }).catch((error: unknown) => error);
+        await vi.waitFor(
+          async () => {
+            const waiting = await t.blocker.client.query<{ n: number }>(
+              'select cardinality(pg_blocking_pids($1))::int as n',
+              [pid],
+            );
+            expect(waiting.rows[0]?.n).toBeGreaterThan(0);
+          },
+          { timeout: 5_000, interval: 10 },
+        );
+        await a.client.exec('commit');
+        const rejected = await competing;
+        expect(rejected).toBeInstanceOf(Error);
+        expect((rejected as Error).message).toContain('来源冲突');
+        expect(await getRun(b.db, row.id)).toEqual(before);
+      } finally {
+        await a.client.exec('rollback');
+        if (competing) await competing;
+        await t.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
   it(
     '连接串指着一个连得上的库：连不上当场红，不退回内存库冒充',
     async () => {

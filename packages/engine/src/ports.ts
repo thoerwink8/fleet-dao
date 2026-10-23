@@ -44,6 +44,8 @@ export interface PortContext {
    * 活动测试不经 Temporal，上下文里没有这一项。
    */
   readonly workflowId?: string;
+  /** 当前活动 SDK 给出的 execution runId；调用方输入和本机会话不能补造。 */
+  readonly temporalRunId?: string;
   /**
    * 这一次尝试必须在这之前结束（这次开跑时刻 + startToClose，毫秒）。
    * 不心跳的活动收不到取消信号，服务端判了超时之后进程里的代码还会往下走；写外部副作用之前用它拦。
