@@ -393,6 +393,12 @@ export const PATH_RULES: readonly Rule[] = [
     units: [AGENTS_UNIT, 'conventions'],
     why: 'subagent-model.rules.test.ts 读它核对决定 0087 的要点；conventions 的 decisions-index 测试核对索引',
   },
+  // 讨论稿（决定 0116）：agents/test/discussion-draft.test.ts 拿仓里 docs/ 下的稿跑推前检查，只改稿也要测 agents
+  {
+    match: (f) => /^docs\/\d{4}-\d{2}-\d{2}-[^/]+-survey\.md$/.test(f),
+    units: [AGENTS_UNIT],
+    why: 'discussion-draft.test.ts 按推前检查核对仓里的讨论稿',
+  },
   // 决定索引 README.md 由各份决定书头部生成，conventions 的 decisions-index.test.ts 拿真仓核对「生成结果 == 仓里文件」
   {
     match: under('docs/decisions/'),

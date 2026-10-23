@@ -684,6 +684,18 @@
       "hitSource": null,
       "outFor": null,
       "whyNotRemove": "存量先登记，尚未逐条自证；保留现有业务规则，待复审后决定删留"
+    },
+    {
+      "id": "command:discuss:check",
+      "kind": "command",
+      "path": "agents/skills/discussion-draft/scripts/draft.mjs",
+      "evidence": ["#3661"],
+      "proposer": "创始人（2026-10-23 认可三层：固定叫法、起稿命令、推前检查）",
+      "expires": "2026-11-22",
+      "keepIf": "到期前真拦下过至少一份不合规的讨论稿（八节缺、已定缺决定链接或单号）才留",
+      "hitSource": "CI 里 agents/test/discussion-draft.test.ts「本仓自己的讨论稿」失败的次数；对外仓推前钩子拒推次数由那个仓自己数",
+      "outFor": null,
+      "whyNotRemove": "新能力，仓里没有同类的讨论稿检查可删；通用段把「我说「先讨论」就只讨论」并进同一句，没有净加句子"
     }
   ]
 }

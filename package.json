@@ -42,6 +42,8 @@
     "github:audit": "node packages/conventions/src/bin/github-audit.ts",
     "branch:hygiene": "node packages/conventions/src/bin/branch-hygiene.ts",
     "release:onekey": "node agents/skills/commander/scripts/release-onekey.mjs",
+    "discuss:new": "node agents/skills/discussion-draft/scripts/draft.mjs new",
+    "discuss:check": "node agents/skills/discussion-draft/scripts/draft.mjs check",
     "pr:open": "node packages/conventions/src/bin/pr-open.ts",
     "subagent:stats": "node packages/conventions/src/bin/subagent-stats.ts",
     "project": "node packages/conventions/src/bin/project.ts",
