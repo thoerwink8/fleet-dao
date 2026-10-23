@@ -8,7 +8,7 @@ import { progressSessionId } from '../progress-session.ts';
 // 读的是本地 origin/main 加 gh 读开着的单，加 #1055 收件箱最近 30 天；没有就输出空、退出码 0。
 // 主人＝本会话的血缘：CLAUDE_CODE_SESSION_ID 所属的 Mirasim 会话目录名（agents/hooks/founder-inbox.mjs 的 lineageOf）。
 // `directive --from-inbox <评论号>`：把驾驶舱答案收件箱（#1055）里的一条搬进仓（挂单同 directive），原评论改成已迁。
-// `directive` 和 `--from-inbox` 必须带 `--kind ai|product|task|once|ops`（决定 0111），判类放在读 prompt-log、fetch、调 gh 之前；
+// `directive` 和 `--from-inbox` 必须带 `--kind ai|product|task|once|ops|discuss`（决定 0111、0117），判类放在读 prompt-log、fetch、调 gh 之前；
 // 非 ai 不写文件、退出 0 并说去处，收件箱的那条评论改成已处理。
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -231,7 +231,7 @@ try {
   if (cmd === 'directive') {
     if (!isDirectiveKind(values.kind))
       throw new ProgressRefused(
-        `${values.kind === undefined ? '没带 --kind' : `--kind ${values.kind} 认不出`}（要 ai|product|task|once|ops 之一），引导没记。\n${KIND_JUDGE}`,
+        `${values.kind === undefined ? '没带 --kind' : `--kind ${values.kind} 认不出`}（要 ai|product|task|once|ops|discuss 之一），引导没记。\n${KIND_JUDGE}`,
       );
     kind = values.kind;
   }
