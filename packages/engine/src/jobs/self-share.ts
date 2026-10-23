@@ -100,10 +100,10 @@ export const SELF_SHARE_RATIO: Record<SelfShareTier, number | null> = {
   frozen: null,
 };
 
-/** fleet-dao 自身单最多同时在跑几条；null＝这一档不按成数限。至少 1 条（名额太少时不把自己整个堵死）。 */
+/** fleet-dao 自身单最多同时在跑几条（向下取整，严格不超成数，在跑上限太小时可以是 0）；null＝这一档不按成数限。 */
 export function selfShareCap(tier: SelfShareTier, maxRunning: number): number | null {
   const ratio = SELF_SHARE_RATIO[tier];
-  return ratio === null ? null : Math.max(1, Math.floor(maxRunning * ratio));
+  return ratio === null ? null : Math.floor(maxRunning * ratio);
 }
 
 /** 别的仓此刻能不能拉新单：冻结不能（在跑的照跑）。 */

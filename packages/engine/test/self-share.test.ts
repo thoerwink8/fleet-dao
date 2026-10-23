@@ -131,7 +131,12 @@ describe('名额份额', () => {
     expect(selfShareCap('healthy', 6)).toBe(1);
     expect(selfShareCap('spending', 6)).toBe(3);
     expect(selfShareCap('healthy', 10)).toBe(3);
-    expect(selfShareCap('healthy', 1)).toBe(1);
+    // 在跑上限太小时向下取整到 0，不凑出 1 条超过成数
+    expect(selfShareCap('healthy', 1)).toBe(0);
+    expect(selfShareCap('healthy', 3)).toBe(0);
+    expect(selfShareCap('healthy', 4)).toBe(1);
+    expect(selfShareCap('spending', 1)).toBe(0);
+    expect(selfShareCap('spending', 2)).toBe(1);
     expect(selfShareCap('frozen', 6)).toBeNull();
   });
 

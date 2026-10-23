@@ -2127,6 +2127,17 @@ describe('名额档位（错误预算，jobs/self-share.ts）', () => {
     expect(selfStarted(h)).toBe(1);
   });
 
+  it('在跑上限很小（2）：健康档 30% 取整是 0 条，不凑出 1 条超份额；耗预算 50% 是 1 条', async () => {
+    const small = { maxStartsPerRound: 10, maxRunningTasks: 2, maxStartsPerHour: 99 };
+    const healthy = twoRepos({ selfShare: fresh('healthy'), limits: small });
+    await runIntakeJob(healthy.deps);
+    expect(selfStarted(healthy)).toBe(0);
+    expect(realStarted(healthy)).toBe(2);
+    const spending = twoRepos({ selfShare: fresh('spending'), limits: small });
+    await runIntakeJob(spending.deps);
+    expect(selfStarted(spending)).toBe(1);
+  });
+
   it('冻结：只拉 fleet-dao 自身单，别的仓不拉新单；自身单不按成数限', async () => {
     const h = twoRepos({ selfShare: fresh('frozen') });
     const run = await runIntakeJob(h.deps);
