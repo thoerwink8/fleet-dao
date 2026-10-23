@@ -245,8 +245,6 @@ jobs:
     # FLEET_TEST_PG_URL 只给 pg 台；放在 job 上是为了算缓存键的那一步也看得到（有没有真 Postgres 是键的一部分）。
     env:
       FLEET_TEST_PG_URL: ${{ matrix.pg && 'postgres://fleet_test:fleet_test@localhost:5432/fleet_test_admin' || '' }}
-      FLEET_CI_EVIDENCE_DIR: ${{ runner.temp }}/fleet-test-runtime
-      FLEET_CI_ARTIFACT_DIR: ${{ runner.temp }}/fleet-test-diagnostics
       FLEET_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
       FLEET_CI_SHARD: ${{ matrix.label }}
     strategy:
@@ -367,6 +365,7 @@ jobs:
       - name: Vitest 与真实进程退出回执
         id: runtime-vitest
         env:
+          FLEET_CI_EVIDENCE_DIR: ${{ runner.temp }}/fleet-test-runtime
           BOX_FILE: ${{ steps.box.outputs.box_file }}
           CACHE_MODE: ${{ steps.cache-plan.outputs.mode }}
           RUN_FILES: ${{ steps.cache-plan.outputs.run_files }}
@@ -391,6 +390,8 @@ jobs:
         id: runtime-diagnose
         if: always()
         env:
+          FLEET_CI_EVIDENCE_DIR: ${{ runner.temp }}/fleet-test-runtime
+          FLEET_CI_ARTIFACT_DIR: ${{ runner.temp }}/fleet-test-diagnostics
           STEP_CHECKOUT: ${{ steps.runtime-checkout.outcome }}
           STEP_PNPM: ${{ steps.runtime-pnpm.outcome }}
           STEP_NODE: ${{ steps.test-node.outcome }}

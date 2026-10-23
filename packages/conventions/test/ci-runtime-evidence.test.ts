@@ -607,6 +607,10 @@ it('工作流保留verify/record判据，always独立核对并只上传固定三
   const steps = testSteps();
   const runtime = steps.find((s) => s.id === 'runtime-vitest');
   expect(runtime?.run).toContain('ci-runtime.ts run');
+  // job env还没有runner上下文；目录只在实际执行/always诊断的step解析。
+  const job = parse(fsRepo(ROOT).read('.github/workflows/ci.yml') as string).jobs.test;
+  expect(JSON.stringify(job.env)).not.toContain('runner.');
+  expect(runtime?.env?.FLEET_CI_EVIDENCE_DIR).toBe(`${'$'}{{ runner.temp }}/fleet-test-runtime`);
   expect(runtime?.['continue-on-error']).toBeUndefined();
   const verify = steps.find((s) => s.id === 'runtime-verify');
   expect(verify?.if).toBe('success()');
@@ -614,6 +618,8 @@ it('工作流保留verify/record判据，always独立核对并只上传固定三
   expect(steps.find((s) => s.id === 'cache-record')?.if).toContain('success()');
   const diagnose = steps.find((s) => s.run?.includes('ci-runtime.ts diagnose'));
   expect(diagnose?.if).toBe('always()');
+  expect(diagnose?.env?.FLEET_CI_EVIDENCE_DIR).toBe(`${'$'}{{ runner.temp }}/fleet-test-runtime`);
+  expect(diagnose?.env?.FLEET_CI_ARTIFACT_DIR).toBe(`${'$'}{{ runner.temp }}/fleet-test-diagnostics`);
   expect(diagnose?.['continue-on-error']).toBeUndefined();
   const verifyAt = steps.findIndex((step) => step.id === 'runtime-verify');
   const diagnoseAt = steps.findIndex((step) => step.id === 'runtime-diagnose');
