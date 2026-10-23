@@ -320,12 +320,13 @@ export const runnerRule = object({
   endedAt: maybe(time),
 });
 export const STEP_NAMES = [
-  'postgres-start',
   'checkout',
   'pnpm',
   'node',
   'install',
   'postgres-ready',
+  'test-server-cache',
+  'test-server-ready',
   'temporal-version',
   'temporal-cache',
   'temporal-download',

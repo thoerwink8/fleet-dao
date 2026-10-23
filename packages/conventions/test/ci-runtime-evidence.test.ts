@@ -252,15 +252,21 @@ describe('最终诊断不会把缺回执、缓存或框架reason当成功', () =
     expect(json(join(dir, 'upload/diagnosis.json')).issues).toContain('reporter-incomplete');
     uploaded(env);
   });
-  it('准备失败只采用具名outcome，不从缺snapshot猜故障', () => {
-    const dir = temp();
-    const env = { ...envFor(dir), STEP_INSTALL: 'failure', STEP_VITEST: 'skipped' };
-    expect(diagnoseCiRuntime(env)).toBe(0);
-    const d = json(join(dir, 'upload/diagnosis.json'));
-    expect(d).toMatchObject({ status: 'not-started', steps: { install: 'failure', vitest: 'skipped' } });
-    expect(diagnosisRule(d)).toBe(true);
-    uploaded(env);
-  });
+  it.each(['INSTALL', 'POSTGRES_READY', 'TEST_SERVER_CACHE', 'TEST_SERVER_READY'])(
+    '%s准备失败只采用具名outcome，不从缺snapshot猜故障',
+    (step) => {
+      const dir = temp();
+      const env = { ...envFor(dir), [`STEP_${step}`]: 'failure', STEP_VITEST: 'skipped' };
+      expect(diagnoseCiRuntime(env)).toBe(0);
+      const d = json(join(dir, 'upload/diagnosis.json'));
+      expect(d).toMatchObject({
+        status: 'not-started',
+        steps: { [step.toLowerCase().replaceAll('_', '-')]: 'failure', vitest: 'skipped' },
+      });
+      expect(diagnosisRule(d)).toBe(true);
+      uploaded(env);
+    },
+  );
   it('Vitest步骤outcome未知时不把缺文件冒充未运行或诊断通过', () => {
     const dir = temp();
     const env = { ...envFor(dir), STEP_VITEST: '' };
@@ -617,6 +623,13 @@ it('工作流保留verify/record判据，always独立核对并只上传固定三
   expect(recordAt).toBeGreaterThan(diagnoseAt);
   expect(saveAt).toBeGreaterThan(recordAt);
   expect(diagnose?.env?.STEP_INSTALL).toBe(`${'$'}{{ steps.runtime-install.outcome }}`);
+  expect(diagnose?.env?.STEP_POSTGRES_READY).toBe(`${'$'}{{ steps.runtime-postgres-ready.outcome }}`);
+  expect(diagnose?.env?.STEP_TEST_SERVER_CACHE).toBe(`${'$'}{{ steps.runtime-test-server-cache.outcome }}`);
+  expect(diagnose?.env?.STEP_TEST_SERVER_READY).toBe(`${'$'}{{ steps.runtime-test-server-ready.outcome }}`);
+  expect(steps.find((s) => s.id === 'runtime-postgres-ready')?.run).toBe(
+    'node packages/conventions/src/bin/ci-postgres.ts test',
+  );
+  expect(steps.find((s) => s.id === 'runtime-test-server-ready')?.run).toBe('pnpm test:temporal-server');
   const upload = steps.find((s) => s.uses === 'actions/upload-artifact@v4');
   expect(upload?.if).toBe('always()');
   expect(upload?.with?.['retention-days']).toBe(7);

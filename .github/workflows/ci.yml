@@ -276,10 +276,12 @@ jobs:
         run: node packages/conventions/src/bin/ci-postgres.ts test
       # useEnv/createEnv 可落在任一台；与只供 createRealEnv 的 CLI 分开准备。
       - uses: actions/cache@v4
+        id: runtime-test-server-cache
         with:
           path: ~/.cache/fleet-temporal-test-server
           key: temporal-test-server-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/conventions/src/temporal-test-server.ts') }}
       - name: 准备时间跳跃服务（固定官方制品，缓存命中也核 SHA256）
+        id: runtime-test-server-ready
         run: pnpm test:temporal-server
       # Temporal 命令行用和法国同一版，版本和校验和从 deploy/france.sh 读（只有一份），缓存按版本 + 校验和。
       - name: Temporal 命令行的版本（和法国同版）
@@ -389,12 +391,13 @@ jobs:
         id: runtime-diagnose
         if: always()
         env:
-          STEP_POSTGRES_START: ${{ steps.runtime-postgres-start.outcome }}
           STEP_CHECKOUT: ${{ steps.runtime-checkout.outcome }}
           STEP_PNPM: ${{ steps.runtime-pnpm.outcome }}
           STEP_NODE: ${{ steps.test-node.outcome }}
           STEP_INSTALL: ${{ steps.runtime-install.outcome }}
           STEP_POSTGRES_READY: ${{ steps.runtime-postgres-ready.outcome }}
+          STEP_TEST_SERVER_CACHE: ${{ steps.runtime-test-server-cache.outcome }}
+          STEP_TEST_SERVER_READY: ${{ steps.runtime-test-server-ready.outcome }}
           STEP_TEMPORAL_VERSION: ${{ steps.temporal.outcome }}
           STEP_TEMPORAL_CACHE: ${{ steps.temporal-cache.outcome }}
           STEP_TEMPORAL_DOWNLOAD: ${{ steps.runtime-temporal-download.outcome }}
