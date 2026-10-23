@@ -158,6 +158,18 @@
       "whyNotRemove": "存量先登记，尚未逐条自证；保留现有业务规则，待复审后决定删留"
     },
     {
+      "id": "hook:downstream-copies.mjs",
+      "kind": "hook",
+      "path": "agents/hooks/downstream-copies.mjs",
+      "evidence": ["#3665：对外仓拷进去的 draft.mjs 上游改了下游不知道，副本漂移没人提醒"],
+      "proposer": "fleet-dao-agent",
+      "expires": "2026-11-22",
+      "keepIf": "复审时下发清单里还有项、对外仓里还有副本；只提醒、不拦",
+      "hitSource": null,
+      "outFor": null,
+      "whyNotRemove": "fleet-dao 不能往对外仓里加检查，本机开会话提醒是唯一能看到下游副本漂移的地方"
+    },
+    {
       "id": "hook:fresh-main.mjs",
       "kind": "hook",
       "path": "agents/hooks/fresh-main.mjs",
