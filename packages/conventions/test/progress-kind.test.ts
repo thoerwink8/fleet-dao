@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runChild } from './child.ts';
 
 const BIN = 'packages/conventions/src/bin/progress.ts';
-const JUDGE = '记之前先两问';
+const JUDGE = '三路分拣';
 const root = mkdtempSync(join(tmpdir(), 'progress-kind-'));
 const bin = join(root, 'bin');
 const COMMENT = {
@@ -109,6 +109,28 @@ describe('pnpm progress directive 先判类', { timeout: 0 }, () => {
     }
   });
 
+  it('不带 --kind：打出完整三路分拣表，每类都点到、判不准的出口在内', () => {
+    const r = run(['directive', '问题里的原话']);
+    for (const kind of ['once', 'task', 'discuss', 'ai', 'product', 'ops']) expect(r.stderr).toContain(kind);
+    expect(r.stderr).toContain('docs/directives/');
+    expect(r.stderr).toContain('本机 AI 记忆');
+    expect(r.stderr).toContain('生效中的临时调整');
+    expect(r.stderr).toContain('决定 0013 第 4 条');
+    expect(r.stderr).toContain('判不准按产品');
+  });
+
+  it('--kind discuss：指到起稿命令，不写文件、退出 0；--from-inbox 评论改成已处理', () => {
+    const r = run(['directive', '--kind', 'discuss', '一次提了好几点']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('pnpm discuss:new');
+    expect(r.stdout).toContain('discussion-draft');
+    expect(r.calls).toEqual([]);
+    const inbox = run(['directive', '--kind', 'discuss', '--from-inbox', '123']);
+    expect(inbox.status).toBe(0);
+    expect(inbox.patched).toMatch(/^【创始人引导·已处理】/);
+    expect(inbox.patched).toContain('pnpm discuss:new');
+  });
+
   it('--kind 的值认不出：退出 1，打出判法，一次 gh 都没调', () => {
     const r = run(['directive', '--kind', 'whatever', '--from-inbox', '123']);
     expect(r.status).toBe(1);
@@ -117,7 +139,7 @@ describe('pnpm progress directive 先判类', { timeout: 0 }, () => {
     expect(r.calls).toEqual([]);
   });
 
-  for (const kind of ['product', 'task', 'once', 'ops']) {
+  for (const kind of ['product', 'task', 'once', 'ops', 'discuss']) {
     it(`--kind ${kind}：零写入、没调 gh、退出 0，说清去处`, () => {
       const r = run(['directive', '--kind', kind, '字节是怎么做的，我们就怎么做吧']);
       expect(r.status).toBe(0);

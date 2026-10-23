@@ -23,17 +23,27 @@ export const ownerLine = (owner: string): string => `〔主：${owner}〕`;
 /** 收件箱看最近多少天改过的评论 */
 export const INBOX_DAYS = 30;
 
-/** 记引导前先判的类别：ai 才记引导，其余各有去处（决定 0111） */
-export const DIRECTIVE_KINDS = ['ai', 'product', 'task', 'once', 'ops'] as const;
+/** 先分拣的类别：ai 才记引导，discuss 指到起稿命令，其余各有去处（决定 0111、0117） */
+export const DIRECTIVE_KINDS = ['ai', 'product', 'task', 'once', 'ops', 'discuss'] as const;
 export type DirectiveKind = (typeof DIRECTIVE_KINDS)[number];
 export const isDirectiveKind = (v: unknown): v is DirectiveKind =>
   typeof v === 'string' && (DIRECTIVE_KINDS as readonly string[]).includes(v);
 
-/** 判法原文。不带 --kind、值认不出时打出来；ai 记成功时也打一遍。 */
-export const KIND_JUDGE =
-  '记之前先两问：①讲的是 AI 的做法（规矩、偏好、派活、用哪个模型/CLI），还是东西该长什么样、做成什么样（驾驶舱、引擎这些 fleet-dao 自己的产品也算）；②只管这一次，还是以后都管。' +
-  '只这一次 → once；要去做的一件活 → task；以后都管的 AI 做法 → ai；产品该长什么样 → product；额度、断电、人不在这类一时调整 → ops。' +
-  '他回答你提的问题时，答案写进你正在做的那件活，不另记。';
+/**
+ * 分拣表和判法原文（决定 0117：判法住在命令里，不住通用段）。不带 --kind、值认不出时打出来；ai 记成功时也打一遍。
+ * 判不准的先后：先判是不是只这一次，判不准就不记（决定 0013 第 4 条）；确定以后都管再分 AI 还是产品，判不准按产品。
+ */
+export const KIND_JUDGE = [
+  '三路分拣（回执首行写「按 照做／讨论稿／记成规矩 办」）：',
+  '一、照做＝只管这一次、一件活：once 照做就行、不记；task 要去做的活，pnpm issue:new 开单、原话写进单里。',
+  '二、讨论稿＝一次提了好几点、要他拍板、根因不清的：discuss 先出稿、不改代码（fleet-dao 里 pnpm discuss:new -- <短名> --ask "…"，别的仓照 discussion-draft 技能）。',
+  '三、记成规矩＝以后都管的，再两问：①讲的是 AI 的做法（规矩、偏好、派活、用哪个模型/CLI），还是东西该长什么样、做成什么样（驾驶舱、引擎这些 fleet-dao 自己的产品也算）；②只管这一次，还是以后都管。',
+  '  ai＝以后都管的 AI 做法：记进 fleet-dao 的 docs/directives/；只关某一个项目的，记本机 AI 记忆。',
+  '  product＝产品该长什么样：记进那个产品的设计文档或决定记录，跟着正在干的 PR；没有在干的活就单开一个只改文档的 PR；对外仓照通用段「对外仓和对外内容怎么写」。',
+  '  ops＝因一时情况拍的 AI 运营调整（额度、断电、他不在）：记进 docs/PROGRESS.md「## 生效中的临时调整」，到期问他。',
+  '判不准的先后：先判是不是只这一次，判不准就不记（决定 0013 第 4 条）；确定以后都管再分 AI 还是产品，判不准按产品。',
+  '他回答你提的问题时，答案写进你正在做的那件活，不另记。',
+].join('\n');
 
 /** 非 ai 类别该去哪。对外仓的 product 不提示贴原话。 */
 export function kindDestination(kind: Exclude<DirectiveKind, 'ai'>, external: boolean): string {
@@ -48,11 +58,13 @@ export function kindDestination(kind: Exclude<DirectiveKind, 'ai'>, external: bo
       return '不记：照做就行（决定 0013）';
     case 'ops':
       return 'docs/PROGRESS.md「## 生效中的临时调整」';
+    case 'discuss':
+      return '讨论稿：先出稿、不改代码；fleet-dao 里 pnpm discuss:new -- <短名> --ask "…"，别的仓照 discussion-draft 技能';
   }
 }
 
 export const PROGRESS_USAGE =
-  '用法：pnpm progress quotes:flush｜pnpm progress note "<一句话进度>"｜pnpm progress directive --kind <ai|product|task|once|ops> ["<创始人原话>" --at "<时间>"] [--meaning "<可公开的意思>"] [--stdin] [--owner <会话目录名|无主>] [--issue <单号>]' +
+  '用法：pnpm progress quotes:flush｜pnpm progress note "<一句话进度>"｜pnpm progress directive --kind <ai|product|task|once|ops|discuss> ["<创始人原话>" --at "<时间>"] [--meaning "<可公开的意思>"] [--stdin] [--owner <会话目录名|无主>] [--issue <单号>]' +
   '（不给原话就从 prompt-log 取本会话他最近一句；不给 --issue 就顺手开一张单，引导办没办完看这张单开着还是关了）｜' +
   'pnpm progress directive --kind <类> --from-inbox <收件箱评论号> [--issue <单号>]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
 
