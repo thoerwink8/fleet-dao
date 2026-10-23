@@ -24,9 +24,10 @@ description: 需求方的话以「讨论：」「出讨论稿：」开头时读�
 仓里有自己的起稿、检查命令就用仓里的（看仓根 `AGENTS.md` 和 `package.json`）。没有的，脚本在本技能 `scripts/draft.mjs`（Claude Code 装在 `~/.claude/skills/discussion-draft/scripts`，别家在 `~/.agents/skills/discussion-draft/scripts`），在仓根跑：
 
 - 起稿：`node draft.mjs new <短名> --ask "需求方提了什么" [--title 标题]`，默认在仓根 docs 目录生成 `YYYY-MM-DD-<短名>-survey.md`，状态、起因、日期、代码版本自动填。
-- 推前查：`node draft.mjs check`。「讨论中」的八节标题要齐；「已定」的结论节要有指得到的决定链接和任务编号，否则退出 1（拒推）；「讨论中」超过 7 天只提醒。退出 2 是没查成，不算过。
+- 按主题放的仓（`layout: "topic"`，见下）起稿多带 `--issue <单号>`：`node draft.mjs new <短名> --issue 123 --ask "…"`，稿生成在 `<dir>/123-<短名>/讨论稿.md`；没带退出 2（先开单），单号已有目录就报出来、不新建（退出 1），短名第一段不能是纯数字。
+- 推前查：`node draft.mjs check`。「讨论中」的八节标题要齐；「已定」的结论节要有指得到的决定链接和任务编号，否则退出 1（拒推）；「讨论中」超过 7 天只提醒。退出 2 是没查成，不算过。按主题放的仓里，「在做」「做完」查法同「已定」，「搁置」「被取代」不查正文，「未复核」报错。
 
 fleet-dao 里是 `pnpm discuss:new -- <短名> --ask "…"` 和 `pnpm discuss:check`，仓里的稿由 `agents/test/discussion-draft.test.ts` 在 CI 里查。
 
 ## 各仓的差异
-稿放哪、后缀、模板、决定放哪、任务编号长什么样、从哪天起查，写在仓根 `package.json` 的 `discussionDraft`（键和默认值见 `scripts/draft.mjs` 开头）。对外仓要自己就完整：把 `scripts/draft.mjs` 原样拷进仓、模板放仓里、`discussionDraft.template` 指过去，推前钩子调它的 check；仓里已有的模板保留八节标题、状态行和 `{{标题}}` `{{日期}}` `{{起因}}` `{{代码版本}}` 四个占位，措辞可以改。
+稿放哪、后缀、模板、决定放哪、任务编号长什么样、从哪天起查，写在仓根 `package.json` 的 `discussionDraft`（键和默认值见 `scripts/draft.mjs` 开头）。稿默认一份一个日期文件放 `docs`（`layout: "dated"`）；仓里方案本来就按主题一个目录放的，写 `{"layout":"topic","dir":"<目录>"}`，稿放 `<目录>/<单号>-<短名>/讨论稿.md`（`file` 可改名），同一份从讨论中接着改到在做、做完，方案就写在五、六、八节，不另起方案文件；这时不能写 `suffix`、`since`，dated 下不能写 `file`。对外仓要自己就完整：把 `scripts/draft.mjs` 原样拷进仓、模板放仓里、`discussionDraft.template` 指过去，推前钩子调它的 check；仓里已有的模板保留八节标题、状态行和 `{{标题}}` `{{日期}}` `{{起因}}` `{{代码版本}}` 四个占位，措辞可以改。

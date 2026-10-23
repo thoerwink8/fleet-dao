@@ -1,40 +1,57 @@
 // 讨论稿的起稿和推前检查。八节、状态行和五步写在模板里（默认是上一层的 template.md）。
 // 单文件、零依赖、不写死哪个仓的约定：可以原样拷进别的仓用，各仓的差异写在仓根 package.json，改这份时别加只对一个仓成立的东西。
 //
-//   node draft.mjs new <短名> --ask "需求方提了什么" [--title 标题] [--date YYYY-MM-DD] [--root 仓根]
+//   node draft.mjs new <短名> --ask "需求方提了什么" [--title 标题] [--date YYYY-MM-DD] [--issue 单号（只在 layout 为 topic 时）] [--root 仓根]
 //   node draft.mjs check [文件…] [--today YYYY-MM-DD] [--root 仓根]
 //
 // 配置：仓根 package.json 的 "discussionDraft"，每项都可不写：
-//   dir        稿放哪个目录（仓根相对），默认 docs；文件名 YYYY-MM-DD-<短名><suffix>
-//   suffix     文件名后缀，默认 -survey.md
+//   layout     稿怎么放：dated（默认）＝dir 下一份一个文件 YYYY-MM-DD-<短名><suffix>；
+//              topic＝按主题放，稿在 <dir>/<单号>-<短名>/<file>，同一份从讨论中走到做完，方案正文就写在里面
+//   dir        稿放哪个目录（仓根相对），默认 docs
+//   suffix     dated 的文件名后缀，默认 -survey.md（topic 下不能写）
+//   file       topic 的稿文件名，默认 讨论稿.md（dated 下不能写）
 //   template   模板（仓根相对），默认本脚本上一层的 template.md；拷进别的仓后那里没有，要写
 //   decisions  决定放哪（目录或单个文件，可写数组），默认 docs/decisions 和 docs/decisions.md
 //   task       任务编号的正则（字符串），默认 GitHub 单号 #123
-//   since      只查文件名日期不早于这天的稿（YYYY-MM-DD），用模板之前的旧稿靠它跳过；默认全查
+//   since      只查文件名日期不早于这天的稿（YYYY-MM-DD），用模板之前的旧稿靠它跳过；默认全查（topic 下不能写）
 //   staleDays  「讨论中」超过几天提醒，默认 7
 //
 // new：按模板起稿，去掉模板开头那段说明注释，填好 {{标题}} {{日期}} {{起因}} {{代码版本}}，状态是模板里的「讨论中」。
 //   同短名已有稿（不论哪天）就报出那份、不新建，退出 1：同一个主题只留一份稿，接着改旧稿。
+//   topic：必须带 --issue <单号>（字母数字），没带退出 2（先开单）；dir 下已有以「<单号>-」开头的目录就报出来、不新建，退出 1；
+//   短名第一段不许纯数字（防 555-2-x 被当成子编号）。dated 下给 --issue 是不认识的参数，退出 2。
 // check：「讨论中」的稿模板的「## 」标题要齐；「已定」的结论节（模板最后一个「## 」）要有指得到的决定链接和任务编号；
 //   状态认不出也算不合规。不合规退出 1，推前钩子见非 0 就拒推。「讨论中」超过 staleDays 天只提醒、不影响退出码。
+//   topic 下状态多三个：在做、做完、被取代（讨论中、已定、搁置照旧）；已定 / 在做 / 做完查结论节，搁置 / 被取代不查正文，
+//   未复核（只留给存量旧方案）报错；讨论中超期提醒的日子取 H1 里第一个 YYYY-MM-DD，没有就不提醒。
 //   不给文件就查目录里全部的稿；给了只查其中是稿的那几份（钩子可以只传这次推的文件）。
 // 退出码：0 过；1 不合规或拒绝新建；2 没查成（读不到配置、模板、目录，参数不对，找不到仓根）——没查成不算过。
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const USAGE = [
   '用法：',
-  '  node draft.mjs new <短名> --ask "需求方提了什么" [--title 标题] [--date YYYY-MM-DD] [--root 仓根]',
+  '  node draft.mjs new <短名> --ask "需求方提了什么" [--title 标题] [--date YYYY-MM-DD] [--issue 单号（layout 为 topic 的仓必带）] [--root 仓根]',
   '  node draft.mjs check [文件…] [--today YYYY-MM-DD] [--root 仓根]',
 ].join('\n');
 
 export const STATUSES = ['讨论中', '已定', '搁置'];
+/** topic 布局：一条线 讨论中 → 已定 → 在做 → 做完，岔路 搁置、被取代；未复核只留存量旧方案，这里认出来是为了报错。 */
+export const TOPIC_STATUSES = ['讨论中', '已定', '在做', '做完', '搁置', '被取代', '未复核'];
 const DEFAULT_TEMPLATE = fileURLToPath(new URL('../template.md', import.meta.url));
 
 /**
- * @typedef {{ dir: string; suffix: string; template: string | null; decisions: string[]; task: RegExp; since: string | null; staleDays: number }} Config
+ * @typedef {{ layout: 'dated' | 'topic'; file: string; dir: string; suffix: string; template: string | null; decisions: string[]; task: RegExp; since: string | null; staleDays: number }} Config
  * @typedef {{ errors: string[]; reminders: string[] }} DraftCheck
  */
 
@@ -66,6 +83,8 @@ export function localToday() {
 export function parseConfig(raw) {
   /** @type {Config} */
   const config = {
+    layout: 'dated',
+    file: '讨论稿.md',
     dir: 'docs',
     suffix: '-survey.md',
     template: null,
@@ -86,7 +105,15 @@ export function parseConfig(raw) {
     return v.trim();
   };
   for (const key of Object.keys(obj)) {
-    if (key === 'dir' || key === 'suffix') config[key] = text(key).replace(/\\/g, '/');
+    if (key === 'layout') {
+      const v = text(key);
+      if (v !== 'dated' && v !== 'topic') throw new SetupError('discussionDraft.layout 要是 dated 或 topic');
+      config.layout = v;
+    } else if (key === 'file') {
+      const v = text(key).replace(/\\/g, '/');
+      if (v.includes('/')) throw new SetupError('discussionDraft.file 要是文件名，不带目录');
+      config.file = v;
+    } else if (key === 'dir' || key === 'suffix') config[key] = text(key).replace(/\\/g, '/');
     else if (key === 'template') config.template = text(key).replace(/\\/g, '/');
     else if (key === 'decisions') {
       const v = obj.decisions;
@@ -117,9 +144,17 @@ export function parseConfig(raw) {
       config.staleDays = v;
     } else {
       throw new SetupError(
-        `discussionDraft 里不认识「${key}」（认得的：dir、suffix、template、decisions、task、since、staleDays）`,
+        `discussionDraft 里不认识「${key}」（认得的：layout、file、dir、suffix、template、decisions、task、since、staleDays）`,
       );
     }
+  }
+  if (config.layout === 'topic') {
+    for (const key of ['suffix', 'since']) {
+      if (key in obj)
+        throw new SetupError(`discussionDraft.layout 是 topic 时不能写 ${key}（它只管 dated 布局）`);
+    }
+  } else if ('file' in obj) {
+    throw new SetupError('discussionDraft.file 只在 layout 是 topic 时用；dated 布局的文件名由 suffix 定');
   }
   return config;
 }
@@ -149,14 +184,23 @@ export const headingsOf = (text) =>
 
 /**
  * 头部（第一个「## 」之前）的状态行认出来的状态；没有状态行返回 null，有但不认识返回原文。
- * @param {string} text
+ * @param {string} text @param {readonly string[]} [known] 认得的状态词，默认 dated 的三个
  */
-export function statusOf(text) {
+export function statusOf(text, known = STATUSES) {
   const head = stripComments(text.replace(/\r\n/g, '\n')).split(/^## /m)[0] ?? '';
   const m = /^- 状态：\s*(.*)$/m.exec(head);
   if (!m) return null;
   const value = (m[1] ?? '').trim();
-  return STATUSES.find((s) => value.startsWith(s)) ?? value;
+  return known.find((s) => value.startsWith(s)) ?? value;
+}
+
+/** H1 里第一个 YYYY-MM-DD（topic 稿的文件名没有日期，超期提醒靠它）；没有 H1 或没有日期返回 null。 @param {string} text */
+export function h1Date(text) {
+  const h1 = stripComments(text.replace(/\r\n/g, '\n'))
+    .split('\n')
+    .find((line) => /^# \S/.test(line));
+  const m = h1 ? /\d{4}-\d{2}-\d{2}/.exec(h1) : null;
+  return m && isDate(m[0]) ? m[0] : null;
 }
 
 /**
@@ -197,13 +241,20 @@ export function linkTarget(draft, target) {
 export function checkDraft({ path, text, headings, config, exists, today }) {
   /** @type {DraftCheck} */
   const out = { errors: [], reminders: [] };
-  const status = statusOf(text);
+  const topic = config.layout === 'topic';
+  const known = topic ? TOPIC_STATUSES : STATUSES;
+  const allowed = known.filter((s) => s !== '未复核').join(' / ');
+  const status = statusOf(text, known);
   if (status === null) {
-    out.errors.push('头部没有「- 状态：」行（讨论中 / 已定 / 搁置）');
+    out.errors.push(`头部没有「- 状态：」行（${allowed}）`);
     return out;
   }
-  if (!STATUSES.includes(status)) {
-    out.errors.push(`状态「${status}」认不出，要以讨论中 / 已定 / 搁置开头`);
+  if (!known.includes(status)) {
+    out.errors.push(`状态「${status}」认不出，要以${allowed}开头`);
+    return out;
+  }
+  if (status === '未复核') {
+    out.errors.push('讨论稿不能是「未复核」：这个状态只留给存量旧方案，起了稿写讨论中，定了写已定');
     return out;
   }
   const have = new Set(headingsOf(text));
@@ -211,18 +262,19 @@ export function checkDraft({ path, text, headings, config, exists, today }) {
     const missing = headings.filter((h) => !have.has(h));
     if (missing.length)
       out.errors.push(`讨论中的稿缺这几节标题（照模板原样写，用不上写「无」）：${missing.join('、')}`);
-    const started = posix.basename(path).slice(0, 10);
+    const started = topic ? (h1Date(text) ?? '') : posix.basename(path).slice(0, 10);
     if (isDate(started) && daysBetween(started, today) > config.staleDays) {
       out.reminders.push(
         `讨论中已经 ${daysBetween(started, today)} 天（${started} 起稿）：该拍板就拍，放下了改「搁置（原因、什么时候再看）」`,
       );
     }
   }
-  if (status === '已定') {
+  // topic 的在做、做完和已定一样要结论节有决定和单号：方案正文在同一份稿里，走到哪一步都不能丢了出处
+  if (status === '已定' || status === '在做' || status === '做完') {
     const conclusion = headings.at(-1) ?? '';
     const body = sectionOf(text, conclusion);
     if (body === null) {
-      out.errors.push(`已定的稿缺结论节「${conclusion}」`);
+      out.errors.push(`${status}的稿缺结论节「${conclusion}」`);
       return out;
     }
     const decisions = config.decisions;
@@ -232,23 +284,32 @@ export function checkDraft({ path, text, headings, config, exists, today }) {
     const toDecisions = links.filter((t) => decisions.some((d) => t === d || t.startsWith(`${d}/`)));
     const broken = toDecisions.filter((t) => !exists(t));
     if (toDecisions.length === 0) {
-      out.errors.push(`已定的稿「${conclusion}」里没有指向决定（${decisions.join(' 或 ')}）的链接`);
+      out.errors.push(`${status}的稿「${conclusion}」里没有指向决定（${decisions.join(' 或 ')}）的链接`);
     } else if (broken.length === toDecisions.length) {
       out.errors.push(`「${conclusion}」里的决定链接指不到文件：${broken.join('、')}`);
     }
     if (!config.task.test(body)) {
-      out.errors.push(`已定的稿「${conclusion}」里没有任务编号（要匹配 ${config.task.source}）`);
+      out.errors.push(`${status}的稿「${conclusion}」里没有任务编号（要匹配 ${config.task.source}）`);
     }
   }
   return out;
 }
 
 /**
- * 是不是讨论稿：在 dir 下（不进子目录）、文件名 YYYY-MM-DD-<短名><suffix>、日期不早于 since。
+ * 是不是讨论稿。dated：在 dir 下（不进子目录）、文件名 YYYY-MM-DD-<短名><suffix>、日期不早于 since。
+ * topic：恰好是 <dir>/<单号>-<短名>/<file>，往深一层、别的文件名都不算。
  * @param {string} repoPath @param {Config} config
  */
 export function isDraftPath(repoPath, config) {
-  const p = repoPath.replace(/\\/g, '/').replace(/^\.\//, '');
+  const p = posix.normalize(repoPath.replace(/\\/g, '/'));
+  if (config.layout === 'topic') {
+    const topicDir = posix.dirname(p);
+    return (
+      posix.basename(p) === config.file &&
+      posix.dirname(topicDir) === posix.normalize(config.dir) &&
+      /^[A-Za-z0-9]+-\S/.test(posix.basename(topicDir))
+    );
+  }
   if (posix.dirname(p) !== posix.normalize(config.dir)) return false;
   const name = posix.basename(p);
   if (!name.endsWith(config.suffix)) return false;
@@ -313,11 +374,14 @@ export function codeVersion(root) {
   return { text: `\`${head.text}\`${version}`, warning: null };
 }
 
-/** @param {string} root @param {Config} config */
-function listDir(root, config) {
+/** @param {string} root @param {Config} config @param {'file' | 'dir'} [kind] dated 列文件，topic 列主题子目录 */
+function listDir(root, config, kind = 'file') {
   const dir = join(root, config.dir);
   try {
-    return readdirSync(dir).filter((name) => statSync(join(dir, name)).isFile());
+    return readdirSync(dir).filter((name) => {
+      const st = statSync(join(dir, name));
+      return kind === 'dir' ? st.isDirectory() : st.isFile();
+    });
   } catch (e) {
     throw new SetupError(`读不了稿的目录 ${config.dir}：${e instanceof Error ? e.message : String(e)}`);
   }
@@ -325,10 +389,43 @@ function listDir(root, config) {
 
 /**
  * 起稿。返回要报给人的几行和退出码；真写文件。
- * @param {{ root: string; short: string; ask: string; title?: string | undefined; date: string }} opts
+ * @param {{ root: string; short: string; ask: string; title?: string | undefined; date: string; issue?: string | undefined }} opts
+ *   issue 只在 topic 布局下用（main 已核过格式和是否必带）。
  */
-export function newDraft({ root, short, ask, title, date }) {
+export function newDraft({ root, short, ask, title, date, issue }) {
   const config = loadConfig(root);
+  if (config.layout === 'topic') {
+    if (!issue) throw new SetupError('topic 布局起稿要 --issue <单号>');
+    if (!existsSync(join(root, config.dir))) throw new SetupError(`稿的目录 ${config.dir} 不在`);
+    const same = listDir(root, config, 'dir').filter((name) => name.startsWith(`${issue}-`));
+    if (same.length) {
+      const paths = same.map((name) => posix.join(config.dir, name));
+      return {
+        code: 1,
+        lines: [
+          `单 ${issue} 已有目录：${paths.join('、')}。接着用那里的稿（没有就在里面起 ${config.file}），不新建。`,
+        ],
+      };
+    }
+    const version = codeVersion(root);
+    const text = fillTemplate(readTemplate(root, config), {
+      标题: title ?? short,
+      日期: date,
+      起因: `需求方 ${date} 提了：${ask}`,
+      代码版本: version.text,
+    });
+    const topicDir = posix.join(config.dir, `${issue}-${short}`);
+    const rel = posix.join(topicDir, config.file);
+    mkdirSync(join(root, topicDir));
+    writeFileSync(join(root, rel), text, 'utf8');
+    return {
+      code: 0,
+      lines: [
+        ...(version.warning ? [`注意：${version.warning}`] : []),
+        `起好了：${rel}（状态：讨论中）。先写头和第一节，查完补二、三；只拿第五节去问需求方。定了接着在这份里改状态（已定 → 在做 → 做完），方案就写在五、六、八节。`,
+      ],
+    };
+  }
   const existing = existsSync(join(root, config.dir))
     ? listDir(root, config).filter(
         (name) => isDate(name.slice(0, 10)) && name.slice(11) === `${short}${config.suffix}`,
@@ -374,7 +471,11 @@ export function checkDrafts({ root, today, files }) {
     files?.length
       ? files.map((f) => posix.normalize(f.replace(/\\/g, '/')))
       : existsSync(join(root, config.dir))
-        ? listDir(root, config).map((name) => posix.join(config.dir, name))
+        ? config.layout === 'topic'
+          ? listDir(root, config, 'dir')
+              .map((name) => posix.join(config.dir, name, config.file))
+              .filter((p) => existsSync(join(root, p))) // 多数主题目录没有讨论稿，不算缺
+          : listDir(root, config).map((name) => posix.join(config.dir, name))
         : []
   ).filter((p) => isDraftPath(p, config));
   const lines = [];
@@ -440,7 +541,8 @@ export function main(argv) {
       i++;
     } else positional.push(a);
   }
-  const allowed = cmd === 'new' ? ['ask', 'title', 'date', 'root'] : ['today', 'root'];
+  // --issue 认不认要看仓的布局（读了配置才知道），先放行，下面再核
+  const allowed = cmd === 'new' ? ['ask', 'title', 'date', 'issue', 'root'] : ['today', 'root'];
   const unknown = Object.keys(opts).filter((k) => !allowed.includes(k));
   if ((cmd !== 'new' && cmd !== 'check') || unknown.length) {
     console.error(`${unknown.length ? `不认识的参数：--${unknown.join('、--')}\n` : ''}${USAGE}`);
@@ -464,7 +566,31 @@ export function main(argv) {
         console.error(`--date 要是 YYYY-MM-DD，现在是「${date}」`);
         return 2;
       }
-      r = newDraft({ root, short, ask: opts.ask.trim(), title: opts.title?.trim() || undefined, date });
+      const topic = loadConfig(root).layout === 'topic';
+      if (!topic && opts.issue !== undefined) {
+        console.error(`不认识的参数：--issue（这个仓的稿按日期放，没配 layout: topic）\n${USAGE}`);
+        return 2;
+      }
+      if (topic) {
+        if (!opts.issue || !/^[A-Za-z0-9]+$/.test(opts.issue.trim())) {
+          console.error(
+            `这个仓的稿按主题放（layout: topic），起稿要 --issue <单号>（字母数字）：先开单，再用单号起稿\n${USAGE}`,
+          );
+          return 2;
+        }
+        if (/^\d+$/.test(short.split('-')[0] ?? '')) {
+          console.error(`短名「${short}」第一段不能是纯数字（会和目录名里的单号混在一起），换个带字母的开头`);
+          return 2;
+        }
+      }
+      r = newDraft({
+        root,
+        short,
+        ask: opts.ask.trim(),
+        title: opts.title?.trim() || undefined,
+        date,
+        issue: opts.issue?.trim(),
+      });
     } else {
       const today = opts.today ?? localToday();
       if (!isDate(today)) {
