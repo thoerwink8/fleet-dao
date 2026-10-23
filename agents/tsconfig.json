@@ -12,6 +12,7 @@
     "skills/commander/scripts/wait.mjs",
     "skills/discuss/scripts/tools.mjs",
     "skills/discuss/scripts/walkthrough.mjs",
+    "skills/discussion-draft/scripts/draft.mjs",
     "hooks/pretool.mjs",
     "hooks/ai-attribution.mjs",
     "hooks/repo-kind.mjs",

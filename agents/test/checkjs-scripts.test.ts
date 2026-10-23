@@ -19,6 +19,7 @@ const CHECKED = [
   'skills/commander/scripts/wait.mjs',
   'skills/discuss/scripts/tools.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
+  'skills/discussion-draft/scripts/draft.mjs',
   'hooks/pretool.mjs',
   'hooks/vendor-pretool.mjs',
   'hooks/pretool-codex.mjs',
