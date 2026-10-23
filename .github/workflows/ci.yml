@@ -245,15 +245,19 @@ jobs:
     # FLEET_TEST_PG_URL 只给 pg 台；放在 job 上是为了算缓存键的那一步也看得到（有没有真 Postgres 是键的一部分）。
     env:
       FLEET_TEST_PG_URL: ${{ matrix.pg && 'postgres://fleet_test:fleet_test@localhost:5432/fleet_test_admin' || '' }}
+      FLEET_CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+      FLEET_CI_SHARD: ${{ matrix.label }}
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.tests) }}
     steps:
       - uses: actions/checkout@v4
+        id: runtime-checkout
         with:
           persist-credentials: false
       - uses: pnpm/action-setup@v4
+        id: runtime-pnpm
       - uses: actions/setup-node@v4
         id: test-node
         with:
@@ -263,15 +267,19 @@ jobs:
       - name: 已测的环境 node=${{ steps.test-node.outputs.node-version }}
         run: ':'
       - run: pnpm install --frozen-lockfile
+        id: runtime-install
       - name: 起 runner PostgreSQL 16（独立测试 cluster，只 pg 台）
+        id: runtime-postgres-ready
         if: matrix.pg
         run: node packages/conventions/src/bin/ci-postgres.ts test
       # useEnv/createEnv 可落在任一台；与只供 createRealEnv 的 CLI 分开准备。
       - uses: actions/cache@v4
+        id: runtime-test-server-cache
         with:
           path: ~/.cache/fleet-temporal-test-server
           key: temporal-test-server-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/conventions/src/temporal-test-server.ts') }}
       - name: 准备时间跳跃服务（固定官方制品，缓存命中也核 SHA256）
+        id: runtime-test-server-ready
         run: pnpm test:temporal-server
       # Temporal 命令行用和法国同一版，版本和校验和从 deploy/france.sh 读（只有一份），缓存按版本 + 校验和。
       - name: Temporal 命令行的版本（和法国同版）
@@ -294,6 +302,7 @@ jobs:
           path: ~/.cache/fleet-temporal-cli/${{ steps.temporal.outputs.version }}
           key: temporal-cli-${{ runner.os }}-${{ steps.temporal.outputs.version }}-${{ steps.temporal.outputs.sha }}
       - name: 下载 Temporal 命令行（缓存没命中时；校验和对不上就红）
+        id: runtime-temporal-download
         if: matrix.temporal && steps.temporal-cache.outputs.cache-hit != 'true'
         env:
           VERSION: ${{ steps.temporal.outputs.version }}
@@ -308,6 +317,7 @@ jobs:
           echo "$SHA  $tgz" | sha256sum -c -
           tar -xzf "$tgz" -C "$dir" temporal
       - name: 核对版本，交给测试
+        id: runtime-temporal-ready
         if: matrix.temporal
         env:
           VERSION: ${{ steps.temporal.outputs.version }}
@@ -351,31 +361,23 @@ jobs:
         if: github.event_name == 'pull_request' && steps.cache-key.outputs.enabled == 'true'
         id: cache-plan
         run: node packages/conventions/src/bin/ci-cache.ts plan --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP"
-      # 交给 vitest 的是这一台分到的文件：缓存没开时全跑，files 只跑清单没盖住的，none 不跑；CACHE_MODE 认不出直接红。每一轮都出 JSON 报告。
-      - env:
+      # wrapper 仍只跑原来的 all/files；none 不启动 Vitest。原报告仅供 verify/record，不能上传。
+      - name: Vitest 与真实进程退出回执
+        id: runtime-vitest
+        env:
+          FLEET_CI_EVIDENCE_DIR: ${{ runner.temp }}/fleet-test-runtime
           BOX_FILE: ${{ steps.box.outputs.box_file }}
           CACHE_MODE: ${{ steps.cache-plan.outputs.mode }}
           RUN_FILES: ${{ steps.cache-plan.outputs.run_files }}
           REPORT: ${{ runner.temp }}/fleet-test-out/report.json
+          STATE: ${{ runner.temp }}/fleet-test-cache-state.json
         run: |
           set -euo pipefail
-          mapfile -t box <"$BOX_FILE"
-          report=(--reporter=default --reporter=github-actions --reporter=json --outputFile.json="$REPORT")
-          case "${CACHE_MODE:-}" in
-            "") pnpm exec vitest run "${box[@]}" "${report[@]}" ;;
-            all) pnpm exec vitest run "${box[@]}" "${report[@]}" ;;
-            files)
-              mapfile -t files <"$RUN_FILES"
-              pnpm exec vitest run "${files[@]}" "${report[@]}"
-              ;;
-            none) echo "测试缓存命中：这一台的输入没变、上一轮全绿，不跑 vitest" ;;
-            *)
-              echo "认不出的缓存模式「$CACHE_MODE」" >&2
-              exit 1
-              ;;
-          esac
+          pnpm exec node packages/conventions/src/bin/ci-runtime.ts run \
+            --reporter=default --reporter=github-actions --reporter=json --outputFile.json="$REPORT"
       # 跑完核对「实际跑的测试文件 == 分到的这一台」（命中缓存的：盖住的 + 跑的 == 分到的）：少跑、多跑都红并点名。
       - name: 核对这一台跑的 == 分到的
+        id: runtime-verify
         if: success()
         env:
           MATRIX: ${{ toJSON(matrix) }}
@@ -383,7 +385,32 @@ jobs:
           REPORT: ${{ runner.temp }}/fleet-test-out/report.json
           STATE: ${{ runner.temp }}/fleet-test-cache-state.json
         run: node packages/conventions/src/bin/ci-box.ts verify --box "$MATRIX" --mode "${CACHE_MODE:-}" --report "$REPORT" --state "$STATE"
-      # 4. 只在这一台全绿之后写清单（record 自己再核对一遍），再存缓存
+      # 准备阶段只记录具名 step outcome；reporter passed 不代表 CLI/job 成功。
+      - name: 核对脱敏运行证据
+        id: runtime-diagnose
+        if: always()
+        env:
+          FLEET_CI_EVIDENCE_DIR: ${{ runner.temp }}/fleet-test-runtime
+          FLEET_CI_ARTIFACT_DIR: ${{ runner.temp }}/fleet-test-diagnostics
+          STEP_CHECKOUT: ${{ steps.runtime-checkout.outcome }}
+          STEP_PNPM: ${{ steps.runtime-pnpm.outcome }}
+          STEP_NODE: ${{ steps.test-node.outcome }}
+          STEP_INSTALL: ${{ steps.runtime-install.outcome }}
+          STEP_POSTGRES_READY: ${{ steps.runtime-postgres-ready.outcome }}
+          STEP_TEST_SERVER_CACHE: ${{ steps.runtime-test-server-cache.outcome }}
+          STEP_TEST_SERVER_READY: ${{ steps.runtime-test-server-ready.outcome }}
+          STEP_TEMPORAL_VERSION: ${{ steps.temporal.outcome }}
+          STEP_TEMPORAL_CACHE: ${{ steps.temporal-cache.outcome }}
+          STEP_TEMPORAL_DOWNLOAD: ${{ steps.runtime-temporal-download.outcome }}
+          STEP_TEMPORAL_READY: ${{ steps.runtime-temporal-ready.outcome }}
+          STEP_BOX: ${{ steps.box.outcome }}
+          STEP_CACHE_KEY: ${{ steps.cache-key.outcome }}
+          STEP_CACHE_RESTORE: ${{ steps.cache-restore.outcome }}
+          STEP_CACHE_PLAN: ${{ steps.cache-plan.outcome }}
+          STEP_VITEST: ${{ steps.runtime-vitest.outcome }}
+          STEP_VERIFY: ${{ steps.runtime-verify.outcome }}
+        run: node packages/conventions/src/bin/ci-runtime.ts diagnose
+      # 4. 必需诊断也通过后才写/存清单，失败的证据不能在下一attempt通过none绕过。
       - name: 测试缓存：全绿，写清单
         if: success() && github.event_name == 'pull_request' && (steps.cache-plan.outputs.mode == 'all' || steps.cache-plan.outputs.mode == 'files')
         id: cache-record
@@ -394,6 +421,19 @@ jobs:
         with:
           path: ${{ runner.temp }}/fleet-test-cache
           key: ${{ steps.cache-key.outputs.cache_key }}
+
+      # runner 失联或 checkout 失败可能没有附件，不承诺上传必达。
+      - name: 保存脱敏运行证据（7天）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-runtime-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fleet-test-diagnostics/reporter.json
+            ${{ runner.temp }}/fleet-test-diagnostics/runner.json
+            ${{ runner.temp }}/fleet-test-diagnostics/diagnosis.json
+          if-no-files-found: error
+          retention-days: 7
 
   # 驾驶舱前端打包（发布时也是这一道）：打不出来就红。
   web:
