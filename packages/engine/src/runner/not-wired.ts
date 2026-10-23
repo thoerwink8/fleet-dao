@@ -36,6 +36,8 @@ const RunRecordFields = z.object({
   routeWhy: z.string().min(1).optional(),
   /** 跑在哪条 Temporal 工作流里（任务工作流是 taskWorkflowId(仓, 单号)）；不在工作流里跑的不给。 */
   workflowId: z.string().min(1).optional(),
+  /** 起跑活动的 Temporal execution；缺上下文保持未知，不补历史。 */
+  temporalRunId: z.string().min(1).optional(),
   /** 这一段对着的 PR；还没开 PR 的（动手第一轮）不给。 */
   prNumber: z.number().int().positive().optional(),
   /** 会话干活的分支。 */
@@ -124,6 +126,7 @@ export const RunStartSchema = RunRecordFields.pick({
   causeSummary: true,
   roundSeq: true,
   workflowId: true,
+  temporalRunId: true,
   prNumber: true,
   branch: true,
   worktreePath: true,
@@ -141,8 +144,12 @@ export interface RunsWriter {
    * 着名额、池又满了，抛 NoSlotError、一行不写。
    */
   start(run: RunStart, options?: { reservationId?: string }): Promise<void>;
-  /** 收场（或没开跑就收了，比如内存放不下）：整行记下；开跑时留过那一行的，补完同一行。 */
+  /** 收场（或没开跑就收了，比如内存放不下）：补完同一行；真实库保留首次 workflow/execution（含 NULL），明确冲突拒绝。 */
   record(run: RunRecord): Promise<void>;
+  /** attach 只认原行的首次来源；缺行返回 undefined。未接此读口不能接回会话。 */
+  readSource?(
+    runId: string,
+  ): Promise<{ workflowId: string | null; temporalRunId: string | null } | undefined>;
   /** 流里拿到真会话号时提前记回；占位实现可不做。 */
   observeSessionId?(runId: string, sessionId: string): Promise<void>;
   /** 冷验收有结论了（#3140）：写在验收那一笔上（runs.verdict）。占位实现可不做；真实现写不进抛。 */

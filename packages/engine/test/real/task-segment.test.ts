@@ -165,6 +165,10 @@ function rig(
       ...(opts.handoff ? { handoff: opts.handoff } : {}),
     },
     runs: {
+      // 接回夹具模拟已有旧 runs 行；真实缺行与来源保存由 runs-writer 真库回归覆盖。
+      async readSource() {
+        return { workflowId: null, temporalRunId: null };
+      },
       async start(r, options) {
         started.push(r);
         startedWith.push(options?.reservationId);
@@ -413,7 +417,11 @@ describe('备树', { timeout: 60_000 }, () => {
       },
     });
     const beats = { n: 0 };
-    const got = await r.run(r.input(), ctx(undefined, beats));
+    const got = await r.run(r.input(), {
+      ...ctx(undefined, beats),
+      workflowId: 'task:acme/demo#12',
+      temporalRunId: 'execution-manual',
+    });
     expect(got).toMatchObject({
       ok: true,
       runId: 'run-0002',
@@ -447,6 +455,7 @@ describe('备树', { timeout: 60_000 }, () => {
       issueNumber: 12,
       tier: 'medium',
       workflowId: 'task:acme/demo#12',
+      temporalRunId: 'execution-manual',
       branch: BRANCH,
     };
     expect(r.started).toEqual([expect.objectContaining({ ...owner, routeId: 'r1' })]);

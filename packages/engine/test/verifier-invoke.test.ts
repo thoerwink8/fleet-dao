@@ -557,6 +557,23 @@ describe('invokeVerifier：写过这张单的族不止一个、路由编号、�
 });
 
 describe('invokeVerifier：这一次验收记进 runs 挂得上单（#216）', () => {
+  it.each([false, true])('可信 execution 贯通单家/并行验收（parallel=%s，#3652）', async (parallel) => {
+    const { oneShot, started, recorded } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    const source = { workflowId: 'workflow-verify', temporalRunId: 'execution-verify' };
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, ...source, requireTwoFamilies: parallel },
+      DEPS(oneShot, async (family) => ({ modelId: `${family}-model` })),
+    );
+    expect(out.pass).toBe(true);
+    expect(started).toHaveLength(parallel ? 2 : 1);
+    expect(recorded).toHaveLength(started.length);
+    for (const row of [...started, ...recorded]) expect(row).toMatchObject(source);
+  });
   it('开跑那一行、收场那一笔都带 tasks.id、单号、工作流编号、PR 号、分支；验收是冷调用，不带派工档', async () => {
     const { oneShot, started, recorded } = fakeOneShot({
       exitCode: 0,

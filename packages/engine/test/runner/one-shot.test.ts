@@ -29,6 +29,26 @@ const OWNER = {
 };
 
 describe('one-shot.ts', () => {
+  it('attach 无来源读取能力明确拒绝，不调用驱动或记账（#3652）', async () => {
+    const { deps, calls, started, recorded, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: 'x', stderr: '', killed: false },
+    });
+    try {
+      await expect(
+        runOneShot(
+          {
+            ...BASE_INPUT,
+            runId: 'original-run',
+            detach: { attach: { startedAt: new Date().toISOString() } },
+          },
+          deps,
+        ),
+      ).rejects.toMatchObject({ code: 'BAD_RUN_INPUT' });
+      expect([calls.length, started.length, recorded.length]).toEqual([0, 0, 0]);
+    } finally {
+      await cleanup();
+    }
+  });
   it('happy path：起 → 拿 stdout → 记一笔 runs，落盘 stdout/stderr/result.json', async () => {
     const { deps, calls, recorded, tmpDir, cleanup } = await fakeDeps({
       scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },

@@ -108,6 +108,38 @@ async function invokeWithAuthors(authors: string[]) {
 }
 
 describe('runColdVerifyForPr：跑通一路', () => {
+  it.each([false, true])(
+    'execution 经 spec/invoke 贯通真实单家/并行 one-shot（parallel=%s，#3652）',
+    async (parallel) => {
+      const recorded: RunRecord[] = [];
+      const oneShot = fakeOneShot({ exitCode: 0, stdout: MODEL_PASS, stderr: '', killed: false });
+      oneShot.runs.record = async (row) => {
+        recorded.push(row);
+      };
+      const source = { workflowId: 'workflow-a', temporalRunId: 'execution-a' };
+      const rec = recorder();
+      const out = await runColdVerifyForPr(42, {
+        sources: sources({
+          spec: async () => ({
+            taskId: TASK_ID,
+            issueNumber: 12,
+            ...source,
+            what: '要 A',
+            howToFinish: ['代码里有 A'],
+          }),
+          authors: async () => (parallel ? ['cursor'] : ['gpt']),
+        }),
+        invoke: invokeVerifier,
+        oneShot,
+        chooseModelForFamily: async (family) => ({ modelId: `${family}-model` }),
+        cwd: 'C:/work/x',
+        writeStatus: rec.writeStatus,
+      });
+      expect(out.status.state).toBe('success');
+      expect(recorded).toHaveLength(parallel ? 2 : 1);
+      for (const row of recorded) expect(row).toMatchObject(source);
+    },
+  );
   it('三样都读得到、挑得出别家、模型说 pass → 贴上 success（贴在 PR 的头上）', async () => {
     const rec = recorder();
     const r = await runColdVerifyForPr(42, {

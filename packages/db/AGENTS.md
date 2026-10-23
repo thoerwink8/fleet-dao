@@ -25,6 +25,8 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 
 ## 常见坑
 
+- `startRun` 同编号更新原子保留首次 workflowId/temporalRunId（含 NULL、部分未知），明确的不同来源整行拒绝；不补历史。带池的 `admitRun` 复用此写口，来源冲突须回滚预占交接。真实两连接竞争在 `test/real-pg.test.ts` 的现有 PG 台验证。
+
 - `claimIdempotencyKey` 遇到成功INSERT冲突后成功SELECT为空，会完整重做占键/读回，最多四次；持续竞争抛可重试的 `IdempotencyClaimContentionError`，不冒充已占键。数据库异常直接抛出，不延长TTL、不持连接跨外部操作；更强隔离事务的序列化失败由调用方重试整个事务。
 
 - 改了 `src/schema` 没生成迁移：`packages/db/test/schema-drift.test.ts` 当场红。
