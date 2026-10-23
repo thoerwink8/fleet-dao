@@ -52,7 +52,7 @@ import type { ScheduleRunLog } from './github-reconcile.ts';
 import type { GroomSessionInput, GroomSessionOutcome } from './groom.ts';
 import { extractJson, renderNewIssueBody } from './groom-plan.ts';
 import type { IntakeRepo } from './intake.ts';
-import type { ParkedRetryRow, ParkedSnapshot } from './parked-retry.ts';
+import { failureDetail, type ParkedRetryRow, type ParkedSnapshot } from './parked-retry.ts';
 import { stamp } from './reconcile-common.ts';
 
 export const PARK_TRIAGE_EVERY_MINUTES = 10;
@@ -840,7 +840,7 @@ async function triageRepo(
         snap.phase === 'parked' &&
         (item.legacy ? snap.park === undefined : snap.park?.seq === item.park.seq);
     } catch (err) {
-      result.problems.push(`${ref} 执行前没问到工作流：${errMessage(err)}`);
+      result.problems.push(`${ref} 执行前没问到工作流：${failureDetail(err)}`);
       return;
     }
     if (!still) {
@@ -1496,7 +1496,7 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
         at: Number.isFinite(at) ? at : 0,
       });
     } catch (err) {
-      result.problems.push(`${ref} 没问到工作流：${errMessage(err)}`);
+      result.problems.push(`${ref} 没问到工作流：${failureDetail(err)}`);
     }
   }
   result.candidates = waiting.length;

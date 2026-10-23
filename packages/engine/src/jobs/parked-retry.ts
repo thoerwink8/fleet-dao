@@ -138,7 +138,7 @@ function refOf(row: ParkedRetryRow): string {
 }
 
 /** SDK 外层错误不含 RPC 原因（#3659）；有界保留 cause，不展开任意对象或循环。 */
-function failureDetail(error: unknown): string {
+export function failureDetail(error: unknown): string {
   const parts: string[] = [];
   const seen = new Set<unknown>();
   let current = error;

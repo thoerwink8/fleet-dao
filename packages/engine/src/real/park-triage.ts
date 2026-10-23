@@ -75,6 +75,8 @@ import { isWorkflowGone } from './route-wake.ts';
 /** 设置里的开关键（和驾驶舱 SETTING_SCHEMAS 同一个字符串）。 */
 export const COMMANDER_SETTING = 'engine.commander';
 
+// 状态查询可能触发冷回放（#3670）；信号期限独立，不能一起扩大。
+const QUERY_TIMEOUT_MS = 30_000;
 const SIGNAL_TIMEOUT_MS = 5_000;
 /** 重做前叫停停着的上一代：等它收尾终止最多多久。 */
 const ABANDON_WAIT_MS = 60_000;
@@ -95,10 +97,10 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
   };
   const runSession = readOnlySessionRunner({ ...w, log }, { stage: 'commander', word: '指挥官' });
-  const withDeadline = <T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>) =>
-    w.temporal.use((client) =>
-      client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () => fn(client)),
-    );
+  const withDeadline = <T>(
+    timeoutMs: number,
+    fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>,
+  ) => w.temporal.use((client) => client.connection.withDeadline(Date.now() + timeoutMs, () => fn(client)));
   const findRepo: ParkTriageDeps['findRepo'] = async (owner, name) => {
     const hit = (await listIntakeRepos(w.db)).find(
       (r) => r.owner.toLowerCase() === owner.toLowerCase() && r.name.toLowerCase() === name.toLowerCase(),
@@ -291,7 +293,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     id: string,
   ): Promise<'started' | 'already_exists'> => {
     try {
-      await withDeadline((c) =>
+      await withDeadline(SIGNAL_TIMEOUT_MS, (c) =>
         c.workflow.start(TASK_WORKFLOW_TYPE, {
           taskQueue: w.taskQueue,
           workflowId: id,
@@ -364,7 +366,9 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           list: async () => read.generations,
           posture: async (id) => {
             try {
-              const status = await withDeadline((c) => pinned(c, id, runIdFor(id)).query(taskStatusQuery));
+              const status = await withDeadline(QUERY_TIMEOUT_MS, (c) =>
+                pinned(c, id, runIdFor(id)).query(taskStatusQuery),
+              );
               return redoCanStop(status.phase) ? 'parked' : 'running';
             } catch (err) {
               return isWorkflowGone(err) ? 'parked' : 'running';
@@ -391,7 +395,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
               const failures: string[] = [];
               for (const g of read.generations.filter((x) => x.life === 'running')) {
                 try {
-                  await withDeadline((c) =>
+                  await withDeadline(SIGNAL_TIMEOUT_MS, (c) =>
                     pinned(c, g.workflowId, runIdFor(g.workflowId)).signal(taskAbandonSignal, {
                       by: COMMANDER_ACTOR,
                       reason: '指挥官判重做：先叫停停住的上一代',
@@ -511,7 +515,9 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           if (runId === null)
             return { ok: false, stage: 'waiting', why: `旧代 ${g.workflowId} 的 run 身份未核实，不补发叫停` };
           try {
-            const status = await withDeadline((c) => pinned(c, g.workflowId, runId).query(taskStatusQuery));
+            const status = await withDeadline(QUERY_TIMEOUT_MS, (c) =>
+              pinned(c, g.workflowId, runId).query(taskStatusQuery),
+            );
             if (status.phase === 'parked') parked.push(g);
             else if (status.phase !== 'abandoned')
               return {
@@ -550,7 +556,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           const failures: string[] = [];
           for (const g of parked) {
             try {
-              await withDeadline((c) =>
+              await withDeadline(SIGNAL_TIMEOUT_MS, (c) =>
                 pinned(c, g.workflowId, runIdOf(g) ?? '').signal(taskAbandonSignal, {
                   by: COMMANDER_ACTOR,
                   reason: '指挥官判重做：补发叫停停住的上一代',
@@ -695,7 +701,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     tasks: () => listStalledEngineTasks(w.db),
     async status(workflowId) {
       try {
-        const s = await withDeadline((client) =>
+        const s = await withDeadline(QUERY_TIMEOUT_MS, (client) =>
           client.workflow.getHandle(workflowId).query(taskStatusQuery),
         );
         return { phase: s.phase, prNumber: s.prNumber, park: s.park };
@@ -772,7 +778,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     runSession,
     async continueTask(workflowId, command) {
       try {
-        await withDeadline((client) =>
+        await withDeadline(SIGNAL_TIMEOUT_MS, (client) =>
           client.workflow.getHandle(workflowId).signal(taskContinueSignal, command),
         );
         return 'sent';
@@ -783,7 +789,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     },
     async abandonTask(workflowId, reason) {
       try {
-        await withDeadline((client) =>
+        await withDeadline(SIGNAL_TIMEOUT_MS, (client) =>
           client.workflow.getHandle(workflowId).signal(taskAbandonSignal, { by: COMMANDER_ACTOR, reason }),
         );
         return 'sent';

@@ -3,7 +3,8 @@
 // 真装配的开关、操作记录名下在 real/park-triage.test.ts。
 
 import { implementRoundsDone, offDiffHoldOf, totalRoundsHoldOf } from '@fleet-dao/conventions';
-import { describe, expect, it, vi } from 'vitest';
+import { WorkflowNotFoundError } from '@temporalio/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
 import { allowedActions, defaultAction } from '../src/decisions/park-triage.ts';
 import type { SpinRound } from '../src/decisions/spin.ts';
@@ -30,6 +31,7 @@ import {
 } from '../src/jobs/park-triage.ts';
 import type { ParkedRetryRow, ParkedSnapshot } from '../src/jobs/parked-retry.ts';
 import { stamp } from '../src/jobs/reconcile-common.ts';
+import { parkTriageJob } from '../src/real/park-triage.ts';
 import {
   type ContinueCommand,
   MAX_TOTAL_ROUNDS,
@@ -1319,5 +1321,151 @@ describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
     const next = rig({ audits: r.audits, over: GONE });
     await triageParkedTasks(next.deps);
     expect(next.resumed).toEqual([{ phase: 'stop-requested', canStart: true }]);
+  });
+});
+
+// #3670：假连接负责按期限取消 RPC，不能让已失败的 promise 脱离作业继续跑。
+function deadlineRig(queryAfter: number | null, signalAfter: number | null = 0, failure?: Error) {
+  const calls: string[] = [];
+  const deadlines: number[] = [];
+  let cancel: ((error: Error) => void) | undefined;
+  function rpc<T>(kind: string, afterMs: number | null, value: T): Promise<T> {
+    calls.push(kind);
+    return new Promise((resolve, reject) => {
+      const timer =
+        afterMs === null
+          ? undefined
+          : setTimeout(() => {
+              if (failure) reject(failure);
+              else resolve(value);
+            }, afterMs);
+      cancel = (error) => {
+        clearTimeout(timer);
+        reject(error);
+      };
+    });
+  }
+  const client = {
+    connection: {
+      async withDeadline<T>(deadline: number | Date, fn: () => Promise<T>): Promise<T> {
+        const ms = Number(deadline) - Date.now();
+        deadlines.push(ms);
+        const timer = setTimeout(
+          () =>
+            cancel?.(
+              new Error('Failed to query Workflow', {
+                cause: new Error('4 DEADLINE_EXCEEDED'),
+              }),
+            ),
+          ms,
+        );
+        try {
+          return await fn();
+        } finally {
+          clearTimeout(timer);
+          cancel = undefined;
+        }
+      },
+    },
+    workflow: {
+      getHandle: () => ({
+        query: () => rpc('query', queryAfter, { phase: 'ci', prNumber: 7 }),
+        signal: () => rpc('signal', signalAfter, undefined),
+      }),
+    },
+  };
+  const deps = parkTriageJob({
+    db: {} as never,
+    gh: {} as never,
+    trees: {} as never,
+    exec: {} as never,
+    tmpDir: '/unused',
+    spawner: {} as never,
+    pickRoute: {} as never,
+    sessions: {} as never,
+    temporal: { use: async (fn) => fn(client as never) },
+    taskQueue: 'fleet',
+  })();
+  return { deps, calls, deadlines };
+}
+
+describe('parkTriageJob：状态查询与信号使用各自的期限', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('#3670：超过旧5秒期限的状态查询仍能读成，不启动会话或发送信号', async () => {
+    vi.useFakeTimers();
+    const transport = deadlineRig(6324);
+    const f = rig({ over: { status: transport.deps.status } });
+    const result = runParkTriageJob(f.deps);
+    await vi.advanceTimersByTimeAsync(6324);
+    expect(await result).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
+    expect(f.sessions).toEqual([]);
+    expect(f.acts).toEqual([]);
+    expect(transport.calls).toEqual(['query']);
+    expect(transport.deadlines).toEqual([30_000]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('永久查询在30秒取消，作业保持partial并保留cause，不执行任务', async () => {
+    vi.useFakeTimers();
+    const transport = deadlineRig(null);
+    const f = rig({ over: { status: transport.deps.status } });
+    let finished = false;
+    const result = runParkTriageJob(f.deps).then((value) => {
+      finished = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toMatchObject({
+      outcome: 'partial',
+      why: expect.stringContaining('4 DEADLINE_EXCEEDED'),
+    });
+    expect(f.sessions).toEqual([]);
+    expect(f.acts).toEqual([]);
+    expect(transport.calls).toEqual(['query']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['continue', 'abandon'] as const)('%s信号仍在5秒取消', async (action) => {
+    vi.useFakeTimers();
+    const transport = deadlineRig(0, null);
+    const result =
+      action === 'continue'
+        ? transport.deps.continueTask(WF, { by: COMMANDER_ACTOR, note: '测试', parkSeq: 2 })
+        : transport.deps.abandonTask(WF, '测试');
+    const rejected = expect(result).rejects.toThrow('Failed to query Workflow');
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(transport.deadlines).toEqual([5_000]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('真正WorkflowNotFoundError仍为gone，普通RPC的NOT_FOUND cause保持partial', async () => {
+    vi.useFakeTimers();
+    const gone = deadlineRig(0, 0, new WorkflowNotFoundError('not found', WF, undefined));
+    const status = gone.deps.status(WF);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await status).toBe('gone');
+    const transport = deadlineRig(
+      0,
+      0,
+      new Error('Failed to query Workflow', {
+        cause: Object.assign(new Error('query task not found, or already expired'), { code: 'NOT_FOUND' }),
+      }),
+    );
+    const f = rig({ over: { status: transport.deps.status } });
+    const result = runParkTriageJob(f.deps);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await result).toMatchObject({
+      outcome: 'partial',
+      why: expect.stringContaining('already expired'),
+    });
+    expect(f.sessions).toEqual([]);
+    expect(f.acts).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
