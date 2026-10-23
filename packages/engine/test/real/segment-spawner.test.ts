@@ -46,7 +46,7 @@ import {
   writeMirasimHandle,
 } from '../../src/real/session-handoff.ts';
 import type { WorkTrees } from '../../src/real/worktrees.ts';
-import type { RunRecord } from '../../src/runner/not-wired.ts';
+import type { RunRecord, RunStart, RunsWriter } from '../../src/runner/not-wired.ts';
 import { OneShotDetached, OneShotError, type OneShotInput, runOneShot } from '../../src/runner/one-shot.ts';
 
 const USER = 'fleet-agent-carpool' as SessionUser;
@@ -102,6 +102,7 @@ interface Harness {
   recorded: RunRecord[];
   logs: string[];
   spawn: ReturnType<typeof hostSegmentSpawner>;
+  runs: RunsWriter;
   run: (
     input?: { [K in keyof OneShotInput]?: OneShotInput[K] | undefined },
     timeoutMinutes?: number,
@@ -109,8 +110,11 @@ interface Harness {
 }
 
 let tmp: string;
+// 模拟同一库里的原会话行：同一测试的重启 harness 能读取，其他测试不能借用。
+let runSources: Map<string, { workflowId: string | null; temporalRunId: string | null }>;
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), 'fleet-segment-spawner-'));
+  runSources = new Map();
 });
 afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
@@ -198,6 +202,27 @@ function harness(
     ...(opts.observeSessionId ? { runs: { observeSessionId: opts.observeSessionId } } : {}),
     log: (message, fields) => void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   });
+  const rememberSource = (row: RunStart) => {
+    if (!runSources.has(row.runId)) {
+      runSources.set(row.runId, {
+        workflowId: row.workflowId ?? null,
+        temporalRunId: row.temporalRunId ?? null,
+      });
+    }
+  };
+  const runs: RunsWriter = {
+    async readSource(runId) {
+      return runSources.get(runId);
+    },
+    async start(row) {
+      order.push('start');
+      rememberSource(row);
+    },
+    async record(row) {
+      recorded.push(row);
+      rememberSource(row);
+    },
+  };
   const run: Harness['run'] = (input = {}, timeoutMinutes = 60) =>
     runOneShot(
       merge<OneShotInput>(
@@ -214,18 +239,21 @@ function harness(
       ),
       {
         spawn,
-        runs: {
-          async start() {
-            order.push('start');
-          },
-          async record(r) {
-            recorded.push(r);
-          },
-        },
+        runs,
         tmpDir: tmp,
       },
     );
-  return { calls, adopted, removed, removedIdentities, order, recorded, logs, spawn, run };
+  return { calls, adopted, removed, removedIdentities, order, recorded, logs, spawn, runs, run };
+}
+
+/** 单独构造接回现场时，先经上一 harness 的 start 留精确原行，不把任意 runId 当存在。 */
+async function startPreviousRun(startedAt: string) {
+  await harness().runs.start({
+    runId: RUN_ID,
+    segment: 'manual',
+    model: 'claude-opus-5-5',
+    startedAt,
+  });
 }
 
 describe('hostSegmentSpawner · 会话号与花费', () => {
@@ -1344,6 +1372,7 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
         });
       const h = harness({ handoff, route: mirasimRoute(), driverRun: stopped });
       const startedAt = new Date(Date.now() - 61 * 60_000).toISOString();
+      await startPreviousRun(startedAt);
       const got = await h.run({ detach: { attach: { startedAt } } }, 60);
       expect(got.outcome).toBe('timeout');
       expect(h.calls[0]?.hooks.signal?.aborted).toBe(true);
@@ -1404,6 +1433,7 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
       writeFileSync(join(dir, DETACHED_MARK), 'x');
       const h = harness({ handoff, route: mirasimRoute() });
       const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+      await startPreviousRun(startedAt);
       const got = await h.run({ detach: { attach: { startedAt } } });
       expect(got).toMatchObject({ outcome: 'done', startedAt });
       expect(h.calls[0]?.hooks.io).toMatchObject({ dir, attach: true });
@@ -1436,6 +1466,7 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
     writeFileSync(join(dir, DETACHED_MARK), 'x');
     const h = harness({ handoff });
     const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    await startPreviousRun(startedAt);
     const got = await h.run({ detach: { attach: { startedAt } } });
     expect(got).toMatchObject({ outcome: 'done', startedAt });
     expect(h.calls[0]?.hooks.io).toMatchObject({ dir, attach: true });
@@ -1449,12 +1480,14 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
     const handoff = sessionHandoff(join(tmp, 'io'));
     const h = harness({ handoff, driverRun: untilReleasedOrStopped });
     const startedAt = new Date(Date.now() - 61 * 60_000).toISOString();
+    await startPreviousRun(startedAt);
     const got = await h.run({ detach: { attach: { startedAt } } }, 60);
     expect(got.outcome).toBe('timeout');
   });
 
   it('【故意造出的失败】要接回、可这个引擎没装收发目录：明确报起不来，不当成起了新会话', async () => {
     const h = harness();
+    await startPreviousRun(new Date().toISOString());
     await expect(h.run({ detach: { attach: { startedAt: new Date().toISOString() } } })).rejects.toThrow(
       /接回会话 .* 没接成：这个引擎没装收发目录/,
     );
@@ -1621,6 +1654,7 @@ describe('hostSegmentSpawner · scope 内存事件见证（#3448）', () => {
   it('接回：窗口写 attach，完整性不会是 complete', async () => {
     const handoff = sessionHandoff(join(tmp, 'io'));
     const startedAt = new Date().toISOString();
+    await startPreviousRun(startedAt);
     const h = harness({
       handoff,
       scopeOom: FAKE_OOM(async (path) => {
