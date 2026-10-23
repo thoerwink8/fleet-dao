@@ -17,6 +17,7 @@ import {
   parseNpmRegistry,
   parseReclaudeStable,
   parseVersion,
+  reclaudeOlderTags,
   resolveCursorRelease,
 } from '../src/cli-versions.ts';
 import { CliToolsResponseSchema } from '../src/web-api/cli-versions.ts';
@@ -53,6 +54,27 @@ describe('reclaude 只读安装摘要与官方 artifact', () => {
     expect(matchReclaudeArtifact(JSON.stringify(installed), JSON.stringify(manifest))).toHaveProperty(
       'error',
     );
+  });
+  it('落后一版：对上官方旧版清单就认旧版本；对不上仍带 mismatch 报摘要不符', () => {
+    const newer = { version: 'v1.5.1', binaries: { 'linux-amd64': { sha256: '4'.repeat(64) } } };
+    expect(matchReclaudeArtifact(JSON.stringify(probe), JSON.stringify(newer))).toEqual({
+      error: '来源不明：reclaude 在用二进制与官方 linux-amd64 artifact 摘要不符',
+      mismatch: true,
+    });
+    expect(
+      matchReclaudeArtifact(JSON.stringify(probe), JSON.stringify(newer), ['<html>', JSON.stringify(stable)]),
+    ).toEqual({ version: '1.5.0' });
+    expect(
+      matchReclaudeArtifact(JSON.stringify(probe), JSON.stringify(newer), [
+        JSON.stringify({ ...stable, binaries: { 'linux-amd64': { sha256: '5'.repeat(64) } } }),
+      ]),
+    ).toHaveProperty('mismatch', true);
+  });
+  it('往回数的旧版标签只在同一小版本内', () => {
+    expect(reclaudeOlderTags('1.5.3')).toEqual(['v1.5.2', 'v1.5.1', 'v1.5.0']);
+    expect(reclaudeOlderTags('v1.5.9', 2)).toEqual(['v1.5.8', 'v1.5.7']);
+    expect(reclaudeOlderTags('1.5.0')).toEqual([]);
+    expect(reclaudeOlderTags('garbled')).toEqual([]);
   });
   it('旧帮手 Claude 输出或损坏清单都明确失败', () => {
     expect(matchReclaudeArtifact('2.1.308 (Claude Code)', JSON.stringify(stable))).toHaveProperty('error');
