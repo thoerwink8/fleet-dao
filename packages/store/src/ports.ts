@@ -396,8 +396,15 @@ export function judgeMergedCorrection(
     return conflict('任务有别的工作流（换代）的 run，不是同一代');
   if (runs.some((r) => r.temporalRunId !== undefined && r.temporalRunId !== input.temporalRunId))
     return conflict('任务有别的 Temporal run，请求的 run 不是它的原 run');
-  if (runs.some((r) => r.workflowId === undefined || r.temporalRunId === undefined))
-    return conflict('任务有 run 没记工作流编号或 Temporal run，绑定不上请求的 run');
+  // 逐条点名没绑定的 run 和缺的列：只读预检据此看出是哪几条、缺什么，不去猜它们属于哪一代
+  const unbound = runs.filter((r) => r.workflowId === undefined || r.temporalRunId === undefined);
+  if (unbound.length > 0) {
+    const lacks = (r: MergedCorrectionRunFact) =>
+      `${r.id}（缺${[r.workflowId === undefined ? '工作流编号' : '', r.temporalRunId === undefined ? 'Temporal run' : ''].filter(Boolean).join('、')}）`;
+    return conflict(
+      `任务有 ${unbound.length} 条 run 没记工作流编号或 Temporal run，绑定不上请求的 run：${unbound.map(lacks).join('、')}`,
+    );
+  }
   return { result: 'ok' };
 }
 
