@@ -91,6 +91,19 @@ describe.skipIf(!linux)('检查子进程收组', () => {
     // 要比记账间隔长，退出前看守来得及看见已经 setsid 的孙进程。短于这一截的脱离进程不在这条回归里。
     const dwell = DESCENDANT_TRACK_MS * 6;
     writeFileSync(join(dir, 'sleep.mjs'), 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n');
+    writeFileSync(join(dir, 'busy.mjs'), 'for (;;) {}\n');
+    writeFileSync(
+      join(dir, 'identity-parent.mjs'),
+      `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const child = spawn(process.execPath, [process.argv[3]], { stdio: 'ignore', detached: true });
+process.on('SIGTERM', () => child.kill('SIGKILL'));
+child.on('spawn', () => writeFileSync(process.argv[2], String(child.pid)));
+// 保留自有父进程回收孩子，失败清理也不用碰过继后的系统进程。
+child.on('exit', () => { process.exitCode = 0; });
+`,
+    );
     writeFileSync(
       join(dir, 'partial.mjs'),
       `
@@ -383,21 +396,48 @@ setInterval(() => {}, 1000);
     expect(() => reapIfSameStart(0, '1')).not.toThrow();
   });
 
-  it('记下的启动时刻对不上就不收，对得上才收', () => {
+  it.each([
+    { script: 'sleep.mjs', state: 'S' },
+    { script: 'busy.mjs', state: 'R' },
+  ])('记下的启动时刻对不上就不收，对得上才收（$script）', async ({ script, state }) => {
     scripts();
     const pidFile = join(dir, 'lead.pid');
-    const sleeper = join(dir, 'sleep.mjs');
-    // 短命父进程退出后，脱离的命令过继走。测试进程不是它的父进程，收掉之后 /proc 会消失，而不是停在僵尸。
-    expect(runChild(process.execPath, [join(dir, 'lead.mjs'), pidFile, sleeper]).status).toBe(0);
-    const pid = remember(pidFile);
-    expect(waitUntil(() => procState(pid) === 'S', 2000)).toBe(true);
-    const start = procStartTicks(pid);
-    expect(start).toMatch(/^\d+$/);
-    reapIfSameStart(pid, undefined);
-    reapIfSameStart(pid, '0');
-    expect(procState(pid)).toBe('S');
-    reapIfSameStart(pid, start);
-    expect(waitUntil(() => procState(pid) === undefined, 3000)).toBe(true);
+    const childScript = join(dir, script);
+    const launcher = spawn(process.execPath, [join(dir, 'identity-parent.mjs'), pidFile, childScript], {
+      stdio: 'ignore',
+    });
+    const exited = new Promise<number | null>((resolve, reject) => {
+      launcher.once('error', reject);
+      launcher.once('close', resolve);
+    });
+    let pid = 0;
+    try {
+      expect(
+        waitUntil(() => {
+          try {
+            pid = Number(readFileSync(pidFile, 'utf8'));
+            return pid > 1;
+          } catch {
+            return false;
+          }
+        }, 2000),
+      ).toBe(true);
+      expect(waitUntil(() => procState(pid) === state, 2000)).toBe(true);
+      const start = procStartTicks(pid);
+      expect(start).toMatch(/^\d+$/);
+      for (const wrongStart of [undefined, '0']) {
+        reapIfSameStart(pid, wrongStart);
+        // 调度态会切换；错误身份后仍须是同一次启动、存活且非僵尸。
+        expect(procStartTicks(pid)).toBe(start);
+        expect(() => process.kill(pid, 0)).not.toThrow();
+        expect(procState(pid)).toMatch(/^[SRD]$/);
+      }
+      reapIfSameStart(pid, start);
+      expect(waitUntil(() => procState(pid) === undefined, 3000)).toBe(true);
+    } finally {
+      launcher.kill('SIGTERM');
+      expect(await exited).toBe(0);
+    }
   });
 
   it('脱离进程组的孙进程：只杀命令那一组留着它；旧的同步执行留着；正常退出时检查入口收掉', () => {
