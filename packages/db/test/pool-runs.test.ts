@@ -383,6 +383,25 @@ describe('三段的一段选定路由、还没开跑时预占着的名额（pool
   });
   const rows = () => t.db.select().from(poolReservations);
 
+  it('execution 来源冲突使 admitRun 预占交接整笔回滚（#3652）', async () => {
+    const [taskId] = await tasksOf(1);
+    if (!taskId) throw new Error('夹具缺 task');
+    const reservationId = await reserved(req(taskId, 'a-opus'));
+    const run = {
+      ...row(randomUUID(), 'a-opus', { taskId }),
+      workflowId: 'workflow-a',
+      temporalRunId: 'execution-a',
+    };
+    await startRun(t.db, run);
+    const before = await getRun(t.db, run.id);
+    const reservationsBefore = await rows();
+    await expect(admitRun(t.db, { ...run, temporalRunId: 'execution-b' }, { reservationId })).rejects.toThrow(
+      /来源冲突/,
+    );
+    expect(await getRun(t.db, run.id)).toEqual(before);
+    expect(await rows()).toEqual(reservationsBefore);
+  });
+
   it('openPoolRuns、poolOccupancy 数得到预占着的名额（算一次性会话、还没开工）；过了 expires_at 的不算', async () => {
     const [a, b] = await three();
     const id = await reserved(req(a, 'a-opus', { reservedAt: ago(2 * MIN) }));

@@ -62,6 +62,7 @@ export interface ColdVerifySpec {
   issueNumber: number;
   /** 这张单的任务工作流编号（taskWorkflowId）；不在任务工作流里验的不给。 */
   workflowId?: string;
+  temporalRunId?: string;
   what: string;
   howToFinish: string[];
   specDir?: string;
@@ -235,6 +236,7 @@ export async function runColdVerifyForPr(
     taskId: spec.taskId,
     issueNumber: spec.issueNumber,
     ...(spec.workflowId !== undefined ? { workflowId: spec.workflowId } : {}),
+    ...(spec.temporalRunId !== undefined ? { temporalRunId: spec.temporalRunId } : {}),
     what: spec.what,
     howToFinish: spec.howToFinish,
     modelFamiliesAvoid: avoid,

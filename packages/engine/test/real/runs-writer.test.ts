@@ -19,6 +19,7 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { RunInputError, realRuns } from '../../src/real/runs-writer.ts';
+import { RunRecordSchema, RunStartSchema } from '../../src/runner/not-wired.ts';
 import {
   OneShotError,
   type OneShotInput,
@@ -60,6 +61,137 @@ function spawnPeeking(opening: (RunRow | null)[]): OneShotSpawner {
     };
   };
 }
+
+describe('execution 来源贯通与 attach（#3652）', { timeout: 60_000 }, () => {
+  const source = { workflowId: 'workflow-a', temporalRunId: 'execution-a' };
+  it('schema 保留真实 execution，one-shot 开跑与收场都入库；本机无 context 保持 NULL', async () => {
+    const opening: (RunRow | null)[] = [];
+    const input = { segment: 'manual' as const, modelId: 'opus-5.5', prompt: 'x', cwd: root, ...source };
+    const writer = realRuns({ db: t.db });
+    const result = await runOneShot(input, { runs: writer, spawn: spawnPeeking(opening), tmpDir: root });
+    expect(opening[0]).toMatchObject(source);
+    expect(await getRun(t.db, result.runId)).toMatchObject(source);
+    const start = {
+      runId: result.runId,
+      segment: 'manual',
+      model: 'opus-5.5',
+      startedAt: result.startedAt,
+      ...source,
+    };
+    expect(RunStartSchema.parse(start)).toMatchObject(source);
+    expect(
+      RunRecordSchema.parse({ ...start, endedAt: result.endedAt, outcome: 'done', routeOutcome: 'ok' }),
+    ).toMatchObject(source);
+    const local = await runOneShot(
+      { segment: 'manual', modelId: 'opus-5.5', prompt: 'local', cwd: root },
+      { runs: writer, spawn: spawnPeeking([]), tmpDir: root },
+    );
+    expect(await getRun(t.db, local.runId)).toMatchObject({ workflowId: null, temporalRunId: null });
+  });
+
+  it.each([source, {}, { workflowId: 'workflow-a' }])(
+    'attach 保留原 pair，不能借当前 execution 补未知来源：%j',
+    async (original) => {
+      const runId = '11111111-2222-4333-8444-555555555555';
+      const startedAt = new Date().toISOString();
+      await startRun(t.db, {
+        id: runId,
+        segment: 'manual',
+        model: 'opus-5.5',
+        startedAt: new Date(startedAt),
+        ...original,
+      });
+      const opening: (RunRow | null)[] = [];
+      await runOneShot(
+        {
+          runId,
+          segment: 'manual',
+          modelId: 'opus-5.5',
+          prompt: '',
+          cwd: root,
+          workflowId: 'workflow-b',
+          temporalRunId: 'execution-b',
+          detach: { attach: { startedAt } },
+        },
+        { runs: realRuns({ db: t.db }), spawn: spawnPeeking(opening), tmpDir: root },
+      );
+      expect(opening[0]).toMatchObject({
+        workflowId: original.workflowId ?? null,
+        temporalRunId: 'temporalRunId' in original ? original.temporalRunId : null,
+      });
+      expect(await getRun(t.db, runId)).toMatchObject({
+        workflowId: original.workflowId ?? null,
+        temporalRunId: 'temporalRunId' in original ? original.temporalRunId : null,
+        outcome: 'done',
+      });
+    },
+  );
+
+  it('缺原行 attach 在驱动/anchor/record 前拒绝，不造无源锚点', async () => {
+    const runId = '11111111-2222-4333-8444-555555555555';
+    let spawned = 0;
+    const writer = realRuns({ db: t.db });
+    let recorded = 0;
+    const record = writer.record;
+    writer.record = async (row) => {
+      recorded += 1;
+      await record(row);
+    };
+    await expect(
+      runOneShot(
+        {
+          runId,
+          segment: 'manual',
+          modelId: 'opus-5.5',
+          prompt: '',
+          cwd: root,
+          ...source,
+          detach: { attach: { startedAt: new Date().toISOString() } },
+        },
+        {
+          runs: writer,
+          spawn: async () => {
+            spawned += 1;
+            throw new Error('不该进入 transcript anchor 路径');
+          },
+          tmpDir: root,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'BAD_RUN_INPUT' });
+    expect([spawned, recorded]).toEqual([0, 0]);
+    expect(await getRun(t.db, runId)).toBeNull();
+  });
+
+  it('同 runId 在另一 execution 重试明确失败，不再起模型，原行不变', async () => {
+    const runId = '11111111-2222-4333-8444-555555555555';
+    await startRun(t.db, { id: runId, segment: 'manual', model: 'opus-5.5', ...source });
+    const before = await getRun(t.db, runId);
+    let spawned = 0;
+    const failure = await runOneShot(
+      {
+        runId,
+        segment: 'manual',
+        modelId: 'opus-5.5',
+        prompt: 'retry',
+        cwd: root,
+        ...source,
+        temporalRunId: 'execution-b',
+      },
+      {
+        runs: realRuns({ db: t.db }),
+        spawn: async () => {
+          spawned += 1;
+          throw new Error('不应重起');
+        },
+        tmpDir: root,
+      },
+    ).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: 'RUN_START_FAILED' });
+    expect((failure as Error).message).toContain('来源冲突');
+    expect(spawned).toBe(0);
+    expect(await getRun(t.db, runId)).toEqual(before);
+  });
+});
 
 describe('三段各一笔记进 runs：记到这张单名下（#216）', { timeout: 60_000 }, () => {
   it('对题、动手、验收各跑一次：task_id、单号、工作流编号、PR、分支落进列，派工档只有动手有；开跑那一行就带齐，收场不冲掉', async () => {

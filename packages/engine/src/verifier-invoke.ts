@@ -80,6 +80,7 @@ export const VerifierInvokeInputSchema = z
     issueNumber: z.number().int().positive(),
     /** 这张单的任务工作流编号（taskWorkflowId），一起记进 runs；不在任务工作流里验的不给。 */
     workflowId: z.string().min(1).optional(),
+    temporalRunId: z.string().min(1).optional(),
     /** 「要什么」原文（需求文档里的「## 场景 / 需求」段；冷调用模型要照它核）。 */
     what: z.string().min(1),
     /** 「怎么算做完」逐条原文。 */
@@ -1295,6 +1296,7 @@ async function invokeVerifierInner(
         taskId: parsed.taskId,
         issueNumber: parsed.issueNumber,
         ...(parsed.workflowId !== undefined ? { workflowId: parsed.workflowId } : {}),
+        ...(parsed.temporalRunId !== undefined ? { temporalRunId: parsed.temporalRunId } : {}),
         ...(parsed.roundSeq !== undefined ? { roundSeq: parsed.roundSeq } : {}),
         prNumber: parsed.prNumber,
         branch: parsed.branch,

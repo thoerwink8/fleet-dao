@@ -749,6 +749,9 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               taskId: input.taskId,
               issueNumber: input.issueNumber,
               workflowId: ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
+              ...(ctx.workflowId !== undefined && ctx.temporalRunId !== undefined
+                ? { temporalRunId: ctx.temporalRunId }
+                : {}),
               what: input.what,
               howToFinish: input.howToFinish,
               ...(input.testOutput === undefined ? {} : { testOutput: input.testOutput }),

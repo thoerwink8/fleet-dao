@@ -130,6 +130,7 @@ function activityDeadlines(info: Context['info']): {
 
 function portContext(ctx: Context, activity?: string): PortContext {
   const workflowId = ctx.info.workflowExecution?.workflowId;
+  const temporalRunId = ctx.info.workflowExecution?.runId;
   return {
     signal: ctx.cancellationSignal,
     heartbeat: (details?: unknown) =>
@@ -141,6 +142,7 @@ function portContext(ctx: Context, activity?: string): PortContext {
     attempt: ctx.info.attempt,
     lastHeartbeat: ctx.info.heartbeatDetails,
     ...(workflowId !== undefined ? { workflowId } : {}),
+    ...(workflowId !== undefined && temporalRunId !== undefined ? { temporalRunId } : {}),
     ...activityDeadlines(ctx.info),
   };
 }

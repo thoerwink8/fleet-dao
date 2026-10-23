@@ -15,6 +15,7 @@ import { listRunningEngineTasks } from '../src/queries/idle-running.ts';
 import {
   annotateSessionlessRuns,
   closeOpenRuns,
+  finishRun,
   getRun,
   latestRunOfTask,
   observeRunSessionId,
@@ -41,6 +42,46 @@ beforeEach(async () => {
 
 /** 还没收场的行（ended_at 为空）。 */
 const openRuns = () => t.db.select().from(runs).where(isNull(runs.endedAt));
+
+describe('runs 首次 execution 来源（#3652）', () => {
+  it.each([
+    { workflowId: 'workflow-a', temporalRunId: 'execution-a' },
+    { workflowId: 'workflow-a' },
+    { temporalRunId: 'execution-a' },
+    {},
+  ])('首次 pair 含 NULL 原样保留，旧 caller 或后来来源不能补绑：%j', async (source) => {
+    const row = { id: randomUUID(), segment: 'manual' as const, model: 'opus-5.5', startedAt: ago(MIN) };
+    await startRun(t.db, { ...row, ...source });
+    expect(await finishRun(t.db, { runId: row.id, outcome: 'done', endedAt: NOW })).toBe('finished');
+    await startRun(t.db, { ...row, endedAt: NOW, outcome: 'done' });
+    await startRun(t.db, { ...row, workflowId: 'workflow-a', temporalRunId: 'execution-a' });
+    expect(await getRun(t.db, row.id)).toMatchObject({
+      workflowId: source.workflowId ?? null,
+      temporalRunId: source.temporalRunId ?? null,
+      outcome: 'done',
+    });
+  });
+
+  it.each([
+    { workflowId: 'workflow-a', temporalRunId: 'execution-b' },
+    { workflowId: 'workflow-b', temporalRunId: 'execution-a' },
+  ])('明确不同的 execution/workflow 拒绝且整行不变：%j', async (conflict) => {
+    const row = {
+      id: randomUUID(),
+      segment: 'manual' as const,
+      model: 'opus-5.5',
+      startedAt: ago(MIN),
+      workflowId: 'workflow-a',
+      temporalRunId: 'execution-a',
+    };
+    await startRun(t.db, row);
+    const before = await getRun(t.db, row.id);
+    await expect(startRun(t.db, { ...row, ...conflict, endedAt: NOW, outcome: 'done' })).rejects.toThrow(
+      /来源冲突/,
+    );
+    expect(await getRun(t.db, row.id)).toEqual(before);
+  });
+});
 
 describe('runs 表本身的约束', () => {
   async function insertRun(over: Partial<typeof runs.$inferInsert>) {

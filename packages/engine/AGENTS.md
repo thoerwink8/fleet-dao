@@ -71,6 +71,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 ## 测试
 
+- runs 首次来源只从活动 SDK 的 workflowExecution 取 workflowId/runId，经 PortContext 传到 one-shot；缺上下文不造 temporalRunId。DB 保留首次 pair（含 NULL），明确冲突拒绝；attach 先经 RunsWriter.readSource 核原行并沿用原 pair，缺行/缺读口不起驱动、不补锚点。
+
 - `npx vitest run packages/engine/test/<文件>`；不要 Postgres（用库的跑在 PGlite）。时间跳跃先 `pnpm test:temporal-server` 显式准备，经 `test/support.ts` 的 `createEnv()`；真 Temporal 服务用 `pnpm temporal:install` 或 `pnpm test:temporal --cli <路径>`，版本须一致，不在业务测试内隐式下载。
 - 重放：`test/replay.test.ts` 拿 `test/replay/fixtures/task-*.json` 对现在的代码重放。`test/replay/worker-replacement-3413/` 是保留的原字节，不许重录覆盖。
 - `admission-alert-*` 测试必须用真实 Linux 普通用户（Windows 经 `local-vitest.ts` 转交）；`legacy-admission.real-pg.test.ts` 等 real-pg 在真实 PG 台跑，缺配置的 CI 明确报错。

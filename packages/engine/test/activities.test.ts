@@ -159,6 +159,33 @@ describe.each(['createWorktree', 'coldVerify'] as const)('%s 的取消传播', (
 });
 
 describe('活动外壳', () => {
+  it('execution 来源只读 SDK：跨 execution、重试和伪造 caller 不串源，缺 runId 保持未知（#3652）', async () => {
+    const captured: PortContext[] = [];
+    const world = createFakeWorld();
+    const activities = createActivities({
+      ...world.ports,
+      createWorktree: async (input, context) => {
+        captured.push(context);
+        return world.ports.createWorktree(input, context);
+      },
+    });
+    const forged = {
+      ...createWorktreeInput,
+      temporalRunId: 'forged',
+      workflowExecution: { runId: 'forged' },
+    };
+    for (const execution of [
+      { workflowId: 'wf-a', runId: 'execution-a' },
+      { workflowId: 'wf-a', runId: 'execution-b' },
+      { workflowId: 'wf-a' },
+    ])
+      await envWith({ workflowExecution: execution, attempt: 2 }).run(activities.createWorktree, forged);
+    expect(captured.map((context) => [context.workflowId, context.temporalRunId])).toEqual([
+      ['wf-a', 'execution-a'],
+      ['wf-a', 'execution-b'],
+      ['wf-a', undefined],
+    ]);
+  });
   it('活动表齐全：工作流会调的每个名字 worker 都挂上了（windsurf-dao#1422）', () => {
     const activities = createActivities(createFakeWorld().ports);
     expect(Object.keys(activities).sort()).toEqual(Object.keys(ACTIVITY_PROFILE).sort());

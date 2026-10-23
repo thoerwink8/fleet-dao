@@ -379,6 +379,9 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               taskId: input.taskId,
               tier: input.tier.tier,
               workflowId: ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
+              ...(ctx.workflowId !== undefined && ctx.temporalRunId !== undefined
+                ? { temporalRunId: ctx.temporalRunId }
+                : {}),
               branch: input.branch,
               ...(input.prNumber !== undefined ? { prNumber: input.prNumber } : {}),
               prompt,

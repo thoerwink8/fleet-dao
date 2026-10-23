@@ -112,8 +112,8 @@ export class RunInputError extends Error {
 type RunRowSure = Omit<RunRow, 'id'> & { id: string };
 
 /**
- * 起一段时记一笔；同 runId 再记不重复建（onConflictDoUpdate）。再记时：开跑写的那几列（单子、派工档、工作流、PR、分支……）
- * 整行覆盖，这一次没给的写回 NULL，收场补完开跑那一行时要把它们再带一遍；收场才有的列（endedAt、outcome、routeOutcome、
+ * 起一段时记一笔；同 runId 再记不重复建（onConflictDoUpdate）。首次 workflowId/temporalRunId 成对保留（含 NULL），明确冲突整笔拒绝。
+ * 其余开跑列（单子、派工档、PR、分支……）整行覆盖，没给的写回 NULL，收场要再带一遍；收场才有的列（endedAt、outcome、routeOutcome、
  * 用量、花费、内存峰值、失败原因）没给就保留库里已有的，所以重放的开跑不会把已经收场的那一行冲回「还在跑」。
  */
 export async function startRun(db: Db, row: RunInsert, now: Date = new Date()): Promise<{ id: string }> {
@@ -121,13 +121,18 @@ export async function startRun(db: Db, row: RunInsert, now: Date = new Date()): 
   if (!row.model) throw new RunInputError('model 是空的');
   const r = toRow(row, now);
   try {
-    await db
+    const written = await db
       .insert(runs)
       .values(r)
       .onConflictDoUpdate({
         target: runs.id,
         set: pickRowWithoutId(r),
-      });
+        // 冲突更新持有原行锁：明确的旧、新来源不同就整笔拒绝，admitRun 的预占交接也随事务回滚。
+        setWhere: sql`(${runs.workflowId} is null or ${r.workflowId}::text is null or ${runs.workflowId} = ${r.workflowId})
+          and (${runs.temporalRunId} is null or ${r.temporalRunId}::text is null or ${runs.temporalRunId} = ${r.temporalRunId})`,
+      })
+      .returning({ id: runs.id });
+    if (written.length === 0) throw new RunInputError(`runs 首次来源冲突（${r.id}），原行未修改`);
   } catch (error) {
     const message = errMessage(error);
     throw new RunInputError(`写入 runs 失败：${message}`, { cause: error });
@@ -1032,6 +1037,9 @@ function pickRowWithoutId(r: RunRowSure) {
   const { id: _i, createdAt: _c, ...rest } = r;
   return {
     ...rest,
+    // 首次 workflow/execution 是一对原始事实；旧 caller、retry、attach 都不能补绑或清除，包括 NULL。
+    workflowId: runs.workflowId,
+    temporalRunId: runs.temporalRunId,
     // 开跑写的「为什么派它」：收场那一笔常常不带，没带就留着，不冲成空
     routeWhy: sql`coalesce(${r.routeWhy}, ${runs.routeWhy})`,
     usageNote: sql`coalesce(${r.usageNote}, ${runs.usageNote})`,
