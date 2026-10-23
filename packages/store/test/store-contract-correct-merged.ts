@@ -317,6 +317,42 @@ export function describeCorrectMergedContract(make: MakeStore): void {
       }
     });
 
+    it('部分 run 没绑定：整体拒绝，原因逐条点名没绑定的 run 和缺的列，不因其余 run 已绑定而放行', async () => {
+      const BARE = 'd1000000-0000-4000-8000-000000013102';
+      const BARE_TWO = 'd1000000-0000-4000-8000-000000013103';
+      const extra = (id: string, over: Record<string, unknown>) => ({
+        id,
+        segment: 'verify',
+        taskId: TASK,
+        issueNumber: 13,
+        model: 'opus-5.5',
+        startedAt: '2026-10-19T00:10:00.000Z',
+        endedAt: '2026-10-19T00:20:00.000Z',
+        outcome: 'done',
+        ...over,
+      });
+      const store = await open({
+        extraRuns: [extra(BARE, {}), extra(BARE_TWO, { workflowId: WF })],
+      });
+      const key = input({
+        expected: {
+          phase: 'abandoned',
+          doing: DOING,
+          updatedAt: UPDATED_AT,
+          runIds: [RUN_ID, BARE, BARE_TWO],
+        },
+      });
+      const verdict = await store.correctMergedAbandoned(key, entry());
+      expect(verdict).toMatchObject({ result: 'conflict', why: expect.stringContaining('2 条 run') });
+      const why = (verdict as { why: string }).why;
+      expect(why).toContain(`${BARE}（缺工作流编号、Temporal run）`);
+      expect(why).toContain(`${BARE_TWO}（缺Temporal run）`);
+      expect(why).not.toContain(RUN_ID);
+      const facts = await store.readMergedCorrection({ repoId: IDS.repo, taskId: TASK, issueNumber: 13 });
+      expect(facts?.task.state).toBe('stopped');
+      expect(await auditsOf(store)).toEqual([]);
+    });
+
     it('操作记录不是这张任务的受管纠正成功记录：拒绝，任务不动', async () => {
       const store = await open();
       for (const bad of [
