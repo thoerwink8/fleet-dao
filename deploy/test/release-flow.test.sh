@@ -511,6 +511,27 @@ for HEALTH_CASE in engine-red stale-red api-down pid-change version-change bad-r
   check "$HEALTH_CASE：受管未决协议只有一份" "$(grep -c '^FLEET_RELEASE_HEALTH_PENDING' "$TMP/health-output")" 1
 done
 
+# #3679：运行内容没变（桩的 service_unchanged 一律说没变）而主进程留在上一版目录：
+# 发布收尾（严格）不认，--check（另一次进程）仍认可沿用；服务没启用或没在跑不算没对齐。
+HEALTH_CASE=green
+health_case_prepare
+echo "$A" >"$TMP/live-sha"
+check "主进程在旧目录：算没对齐" "$(cwd_misaligned fleet-engine "$B" && echo 是 || echo 否)" 是
+RELEASE_STRICT_CWD=1
+check_running_release "$B" >"$TMP/strict-cwd" 2>&1
+check "主进程在旧目录、运行内容没变：发布收尾判红" "$?" 1
+RELEASE_STRICT_CWD=0
+reset
+check_running_release "$B" >"$TMP/loose-cwd" 2>&1
+check "主进程在旧目录、运行内容没变：--check 仍认可沿用" "$?" 0
+echo "$B" >"$TMP/live-sha"
+check "主进程在这一版目录：算对齐" "$(cwd_misaligned fleet-engine "$B" && echo 是 || echo 否)" 否
+RELEASE_STRICT_CWD=1
+reset
+check_running_release "$B" >"$TMP/strict-cwd" 2>&1
+check "主进程在这一版目录：发布收尾过" "$?" 0
+RELEASE_STRICT_CWD=0
+
 # --check必须只读，并且使用原before而非把已经红的engine降成“切前就坏”。
 HEALTH_CASE=engine-red
 health_case_prepare

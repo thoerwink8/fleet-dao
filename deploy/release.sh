@@ -13,8 +13,9 @@
 # 给引擎手上有会话的任务发 hard 暂停（暂停人「发版」，名单落 $PAUSE_FILE），等会话收掉（停不下来的最多再做 DRAIN_GRACE 秒，
 # 到点由引擎按切号那一套停下、按编号续上）就停引擎，再迁移、切版本；新引擎起来后只对名单里这一批发「继续」（续上原会话见 #2037）。
 # 相对在用版本没碰引擎的运行内容（service_unchanged：从引擎入口走 TypeScript 解析出的引用闭包、外加非代码的运行输入，
-# deploy/lib/runtime-closure.mjs，#2797）时不暂停、不重启引擎；后端按它自己的闭包判、不连带停引擎。健康检查这时核主进程
-# 所在版本和这一版运行内容一致，不要求它已经在新版目录里，也不把这一版记成不健康；在跑的进程所在的旧目录清旧版时留着。
+# deploy/lib/runtime-closure.mjs，#2797）且主进程已经在这一版目录里（重跑同一版）时不暂停、不重启引擎；后端按它自己的闭包判、
+# 不连带停引擎。主进程还在别的目录里就照样重启（引擎先暂停、排空）：发布、退回结束时，两个服务的 /proc/<MainPID>/cwd 必须和
+# readlink -f current 一致，不一致判红自动退回（#3679）；只有 --check（另一次进程）仍认「运行内容一致」的沿用旧目录。
 # 发版不碰引擎总开关和各仓「让 AI 接活」开关：停接新活只在切版本这一段，由排空请求管，脚本退了请求就撤。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
@@ -91,6 +92,9 @@ ENGINE_STOPPED=0                                                         # 这�
 # 这一版相对在用版本没碰引擎 / 后端的运行内容（service_unchanged，#2797：按引用闭包判）：不暂停、不重启那一个服务
 ENGINE_UNCHANGED=0
 API_UNCHANGED=0
+# 发布、退回（do_release、do_rollback）置 1：收尾核对时服务主进程的目录必须就是这一版（和 readlink -f current 一致，#3679），
+# 不再认「运行内容一致、沿用旧目录」。--check 是另一次进程、不置它，仍按闭包认可沿用旧目录
+RELEASE_STRICT_CWD=0
 declare -A UNCHANGED_RC=() UNCHANGED_WHY=() # service_unchanged 的结果按「服务 在用 目标」记下，一次发布里不重算
 # 照期望写本机配置（#323，docs/ops.md 第九节「配置进仓对账」）：切版本之前照这一版的期望写 engine.env、api.env、release.env 里
 # 公开的值，只写这一版的期望和上次写的不一样的键（上次写的记在 CONFIG_STATE），人手改的不改回（期望里 selfHeal 开了才改回）。
@@ -1846,8 +1850,8 @@ check_running_release() { # 提交号
   for u in $FLEET_SERVICES; do
     running=$(running_release "$u.service")
     if [[ "$running" == "$RELEASES/$sha" ]]; then
-      ok "$u 的主进程跑的是这一版（${sha:0:12}）"
-    elif running_runtime_matches "$running" "$sha" "$u"; then
+      ok "$u 的主进程跑的是这一版（${sha:0:12}；cwd $running，current → $(readlink -f -- "$RELEASES/current" 2>/dev/null || echo 读不出)）"
+    elif ((RELEASE_STRICT_CWD == 0)) && running_runtime_matches "$running" "$sha" "$u"; then
       short=${running##*/}
       ok "$u 的主进程沿用 ${short:0:12}（和 ${sha:0:12} 运行内容一致，没重启）"
     else
@@ -2481,6 +2485,14 @@ service_unchanged() { # engine|api 在用提交 目标提交
   return "${UNCHANGED_RC[$key]}"
 }
 
+# 服务在跑、主进程的目录却不是这一版（#3679）：要重启才能和 current 对齐。没启用、没在跑的不算（没在跑的起来就在 current 下）
+cwd_misaligned() { # 服务名（fleet-engine / fleet-api） 提交号
+  local r
+  has_service "$1" || return 1
+  r=$(running_release "$1.service")
+  [[ -n "$r" && "$r" != "$RELEASES/$2" ]]
+}
+
 do_release() { # 要发的提交（空 = 主线最新）
   local cur before="" context="" expected="" gate=1 RELEASE_HEALTH_OWNER=""
   if ! RELEASE_HEALTH_OWNER=$(train_health_owner); then
@@ -2499,15 +2511,26 @@ do_release() { # 要发的提交（空 = 主线最新）
   # 后端按它自己的闭包判，不连带停引擎；驾驶舱静态文件照旧发。
   ENGINE_UNCHANGED=0
   API_UNCHANGED=0
+  # 但主进程的目录和 current 必须对齐（#3679）：运行内容没变只省掉「内容变了才需要的」重启，主进程还在别的目录里
+  # （上一版、更早的版）照样重启——current 切了而进程留在旧目录，人去对 cwd 对不上，旧目录一清进程脚下的文件也没了。
+  RELEASE_STRICT_CWD=1
   if service_unchanged api "$cur" "$SHA"; then
-    API_UNCHANGED=1
-    ok "后端运行内容没变，没重启（${UNCHANGED_WHY["api $cur $SHA"]}）"
+    if cwd_misaligned fleet-api "$SHA"; then
+      echo "  · 后端运行内容没变，但主进程在 $(running_release fleet-api.service)、不在这一版目录：重启对齐（${UNCHANGED_WHY["api $cur $SHA"]}）"
+    else
+      API_UNCHANGED=1
+      ok "后端运行内容没变，没重启（${UNCHANGED_WHY["api $cur $SHA"]}）"
+    fi
   fi
-  if service_unchanged engine "$cur" "$SHA"; then
+  if service_unchanged engine "$cur" "$SHA" && ! cwd_misaligned fleet-engine "$SHA"; then
     ENGINE_UNCHANGED=1
     ok "引擎运行内容没变，没重启（${UNCHANGED_WHY["engine $cur $SHA"]}）"
   else
-    if [[ -n "${UNCHANGED_WHY["engine $cur $SHA"]:-}" ]]; then echo "  · 要停引擎：${UNCHANGED_WHY["engine $cur $SHA"]}"; fi
+    if [[ "${UNCHANGED_RC["engine $cur $SHA"]:-1}" == 0 ]]; then
+      echo "  · 引擎运行内容没变，但主进程在 $(running_release fleet-engine.service)、不在这一版目录：暂停、排空后重启对齐（${UNCHANGED_WHY["engine $cur $SHA"]}）"
+    elif [[ -n "${UNCHANGED_WHY["engine $cur $SHA"]:-}" ]]; then
+      echo "  · 要停引擎：${UNCHANGED_WHY["engine $cur $SHA"]}"
+    fi
     drain_request "$SHA" "$(drain_grace)"
     pause_tasks "$SHA"
     drain_engine || return 1
@@ -2589,6 +2612,7 @@ do_rollback() {
   local cur prev
   ENGINE_UNCHANGED=0
   API_UNCHANGED=0
+  RELEASE_STRICT_CWD=1
   cur=$(current_sha)
   prev=$(previous_sha)
   if [[ -z "$prev" ]]; then

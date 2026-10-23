@@ -142,12 +142,14 @@ unit_prop() {
   *) return 1 ;;
   esac
 }
-activate() { # 提交号 事件：切 current、记历史，主进程不动（模拟没重启）
+STUB_RESTART=1 # 0：模拟重启没生效（主进程留在旧目录）
+activate() { # 提交号 事件：切 current、记历史；do_release 没说「不重启」（两个标志都是 0）且 STUB_RESTART=1 时，主进程挪到新目录
   local sha=$1 how=$2
   if [[ "$(readlink -- "$RELEASES/current" 2>/dev/null)" != "$sha" ]]; then
     ln -sfn -- "$sha" "$RELEASES/current"
     record "$sha" "$how"
   fi
+  if ((STUB_RESTART && ENGINE_UNCHANGED == 0 && API_UNCHANGED == 0)); then printf '%s' "$RELEASES/$sha" >"$TMP/proc"; fi
   if has_service fleet-api; then api_wait_up || return 1; fi
 }
 FLEET_SERVICES="fleet-engine fleet-api"
@@ -217,18 +219,28 @@ docs_rc=$?
 check "只改文档：发布退出 0" "$docs_rc" 0
 check "只改文档：current 指向新版" "$(current_sha)" "$docs_sha"
 check "只改文档：历史不记不健康" "$(grep -cE 'unhealthy|auto-rollback' "$HISTORY" || true)" 0
-check "只改文档：不写「重启后」" "$(grep -c '重启后' "$TMP/docs.out" || true)" 0
-check "只改文档：写了沿用上一版进程" "$(grep -cF '没重启，沿用上一版进程' "$TMP/docs.out")" 1
-check "只改文档：两个服务都核运行内容一致" "$(grep -cF '运行内容一致' "$TMP/docs.out")" 2
+# #3679：主进程在旧目录，运行内容没变也要重启对齐
+check "只改文档：主进程在旧目录，日志写了重启对齐" "$(grep -cF '运行内容没变，但主进程在' "$TMP/docs.out")" 2
+check "只改文档：写了重启后" "$(grep -c '重启后' "$TMP/docs.out" || true)" 1
+check "只改文档：不写沿用上一版进程" "$(grep -cF '没重启，沿用上一版进程' "$TMP/docs.out" || true)" 0
+check "只改文档：两个服务都核到 cwd 是这一版" "$(grep -cF '的主进程跑的是这一版' "$TMP/docs.out")" 2
+check "只改文档：主进程 cwd 和 current 一致" "$(<"$TMP/proc")" "$(readlink -f -- "$RELEASES/current")"
 docs_identity=$(health_identity "$docs_sha")
-check "只改文档：稳定旧进程可绑定健康身份" "$?" 0
-check "只改文档：身份分别绑定两服务 PID 与实际旧目录" "$docs_identity" "$docs_sha|fleet-engine:4242:$RELEASES/$BASE|fleet-api:4343:$RELEASES/$BASE"
+check "只改文档：身份可绑定健康身份" "$?" 0
+check "只改文档：身份分别绑定两服务 PID 与新目录" "$docs_identity" "$docs_sha|fleet-engine:4242:$RELEASES/$docs_sha|fleet-api:4343:$RELEASES/$docs_sha"
+printf '%s' "$RELEASES/$BASE" >"$TMP/proc"
 ENGINE_UNCHANGED=0
 API_UNCHANGED=0
+RELEASE_STRICT_CWD=0 # --check 是另一次进程：不置严格
 UNCHANGED_RC=()
 REDS=()
 check_running_release "$docs_sha" >"$TMP/check.out" 2>&1
-check "只改文档：另一次进程没有标志也认可沿用" "$?" 0
+check "只改文档：--check（另一次进程）没有标志也认可沿用旧目录" "$?" 0
+RELEASE_STRICT_CWD=1
+REDS=()
+check_running_release "$docs_sha" >"$TMP/strict.out" 2>&1
+check "只改文档：发布收尾（严格）不认沿用旧目录" "$?" 1
+RELEASE_STRICT_CWD=0
 docs_train=$(train_status_for "$docs_rc")
 write_train "$docs_train" "$docs_sha"
 check "只改文档：发版记录按退出码写" "$(train_status)" "$docs_train"
@@ -240,8 +252,10 @@ check "只改文档：看门狗不说新版没发成或退回了" "$(grep -c '�
 rm -f -- "$HISTORY"
 ln -sfn -- "$BASE" "$RELEASES/current"
 printf '%s' "$RELEASES/$BASE" >"$TMP/proc"
+STUB_RESTART=0
 release_rc "$src_sha" "$TMP/src.out"
 src_rc=$?
+STUB_RESTART=1
 check "改了源码、没重启：发布退出 1" "$src_rc" 1
 grep -qF '主进程跑的不是这一版' "$TMP/src.out"
 check "改了源码、没重启：仍要求主进程在新版目录" "$?" 0
@@ -289,6 +303,11 @@ check_api() { pending '独立的待配项'; }
 release_rc "$src_sha" "$TMP/pending.out"
 check "闭包免重启加独立待配：发布退出 2" "$?" 2
 check "闭包免重启加独立待配：current 已切目标" "$(current_sha)" "$src_sha"
+# #3679：退出 2（有待配）也要对齐——两个服务的主进程 cwd 和 readlink -f current 一致
+check "闭包免重启加独立待配：主进程 cwd 和 current 一致" "$(<"$TMP/proc")" "$(readlink -f -- "$RELEASES/current")"
+check "闭包免重启加独立待配：日志写了重启对齐" "$(grep -cF '运行内容没变，但主进程在' "$TMP/pending.out")" 2
+# 以下几条核凭据本身：切之前按实际进程（BASE）核实写下，之后主进程换到新目录，凭据留着无害
+printf '%s' "$RELEASES/$BASE" >"$TMP/proc"
 check "凭据绑定实际进程而非上一轮 current" "$(cat "$RELEASES/$src_sha/.runtime-fleet-engine")" "$src_sha $BASE fleet-engine"
 check "后端凭据独立绑定服务" "$(cat "$RELEASES/$src_sha/.runtime-fleet-api")" "$src_sha $BASE fleet-api"
 rm -f "$RELEASES/$src_sha/.runtime-fleet-engine"
