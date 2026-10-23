@@ -10,6 +10,7 @@
 | `pnpm check` | `check.ts`：biome + `tsc -b` + 改到的测试（`--all` 才全量）+ 卫生检查 + `specs:index --check`，五样跑完再判红；POSIX 每步经 `step-process.ts` 收进程组 |
 | Windows 本机执行 | `local-vitest.ts`（`check`、`test:changed`、`test:linux` 共用；需 Linux 语义的测试只转交显式配置的本机 Linux 普通用户，无配置/对不上/跳过明确失败） |
 | 只给 CI 用（`.github/workflows/` 调） | `ci-plan.ts`、`ci-box.ts`、`ci-cache.ts`、`ci-verdict.ts`、`main-reuse.ts`、`merge-gate.ts`、`close-on-merge.ts`、`debt-check.ts`、`github-audit.ts`、`version-cut.ts` |
+| CI 测试库 | `ci-postgres.ts`：三处共用 runner 预装 PG16，在 `RUNNER_TEMP` 新建独立 cluster；工具版本、SQL server 版本和实际数据目录核对后才交给测试，不用镜像或宿主默认库 |
 | 查询轴词汇（`--domain`、`--nature`） | 只在 `src/labels.ts` |
 | 改标准的路径清单 | `standard-paths.json`（改它本身就是改标准） |
 | 测试分台耗时表 | `test-timings.json`，用 `pnpm ci:timings` 刷新，别手改 |
@@ -38,6 +39,8 @@
 - 本机显式退回协议（`managed-feedback*.ts`、`managed-work.ts`）：只接受可信 Actions Bot 的 COMMENTED 明确协议；工人退出码成功但交付没核上时只退避复核不再起 CLI；issue 已关闭、伪造本分支 PR、待审查都不算交付；返工用 `pnpm work rework <单号>`，同一代次只起一个工人；不手写 state/result，不杀进程。
 
 ## 测试
+
+`bin/ci-runtime.ts` 包装原 Vitest run：同进程 reporter 保存白名单配置与有界资源快照，runner 另记真实退出码；默认未解析 maxWorkers、缓存来源保持 unknown。verify 后 always 诊断、通过才写缓存，仅上传三份 JSON（每份≤64KiB、7天），不上传原 report.json；观测失败独立报红，不覆盖测试失败。
 
 - `npx vitest run packages/conventions/test/<文件>`。读仓里文件的检查都经 `src/repo.ts` 的 `RepoView`，测试换成内存假仓（`test/helpers.ts` 的 `memRepo`）。
 - `test/doc-pointers.test.ts` 对全仓活文档（design、ops、README、仓根和各包 AGENTS.md、`docs/design/`）跑指针检查。

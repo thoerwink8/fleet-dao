@@ -2,7 +2,7 @@ name: e2e-quarantine
 # 驾驶舱 e2e 的隔离集（决定 0093；2026-10-16 从 ci.yml 的 e2e job 挪来）：packages/web/e2e/quarantine.json 里的用例常偶发、已开单限期修，
 # 照跑照报、本来就不挡发版，所以不占每次合并的等待，改成每天跑一次，也可手动触发（gh workflow run e2e-quarantine.yml）。
 # 红了在这个 workflow 的运行页上看（报告 artifact 留 7 天）；ci.yml 的 e2e 那一步用 E2E_QUARANTINE=skip 跳过这些用例，不删任何用例。
-# 环境和 ci.yml 的 e2e job 一样（Postgres 容器、Chromium）；postgres 拉镜像那段与 ci.yml 同源，改一处两处一起改。
+# 环境和 ci.yml 的 e2e job 一样（runner PostgreSQL 16 独立 cluster、Chromium）；共用 ci-postgres.ts 启动并核对实际 server。
 on:
   schedule:
     - cron: '47 20 * * *'
@@ -21,21 +21,6 @@ jobs:
       E2E_BROWSER_CHANNEL: chromium
       E2E_QUARANTINE: only
     steps:
-      - name: 起 postgres:16（后台）
-        run: |
-          set -euo pipefail
-          nohup bash -c '
-            for img in public.ecr.aws/docker/library/postgres:16-alpine public.ecr.aws/docker/library/postgres:16-alpine \
-              mirror.gcr.io/library/postgres:16-alpine mirror.gcr.io/library/postgres:16-alpine; do
-              if docker pull -q "$img"; then
-                exec docker run -d --name fleet-e2e-pg -p 5432:5432 \
-                  -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust "$img"
-              fi
-              sleep 4
-            done
-            echo "postgres:16-alpine 在 public.ecr.aws 和 mirror.gcr.io 各试两次都没拉下来" >&2
-            exit 1
-          ' > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -61,17 +46,8 @@ jobs:
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - name: 装 Chromium 和系统库
         run: node packages/conventions/src/bin/ci-browser.ts
-      - name: 等 postgres:16 起来
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 90); do
-            if docker exec fleet-e2e-pg pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then exit 0; fi
-            sleep 1
-          done
-          if [ -f "$RUNNER_TEMP/fleet-e2e-pg-start.log" ]; then cat "$RUNNER_TEMP/fleet-e2e-pg-start.log" >&2; fi
-          if ! docker logs fleet-e2e-pg >&2; then echo "（拿不到容器日志）" >&2; fi
-          echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
-          exit 1
+      - name: 起 runner PostgreSQL 16（独立 e2e cluster）
+        run: node packages/conventions/src/bin/ci-postgres.ts e2e
       - name: 隔离集（全部隔离用例，不分片）
         run: pnpm --filter @fleet-dao/web e2e --pass-with-no-tests
       - name: 隔离集结局

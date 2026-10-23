@@ -1898,13 +1898,22 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     expect(browserInstall, '缓存未恢复也要真的安装浏览器和系统库').toBeDefined();
     expect(browserInstall).not.toHaveProperty('if');
     expect(steps.indexOf(browserInstall!)).toBeGreaterThan(steps.indexOf(browserCache!));
-    expect(runs).toContain('postgres:16');
+    expect(runs).toContain('node packages/conventions/src/bin/ci-postgres.ts e2e');
+    expect(runs).not.toContain('docker ');
+    const pgSteps = doc.jobs.test?.steps?.filter((s) => String(s.run ?? '').includes('ci-postgres.ts'));
+    expect(pgSteps).toHaveLength(1);
+    expect(pgSteps?.[0]).toMatchObject({
+      if: 'matrix.pg',
+      run: 'node packages/conventions/src/bin/ci-postgres.ts test',
+    });
     // 红了不吞：没有 job 级 continue-on-error，也没有步骤级的（隔离集 2026-10-16 起挪去 e2e-quarantine.yml 每天跑）；没有 || true
     expect(e2e).not.toHaveProperty('continue-on-error');
     expect(steps.filter((s) => 'continue-on-error' in s)).toEqual([]);
     expect(JSON.stringify(steps)).not.toContain('E2E_QUARANTINE: only');
     const quarantineYml = readFileSync(join(ROOT, '.github/workflows/e2e-quarantine.yml'), 'utf8');
     expect(quarantineYml).toContain('run: node packages/conventions/src/bin/ci-browser.ts');
+    expect(quarantineYml).toContain('run: node packages/conventions/src/bin/ci-postgres.ts e2e');
+    expect(quarantineYml).not.toContain('docker ');
     expect(quarantineYml).toMatch(/^ {2}schedule:/m);
     expect(quarantineYml).toMatch(/^ {2}workflow_dispatch:/m);
     expect(quarantineYml).toContain('E2E_QUARANTINE: only');

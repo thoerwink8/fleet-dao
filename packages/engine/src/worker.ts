@@ -150,6 +150,8 @@ export interface SignalSource {
 
 export interface GracefulShutdownOptions {
   worker: Pick<Worker, 'getState' | 'shutdown'>;
+  /** 信号一来同步停接新定时轮次；在途的仍由 worker 收尾后统一等原宽限。 */
+  timers?: Pick<EngineTimers, 'stopAccepting'>;
   drain: EngineDrain;
   /** 到截止、被强停时停下还在跑的会话（real/one-shot-sessions.ts 的 drainStop；假端口没有会话，给空的）。 */
   stopSessions(why: string): string[];
@@ -207,6 +209,7 @@ export function installGracefulShutdown(o: GracefulShutdownOptions): {
     settle(end);
   };
   const force = (signal: string) => {
+    o.timers?.stopAccepting();
     if (finished) return;
     forced = true;
     const t = now();
@@ -231,6 +234,7 @@ export function installGracefulShutdown(o: GracefulShutdownOptions): {
       return;
     }
     started = true;
+    o.timers?.stopAccepting();
     const t = now();
     o.drain.cordon({
       source: 'signal',
@@ -438,6 +442,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     }
     shutdown = installGracefulShutdown({
       worker,
+      ...(timers ? { timers } : {}),
       drain,
       stopSessions,
       ...(releaseSessions ? { releaseSessions } : {}),
@@ -449,7 +454,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     await worker.run();
   } finally {
     shutdown?.dispose();
-    // 不再起新的一轮，在跑的最多再等一个收尾宽限（和在途活动一样）
+    // 信号已同步停接新轮次；此处统一等在跑的一个原收尾宽限（异常退出也在 stop 里停接）
     const unfinished = await timers?.stop(config.shutdownGraceSeconds * 1000);
     if (unfinished && unfinished.length > 0) {
       console.warn(`停机时这些定时任务的一轮还没完，不等了：${unfinished.join('、')}`);
