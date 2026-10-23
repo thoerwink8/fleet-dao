@@ -264,11 +264,26 @@ export function parseReclaudeStable(body: string): { latest: string; versions: n
   return { latest: cleaned, versions: null };
 }
 
-/** 帮手的只读摘要必须与这一轮官方 stable.json 的对应平台逐字节相符，不能只借 latest 猜在用版本。 */
+/** 官方 stable.json 只给当前一版，在用二进制落后时摘要必然不符。同一小版本里往回数几版的标签，用来去官方取旧版清单。 */
+export function reclaudeOlderTags(latest: string, max = 5): string[] {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(latest.trim());
+  if (!m) return [];
+  const tags: string[] = [];
+  for (let patch = Number(m[3]) - 1; patch >= 0 && tags.length < max; patch--)
+    tags.push(`v${m[1]}.${m[2]}.${patch}`);
+  return tags;
+}
+
+/**
+ * 帮手的只读摘要必须与官方清单的对应平台逐字节相符，不能只借 latest 猜在用版本。
+ * 与当前 stable.json 不符时再对 olderBodies（官方旧版各自的清单）：对上的是落后的那一版，不是来源不明。
+ * 都对不上才报摘要不符（带 mismatch，调用方据此去取旧版清单）。
+ */
 export function matchReclaudeArtifact(
   stdout: string,
   stableBody: string,
-): { version: string } | { error: string } {
+  olderBodies: readonly string[] = [],
+): { version: string } | { error: string; mismatch?: true } {
   const stable = parseReclaudeStable(stableBody);
   if ('error' in stable) return stable;
   let probe: unknown;
@@ -293,9 +308,16 @@ export function matchReclaudeArtifact(
   const expected = (artifact as { sha256?: unknown }).sha256;
   if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected))
     return { error: `来源不明：reclaude 官方 ${platform} artifact 缺少有效 SHA256` };
-  if (sha256 !== expected)
-    return { error: `来源不明：reclaude 在用二进制与官方 ${platform} artifact 摘要不符` };
-  return { version: stable.latest };
+  if (sha256 === expected) return { version: stable.latest };
+  for (const body of olderBodies) {
+    const older = parseReclaudeStable(body);
+    if ('error' in older) continue;
+    const sum = (JSON.parse(body) as { binaries?: Record<string, { sha256?: unknown } | null> }).binaries?.[
+      platform
+    ]?.sha256;
+    if (sum === sha256) return { version: older.latest };
+  }
+  return { error: `来源不明：reclaude 在用二进制与官方 ${platform} artifact 摘要不符`, mismatch: true };
 }
 
 export function parseCursorChangelog(md: string): { latest: string; versions: string[] } | { error: string } {

@@ -30,6 +30,42 @@ describe('reclaude artifact 真接线', () => {
     await factory().probeUser('pilot', 'reclaude');
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
+  // 2026-10-24 官方 stable 升到 v1.5.1，在用的 v1.5.0 摘要对不上当前清单，要对官方旧版自己的清单才认得出。
+  it('在用二进制落后一版：当前清单不符，旧版清单对上就认旧版本，不判来源不明', async () => {
+    const latest = { version: 'v1.5.1', binaries: { 'linux-amd64': { sha256: '4'.repeat(64) } } };
+    const fetcher = vi.fn(async (url: string) =>
+      url === 'https://dl.reclaude.ai/v1.5.0/stable.json'
+        ? new Response(JSON.stringify(manifest))
+        : url === 'https://dl.reclaude.ai/stable.json'
+          ? new Response(JSON.stringify(latest))
+          : new Response('forbidden', { status: 403 }),
+    );
+    vi.stubGlobal('fetch', fetcher);
+    const job = cliVersionsJob({
+      db: {} as never,
+      run: async () => ({ code: 0, stdout: JSON.stringify(metadata), stderr: '', timedOut: false }),
+      log: () => {},
+    })();
+    expect(await job.fetchLatest('reclaude')).toEqual({ latest: '1.5.1', versions: null });
+    expect(await job.probeUser('pilot', 'reclaude')).toEqual({ version: '1.5.0' });
+    expect(fetcher).toHaveBeenCalledWith('https://dl.reclaude.ai/v1.5.0/stable.json', expect.any(Object));
+  });
+  it('落后但旧版清单读不到或也对不上：仍是摘要不符，不猜版本', async () => {
+    const latest = { version: 'v1.5.1', binaries: { 'linux-amd64': { sha256: '4'.repeat(64) } } };
+    vi.stubGlobal('fetch', async (url: string) =>
+      url === 'https://dl.reclaude.ai/stable.json'
+        ? new Response(JSON.stringify(latest))
+        : new Response('forbidden', { status: 403 }),
+    );
+    const job = cliVersionsJob({
+      db: {} as never,
+      run: async () => ({ code: 0, stdout: JSON.stringify(metadata), stderr: '', timedOut: false }),
+      log: () => {},
+    })();
+    expect(await job.probeUser('pilot', 'reclaude')).toEqual({
+      error: '来源不明：reclaude 在用二进制与官方 linux-amd64 artifact 摘要不符',
+    });
+  });
   it('官方读取失败仍复用失败，保留 unknown；下一轮才重试', async () => {
     const fetcher = vi.fn(async () => {
       throw new Error('HTTPS timeout');

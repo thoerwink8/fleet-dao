@@ -12,6 +12,7 @@ import {
   parseMirasimLatest,
   parseNpmRegistry,
   parseReclaudeStable,
+  reclaudeOlderTags,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CliLatestOk, CliVersionsJobDeps } from '../jobs/cli-versions.ts';
@@ -29,6 +30,27 @@ export const CLI_RELEASE_URLS = {
   mirasimLatest: 'https://cdn-assets.mirasim.ai/mirasim/releases/latest.json',
   mirasimChangelog: 'https://mirasim.ai/changelog',
 } as const;
+
+/**
+ * 在用二进制与当前 stable 不符时：落后的话会对上官方某个旧版自己的清单（dl.reclaude.ai/<tag>/stable.json）。
+ * 旧版清单取不到、对不上都保持「摘要不符」，不猜版本。
+ */
+export async function matchReclaudeInstalled(
+  stdout: string,
+  stableBody: string,
+  readOlder: (tag: string) => Promise<string> = (tag) =>
+    fetchText(`https://dl.reclaude.ai/${tag}/stable.json`, 'application/json'),
+): Promise<{ version: string } | { error: string }> {
+  const first = matchReclaudeArtifact(stdout, stableBody);
+  if (!('error' in first) || !first.mismatch) return first;
+  const latest = parseReclaudeStable(stableBody);
+  if ('error' in latest) return latest;
+  const bodies = await Promise.all(
+    reclaudeOlderTags(latest.latest).map((tag) => readOlder(tag).catch(() => '')),
+  );
+  const second = matchReclaudeArtifact(stdout, stableBody, bodies);
+  return 'error' in second ? { error: second.error } : second;
+}
 
 export function cliProbeArgv(
   input: { user: string; tool: string } | { npmTool: string },
@@ -205,7 +227,7 @@ export function cliVersionsJob(w: CliVersionsWiring): () => CliVersionsJobDeps {
         const got = await call(cliProbeArgv({ user, tool }, helper));
         if (tool !== 'reclaude' || 'error' in got) return got;
         try {
-          return matchReclaudeArtifact(got.stdout, await readStable());
+          return await matchReclaudeInstalled(got.stdout, await readStable());
         } catch (err) {
           return { error: `来源不明：reclaude 官方 artifact 没读成：${errMessage(err)}` };
         }
