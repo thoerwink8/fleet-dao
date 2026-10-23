@@ -10,6 +10,7 @@ import { applyHooks, checkHooks } from './hooks.ts';
 import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
 import { applyMcp, checkMcp } from './mcp.ts';
+import { applyModelPins, checkModelPins } from './model-pins.ts';
 import { applyPermissions, checkPermissions } from './permissions.ts';
 import { applyOtherPermissions, checkOtherPermissions } from './permissions-vendors.ts';
 import { applyPosition, checkPosition, type Git, type Position, readPosition, runGit } from './position.ts';
@@ -340,6 +341,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
       const mcpOff = args.user === undefined ? undefined : MCP_OFF_FOR_USER;
       const mcpSection = 'MCP 服务器（~/.claude.json 里的 Playwright 输出目录）';
       const subagentSection = '子代理定义（agents/subagents/ 里列了名字的几份 → ~/.claude/agents/）';
+      const pinsSection = '设置 env 里钉死的模型（~/.claude、reclaude 各账号的 settings.json）';
       const mf = manifestPath(home, deps.platform);
       if (args.mode === '--check') {
         section('通用段（agents/shared-rules.md）', checkRules(ctx, src));
@@ -348,6 +350,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('钩子（agents/hooks/）', checkHooks(ctx, src));
         section('权限（agents/config/claude-permissions.json）', checkPermissions(ctx, src, permsOff));
         section('其他几家 AI 的权限（Kimi、Codex、Devin）', checkOtherPermissions(ctx, src, permsOff));
+        section(pinsSection, checkModelPins(ctx));
         section('全局 git 忽略（_tmp/）', checkGitExcludes(ctx));
         section(GIT_PROXY_SECTION, checkGitProxy(ctx));
         section('各家配置里的开关', checkToolConfig(ctx));
@@ -367,6 +370,9 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('权限（agents/config/claude-permissions.json）', perms);
         const otherPerms = applyOtherPermissions(ctx, src, backups, permsOff);
         section('其他几家 AI 的权限（Kimi、Codex、Devin）', otherPerms);
+        // 权限那步可能刚写过 ~/.claude/settings.json：这一步自己重读再删，不拿旧的盖掉
+        const pins = applyModelPins(ctx, backups);
+        section(pinsSection, pins);
         const config = applyToolConfig(ctx, backups);
         section('各家配置里的开关', config);
         const mcp = mcpOff ? [line('skip', 'MCP', mcpOff)] : applyMcp(ctx, backups);
@@ -378,11 +384,12 @@ export function runCli(argv: readonly string[], deps: Deps): number {
           ...checkHooks(ctx, src),
           ...checkPermissions(ctx, src, permsOff),
           ...checkOtherPermissions(ctx, src, permsOff),
+          ...checkModelPins(ctx),
           ...checkToolConfig(ctx),
           ...(mcpOff ? [] : checkMcp(ctx)),
         ];
         const bad = verify(
-          [...rules, ...skills, ...subagents, ...hooks, ...perms, ...otherPerms, ...config, ...mcp],
+          [...rules, ...skills, ...subagents, ...hooks, ...perms, ...otherPerms, ...pins, ...config, ...mcp],
           after,
         );
         if (bad.length) section('读回', bad);

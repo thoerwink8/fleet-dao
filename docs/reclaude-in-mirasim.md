@@ -23,7 +23,7 @@ Windows 和 macOS 的 Mirasim 里，让 Claude 经 reclaude 起，只要改一�
 
 Mirasim 自己决定给不给网关（读 0.0.498 的 `server.cjs` 查到）：`~/.claude/settings.json` 的 env 里有任一改模型的键（`CLAUDE_CODE_SUBAGENT_MODEL`、`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL`），又有 reclaude 写的指向回环的 `HTTPS_PROXY` 加 `NODE_EXTRA_CA_CERTS`，又设了 claude 启动命令（填 reclaude 就算），它就判 claude 被拦截（`via=intercept`），不给跟随全局的会话注入平台网关；界面显示「平台」，实际花自有额度。
 
-所以启动命令是 reclaude（或还没换掉的旧启动器）的桌面机上，同步工具不写子代理默认模型键、已有的删掉，子代理默认模型改在 Mirasim 设置里管（[决定 0092](decisions/0092-no-subagent-model-env-on-launcher-desktops.md)、[决定 0112](decisions/0112-mirasim-direct-reclaude.md)）。别的改模型的键同步不碰，症状是「跟随全局的会话显示平台、账本却没有 relay」，手动从 env 里删掉，重开会话生效。
+所以启动命令是 reclaude（或还没换掉的旧启动器）的桌面机上，同步工具不写子代理默认模型键、已有的删掉，子代理默认模型改在 Mirasim 设置里管（[决定 0092](decisions/0092-no-subagent-model-env-on-launcher-desktops.md)、[决定 0112](decisions/0112-mirasim-direct-reclaude.md)）。`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL` 在哪台机器上都不许有：同步扫 `~/.claude/settings.json` 和 reclaude 各账号目录的 `settings.json`，见到算漂移、先备份再删（[决定 0119](decisions/0119-no-model-pins-in-settings-env.md)）。
 
 ## 还在用旧启动器的机器
 

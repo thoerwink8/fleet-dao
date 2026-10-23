@@ -97,7 +97,7 @@ const ENV_KEYS: ReadonlyMap<string, (value: string) => string | null> = new Map(
  * 启动命令是 reclaude 的桌面机上 env 不许有子代理默认模型键的原因（决定 0092）。Mirasim（0.0.498 读过 server.cjs）判 claude 走不走拦截：
  * ~/.claude/settings.json 的 env 里有任一改模型的键（CLAUDE_CODE_SUBAGENT_MODEL、ANTHROPIC_DEFAULT_*_MODEL、ANTHROPIC_SMALL_FAST_MODEL），
  * 又有指向回环的 HTTPS_PROXY 加 NODE_EXTRA_CA_CERTS（reclaude 写的），又设了启动命令，就判 via=intercept，
- * 不给跟随全局的会话注入平台网关——界面显示「平台」，实际经 reclaude 花自有额度。别的改模型的键不是本脚本写的，不碰。
+ * 不给跟随全局的会话注入平台网关——界面显示「平台」，实际经 reclaude 花自有额度。别的改模型的键归 model-pins.ts（决定 0119：哪台都不许有，见到就删）。
  */
 const DROP_WHY =
   '这台 Mirasim 的 claude 启动命令是 reclaude，Mirasim 见到这个键会判 claude 走拦截、不给跟随全局的会话注入平台网关（显示平台、实际花自有额度），所以这类机器不写它、已有的删掉；子代理默认模型改在 Mirasim 设置里管（决定 0092）';
