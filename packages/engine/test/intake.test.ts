@@ -2073,6 +2073,154 @@ describe('每小时限速', () => {
   });
 });
 
+describe('名额档位（错误预算，jobs/self-share.ts）', () => {
+  const SELF = { ...REPO, id: 'r1', owner: 'acme', name: 'fleet-dao' };
+  const REAL = { ...REPO, id: 'r2', owner: 'acme', name: 'fluxwatch' };
+  const LIMITS = { maxStartsPerRound: 10, maxRunningTasks: 10, maxStartsPerHour: 99 };
+  const fresh = (tier: 'healthy' | 'spending' | 'frozen') => async () => ({
+    tier,
+    at: new Date(NOW.getTime() - 3_600_000),
+    day: '2026-10-02',
+  });
+  /** 自身仓单号 100 起 8 张，真实项目单号 200 起 8 张。selfRunning：自身仓开头已在跑几条。 */
+  function twoRepos(over: Partial<IntakeDeps>, selfRunning = 0) {
+    return harness({
+      limits: LIMITS,
+      async repos() {
+        return [SELF, REAL];
+      },
+      async openIssues(repo) {
+        const base = repo.id === SELF.id ? 100 : 200;
+        return {
+          issues: Array.from({ length: 8 }, (_, i) => issue({ number: base + i })),
+          openMilestones: [V1, V2],
+        };
+      },
+      async runningTasks() {
+        return { working: selfRunning, stalled: 0, byRepo: { [SELF.id]: selfRunning } };
+      },
+      ...over,
+    });
+  }
+  const selfStarted = (h: Harness) => h.started.filter((s) => s.issueNumber < 200).length;
+  const realStarted = (h: Harness) => h.started.filter((s) => s.issueNumber >= 200).length;
+
+  it('健康：fleet-dao 自身单最多占在跑名额（10）的 30%＝3 条，真实项目照拉', async () => {
+    const h = twoRepos({ selfShare: fresh('healthy') });
+    const run = await runIntakeJob(h.deps);
+    expect(selfStarted(h)).toBe(3);
+    expect(realStarted(h)).toBe(7); // 在跑上限 10 里剩下的 7 条都给了真实项目
+    expect(run.outcome).toBe('ok');
+    expect(h.logs.some((l) => l.text.includes('self_share_hold×5'))).toBe(true);
+  });
+
+  it('耗预算：自身单最多占 50%＝5 条', async () => {
+    const h = twoRepos({ selfShare: fresh('spending') });
+    await runIntakeJob(h.deps);
+    expect(selfStarted(h)).toBe(5);
+    expect(realStarted(h)).toBe(5);
+  });
+
+  it('已经在跑的自身单也算份额：健康档开头自身单已在跑 2 条，这一轮只再起 1 条', async () => {
+    const h = twoRepos({ selfShare: fresh('healthy') }, 2);
+    await runIntakeJob(h.deps);
+    expect(selfStarted(h)).toBe(1);
+  });
+
+  it('冻结：只拉 fleet-dao 自身单，别的仓不拉新单；自身单不按成数限', async () => {
+    const h = twoRepos({ selfShare: fresh('frozen') });
+    const run = await runIntakeJob(h.deps);
+    expect(realStarted(h)).toBe(0);
+    expect(selfStarted(h)).toBe(8);
+    expect(run.outcome).toBe('ok');
+    expect(h.logs.some((l) => l.text.includes('self_share_hold×8'))).toBe(true);
+  });
+
+  it('冻结时在跑的照跑：不去动已经在跑的，也不对被挡下的单现读 GitHub', async () => {
+    const h = twoRepos({
+      selfShare: fresh('frozen'),
+      async runningTasks() {
+        return { working: 4, stalled: 0, byRepo: { [REAL.id]: 4 } };
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.planReads.every((n) => n < 200)).toBe(true);
+  });
+
+  it('被档位挡下的单不记进「等空位」（看门狗不把它当引擎有活可接却没接）', async () => {
+    const records: { at: Date; byRepo: Record<string, number> }[] = [];
+    const h = twoRepos({ selfShare: fresh('frozen'), recordWaiting: async (x) => void records.push(x) });
+    await runIntakeJob(h.deps);
+    expect(records[0]?.byRepo[REAL.id]).toBe(0);
+  });
+
+  it('档位里的 stalled 不影响：自身单份额只数在干活的', async () => {
+    const h = twoRepos({
+      selfShare: fresh('healthy'),
+      async runningTasks() {
+        return { working: 0, stalled: 5, byRepo: {} };
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(selfStarted(h)).toBe(3);
+  });
+
+  it('读不到档位（没有这一行）：照现行行为拉单，记一条日志', async () => {
+    const h = twoRepos({ selfShare: async () => null });
+    const run = await runIntakeJob(h.deps);
+    // 没有档位限：两个仓按权重交错，把在跑上限 10 吃满
+    expect(h.started).toHaveLength(10);
+    expect(selfStarted(h)).toBeGreaterThan(3);
+    expect(realStarted(h)).toBeGreaterThan(0);
+    expect(run.outcome).toBe('ok');
+    const warns = h.logs.filter((l) => l.level === 'warn' && l.text.includes('名额档位读不到'));
+    expect(warns).toHaveLength(1);
+    expect(h.logs.some((l) => l.text.includes('self_share_hold'))).toBe(false);
+  });
+
+  it('读不到档位（读失败）：照现行行为拉单，日志写明原因；不当成冻结也不当成健康', async () => {
+    const h = twoRepos({
+      selfShare: async () => {
+        throw new Error('设置值认不出');
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toHaveLength(10);
+    expect(run.outcome).toBe('ok');
+    expect(h.logs.some((l) => l.level === 'warn' && l.text.includes('设置值认不出'))).toBe(true);
+  });
+
+  it('读不到档位（超过 72 小时没更新，简报停了）：当读不到，别让冻结的结论永远挂着', async () => {
+    const h = twoRepos({
+      selfShare: async () => ({
+        tier: 'frozen',
+        at: new Date(NOW.getTime() - 73 * 3_600_000),
+        day: '2026-09-29',
+      }),
+    });
+    await runIntakeJob(h.deps);
+    expect(realStarted(h)).toBeGreaterThan(0);
+    expect(h.logs.some((l) => l.level === 'warn' && l.text.includes('名额档位读不到'))).toBe(true);
+  });
+
+  it('没接档位（deps.selfShare 不给）：和以前一样，不记日志', async () => {
+    const h = twoRepos({});
+    await runIntakeJob(h.deps);
+    expect(h.started).toHaveLength(10);
+    expect(h.logs.some((l) => l.text.includes('名额档位'))).toBe(false);
+  });
+
+  it('只有一个仓且不是 fleet-dao：健康档不限它，冻结档停拉', async () => {
+    const healthy = harness({ selfShare: fresh('healthy'), limits: LIMITS });
+    await runIntakeJob(healthy.deps);
+    expect(healthy.started).toHaveLength(1);
+    const frozen = harness({ selfShare: fresh('frozen'), limits: LIMITS });
+    const run = await runIntakeJob(frozen.deps);
+    expect(frozen.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+  });
+});
+
 describe('熔断', () => {
   const some = (n: number) => Array.from({ length: n }, (_, i) => issue({ number: 300 + i }));
   const since = (minutesAgo: number) => new Date(NOW.getTime() - minutesAgo * 60_000);

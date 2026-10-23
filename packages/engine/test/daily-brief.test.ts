@@ -10,6 +10,7 @@ import {
   type PipelineHealth,
   ROUND_OUTCOMES,
   type ScheduleResult,
+  type SelfShareRow,
 } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import {
@@ -745,5 +746,202 @@ describe('流程健康：两种流程对照（决定 0105）', () => {
     expect(broken.published[0]?.body ?? '').toContain(
       '两种流程对照（决定 0105，自开跑累计）：没查成（读两种流程对照：库连不上）',
     );
+  });
+});
+
+describe('名额一节（按错误预算分档）', () => {
+  const extraOk = {
+    ciRedMinutes: { value: 30 },
+    selfDefects: { value: 12 },
+    offReasonDecisions: { value: 0 },
+  };
+  /** 流程健康夹具里这周做成率 35%、冷验收拒绝 25%：这两项没过。 */
+  function shareDeps(over: Partial<DailyBriefDeps> = {}, previous: SelfShareRow | null = null) {
+    const saved: SelfShareRow[] = [];
+    const d = makeDeps({
+      selfShareReadings: async () => extraOk,
+      selfSharePrevious: async () => previous,
+      selfShareSave: async (row) => {
+        saved.push(row);
+      },
+      ...over,
+    });
+    return { ...d, saved };
+  }
+
+  it('没接的不写这一节、不写设置', async () => {
+    const d = makeDeps();
+    await runDailyBriefJob(d.deps);
+    expect(d.published[0]?.body ?? '').not.toContain('名额');
+  });
+
+  it('算一次：档位和每项现值写进设置，简报里加「六、名额」一节；两项没过判冻结', async () => {
+    const d = shareDeps();
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('ok');
+    expect(d.saved).toHaveLength(1);
+    const row = d.saved[0];
+    expect(row?.tier).toBe('frozen');
+    expect(row?.day).toBe('2026-10-15');
+    expect(row?.at).toEqual(NOW);
+    expect(row?.items.map((i) => [i.key, i.value, i.passed])).toEqual([
+      ['oneRoundRate', 7 / 20, false],
+      ['verifyReject', 5 / 20, false],
+      ['ciRedMinutes', 30, true],
+      ['selfDefects', 12, true],
+      ['offReasonDecisions', 0, true],
+    ]);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('六、名额（按错误预算分，滚动 7 天）');
+    expect(body).toContain('档位：冻结（第一次算）');
+    expect(body).toContain('只拉 fleet-dao 自身单，别的仓不拉新单（在跑的照跑）');
+    expect(body).toContain('· 一轮做成率 35%（要 ≥ 40%）：没过');
+    expect(body).toContain('· 冷验收拒绝占比 25%（要 ≤ 15%）：没过');
+    expect(body).toContain('· 主线 CI 红 30 分钟（要 ≤ 60 分钟）：过');
+    expect(body).toContain('· 非掏钱非删数据原因的拍板卡 0 张（要 = 0 张）：过');
+    expect(d.comments[0]?.body).toContain('六、名额');
+  });
+
+  it('只一项没过（非 CI 红）→ 耗预算；和上次比换档要写出来；连续天数承接上次的记录', async () => {
+    const previous: SelfShareRow = {
+      tier: 'healthy',
+      day: '2026-10-14',
+      at: new Date('2026-10-14T00:30:00Z'),
+      items: [],
+      streak: 2,
+      history: [
+        { day: '2026-10-13', allPass: true },
+        { day: '2026-10-14', allPass: true },
+      ],
+    };
+    const d = shareDeps(
+      {
+        // 做成率 50% 过，只剩冷验收拒绝没过
+        pipelineHealth: async (to) => {
+          const h = healthFixture(to);
+          return {
+            ...h,
+            outcomes: h.outcomes.map((o) => (o.outcome === 'merged' ? { ...o, n: 10, share: 0.5 } : o)),
+            verifyRejectShare: 0.25,
+          };
+        },
+      },
+      previous,
+    );
+    await runDailyBriefJob(d.deps);
+    expect(d.saved[0]?.tier).toBe('spending');
+    expect(d.saved[0]?.streak).toBe(0);
+    expect(d.saved[0]?.history).toEqual([
+      { day: '2026-10-13', allPass: true },
+      { day: '2026-10-14', allPass: true },
+      { day: '2026-10-15', allPass: false },
+    ]);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('档位：耗预算（2026-10-14 是健康，换档了）');
+    expect(body).toContain('fleet-dao 自身单最多占在跑名额的 50%');
+  });
+
+  it('5 项都过且连续 3 天 → 健康', async () => {
+    const previous: SelfShareRow = {
+      tier: 'frozen',
+      day: '2026-10-14',
+      at: new Date('2026-10-14T00:30:00Z'),
+      items: [],
+      streak: 2,
+      history: [
+        { day: '2026-10-13', allPass: true },
+        { day: '2026-10-14', allPass: true },
+      ],
+    };
+    const d = shareDeps(
+      {
+        pipelineHealth: async (to) => ({
+          ...healthFixture(to),
+          outcomes: healthFixture(to).outcomes.map((o) =>
+            o.outcome === 'merged' ? { ...o, n: 10, share: 0.5 } : o,
+          ),
+          verifyRejectShare: 0.1,
+        }),
+      },
+      previous,
+    );
+    await runDailyBriefJob(d.deps);
+    expect(d.saved[0]).toMatchObject({ tier: 'healthy', streak: 3 });
+    expect(d.published[0]?.body ?? '').toContain('fleet-dao 自身单最多占在跑名额的 30%');
+  });
+
+  it('读不到按没过算：一项读不到原因写进简报、这一轮记 partial；写进设置的那项 value 是 null', async () => {
+    const d = shareDeps({
+      selfShareReadings: async () => ({
+        ...extraOk,
+        ciRedMinutes: { value: null, unread: '读主线 CI 红了多久：HTTP 502' },
+      }),
+      pipelineHealth: async (to) => ({
+        ...healthFixture(to),
+        outcomes: healthFixture(to).outcomes.map((o) =>
+          o.outcome === 'merged' ? { ...o, n: 10, share: 0.5 } : o,
+        ),
+        verifyRejectShare: 0.1,
+      }),
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('partial');
+    expect(d.saved[0]?.tier).toBe('frozen'); // 只有 CI 红那项没过：冻结
+    expect(d.saved[0]?.items.find((i) => i.key === 'ciRedMinutes')).toMatchObject({
+      value: null,
+      passed: false,
+    });
+    expect(d.published[0]?.body ?? '').toContain(
+      '· 主线 CI 红：没查成：读主线 CI 红了多久：HTTP 502（按没过算）',
+    );
+  });
+
+  it('流程健康整块读不到：那两项按没过算，档位照样算出来', async () => {
+    const d = shareDeps({
+      pipelineHealth: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('partial');
+    expect(d.saved[0]?.tier).toBe('frozen');
+    expect(d.saved[0]?.items.filter((i) => i.value === null).map((i) => i.key)).toEqual([
+      'oneRoundRate',
+      'verifyReject',
+    ]);
+  });
+
+  it('另外三项整个读不到：三项都按没过算', async () => {
+    const d = shareDeps({
+      selfShareReadings: async () => {
+        throw new Error('GitHub 不通');
+      },
+    });
+    await runDailyBriefJob(d.deps);
+    expect(d.saved[0]?.items.filter((i) => !i.passed).length).toBe(5);
+    expect(d.saved[0]?.items[2]?.unread).toContain('GitHub 不通');
+  });
+
+  it('设置写不进：简报照发，这一节记没查成、这一轮记 partial', async () => {
+    const d = shareDeps({
+      selfShareSave: async () => {
+        throw new Error('库只读');
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('partial');
+    expect(d.published).toHaveLength(1);
+    expect(d.published[0]?.body ?? '').toContain('没查成：档位没写进设置 engine.selfShare：库只读');
+  });
+
+  it('上次的档位读不到：照算，注明上次没读成', async () => {
+    const d = shareDeps({
+      selfSharePrevious: async () => {
+        throw new Error('设置值认不出');
+      },
+    });
+    await runDailyBriefJob(d.deps);
+    expect(d.saved).toHaveLength(1);
+    expect(d.published[0]?.body ?? '').toContain('上次的档位没读成：读上次的名额档位：设置值认不出');
   });
 });

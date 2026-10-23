@@ -34,10 +34,21 @@ import {
   type ReleaseKills,
   type RoundOutcome,
   type ScheduleResult,
+  type SelfShareRow,
 } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import { clip, stamp } from './reconcile-common.ts';
+import {
+  computeSelfShare,
+  SELF_SHARE_LINES,
+  SELF_SHARE_TIER_WORDS,
+  type SelfShareReading,
+  type SelfShareReadings,
+  selfShareLineText,
+  selfShareRule,
+  selfShareValueText,
+} from './self-share.ts';
 
 export const DAILY_BRIEF_EVERY_MINUTES = 24 * 60;
 /** 每天 08:30（北京时间，UTC+8）= 00:30 UTC：从 epoch（00:00 UTC）起错开 30 分钟。 */
@@ -126,6 +137,18 @@ export interface DailyBriefDeps {
   releaseKills?(to: Date): Promise<ReleaseKills>;
   /** 截至 to 两种流程（全程 / 三段）的对照（@fleet-dao/db 的 flowModeHealth，决定 0105，#2827）。读不到照抛；没接上的不写这一栏。 */
   flowModeHealth?(to: Date): Promise<FlowModeHealth>;
+  /**
+   * 名额档位要的另外三项现值（主线 CI 红分钟、机器开的自身缺陷单、非掏钱非删数据原因的拍板卡），截至 to 的 7 天。
+   * 每一项各自读、各自带原因（读不到 value 是 null），不整体抛。一轮做成率和冷验收拒绝占比取自 pipelineHealth。
+   * 没接上的不写「名额」一节、不写设置。
+   */
+  selfShareReadings?(
+    to: Date,
+  ): Promise<Pick<SelfShareReadings, 'ciRedMinutes' | 'selfDefects' | 'offReasonDecisions'>>;
+  /** 上一次存下的名额档位（设置 engine.selfShare）；没有是 null。读不到照抛。 */
+  selfSharePrevious?(): Promise<SelfShareRow | null>;
+  /** 把名额档位和每项现值写进设置 engine.selfShare。写不进照抛。 */
+  selfShareSave?(row: SelfShareRow): Promise<void>;
   /** 当前仍停着的任务，以及指挥官已经看过多少。读不到照抛。 */
   commanderSummary(): Promise<CommanderStalledSummary>;
   /** 写那一行提醒（有就原地更新）。写不进照抛。 */
@@ -576,9 +599,44 @@ export function releaseKillsLine(now: ReleaseKills | string, before: ReleaseKill
   return `${head}：${total}${vs}，被叫停的段一共跑了 ${now.hours} 小时；按天：${days}`;
 }
 
+/**
+ * 六、名额（错误预算分档）：档位、规矩、每项现值和线、和上次比有没有换档。读不到的项写原因、按没过算（那一节记没查成）。
+ */
+export function selfShareSection(row: SelfShareRow, previous: SelfShareRow | null | string): BriefSection {
+  const heading = '六、名额（按错误预算分，滚动 7 天）';
+  const tier = SELF_SHARE_TIER_WORDS[row.tier];
+  const change =
+    typeof previous === 'string'
+      ? `（上次的档位没读成：${previous}）`
+      : previous === null
+        ? '（第一次算）'
+        : previous.tier === row.tier
+          ? `（和 ${previous.day} 一样）`
+          : `（${previous.day} 是${SELF_SHARE_TIER_WORDS[previous.tier]}，换档了）`;
+  const lines = [
+    `档位：${tier}${change}；5 项全过已连续 ${row.streak} 天（要连续 3 天才算健康）`,
+    selfShareRule(row.tier),
+  ];
+  const unread: string[] = [];
+  for (const i of row.items) {
+    const name = SELF_SHARE_LINES[i.key].label;
+    if (i.unread !== undefined) {
+      lines.push(`· ${name}：没查成：${i.unread}（按没过算）`);
+      unread.push(`${name}：${i.unread}`);
+    } else {
+      lines.push(
+        `· ${name} ${selfShareValueText(i)}（要 ${selfShareLineText(i.key)}）：${i.passed ? '过' : '没过'}`,
+      );
+    }
+  }
+  return { heading, lines, ...(unread.length > 0 ? { unread: unread.join('；') } : {}) };
+}
+
 /** 收齐的简报。 */
 export interface CollectedBrief {
   sections: BriefSection[];
+  /** 今天算出的名额档位（deps 接了才有）；runDailyBriefJob 写进设置。 */
+  selfShare?: SelfShareRow;
 }
 
 /** 收齐四块。某一块读不到写进那一块、不抛。 */
@@ -618,7 +676,39 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
     lines: [`没查成：${why}`],
     unread: why,
   });
+  // 名额：一轮做成率和冷验收拒绝占比取自上面读到的这周流程健康（rounds 为 0 占比是 null＝读不到＝没过），其余三项现读
+  const selfShareReadings = deps.selfShareReadings;
+  let selfShare: SelfShareRow | undefined;
+  let shareSection: BriefSection | undefined;
+  if (selfShareReadings) {
+    const extra = await guard('读名额的另外三项', () => selfShareReadings(today));
+    const previous = await guard('读上次的名额档位', async () => (await deps.selfSharePrevious?.()) ?? null);
+    const fromHealth = (pick: (h: PipelineHealth) => number | null, what: string): SelfShareReading => {
+      if (typeof health === 'string') return { value: null, unread: health };
+      const v = pick(health);
+      return v === null ? { value: null, unread: `${what}：这周没有收场的轮` } : { value: v };
+    };
+    const lost = (why: string): SelfShareReading => ({ value: null, unread: why });
+    const readings: SelfShareReadings = {
+      oneRoundRate: fromHealth(
+        (h) => h.outcomes.find((o) => o.outcome === 'merged')?.share ?? null,
+        '一轮做成率',
+      ),
+      verifyReject: fromHealth((h) => h.verifyRejectShare, '冷验收拒绝占比'),
+      ciRedMinutes: typeof extra === 'string' ? lost(extra) : extra.ciRedMinutes,
+      selfDefects: typeof extra === 'string' ? lost(extra) : extra.selfDefects,
+      offReasonDecisions: typeof extra === 'string' ? lost(extra) : extra.offReasonDecisions,
+    };
+    selfShare = computeSelfShare({
+      readings,
+      day: beijingDay(now).day,
+      previous: typeof previous === 'string' || previous === null ? [] : previous.history,
+      at: now,
+    });
+    shareSection = selfShareSection(selfShare, previous);
+  }
   return {
+    ...(selfShare ? { selfShare } : {}),
     sections: [
       typeof shipped === 'string' ? unread('一、昨天上线了什么', shipped) : shipped.section,
       typeof decisions === 'string' ? unread('二、要你拍的', decisions) : decisionsSection(decisions, now),
@@ -630,6 +720,7 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
         : failuresSection(alerts, stopped, commander, now),
       metricsSection(typeof shipped === 'string' ? null : shipped.leadMinutes, stats),
       healthSection(health, healthBefore, kills, flow),
+      ...(shareSection ? [shareSection] : []),
     ],
   };
 }
@@ -678,6 +769,20 @@ export async function runDailyBriefJob(
   try {
     const collected = await collectBrief(deps, now);
     sections = collected.sections;
+    if (collected.selfShare && deps.selfShareSave) {
+      // 写不进不拦简报：拉单读到的还是上一次的档位（过 72 小时就当读不到），这一节记没查成、这一轮记 partial
+      try {
+        await deps.selfShareSave(collected.selfShare);
+      } catch (err) {
+        const why = `档位没写进设置 engine.selfShare：${errMessage(err)}`;
+        sections = sections.map((s) =>
+          s.heading.startsWith('六、名额')
+            ? { ...s, lines: [...s.lines, `没查成：${why}`], unread: s.unread ? `${s.unread}；${why}` : why }
+            : s,
+        );
+        deps.log('error', '每日简报：名额档位没写进设置', { runId, why });
+      }
+    }
     const repo = await deps.selfRepo();
     await deps.publish({ dedupeKey: key, title, body: briefPlain(sections), link: BRIEF_LINK });
     const footer = `<sub>引擎定时任务 ${DAILY_BRIEF_JOB.id} 发（${stamp(now)}，北京时间）；飞书团队群同时推了一条。只为四类事和 AI 判定要你拍的事即时推，其余都在这里。</sub>`;
