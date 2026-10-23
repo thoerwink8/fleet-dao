@@ -4,7 +4,8 @@ import { mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ScheduleResult } from '@fleet-dao/db';
-import { afterEach, describe, expect, it } from 'vitest';
+import { WorkflowNotFoundError } from '@temporalio/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   judgeParked,
   type ParkedRetryDeps,
@@ -14,7 +15,7 @@ import {
   retryParkedTasks,
   runParkedRetryJob,
 } from '../src/jobs/parked-retry.ts';
-import { readCurrentRelease } from '../src/real/parked-retry.ts';
+import { parkedRetryJob, readCurrentRelease } from '../src/real/parked-retry.ts';
 import { type ContinueCommand, PARKED_RETRY_ACTOR, type ParkKind } from '../src/task-contract.ts';
 
 const PARKED_AT = '2026-10-19T03:00:00.000Z';
@@ -260,6 +261,183 @@ describe('runParkedRetryJob：一轮的结局', () => {
     await expect(runParkedRetryJob(failed.deps)).rejects.toBeInstanceOf(ParkedRetryFailedError);
     expect(failed.finished[0]).toMatchObject({ outcome: 'failed', why: expect.stringContaining('库连不上') });
   });
+
+  it('查询失败保留最多四层 cause，循环 cause 不空转', async () => {
+    const cause = new Error('4 DEADLINE_EXCEEDED', { cause: new Error('不应输出第五层') });
+    const nested = new Error('Failed to query Workflow', {
+      cause: new Error('RPC failed', { cause: new Error('transport', { cause }) }),
+    });
+    const f = fakeDeps({
+      status: async () => {
+        throw nested;
+      },
+    });
+    const result = await runParkedRetryJob(f.deps);
+    expect(result).toMatchObject({ outcome: 'partial' });
+    expect(result.why).toContain('Failed to query Workflow → RPC failed → transport → 4 DEADLINE_EXCEEDED');
+    expect(result.why).not.toContain('不应输出第五层');
+    expect(f.sent).toEqual([]);
+
+    const cycle = new Error('循环', { cause: undefined });
+    cycle.cause = cycle;
+    f.deps.status = async () => {
+      throw cycle;
+    };
+    expect((await runParkedRetryJob(f.deps)).why).toContain('没判成：循环');
+  });
+
+  it('cause 诊断有长度上限，列任务失败也保留底层原因', async () => {
+    const f = fakeDeps({
+      tasks: async () => {
+        throw new Error('读库失败', { cause: new Error('x'.repeat(2000)) });
+      },
+    });
+    await expect(runParkedRetryJob(f.deps)).rejects.toBeInstanceOf(ParkedRetryFailedError);
+    expect(f.finished[0]?.why).toContain('读库失败 → ');
+    expect(f.finished[0]?.why?.length).toBeLessThan(1100);
+  });
+});
+
+/** 模拟 SDK 连接的取消：RPC 自己不设期限，由 withDeadline 到时拒绝并清理它。 */
+function deadlineRig(queryAfter: number | null, signalAfter: number | null = 0, failure?: Error) {
+  const calls: string[] = [];
+  const deadlines: number[] = [];
+  let cancel: ((error: Error) => void) | undefined;
+  function rpc<T>(kind: string, afterMs: number | null, value: T): Promise<T> {
+    calls.push(kind);
+    return new Promise((resolve, reject) => {
+      const timer =
+        afterMs === null
+          ? undefined
+          : setTimeout(() => {
+              if (failure) reject(failure);
+              else resolve(value);
+            }, afterMs);
+      cancel = (error) => {
+        clearTimeout(timer);
+        reject(error);
+      };
+    });
+  }
+  const client = {
+    connection: {
+      async withDeadline<T>(deadline: number | Date, fn: () => Promise<T>): Promise<T> {
+        const ms = Number(deadline) - Date.now();
+        deadlines.push(ms);
+        const timer = setTimeout(
+          () =>
+            cancel?.(
+              new Error('Failed to query Workflow', {
+                cause: new Error('4 DEADLINE_EXCEEDED'),
+              }),
+            ),
+          ms,
+        );
+        try {
+          return await fn();
+        } finally {
+          clearTimeout(timer);
+          cancel = undefined;
+        }
+      },
+    },
+    workflow: {
+      getHandle: () => ({
+        query: () => rpc('query', queryAfter, snap('rounds')),
+        signal: () => rpc('signal', signalAfter, undefined),
+      }),
+    },
+  };
+  const deps = parkedRetryJob({
+    db: {} as never,
+    temporal: { use: async (fn) => fn(client as never) },
+    store: { appendAudit: async () => 'audit-id' },
+    mergeReady: async () => ({ ready: false, why: '不合' }),
+  })();
+  return { deps, calls, deadlines };
+}
+
+describe('parkedRetryJob：查询冷回放与发信各用自己的连接期限', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('#3659：6.324 秒的冷查询在连接期限内读成；不可续的停法仍不发信', async () => {
+    vi.useFakeTimers();
+    const rig = deadlineRig(6324);
+    const f = fakeDeps({ status: rig.deps.status, continueTask: rig.deps.continueTask });
+    const result = runParkedRetryJob(f.deps);
+    await vi.advanceTimersByTimeAsync(6324);
+    expect(await result).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
+    expect(rig.calls).toEqual(['query']);
+    expect(rig.deadlines).toEqual([30_000]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('永久查询由连接在 30 秒取消，记 partial 和底层 cause，不发信', async () => {
+    vi.useFakeTimers();
+    const rig = deadlineRig(null);
+    const f = fakeDeps({ status: rig.deps.status, continueTask: rig.deps.continueTask });
+    let finished = false;
+    const result = runParkedRetryJob(f.deps).then((value) => {
+      finished = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toMatchObject({
+      outcome: 'partial',
+      why: expect.stringContaining('DEADLINE_EXCEEDED'),
+    });
+    expect(rig.calls).toEqual(['query']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('发继续仍由连接在 5 秒取消，不跟查询一起扩大', async () => {
+    vi.useFakeTimers();
+    const rig = deadlineRig(0, null);
+    const f = fakeDeps({ release: async () => after(30), continueTask: rig.deps.continueTask });
+    let finished = false;
+    const result = runParkedRetryJob(f.deps).then((value) => {
+      finished = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toMatchObject({ outcome: 'partial' });
+    expect(rig.deadlines).toEqual([5_000]);
+    expect(rig.calls).toEqual(['signal']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('真实现认 WorkflowNotFoundError 为 gone，不把它记作读取失败', async () => {
+    vi.useFakeTimers();
+    const rig = deadlineRig(0, 0, new WorkflowNotFoundError('not found', 'w', undefined));
+    const status = rig.deps.status('w');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await status).toBe('gone');
+    const signal = rig.deps.continueTask('w', { by: PARKED_RETRY_ACTOR, note: '测试', parkSeq: 2 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await signal).toBe('gone');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['NOT_FOUND', 'query task not found, or already expired'])(
+    '一般 RPC cause「%s」仍是 partial，不能当工作流正常消失',
+    async (message) => {
+      vi.useFakeTimers();
+      const failure = new Error('Failed to query Workflow', {
+        cause: Object.assign(new Error(message), { code: 'NOT_FOUND' }),
+      });
+      const rig = deadlineRig(0, 0, failure);
+      const f = fakeDeps({ status: rig.deps.status, continueTask: rig.deps.continueTask });
+      const result = runParkedRetryJob(f.deps);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await result).toMatchObject({ outcome: 'partial', why: expect.stringContaining(message) });
+      expect(rig.calls).toEqual(['query']);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 });
 
 describe('readCurrentRelease：法国在用的版本', () => {

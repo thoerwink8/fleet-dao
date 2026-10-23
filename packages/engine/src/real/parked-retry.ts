@@ -17,6 +17,8 @@ import { PARKED_RETRY_AUDIT, type ParkedRetryDeps, type ReleaseFact } from '../j
 import { PARKED_RETRY_ACTOR, taskContinueSignal, taskStatusQuery } from '../task-contract.ts';
 import { isWorkflowGone } from './route-wake.ts';
 
+// 新 worker 的首次查询会重放停着的历史（#3659）；只读查询给 30 秒，发继续仍限 5 秒。
+const QUERY_TIMEOUT_MS = 30_000;
 const SIGNAL_TIMEOUT_MS = 5_000;
 
 const errno = (e: unknown) =>
@@ -50,15 +52,15 @@ export function parkedRetryJob(w: ParkedRetryWiring): () => ParkedRetryDeps {
   const now = w.now ?? (() => new Date());
   const log: ParkedRetryDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
-  const withDeadline = <T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>) =>
-    w.temporal.use((client) =>
-      client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () => fn(client)),
-    );
+  const withDeadline = <T>(
+    timeoutMs: number,
+    fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>,
+  ) => w.temporal.use((client) => client.connection.withDeadline(Date.now() + timeoutMs, () => fn(client)));
   return () => ({
     tasks: () => listStalledEngineTasks(w.db),
     async status(workflowId) {
       try {
-        const s = await withDeadline((client) =>
+        const s = await withDeadline(QUERY_TIMEOUT_MS, (client) =>
           client.workflow.getHandle(workflowId).query(taskStatusQuery),
         );
         return { phase: s.phase, prNumber: s.prNumber, park: s.park };
@@ -71,7 +73,7 @@ export function parkedRetryJob(w: ParkedRetryWiring): () => ParkedRetryDeps {
     mergeReady: w.mergeReady,
     async continueTask(workflowId, command) {
       try {
-        await withDeadline((client) =>
+        await withDeadline(SIGNAL_TIMEOUT_MS, (client) =>
           client.workflow.getHandle(workflowId).signal(taskContinueSignal, command),
         );
         return 'sent';
