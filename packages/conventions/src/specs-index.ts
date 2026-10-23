@@ -1,9 +1,13 @@
 // 方案索引 specs/README.md 由各方案目录主文件的头部生成，不手维护（#3498，照 decisions-index.ts 的做法）。
 // 一单一目录 specs/<编号>-<短名>/；正文写下就不改，头部的状态行可以改。
-// 主文件：目录里有 需求.md 取它，没有取 方案.md，都没有取按文件名（码位）排第一份 .md；一份 .md 也没有的目录（只放截图等附件）
-// 不标状态，索引里单列。
+// 主文件：目录里有 讨论稿.md 取它（讨论稿同时就是方案，决定 0118），没有取 需求.md，再没有取 方案.md，都没有取按文件名（码位）
+// 排第一份 .md；一份 .md 也没有的目录（只放截图等附件）不标状态，索引里单列。目录里同时放了讨论稿.md 和旧的 需求.md / 方案.md 时
+// 只认讨论稿.md，旧文件的状态行不再被核对（不查，文档里写了一句）。
 // 头部：有 `# 标题` 就从标题下一行起、没有就从第一行起，跳过开头的空行，连着的 `- ` 行；第一个空行或别的行就结束。要有：
-//   - 状态：在做 | 做完 | 被取代 | 未复核
+//   - 状态：讨论中 | 已定 | 在做 | 做完 | 搁置 | 被取代 | 未复核
+//     值先去掉 <!-- … -->、两头空白，再按开头认词（「已定（2026-10-24，见 [决定](…)）」认成已定；七个词没有互为前缀的）。
+//     讨论中、已定、搁置只许写在 讨论稿.md 里（讨论稿的状态由 agents/skills/discussion-draft/scripts/draft.mjs 管正文，这里只管头部，
+//     两边认词的规则同一套）；未复核只留存量旧方案。
 //   - 被取代：specs/<目录>     （状态是「被取代」才写、也必须写；指向的目录要在 specs/ 下，不能是自己）
 // 编号是目录名开头的数字，后面紧跟「-一两位数字-」的是子编号（555-2-冷调用进合并闸 的编号是 555-2，对的是 #555-2，
 // 和 555-验收 的 555 不是同一个）。两个目录编号相同、都没标「被取代」就报红，没有白名单；撞了号的换个编号，
@@ -18,11 +22,16 @@ export const SPECS_INDEX_PATH = `${SPECS_DIR}/README.md`;
 /** 生成命令，核对不一致时提示它。 */
 export const SPECS_GENERATE_COMMAND = 'pnpm specs:index';
 
-export const SPEC_STATUSES = ['在做', '做完', '被取代', '未复核'] as const;
+export const SPEC_STATUSES = ['讨论中', '已定', '在做', '做完', '搁置', '被取代', '未复核'] as const;
 export type SpecStatus = (typeof SPEC_STATUSES)[number];
 
-/** 还在管事的状态；其余进「历史」一节。 */
-const ACTIVE: readonly SpecStatus[] = ['在做', '未复核'];
+/** 讨论稿的文件名：讨论稿是方案的第一份，主文件挑它最先。 */
+export const DRAFT_FILE = '讨论稿.md';
+/** 只许写在讨论稿里的状态：别的主文件写这几个说明方案没走讨论稿的流程，报红。 */
+const DRAFT_ONLY: readonly SpecStatus[] = ['讨论中', '已定', '搁置'];
+
+/** 还在管事的状态；其余（做完、搁置、被取代）进「历史」一节。 */
+const ACTIVE: readonly SpecStatus[] = ['讨论中', '已定', '在做', '未复核'];
 
 const DIR_NAME = /^(\d+(?:-\d{1,2})?)-.+$/;
 
@@ -31,7 +40,7 @@ export function specIssueNumber(dir: string): number | undefined {
   const n = /^(\d+)-/.exec(dir)?.[1];
   return n === undefined ? undefined : Number(n);
 }
-const PREFERRED_MAIN = ['需求.md', '方案.md'];
+const PREFERRED_MAIN = [DRAFT_FILE, '需求.md', '方案.md'];
 
 export interface SpecEntry {
   dir: string;
@@ -84,6 +93,12 @@ function headerValue(header: readonly string[], key: string): string | undefined
   return undefined;
 }
 
+/** 状态值认成哪个词：去掉 <!-- … --> 注释、两头空白，再按开头认（和 draft.mjs 的 statusOf 同一规则）；认不出是 undefined。 */
+export function statusOfValue(value: string): SpecStatus | undefined {
+  const v = value.replace(/<!--[\s\S]*?-->/g, '').trim();
+  return SPEC_STATUSES.find((s) => v.startsWith(s));
+}
+
 /** 读全部方案目录。问题逐条返回，坏的那份不进 entries；attachmentsOnly 是没有 .md 的目录。 */
 export function readSpecs(repo: RepoView): {
   entries: SpecEntry[];
@@ -125,10 +140,17 @@ export function readSpecs(repo: RepoView): {
       continue;
     }
     const header = headerLines(text);
-    const status = headerValue(header, '状态');
-    if (!SPEC_STATUSES.includes(status as SpecStatus)) {
+    const raw = headerValue(header, '状态');
+    const status = raw === undefined ? undefined : statusOfValue(raw);
+    if (status === undefined) {
       problems.push({
-        text: `${where}/${file}：头部缺「- 状态：」或值不对（现在是${status === undefined ? '没写' : `「${status}」`}，只认 ${SPEC_STATUSES.join(' / ')}）。`,
+        text: `${where}/${file}：头部缺「- 状态：」或值不对（现在是${raw === undefined ? '没写' : `「${raw}」`}，只认 ${SPEC_STATUSES.join(' / ')}）。`,
+      });
+      continue;
+    }
+    if (DRAFT_ONLY.includes(status) && file !== DRAFT_FILE) {
+      problems.push({
+        text: `${where}/${file}：状态「${status}」只许写在 ${DRAFT_FILE} 里（${DRAFT_ONLY.join('、')}是讨论稿的状态）；这份不是讨论稿，用 在做 / 做完 / 被取代 / 未复核。`,
       });
       continue;
     }
@@ -158,7 +180,7 @@ export function readSpecs(repo: RepoView): {
       number,
       file,
       title: (h1?.[1] ?? dir.slice(number.length + 1)).trim(),
-      status: status as SpecStatus,
+      status,
       supersededBy,
     });
   }
@@ -306,9 +328,11 @@ export function renderSpecsIndex(
     '',
     '要写方案才写，一单一目录 `specs/<编号>-<短名>/`；正文写下就不改，头部的状态行可以改。本页由各目录主文件的头部生成，新方案写好头部后跑 `pnpm specs:index`，`pnpm check` 和 `conventions` 的测试会核对本页和头部一致（`packages/conventions/src/specs-index.ts`）。',
     '',
-    '主文件：目录里有 `需求.md` 取它，没有取 `方案.md`，都没有取按文件名排第一份 md。头部写在 `# 标题` 下面：`- 状态：在做 | 做完 | 被取代 | 未复核`；被后来的方案推翻时状态改「被取代」，另加 `- 被取代：specs/<目录>`。',
+    '主文件：目录里有 `讨论稿.md` 取它，没有取 `需求.md`，再没有取 `方案.md`，都没有取按文件名排第一份 md。头部写在 `# 标题` 下面：`- 状态：讨论中 | 已定 | 在做 | 做完 | 搁置 | 被取代 | 未复核`（值后面可以跟括号说明或注释，按开头认词）；被后来的方案推翻时状态改「被取代」，另加 `- 被取代：specs/<目录>`。',
     '',
-    '「未复核」是加状态那次对不上单、没人核过的，读的时候先看单。',
+    '新方案先出讨论稿（`pnpm discuss:new -- <短名> --issue <单号> --ask "…"`，决定 0118）：稿起在 `specs/<单号>-<短名>/讨论稿.md`，同一份从「讨论中」接着改到「已定」「在做」「做完」，方案正文就写在稿的五、六、八节，不另起方案文件；「讨论中」「已定」「搁置」只许写在 `讨论稿.md` 里。目录里同时有讨论稿和旧的 `需求.md` / `方案.md` 时只认讨论稿，旧文件的状态行不再核对。「讨论中」「已定」「在做」「未复核」进「还在管事」，「做完」「搁置」「被取代」进「历史」。',
+    '',
+    '「未复核」是加状态那次对不上单、没人核过的存量，读的时候先看单。',
     '',
     '## 还在管事',
     '',
@@ -316,7 +340,7 @@ export function renderSpecsIndex(
     '',
     '## 历史',
     '',
-    '做完或被取代的。目录不搬。',
+    '做完、搁置或被取代的。目录不搬。',
     '',
     ...table(history),
     ...(attachments.length === 0

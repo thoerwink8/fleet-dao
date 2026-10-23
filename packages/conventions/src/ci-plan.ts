@@ -149,6 +149,8 @@ export const TEST_READS: Record<string, string[]> = {
     'packages/conventions/standard-paths.json',
     'packages/core/src/idle-running.ts',
     'packages/core/src/self-check-budget.ts',
+    // discussion-draft.test.ts 钉住「讨论稿脚本过的稿，方案索引一定过」（决定 0118），读索引的判法
+    'packages/conventions/src/specs-index.ts',
   ],
 };
 
@@ -398,6 +400,13 @@ export const PATH_RULES: readonly Rule[] = [
     match: (f) => /^docs\/\d{4}-\d{2}-\d{2}-[^/]+-survey\.md$/.test(f),
     units: [AGENTS_UNIT],
     why: 'discussion-draft.test.ts 按推前检查核对仓里的讨论稿',
+  },
+  // 方案目录里的讨论稿（决定 0118）：同样是 discussion-draft.test.ts 拿仓里的稿跑推前检查；conventions 的 specs-index.test.ts
+  // 拿真仓核对主文件头部和索引。放在 under('specs/') 之前（先匹配先用），其余需求文档仍不跑测试
+  {
+    match: (f) => /^specs\/[^/]+\/讨论稿\.md$/.test(f),
+    units: [AGENTS_UNIT, 'conventions'],
+    why: 'discussion-draft.test.ts 按推前检查核对方案目录里的讨论稿；specs-index.test.ts 核对它的头部和索引',
   },
   // 决定索引 README.md 由各份决定书头部生成，conventions 的 decisions-index.test.ts 拿真仓核对「生成结果 == 仓里文件」
   {

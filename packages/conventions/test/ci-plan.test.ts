@@ -166,6 +166,14 @@ describe('按改动算要跑什么', () => {
     }
   });
 
+  it('方案目录里的讨论稿（决定 0118）：选到 agents 和 conventions；同目录别的文档仍不跑测试', () => {
+    const p = pr('specs/12-x/讨论稿.md');
+    expect(p.full).toBe(false);
+    expect([...units(p)].sort()).toEqual([AGENTS_UNIT, 'conventions'].sort());
+    expect(units(pr('specs/12-x/方案.md'))).toEqual([]);
+    expect(units(pr('specs/12-x/sub/讨论稿.md'))).toEqual([]);
+  });
+
   it('测试夹具不升全跑：只测它所在的包，加上测试读这个包的；不把依赖它的整串拉进来', () => {
     const f = 'packages/adapters/test/fixtures/claude-code/cc-haiku-read.ndjson';
     const p = pr(f);

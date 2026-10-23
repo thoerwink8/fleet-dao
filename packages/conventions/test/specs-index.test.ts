@@ -33,6 +33,11 @@ describe('方案主文件和头部', () => {
     expect(mainFile(['截图'])).toBeUndefined();
   });
 
+  it('主文件：讨论稿.md 排在需求.md、方案.md 前面（决定 0118）', () => {
+    expect(mainFile(['方案.md', '需求.md', '讨论稿.md', '落地.md'])).toBe('讨论稿.md');
+    expect(mainFile(['落地.md', '讨论稿.md'])).toBe('讨论稿.md');
+  });
+
   it('头部只认标题下连着的 - 行，正文里的不算', () => {
     expect(headerLines(spec('甲', ['- 状态：做完']))).toEqual(['- 状态：做完']);
     expect(headerLines('# 甲\n\n正文\n\n- 状态：做完\n')).toEqual([]);
@@ -75,6 +80,65 @@ describe('方案索引生成', () => {
   it('状态值不在清单里报红', () => {
     const t = problems({ 'specs/1-a/需求.md': spec('a', ['- 状态：生效']) });
     expect(t.some((x) => x.includes('「生效」'))).toBe(true);
+  });
+
+  it('讨论稿的状态值：去掉注释和括号说明再按开头认；七个词都认，旧值照过', () => {
+    for (const value of [
+      '讨论中 <!-- 讨论中 / 已定（YYYY-MM-DD，见 [决定](…)）/ 搁置 -->',
+      '已定（2026-10-24，见 [决定](../../docs/decisions/0118-x.md)）',
+      '  在做  ',
+      '做完（2026-11-01）',
+      '搁置（等平台升级再看）',
+      '未复核',
+    ]) {
+      expect(problems({ 'specs/1-a/讨论稿.md': spec('a', [`- 状态：${value}`]) }), value).toEqual([]);
+    }
+    expect(
+      problems({
+        'specs/1-a/讨论稿.md': spec('a', ['- 状态：被取代（见 30）', '- 被取代：specs/30-b']),
+        'specs/30-b/方案.md': spec('b', ['- 状态：在做']),
+      }),
+    ).toEqual([]);
+    expect(problems({ 'specs/1-a/讨论稿.md': spec('a', ['- 状态：随便写']) })[0]).toContain('「随便写」');
+  });
+
+  it('讨论中 / 已定 / 搁置只许写在讨论稿.md；方案.md、需求.md 写了报红', () => {
+    for (const status of ['讨论中', '已定', '搁置']) {
+      for (const file of ['方案.md', '需求.md']) {
+        const t = problems({ [`specs/1-a/${file}`]: spec('a', [`- 状态：${status}`]) });
+        expect(t, `${file} ${status}`).toHaveLength(1);
+        expect(t[0]).toContain('只许写在 讨论稿.md');
+      }
+    }
+    for (const status of ['在做', '做完', '未复核'])
+      expect(problems({ 'specs/1-a/方案.md': spec('a', [`- 状态：${status}`]) })).toEqual([]);
+  });
+
+  it('讨论稿和旧方案同目录：只认讨论稿，旧文件的状态行不核对', () => {
+    const files = {
+      'specs/1-a/讨论稿.md': spec('a', ['- 状态：已定（2026-10-24）']),
+      'specs/1-a/需求.md': '# 旧\n\n- 状态：乱写\n',
+    };
+    expect(problems(files)).toEqual([]);
+    expect(readSpecs(memRepo(files)).entries[0]?.file).toBe('讨论稿.md');
+  });
+
+  it('索引分节：讨论中、已定、在做、未复核在「还在管事」，做完、搁置、被取代进「历史」', () => {
+    const files = {
+      'specs/1-a/讨论稿.md': spec('甲', ['- 状态：讨论中']),
+      'specs/2-b/讨论稿.md': spec('乙', ['- 状态：已定（2026-10-24）']),
+      'specs/3-c/方案.md': spec('丙', ['- 状态：在做']),
+      'specs/4-d/方案.md': spec('丁', ['- 状态：未复核']),
+      'specs/5-e/讨论稿.md': spec('戊', ['- 状态：搁置（等一等）']),
+      'specs/6-f/方案.md': spec('己', ['- 状态：做完']),
+      'specs/7-g/方案.md': spec('庚', ['- 状态：被取代', '- 被取代：specs/3-c']),
+    };
+    const { text = '' } = generateSpecsIndex(memRepo(files));
+    const history = text.indexOf('## 历史');
+    for (const d of ['1-a/', '2-b/', '3-c/', '4-d/']) expect(text.indexOf(d)).toBeLessThan(history);
+    for (const d of ['5-e/', '6-f/', '7-g/']) expect(text.indexOf(d)).toBeGreaterThan(history);
+    expect(text).toContain('| 已定 |');
+    expect(text).toContain('| 搁置 |');
   });
 
   it('被取代指向不存在的目录、指自己、写法不对、状态和那行对不上都报红', () => {

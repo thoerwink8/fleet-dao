@@ -47,6 +47,17 @@ interface DraftLib {
 }
 
 const lib = (await import(pathToFileURL(SCRIPT).href)) as DraftLib;
+/** 方案索引的判法（决定 0118：讨论稿的状态两边认同一套）。 */
+const specsLib = (await import(
+  pathToFileURL(join(ROOT, 'packages/conventions/src/specs-index.ts')).href
+)) as {
+  readSpecs(repo: {
+    read(rel: string): string | undefined;
+    exists(rel: string): boolean;
+    isDir(rel: string): boolean;
+    list(rel: string): string[] | undefined;
+  }): { entries: { status: string; file: string }[]; problems: { text: string }[] };
+};
 const HEADINGS = lib.headingsOf(TEMPLATE);
 const VARS = {
   标题: '体验排查',
@@ -421,6 +432,66 @@ describe('命令', () => {
     expect(run(repo(), 'new', 'a b', '--ask', 'x').status).toBe(2);
     expect(run(repo(), 'check', '--today', '昨天').status).toBe(2);
     expect(run(repo(), 'remove').status).toBe(2);
+  });
+});
+
+describe('按主题放：和方案索引（specs-index.ts）认同一套状态', () => {
+  const topic = lib.parseConfig({ layout: 'topic', dir: 'specs' });
+  const conclusion = '- 决定：[0118](../../docs/decisions/0118-x.md)\n- 任务：#12';
+  const withStatus = (status: string, body?: string) => {
+    const base = FRESH.replace('- 状态：讨论中', `- 状态：${status}`);
+    return body === undefined ? base : base.replace(/## 八、结论[\s\S]*$/, `## 八、结论\n\n${body}\n`);
+  };
+  /** 一份稿放进只有一个主题目录的内存仓，让索引读一遍。 */
+  const indexed = (text: string) => {
+    const file = 'specs/12-x/讨论稿.md';
+    return specsLib.readSpecs({
+      read: (rel) => (rel === file ? text : undefined),
+      exists: (rel) => rel === file || rel === 'specs/12-x' || rel === 'specs',
+      isDir: (rel) => rel === 'specs/12-x' || rel === 'specs',
+      list: (rel) => (rel === 'specs' ? ['12-x'] : rel === 'specs/12-x' ? ['讨论稿.md'] : undefined),
+    });
+  };
+
+  it('讨论稿脚本过得了的稿（讨论中、已定、在做、做完、搁置），索引一定也过，认出的状态一致', () => {
+    const cases: [string, string][] = [
+      [FRESH, '讨论中'],
+      [withStatus('已定（2026-10-24，见 [决定](../../docs/decisions/0118-x.md)）', conclusion), '已定'],
+      [withStatus('在做', conclusion), '在做'],
+      [withStatus('做完（2026-11-01）', conclusion), '做完'],
+      [withStatus('搁置（等平台升级再看）'), '搁置'],
+    ];
+    for (const [text, status] of cases) {
+      const drafted = lib.checkDraft({
+        path: 'specs/12-x/讨论稿.md',
+        text,
+        headings: HEADINGS,
+        config: topic,
+        today: '2026-10-23',
+        exists: () => true,
+      });
+      expect([status, drafted.errors]).toEqual([status, []]);
+      const r = indexed(text);
+      expect([status, r.problems]).toEqual([status, []]);
+      expect(r.entries[0]?.status).toBe(status);
+      expect(r.entries[0]?.file).toBe('讨论稿.md');
+    }
+  });
+
+  it('未复核：脚本报红（只留存量），索引照认；认不出的状态两边都报红', () => {
+    for (const status of ['未复核', '随便']) {
+      const text = withStatus(status);
+      const drafted = lib.checkDraft({
+        path: 'specs/12-x/讨论稿.md',
+        text,
+        headings: HEADINGS,
+        config: topic,
+        today: '2026-10-23',
+        exists: () => true,
+      });
+      expect(drafted.errors.length, status).toBeGreaterThan(0);
+      expect(indexed(text).problems.length > 0, status).toBe(status === '随便');
+    }
   });
 });
 
