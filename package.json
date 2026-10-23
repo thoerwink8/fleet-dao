@@ -58,6 +58,10 @@
     "agent-eval": "node packages/agent-eval/src/bin/agent-eval.ts",
     "pg:local": "node packages/db/src/bin/local-pg.ts"
   },
+  "discussionDraft": {
+    "layout": "topic",
+    "dir": "specs"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
     "@types/node": "^22.20.4",
