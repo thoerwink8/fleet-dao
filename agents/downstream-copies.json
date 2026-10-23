@@ -1,0 +1,12 @@
+{
+  "说明": "下发清单：fleet-dao 往对外仓下发、由对外仓自己原样拷进去的脚本。上游改了下游不知道，副本就漂移；fleet-dao 不往对外仓里加检查也不写文件，只在本机开会话时提醒（agents/hooks/downstream-copies.mjs，由 agents/hooks/session-start.mjs 调）：当前仓里按「文件名」用 git ls-files 找已跟踪的同名文件，第一行以「开头」起头的算副本，和本机装的技能里那份（~/.claude/skills/<技能>/<技能里的路径>，其次 ~/.agents/skills/…）内容不一样就提醒一行「照哪个技能再拷一次」；一样或没有副本不出声，读不到本机装的那份说没查成。以后下发别的脚本，往 items 里加一项就行。字段：id；技能（agents/skills/ 下的目录名，提醒里指向它）；技能里的路径（上游文件，相对技能目录，fleet-dao 里是 agents/skills/<技能>/<技能里的路径>）；文件名（副本的文件名，git ls-files 按它找）；开头（副本第一行的开头，认副本用，和上游第一行对得上）。",
+  "items": [
+    {
+      "id": "discussion-draft",
+      "技能": "discussion-draft",
+      "技能里的路径": "scripts/draft.mjs",
+      "文件名": "draft.mjs",
+      "开头": "// 讨论稿的起稿和推前检查。"
+    }
+  ]
+}

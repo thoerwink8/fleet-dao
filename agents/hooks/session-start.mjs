@@ -26,6 +26,8 @@
 //    查不成就说没查成。结果缓存 QUIET_MS，免得每条消息都 ssh。认不出的不当成没到期。
 // 6. 仓合同：自用仓（repo-kind.mjs 判）按 fleet-dao 的 agents/repo-contract.json 查，有缺项说一段事实，对外仓不查（决定 0107）。
 //    每个仓每天最多一次，全过不出声。只在真开会话时接上（repoContract 参数），测试按需注入。
+// 7. 下发副本：当前仓里按 agents/downstream-copies.json 找 fleet-dao 下发的脚本副本（git ls-files），和本机装的技能里那份
+//    不一样说一行照哪个技能再拷一次，读不到本机那份说没查成（downstream-copies.mjs）。只读，接法同第 6 件（downstreamCopies 参数）。
 // 环境变量 FLEET_WORKER=1（机器派的会话设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
@@ -45,6 +47,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { backgroundEnv, backgroundState, launchBackground, processAlive } from './background-launch.mjs';
+import { copyLines } from './downstream-copies.mjs';
 import { lineageOf, readFounderHistory } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
@@ -916,6 +919,7 @@ export function sessionStart({
   env = process.env,
   poolHolds = null,
   repoContract = null,
+  downstreamCopies = null,
 }) {
   // 工人不走三分钟门：它起来就要当前的远端。聊天这场每条消息都续上。
   // 问 GitHub、扫工作树看 session-net；git fetch 看 fetch-ok（子代理刚取成过就不再取）。两扇门都是三分钟。
@@ -954,6 +958,7 @@ export function sessionStart({
     ...checkTemporary(cwd, localGit, now),
     ...poolHoldPromptLines(holdRead, beijingToday(now)),
     ...(repoContract ? repoContract(cwd) : []),
+    ...(downstreamCopies ? downstreamCopies(cwd) : []),
     ...(quiet
       ? []
       : checkProgressIssue({
@@ -1184,6 +1189,7 @@ export function fastSessionStart({
   unattendedDir = null,
   env = process.env,
   repoContract = null,
+  downstreamCopies = null,
   progress = progressRunner(),
   spawnBackground = null,
 }) {
@@ -1226,6 +1232,7 @@ export function fastSessionStart({
   if (quotes?.ok && Array.isArray(quotes.value)) lines.push(...quotes.value.map(aged));
   lines.push(...failed('quotes', '私有原话补传'));
   lines.push(...(repoContract ? repoContract(cwd) : []));
+  lines.push(...(downstreamCopies ? downstreamCopies(cwd) : []));
   // 引导段同步现查，不用后台缓存：缓存里的「没办完」可能已经办完了（#2726）；办没办完看挂的单，读 GitHub（#2727）
   const syncDir = source ? source.syncDirIn(home) : null;
   lines.push(
@@ -1666,6 +1673,7 @@ if (isMain() && process.argv[2] === '--background') {
       sessionId: session.ok ? session.id : input?.session_id,
       agentId: input?.agent_id,
       repoContract: (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
+      downstreamCopies: (dir) => copyLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
     };
     lines =
       process.env.FLEET_WORKER === '1'
