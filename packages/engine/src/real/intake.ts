@@ -29,6 +29,7 @@ import {
   mergedPrForIssue,
   openAlertsByPrefix,
   readIntakeBreaker,
+  readSelfShare,
   recentEndedTasks,
   recordIntakeStart,
   requesterForRequestIssue,
@@ -373,6 +374,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         const repoIds = new Map((await listIntakeRepos(w.db)).map((r) => [`${r.owner}/${r.name}`, r.id]));
         let working = 0;
         let stalled = 0;
+        const byRepo: Record<string, number> = {};
         for await (const wf of client.workflow.list({
           query: `WorkflowType = '${WORKFLOW_TYPES.task}' AND ExecutionStatus = 'Running'`,
         })) {
@@ -384,9 +386,17 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           }
           const row = await taskStateByIssue(w.db, repoId, Number(m[2]));
           if (row?.state === 'stalled') stalled += 1;
-          else working += 1;
+          else {
+            working += 1;
+            byRepo[repoId] = (byRepo[repoId] ?? 0) + 1;
+          }
         }
-        return { working, stalled };
+        return { working, stalled, byRepo };
+      },
+      // 名额档位（每日简报写的 engine.selfShare）；认不出照抛，拉单当成读不到档位
+      selfShare: async () => {
+        const row = await readSelfShare(w.db);
+        return row ? { tier: row.tier, at: row.at, day: row.day } : null;
       },
       failures: (repo, issueNumber) => taskFailureCount(w.db, repo.id, issueNumber),
       async startedSince(since) {

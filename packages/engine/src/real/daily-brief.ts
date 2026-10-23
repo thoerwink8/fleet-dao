@@ -11,22 +11,29 @@ import {
   openBriefNotes,
   pipelineHealth,
   pullsByMergeSha,
+  readSelfShare,
   releaseKilledSessions,
   repoByName,
   startScheduleRun,
   stoppedTasksBetween,
   upsertAlert,
+  writeSelfShare,
 } from '@fleet-dao/db';
-import type { GitHub } from '@fleet-dao/github';
+import type { GitHub, GitHubClient } from '@fleet-dao/github';
 import type { DailyBriefDeps } from '../jobs/daily-brief.ts';
+import { SELF_REPO_NAME } from '../jobs/self-share.ts';
 import { RELEASES_DIR } from './release-evidence.ts';
+import { selfShareFacts } from './self-share-facts.ts';
 
 /** fleet-dao 自己这个仓：在受管的仓里按名字认（和驾驶舱 self-repo.ts 同一个认法），owner 不写死。 */
-export const SELF_REPO_NAME = 'fleet-dao';
+export { SELF_REPO_NAME };
+
+/** 写 engine.selfShare 的操作者。 */
+const SELF_SHARE_ACTOR = 'engine:daily-brief';
 
 export function dailyBriefJob(w: {
   db: Db;
-  gh: Pick<GitHub, 'releaseFacts' | 'commentIssue' | 'readIssue'>;
+  gh: Pick<GitHub, 'releaseFacts' | 'commentIssue' | 'readIssue'> & { deps: { client: GitHubClient } };
   releasesDir?: string;
   now?: () => Date;
   log?: DailyBriefDeps['log'];
@@ -60,6 +67,9 @@ export function dailyBriefJob(w: {
     pipelineHealth: (to) => pipelineHealth(w.db, to),
     releaseKills: (to) => releaseKilledSessions(w.db, to),
     flowModeHealth: (to) => flowModeHealth(w.db, to),
+    selfShareReadings: selfShareFacts({ db: w.db, client: w.gh.deps.client }),
+    selfSharePrevious: () => readSelfShare(w.db),
+    selfShareSave: (row) => writeSelfShare(w.db, row, SELF_SHARE_ACTOR),
     async publish(x) {
       await upsertAlert(w.db, { ...x, level: 'daily', taskId: null });
     },

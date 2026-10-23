@@ -54,6 +54,8 @@
 // - 每轮记下每个开着开关的仓「过了准入、只因没空位没起」的单有几张（recordWaiting，设置表 engine.intakeWaiting）：
 //   看门狗的「主线 N 小时没合 PR」报警（jobs/merge-stall.ts，决定 0093）拿它判这个仓有没有引擎可接的单。
 //   单子读不到的仓不写进去（不拿 0 冒充）；写不进记没查成。
+// - 名额按错误预算分（jobs/self-share.ts，每日简报算好写进设置 engine.selfShare，这里每轮读一次）：健康时 fleet-dao 自身单最多占在跑名额的 30%、
+//   耗预算 50%；冻结时只拉自身单、别的仓不拉新单（在跑的照跑）。被它挡下的单记 self_share_hold，不算「等空位」。读不到档位照现行行为拉单并记一条日志。
 
 import { createHash } from 'node:crypto';
 import {
@@ -86,7 +88,7 @@ import {
   localGate,
   type MilestoneRef,
 } from '@fleet-dao/core';
-import type { ScheduleResult } from '@fleet-dao/db';
+import type { ScheduleResult, SelfShareTier } from '@fleet-dao/db';
 import { humanPart } from '@fleet-dao/github';
 import { type parseRepoProfile, repoProfileGaps, safeParseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -129,6 +131,13 @@ import {
   sweepLocalLeases,
 } from './local-leases.ts';
 import { clip } from './reconcile-common.ts';
+import {
+  othersMayPull,
+  SELF_REPO_NAME,
+  SELF_SHARE_STALE_MS,
+  SELF_SHARE_TIER_WORDS,
+  selfShareCap,
+} from './self-share.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查）。 */
 export const INTAKE_JOB = {
@@ -222,7 +231,8 @@ export type IntakeSkipReason =
   | 'hourly_cap'
   | 'breaker_open'
   | 'already_exists'
-  | 'toolchain_unready';
+  | 'toolchain_unready'
+  | 'self_share_hold';
 
 /** 这几种是「没查成」不是「不该派」：记进 unchecked，这一轮不记 ok。 */
 const UNREADABLE: ReadonlySet<IntakeSkipReason> = new Set(['created_at_unreadable']);
@@ -521,8 +531,15 @@ export interface IntakeDeps {
   /**
    * 现在没结束的任务工作流分两类：working＝真在干活的（占并发名额），stalled＝停下等人的（任务行状态 stalled，
    * 工作流没结束但不占会话，不占名额，#1776）。读不到照抛：不当成「一条没有」。
+   * byRepo（仓编号 → 在干活条数）给了才能按名额档位限 fleet-dao 自身单占的份额；不给按 0 算。
    */
-  runningTasks(): Promise<number | { working: number; stalled: number }>;
+  runningTasks(): Promise<number | { working: number; stalled: number; byRepo?: Record<string, number> }>;
+  /**
+   * 名额档位（每日简报写进设置 engine.selfShare 的，见 jobs/self-share.ts）：健康时 fleet-dao 自身单最多占在跑名额的 30%、耗预算 50%、
+   * 冻结时只拉自身单、别的仓不拉新单。没有这一行回 null；读不到、认不出照抛。null、抛错、超过 SELF_SHARE_STALE_MS 没更新都当「读不到档位」：
+   * 照现行行为拉单，记一条日志（不拿「健康」或「冻结」顶）。不给（测试）就不分档。
+   */
+  selfShare?(): Promise<{ tier: SelfShareTier; at: Date; day: string } | null>;
   /** 这张单历史上失败过几次（该单任务行的失败记录）。读不到照抛：不当成「没失败过」。 */
   failures(repo: IntakeRepo, issueNumber: number): Promise<number>;
   /** 从 since 起建出的任务行有几条（滚动一小时限速）。读不到照抛：不当成「一条没起」。 */
@@ -625,6 +642,10 @@ interface Tally {
   running: number;
   /** 这一轮开头读到的停下等人的条数（不占名额，只用来写日志和说明）。 */
   stalled: number;
+  /** 名额档位（deps.selfShare 读到的）；没分档（没接、读不到）是 null。 */
+  share: SelfShareTier | null;
+  /** fleet-dao 自身单此刻在干活的条数（开头读到的，起一条加一）。 */
+  selfRunning: number;
   /** 开头读到的在干活条数（running 起一条加一，日志要的是开头的数）。 */
   workingAtStart: number;
   /** 这一轮开头读到的滚动一小时内已起的条数，起一条加一。 */
@@ -656,6 +677,8 @@ function newTally(scanned: number): Tally {
     reposOn: 0,
     running: 0,
     stalled: 0,
+    share: null,
+    selfRunning: 0,
     workingAtStart: 0,
     hourStarted: 0,
     breakerAllow: new Map(),
@@ -1165,10 +1188,41 @@ function noRoom(deps: IntakeDeps, repo: IntakeRepo, t: Tally): IntakeSkip | null
   return null;
 }
 
+/**
+ * 名额档位这一道（jobs/self-share.ts）：冻结时别的仓不拉新单；健康 / 耗预算时 fleet-dao 自身单在跑的条数不超过在跑上限的 30% / 50%。
+ * 回 null＝不拦（没分档、读不到档位也是不拦）。这不是「没空位」：不记进等空位的单数（看门狗不拿它当「引擎有活可接却没接」）。
+ */
+function shareHold(deps: IntakeDeps, repo: IntakeRepo, t: Tally): IntakeSkip | null {
+  if (t.share === null) return null;
+  const word = SELF_SHARE_TIER_WORDS[t.share];
+  if (repo.name !== SELF_REPO_NAME) {
+    return othersMayPull(t.share)
+      ? null
+      : {
+          reason: 'self_share_hold',
+          why: `名额档位是「${word}」：只拉 ${SELF_REPO_NAME} 自身单，别的仓不拉新单（在跑的照跑）`,
+        };
+  }
+  const maxRunning = deps.limits?.maxRunningTasks ?? MAX_RUNNING_TASKS;
+  const cap = selfShareCap(t.share, maxRunning);
+  if (cap !== null && t.selfRunning >= cap) {
+    return {
+      reason: 'self_share_hold',
+      why: `名额档位是「${word}」：${SELF_REPO_NAME} 自身单在跑 ${t.selfRunning} 条，已到在跑名额（${maxRunning}）的份额上限 ${cap} 条，其余留给真实项目`,
+    };
+  }
+  return null;
+}
+
 /** 排好序之后，从前往后起：有空位才现读这张单再核一遍，核过了才起。起成了回 true。 */
 async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tally): Promise<boolean> {
   const slug = `${repo.owner}/${repo.name}`;
   const { issue } = c;
+  const held = shareHold(deps, repo, t);
+  if (held) {
+    skip(t, slug, issue.number, held);
+    return false;
+  }
   const full = noRoom(deps, repo, t);
   if (full) {
     skip(t, slug, issue.number, full);
@@ -1195,6 +1249,7 @@ async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, 
   }
   t.started += 1;
   t.running += 1;
+  if (repo.name === SELF_REPO_NAME) t.selfRunning += 1;
   t.hourStarted += 1;
   t.breakerAllow.set(repo.id, (t.breakerAllow.get(repo.id) ?? 0) - 1);
   deps.log('info', `拉单：起了 ${slug}#${issue.number} 的任务工作流`, {
@@ -1474,7 +1529,7 @@ async function groomRepo(
   const current = t.skippedByRepo.get(slug) ?? new Map<IntakeSkipReason, number>();
   const delta = (reason: IntakeSkipReason) => (current.get(reason) ?? 0) - (skippedBefore.get(reason) ?? 0);
   const why = autoGroomWhy({
-    spare: noRoom(deps, repo, t) === null,
+    spare: noRoom(deps, repo, t) === null && shareHold(deps, repo, t) === null,
     started: startedHere,
     backlog:
       delta('brief_incomplete') +
@@ -1561,6 +1616,36 @@ function summarize(t: Tally): string {
   return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}${unready}${ready}${blocked}`;
 }
 
+/**
+ * 读名额档位放进 t.share。读不到（没这一行、认不出、读失败、超过 SELF_SHARE_STALE_MS 没更新）：t.share 留 null＝照现行行为拉单，
+ * 只记一条日志。这不算「没查成」（不改这一轮的结局）：档位是分名额的加成，读不到不该把拉单整个停掉。
+ */
+async function loadShare(deps: IntakeDeps, t: Tally): Promise<void> {
+  if (!deps.selfShare) return;
+  try {
+    const row = await deps.selfShare();
+    if (row === null) {
+      deps.log('warn', '拉单：名额档位读不到（设置里还没有 engine.selfShare），照现行行为拉单');
+      return;
+    }
+    const age = deps.now().getTime() - row.at.getTime();
+    if (!Number.isFinite(age) || age > SELF_SHARE_STALE_MS) {
+      deps.log(
+        'warn',
+        `拉单：名额档位读不到（engine.selfShare 是 ${row.day} 算的，已超过 ${SELF_SHARE_STALE_MS / 3_600_000} 小时没更新），照现行行为拉单`,
+      );
+      return;
+    }
+    t.share = row.tier;
+    deps.log('info', `拉单：名额档位是「${SELF_SHARE_TIER_WORDS[row.tier]}」（${row.day} 算的）`, {
+      tier: row.tier,
+      selfRunning: t.selfRunning,
+    });
+  } catch (err) {
+    deps.log('warn', `拉单：名额档位读不到（${errMessage(err)}），照现行行为拉单`);
+  }
+}
+
 async function round(deps: IntakeDeps): Promise<ScheduleResult> {
   let repos: IntakeRepo[];
   try {
@@ -1586,6 +1671,12 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
       t.running = typeof counts === 'number' ? counts : counts.working;
       t.stalled = typeof counts === 'number' ? 0 : counts.stalled;
       t.workingAtStart = t.running;
+      if (typeof counts !== 'number' && counts.byRepo) {
+        const byRepo = counts.byRepo;
+        t.selfRunning = repos
+          .filter((r) => r.name === SELF_REPO_NAME)
+          .reduce((n, r) => n + (byRepo[r.id] ?? 0), 0);
+      }
     } catch (err) {
       return {
         outcome: 'failed',
@@ -1604,6 +1695,7 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
         scanned: repos.length,
       };
     }
+    await loadShare(deps, t);
     await intakeRepos(deps, repos, whitelist, t);
     if (deps.recordWaiting) {
       try {
