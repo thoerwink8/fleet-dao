@@ -2,7 +2,7 @@
 // 起因：一个对外仓 2026-10-23 的排查讨论稿第一版只有六节，缺「要改的已有规矩」「验收和风险」「结论和交接」，接手的人得重新问。
 // 先钉判法（纯函数），再在临时 git 仓里真跑命令：起稿填对、同短名不新建、真模板起出来的稿过检查、改成已定少链接或单号就拒；
 // 最后一条拿本仓自己的讨论稿跑同一个检查——这就是 fleet-dao 的推前查（CI 每个 PR 全跑）。
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -14,6 +14,8 @@ const SCRIPT = join(ROOT, 'agents/skills/discussion-draft/scripts/draft.mjs');
 const TEMPLATE = readFileSync(join(ROOT, 'agents/skills/discussion-draft/template.md'), 'utf8');
 
 interface Config {
+  layout: 'dated' | 'topic';
+  file: string;
   dir: string;
   suffix: string;
   template: string | null;
@@ -141,6 +143,111 @@ describe('配置', () => {
   it('短名进文件名：字母数字和单个连字符', () => {
     expect(['ux-audit', '体验-排查', 'a1'].every(lib.validShort)).toBe(true);
     expect(['', '-a', 'a--b', 'a b', 'a/b', '../x'].some(lib.validShort)).toBe(false);
+  });
+});
+
+describe('按主题放（layout: topic）的配置', () => {
+  it('没配新键：布局 dated、文件名 讨论稿.md，其余默认不变', () => {
+    for (const raw of [undefined, {}, { dir: 'x', suffix: '-a.md' }]) {
+      const c = lib.parseConfig(raw);
+      expect([c.layout, c.file]).toEqual(['dated', '讨论稿.md']);
+    }
+    const t = lib.parseConfig({ layout: 'topic', dir: 'specs' });
+    expect([t.layout, t.dir, t.file]).toEqual(['topic', 'specs', '讨论稿.md']);
+    expect(lib.parseConfig({ layout: 'topic', file: '稿.md' }).file).toBe('稿.md');
+  });
+
+  it('互斥和写错都报错：topic 写 suffix / since，dated 写 file，layout 值不对，file 带目录', () => {
+    expect(() => lib.parseConfig({ layout: 'topic', suffix: '-x.md' })).toThrow(/topic 时不能写 suffix/);
+    expect(() => lib.parseConfig({ layout: 'topic', since: '2026-10-23' })).toThrow(/topic 时不能写 since/);
+    expect(() => lib.parseConfig({ file: '稿.md' })).toThrow(/file 只在 layout 是 topic/);
+    expect(() => lib.parseConfig({ layout: 'dated', file: '稿.md' })).toThrow(/file 只在 layout 是 topic/);
+    expect(() => lib.parseConfig({ layout: 'nested' })).toThrow(/dated 或 topic/);
+    expect(() => lib.parseConfig({ layout: 'topic', file: 'a/b.md' })).toThrow(/不带目录/);
+  });
+
+  it('只认 <dir>/<单号>-<短名>/<file>：往深一层、别的文件名、没有单号前缀都不算，反斜杠照认', () => {
+    const c = lib.parseConfig({ layout: 'topic', dir: 'specs' });
+    expect(lib.isDraftPath('specs/12-x/讨论稿.md', c)).toBe(true);
+    expect(lib.isDraftPath('specs\\12-x\\讨论稿.md', c)).toBe(true);
+    expect(lib.isDraftPath('./specs/T1-x/讨论稿.md', c)).toBe(true);
+    expect(lib.isDraftPath('specs/12-x/sub/讨论稿.md', c)).toBe(false);
+    expect(lib.isDraftPath('specs/讨论稿.md', c)).toBe(false);
+    expect(lib.isDraftPath('specs/12-x/方案.md', c)).toBe(false);
+    expect(lib.isDraftPath('specs/notes/讨论稿.md', c)).toBe(false);
+    expect(lib.isDraftPath('docs/12-x/讨论稿.md', c)).toBe(false);
+    expect(
+      lib.isDraftPath('specs/12-x/稿.md', lib.parseConfig({ layout: 'topic', dir: 'specs', file: '稿.md' })),
+    ).toBe(true);
+  });
+});
+
+describe('按主题放：状态一条线', () => {
+  const topic = lib.parseConfig({ layout: 'topic', dir: 'specs' });
+  const path = 'specs/12-x/讨论稿.md';
+  const topicCheck = (text: string, today = '2026-10-23') =>
+    lib.checkDraft({ path, text, headings: HEADINGS, config: topic, today, exists: () => true });
+  const withStatus = (status: string, conclusion?: string) => {
+    const base = FRESH.replace('- 状态：讨论中', `- 状态：${status}`);
+    return conclusion === undefined
+      ? base
+      : base.replace(/## 八、结论[\s\S]*$/, `## 八、结论\n\n${conclusion}\n`);
+  };
+  const good = '- 决定：[0118](../../docs/decisions/0118-x.md)\n- 任务：#12';
+
+  it('讨论中：八节齐才过；状态行带注释也认', () => {
+    expect(topicCheck(FRESH)).toEqual({ errors: [], reminders: [] });
+    expect(topicCheck(FRESH.replace('## 七、没核实的', '## 七、没核实')).errors).toEqual([
+      expect.stringContaining('## 七、没核实的'),
+    ]);
+  });
+
+  it('已定 / 在做 / 做完：结论节要有决定链接和单号', () => {
+    const decisions = lib.parseConfig({ layout: 'topic', dir: 'specs', decisions: 'docs/decisions' });
+    for (const s of ['已定（2026-10-24）', '在做', '做完']) {
+      const ok = lib.checkDraft({
+        path,
+        text: withStatus(s, good),
+        headings: HEADINGS,
+        config: decisions,
+        today: '2026-10-24',
+        exists: () => true,
+      });
+      expect([s, ok.errors]).toEqual([s, []]);
+      const bad = lib.checkDraft({
+        path,
+        text: withStatus(s, '- 任务：待开'),
+        headings: HEADINGS,
+        config: decisions,
+        today: '2026-10-24',
+        exists: () => true,
+      });
+      expect(bad.errors).toEqual([
+        expect.stringContaining('没有指向决定'),
+        expect.stringContaining('没有任务编号'),
+      ]);
+    }
+  });
+
+  it('搁置 / 被取代：不查正文', () => {
+    for (const s of ['搁置（等平台升级）', '被取代（见 specs/13-y）'])
+      expect(topicCheck(`# x\n\n- 状态：${s}\n\n## 一、提出的问题\n`).errors).toEqual([]);
+  });
+
+  it('未复核、认不出的状态报错', () => {
+    expect(topicCheck(withStatus('未复核')).errors).toEqual([expect.stringContaining('未复核')]);
+    expect(topicCheck(withStatus('随便')).errors).toEqual([expect.stringContaining('「随便」认不出')]);
+  });
+
+  it('dated 布局仍不认 在做 / 做完 / 被取代', () => {
+    for (const s of ['在做', '做完', '被取代'])
+      expect(check(withStatus(s)).errors).toEqual([expect.stringContaining('认不出')]);
+  });
+
+  it('讨论中超期提醒取 H1 里第一个日期；没有日期不提醒', () => {
+    expect(topicCheck(FRESH, '2026-10-30').reminders).toEqual([]);
+    expect(topicCheck(FRESH, '2026-10-31').reminders).toEqual([expect.stringContaining('8 天')]);
+    expect(topicCheck(FRESH.replace('2026-10-23，讨论稿', '讨论稿'), '2027-01-01').reminders).toEqual([]);
   });
 });
 
@@ -314,6 +421,90 @@ describe('命令', () => {
     expect(run(repo(), 'new', 'a b', '--ask', 'x').status).toBe(2);
     expect(run(repo(), 'check', '--today', '昨天').status).toBe(2);
     expect(run(repo(), 'remove').status).toBe(2);
+  });
+});
+
+describe('按主题放：命令', () => {
+  const dirs: string[] = [];
+  afterAll(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+  const repo = (config: unknown) => {
+    const dir = mkdtempSync(join(tmpdir(), 'discussion-topic-'));
+    dirs.push(dir);
+    mkdirSync(join(dir, 'specs', '5-旧方案'), { recursive: true });
+    writeFileSync(join(dir, 'specs', '5-旧方案', '方案.md'), '# 旧\n');
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', version: '1.0.0', discussionDraft: config }),
+    );
+    runChildOk('git', ['init', '-q'], { cwd: dir });
+    runChildOk(
+      'git',
+      ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'x'],
+      {
+        cwd: dir,
+      },
+    );
+    return dir;
+  };
+  const TOPIC = { layout: 'topic', dir: 'specs' };
+  const run = (dir: string, ...args: string[]) => runChild('node', [SCRIPT, ...args, '--root', dir]);
+
+  it('起稿：生成 <dir>/<单号>-<短名>/讨论稿.md，check 认得（别的主题目录没有稿不算缺）', () => {
+    const dir = repo(TOPIC);
+    const r = run(dir, 'new', 'ux', '--issue', '77', '--ask', '六点', '--date', '2026-10-23');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('specs/77-ux/讨论稿.md');
+    const text = readFileSync(join(dir, 'specs', '77-ux', '讨论稿.md'), 'utf8');
+    expect(text).toContain('- 状态：讨论中');
+    expect(text).toContain('# ux（2026-10-23，讨论稿）');
+    const c = run(dir, 'check', '--today', '2026-10-23');
+    expect([c.status, c.stdout.trim()]).toEqual([0, '讨论稿检查过了：1 份']);
+  });
+
+  it('缺 --issue、单号不是字母数字、短名第一段纯数字，都退出 2 且不建目录', () => {
+    const dir = repo(TOPIC);
+    const noIssue = run(dir, 'new', 'ux', '--ask', '六点');
+    expect([noIssue.status, noIssue.stderr.includes('先开单')]).toEqual([2, true]);
+    expect(run(dir, 'new', 'x', '--issue', '8/8', '--ask', 'd').status).toBe(2);
+    expect(run(dir, 'new', '2-x', '--issue', '88', '--ask', 'd').status).toBe(2);
+    expect(existsSync(join(dir, 'specs', '88-2-x'))).toBe(false);
+  });
+
+  it('单号已有目录（新稿或旧方案）：报出来、退出 1、不新建', () => {
+    const dir = repo(TOPIC);
+    const old = run(dir, 'new', 'x', '--issue', '5', '--ask', 'c');
+    expect(old.status).toBe(1);
+    expect(old.stderr).toContain('specs/5-旧方案');
+    expect(existsSync(join(dir, 'specs', '5-x'))).toBe(false);
+  });
+
+  it('单号 7 不被 77 挡住：只认「7-」开头的目录', () => {
+    const dir = repo(TOPIC);
+    mkdirSync(join(dir, 'specs', '77-a'));
+    expect(run(dir, 'new', 'y', '--issue', '7', '--ask', 'e').status).toBe(0);
+  });
+
+  it('dated 布局给 --issue 是不认识的参数（退出 2）', () => {
+    const dir = repo(undefined);
+    mkdirSync(join(dir, 'docs'));
+    const r = run(dir, 'new', 'ux', '--issue', '77', '--ask', '六点');
+    expect([r.status, r.stderr.includes('--issue')]).toEqual([2, true]);
+    expect(existsSync(join(dir, 'docs', 'ux'))).toBe(false);
+  });
+
+  it('配置互斥退出 2', () => {
+    expect(run(repo({ ...TOPIC, suffix: '-x.md' }), 'check').status).toBe(2);
+    expect(run(repo({ file: 'a.md' }), 'check').status).toBe(2);
+  });
+
+  it('check 只给文件：只查其中是稿的', () => {
+    const dir = repo(TOPIC);
+    mkdirSync(join(dir, 'specs', '9-bad'));
+    writeFileSync(join(dir, 'specs', '9-bad', '讨论稿.md'), '# 坏稿\n');
+    expect(run(dir, 'check', 'specs/5-旧方案/方案.md').stdout.trim()).toBe('讨论稿检查过了：0 份');
+    expect(run(dir, 'check', 'specs/9-bad/讨论稿.md').status).toBe(1);
   });
 });
 
