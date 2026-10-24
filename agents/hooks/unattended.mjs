@@ -93,7 +93,7 @@ export function recordProgress({ dir, sessionId, input }) {
   const validating =
     typeof command === 'string' &&
     !/\b(sleep|Start-Sleep)\b/i.test(command) &&
-    /\b(pnpm\s+([^\r\n]*\s)?(check|test|typecheck|hygiene|vitest|biome|build)|git\s+(commit|push)|gh\s+(pr\s+create|issue\s+create))\b/.test(
+    /\b(pnpm\s+([^\r\n]*\s)?(check|test|typecheck|hygiene|vitest|biome|build)|npx\s+vitest\s+run|node\s+--test\b|git\s+(commit|push)|gh\s+(pr\s+create|issue\s+create))\b/.test(
       command,
     );
   const finished =
@@ -325,7 +325,10 @@ export function sessionLines({ dir, sessionId, now = Date.now() }) {
     return [
       `无人值守开着（到 ${fmt(s.expiresAt)}）：未完成工作必须接到下一轮；有后台任务先用本 CLI 的阻塞等待工具收结果，不能只凭任务存在就结束。有实质进展才重置防空转计数；连续无进展会明确故障暂停。有进展就 pnpm progress note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
     ];
-  if (s.state === 'paused' && s.note) return [`无人值守暂停着（${s.note}）。这一轮可以结束。`];
+  if (s.state === 'paused' && s.note)
+    return [
+      `无人值守自动接续暂停着（${s.note}）；这不取消新收到的用户任务，新请求照常执行、检查和验证。不要只复述暂停提示就收尾；检查接续链路后才重新 on，不凭新请求自动重置暂停计数。`,
+    ];
   return [];
 }
 

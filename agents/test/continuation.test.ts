@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { main } from '../hooks/unattended.mjs';
+import { main, sessionLines } from '../hooks/unattended.mjs';
 import { runChild } from './child.ts';
 import { codexSourceFixture } from './codex-source-fixture.ts';
 
@@ -48,6 +48,68 @@ function session(cli: 'claude' | 'codex') {
 }
 
 describe('各 CLI 真实 Stop → PostToolUse → 下一轮协议接续', { timeout: 0 }, () => {
+  it.each(['claude', 'codex'] as const)('%s 仓库规定的直接验证命令连续工作六轮，不误报无进展', (cli) => {
+    const s = session(cli);
+    const commands = [
+      'npx vitest run agents/test/continuation.test.ts',
+      'node --test _tmp/verification.test.mjs',
+      'node --test _tmp/root-round205-evidence-verify.mjs',
+      'node --test _tmp/root-round205-list-verify.mjs',
+      'node --test "_tmp/verification-check.mjs"',
+      'node --test _tmp/verification.validate.ts',
+    ];
+    for (const command of commands) {
+      expect(JSON.parse(s.run('stop').stdout).decision).toBe('block');
+      s.run('continuation-progress', {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_response: { exit_code: 0 },
+      });
+    }
+    expect(readdirSync(join(s.dir, `${s.sid}.progress`))).toHaveLength(commands.length);
+    expect(JSON.parse(s.run('stop').stdout).decision).toBe('block');
+    expect(s.state()).toMatchObject({ state: 'on', streak: 1 });
+  });
+
+  it('直接验证失败、未结束、重复、查询状态和普通脚本不能续命', () => {
+    const s = session('codex');
+    const event = (command: string, response: object = { exit_code: 0 }) =>
+      s.run('continuation-progress', {
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_response: response,
+      });
+    for (const command of ['npx vitest run failed.test.ts', 'node --test _tmp/evidence-verify.mjs']) {
+      event(command, { exit_code: 1 });
+      event(command, { session_id: 123, status: 'running' });
+      event(command, { interrupted: true });
+    }
+    event('npx vitest run verified.test.ts');
+    event('npx vitest run verified.test.ts');
+    expect(readdirSync(join(s.dir, `${s.sid}.progress`))).toHaveLength(1);
+    expect(JSON.parse(s.run('stop').stdout).decision).toBe('block');
+    for (const command of ['node _tmp/queue-read.mjs', 'node _tmp/pr-check.mjs', 'gh pr checks 1']) {
+      event(command);
+      event('npx vitest run verified.test.ts');
+      s.run('stop');
+    }
+    expect(readdirSync(join(s.dir, `${s.sid}.progress`))).toHaveLength(1);
+    expect(s.state().state).toBe('paused');
+  });
+
+  it('故障暂停只停自动接续，开场仍要求执行新用户任务，且不重置旧窗口', () => {
+    const s = session('codex');
+    for (let i = 0; i < 4; i++) s.run('stop');
+    const before = s.state();
+    expect(before.state).toBe('paused');
+    const lines = sessionLines({ dir: s.dir, sessionId: s.sid }).join('\n');
+    expect(lines).toContain('新请求照常执行、检查和验证');
+    expect(lines).not.toContain('这一轮可以结束');
+    expect(s.state()).toEqual(before);
+    expect(s.run('stop').stdout.trim()).toBe('');
+  });
+
   it.each(['claude', 'codex'] as const)(
     '%s 连续六轮有效工作不被三次上限误停，完成结果一次性可消费，done正常收尾',
     (cli) => {
