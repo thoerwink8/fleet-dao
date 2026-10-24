@@ -49,6 +49,7 @@
     "hooks/work-watch.mjs",
     "hooks/carpool-clock.mjs",
     "hooks/quota-stop.mjs",
+    "hooks/quota-resume.mjs",
     "local-sessions/lib.mjs",
     "local-sessions/heartbeat.mjs",
     "local-sessions/push.mjs",
