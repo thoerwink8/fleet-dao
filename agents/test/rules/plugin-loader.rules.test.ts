@@ -147,6 +147,17 @@ const projectHooks = (): Settings => ({
         ],
       },
     ],
+    StopFailure: [
+      {
+        hooks: [
+          {
+            type: 'command',
+            command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/quota-stop.mjs"',
+            timeout: 10,
+          },
+        ],
+      },
+    ],
   },
 });
 
@@ -160,6 +171,7 @@ describe('订阅目录（决定 0085）', () => {
       ['stop.mjs', 'Stop', 10],
       ['work-watch.mjs', 'Stop', 11_400],
       ['prompt-log.mjs', 'UserPromptSubmit', 30],
+      ['quota-stop.mjs', 'StopFailure', 10],
     ]);
   });
 
@@ -210,7 +222,7 @@ describe('订阅目录（决定 0085）', () => {
     }
   });
 
-  it('空设置加上 process：七条命令都指向安装目录，不指向别的仓的 agents/hooks', () => {
+  it('空设置加上 process：八条命令都指向安装目录，不指向别的仓的 agents/hooks', () => {
     const next = lib.applyCatalog({}, ['process'], HOOKS);
     expect(scriptsOf(next)).toEqual(PROCESS_HOOKS.map((hook) => hook.script));
     const handlers = Object.values(next.hooks ?? {}).flatMap((groups) =>
