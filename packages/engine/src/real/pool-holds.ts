@@ -1,7 +1,9 @@
 // 哪些账号池整池暂停着（选路 real/store-ports.ts、切号 real/org-switch.ts + real/org-plan.ts 读同一份，口径一个）。两个来源：
 // 1. 开关（#746）：设置 engine.poolHolds，人在额度页拍的临时停用，带原因、撤回条件、复查日期（可不填）。探针探通、会话跑通都不碰它，只有人在额度页打开；
 //    认不出（整份或某个池那一项）按暂停办，调用方要把 facts.problems 报出来（org-switch 的一轮报 session-org:pool-hold），不当成能用；
-// 2. 旧的 `pool-hold:<池>` 提醒（兼容读法，保留一版）：引擎发现登录失效、封号这类整池问题写的，探针探通、会话跑通会撤。额度页把封号、登录失效显示成「封号」，不自动改开关。
+// 2. 独享一个可用的都没有 → 引擎让出拼车（#3687 批次 6，real/carpool-yield.ts）：提醒 carpool-yield:solo-down 开着，库里所有拼车池算暂停，
+//    和开关一样连续会话的试探也不放过去（人在驾驶舱把那条标已处理 = 手动放开）；
+// 3. 旧的 `pool-hold:<池>` 提醒（兼容读法，保留一版）：引擎发现登录失效、封号这类整池问题写的，探针探通、会话跑通会撤。额度页把封号、登录失效显示成「封号」，不自动改开关。
 //    引擎自己写提醒的两处（real/route-probe.ts、real/session-pool-hold.ts）没动：它们只管提醒，碰不到开关。
 // 改这里之前必须知道：switched 里的池连「续会话的试探」也不放过去（提醒顶着的池放，那一单就是看修好了没有；开关暂停的是人的决定，
 // 没有「修好了」这回事）。库读不了照抛，不当成没有暂停。
@@ -13,6 +15,7 @@ import {
   readPoolHoldsSetting,
 } from '@fleet-dao/db';
 import { type DecisionOption, type PoolHoldFacts, resolvePoolHolds } from '@fleet-dao/shared';
+import { CARPOOL_YIELD_KEY } from './carpool-yield.ts';
 
 /** 账号池整池暂停（设备被撤销、封号、登录失效、欠费：要人修）的提醒：dedupe_key = pool-hold:<池>。 */
 export const POOL_HOLD_PREFIX = 'pool-hold:';
@@ -70,14 +73,24 @@ export async function carpoolPoolsHeldReason(db: Db, now: Date): Promise<string 
   return `拼车池 ${caps.map((c) => c.poolId).join('、')} 整池暂停着`;
 }
 
-export async function loadHeldPools(db: Db, now: Date): Promise<HeldPools> {
-  const [setting, alerts] = await Promise.all([
+/**
+ * ignoreYield：不算独享不可用时让出的拼车。只有账号清单的判法（org-plan.ts 的 loadOrgSwitchFacts）这样读：让出是由独享状态判出来的，
+ * 清单再把它当「拼车账号不可用」读回去就绕成圈了（独享恢复时，拼车这一类还被自己的让出压着，渠道状态跟着错）。
+ */
+export async function loadHeldPools(
+  db: Db,
+  now: Date,
+  options: { ignoreYield?: boolean } = {},
+): Promise<HeldPools> {
+  const [setting, alerts, yielded] = await Promise.all([
     readPoolHoldsSetting(db),
     openAlertsByPrefix(db, POOL_HOLD_PREFIX),
+    options.ignoreYield ? Promise.resolve([]) : openAlertsByPrefix(db, CARPOOL_YIELD_KEY),
   ]);
   const facts = resolvePoolHolds(setting.set ? setting.value : undefined, now);
   const switched = new Set(facts.heldPoolIds);
   if (facts.holdAll) for (const id of await listPoolIds(db)) switched.add(id);
+  if (yielded.length > 0) for (const c of await carpoolPoolCaps(db)) switched.add(c.poolId);
   const fromAlerts = alerts.map((a) => a.dedupeKey.slice(POOL_HOLD_PREFIX.length)).filter(Boolean);
   const all = new Set([...switched, ...fromAlerts]);
   return { all, switched, alertOnly: fromAlerts.filter((p) => !switched.has(p)), facts };
