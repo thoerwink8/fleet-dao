@@ -32,7 +32,12 @@ export {
 } from './readers/claude.ts';
 export { readingsFromRateLimit } from './readers/claude-stream.ts';
 export { readingsFromPeriodUsage } from './readers/cursor.ts';
-export { dailyTokenFilesSource, estimateWindows, windowSpan } from './readers/estimate.ts';
+export {
+  dailyTokenFilesSource,
+  estimateWindows,
+  recordFromDailyTokenFile,
+  windowSpan,
+} from './readers/estimate.ts';
 export { GROK_TOKEN_SELF_HEAL_MINUTES, readingsFromGrokBilling } from './readers/grok.ts';
 export { readingsFromRelayFrame } from './readers/mirasim.ts';
 export { carpoolSubscription, readingsFromCarpoolQuota } from './readers/reclaude.ts';
