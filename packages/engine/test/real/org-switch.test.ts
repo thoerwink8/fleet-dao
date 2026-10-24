@@ -1539,7 +1539,11 @@ describe('拼车窗口的空档（决定 0120）：工作日凌晨法国切独�
     s.advance(100 * MIN);
     await s.orgSwitch.now({ by: '定时读接口' });
     expect((await alertOf(ORG_WINDOW_ALERT))?.resolvedAt).not.toBeNull();
-    expect((await s.pick()).ok).toBe(true);
+    // 空档的挡法撤了；但独享还封着，批次 6 的让出拼车接着挡（#3687），不是空档的原因了
+    const after = await s.pick();
+    expect(after.ok).toBe(false);
+    expect(!after.ok && after.detail).not.toContain('拼车窗口的空档');
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedAt).toBeNull();
   });
 });
 
@@ -1609,6 +1613,22 @@ describe('独享一个可用的都没有：引擎让出拼车给本机（#3687 �
     s.advance(15 * MIN);
     await s.round();
     expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+  });
+
+  it('和按时段的空档叠加：任一说不派拼车就不派；空档结束了，独享还封着就仍然让出', async () => {
+    const s = setup({ api });
+    mode = 'solo-gone';
+    // 下周一 04:00 北京时间：在空档（03:30–05:30）里，独享又封着
+    s.advance(new Date('2026-09-27T20:00:00Z').getTime() - NOW.getTime());
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedAt).toBeNull();
+    const inGap = await s.pick();
+    expect(inGap.ok).toBe(false);
+    // 05:30 之后：空档的挡法撤了，让出的还在
+    s.advance(100 * MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(await holds(s)).toEqual(new Set(['claude-carpool']));
+    expect((await s.pick()).ok).toBe(false);
   });
 
   it('读不到账号状态：没开的不开，开着的不撤', async () => {
