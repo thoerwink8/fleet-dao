@@ -11,6 +11,9 @@
 //    其余给宽限 G（方案 4.5，创始人 10-04「按你推荐」= 10 分钟），到点还没完的再停、再切；
 //    没有恢复条件（人手动切到独享的、账本丢了）→ 照老判法（拼车没有用满的读数就切回），同样过账号关；
 // 5. 帮手切号刚失败、还在退避里（2 → 10 → 30 分钟）→ 这一轮不切。
+// 另有一条按时段的（决定 0120，jobs/carpool-window.ts）：北京时间工作日凌晨的拼车空档里，挂着拼车就当拼车「用不了」同样走第 3 步的
+// 关（账号状态、暂不用独享、整池暂停、用满、留量线）切独享，不记恢复条件；挂着独享就不切回，出了空档按没有恢复条件的老判法切回
+// （onSoloWithoutRecord）；空档里不管切没切成，OrgDecision.window 都写着，选路据此不派拼车池（等到空档结束）。
 //
 // 改这里之前必须知道：读不到、认不出、对不上，一律明确的「不切 + 原因」，不当成拼车能用、不当成到点了；每条分支在
 // test/org-decision.test.ts 里有一条故意造出失败的测试。
@@ -24,6 +27,12 @@ import {
   type RecoveryPolicy,
   type RecoveryVerdict,
 } from './carpool-outage.ts';
+import {
+  carpoolGapAt,
+  DEFAULT_WINDOW_SCHEDULE,
+  stampShanghai,
+  type WindowSchedule,
+} from './carpool-window.ts';
 import { type AccountsVerdict, type ChannelState, gateSwitch } from './org-accounts.ts';
 import { lastOkRead, type OrgLedger } from './org-ledger.ts';
 import { type OrgSwitchFacts, planOrgSwitch } from './org-switch.ts';
@@ -47,6 +56,8 @@ export interface OrgDecisionPolicy {
   apiFreshMs: number;
   /** 账号状态读不到超过这么久，推「读不到账号状态」提醒（第六节第 1 条：连着没读成才报，不是一次抖动就报）。 */
   channelUnknownAlertMs: number;
+  /** 拼车 5 小时窗口的排法（决定 0120）：空档内挂到独享、选路不派拼车。null = 不按时段切。 */
+  window: WindowSchedule | null;
 }
 
 const MIN = 60_000;
@@ -58,6 +69,7 @@ export const DEFAULT_ORG_DECISION_POLICY: Readonly<OrgDecisionPolicy> = Object.f
   youngRunMs: 5 * MIN,
   apiFreshMs: 15 * MIN,
   channelUnknownAlertMs: 15 * MIN,
+  window: DEFAULT_WINDOW_SCHEDULE,
 });
 
 export interface OrgDecisionFacts extends OrgSwitchFacts {
@@ -91,6 +103,16 @@ export interface ChannelReport {
   alert: { title: string; body: string } | null;
 }
 
+/** 现在在拼车空档里（决定 0120）：选路不派拼车池；挂着拼车又切不过去时另带一条提醒。 */
+export interface WindowReport {
+  /** 空档到几点结束（北京时间工作日锚点）。 */
+  until: Date;
+  /** 给选路和驾驶舱看：为什么拼车不派。 */
+  why: string;
+  /** 挂着拼车、独享又切不过去（账号一个可用的都没有、暂不用独享…）：法国 Claude 步骤等到空档结束，要报这条。 */
+  alert: { title: string; body: string } | null;
+}
+
 export interface OrgDecision {
   plan: OrgPlan;
   /** 新账本（调用方存）。执行成了以后还要经 ledgerAfterSwitch 记一笔。 */
@@ -100,6 +122,8 @@ export interface OrgDecision {
   overdue?: string;
   /** 本轮顺手发生的、要进操作记录的事（例如「接口说本人有余额请求却被拒」）。 */
   notes: string[];
+  /** 现在在拼车空档里才有。 */
+  window?: WindowReport;
 }
 
 export const stamp = (d: Date) => `${d.toISOString().replace('T', ' ').slice(0, 16)}（UTC）`;
@@ -132,6 +156,35 @@ function reportChannel(f: OrgDecisionFacts, policy: OrgDecisionPolicy): ChannelR
   return { state, summary: f.accounts.summary, since, changed: !same, alert };
 }
 
+const GAP_BAR = '拼车窗口的空档';
+
+/**
+ * 现在在不在拼车空档里（决定 0120）。在：选路不派拼车池；挂着拼车、这一轮又没切成也没在等（stay / stuck）就报提醒——
+ * 独享一个可用的都没有时法国的 Claude 步骤只能等，不碰拼车，要让人知道为什么。
+ */
+function windowReport(
+  f: OrgDecisionFacts,
+  policy: OrgDecisionPolicy,
+  plan: OrgPlan,
+): WindowReport | undefined {
+  if (!policy.window) return undefined;
+  const gap = carpoolGapAt(f.now, policy.window);
+  if (!gap.inGap) return undefined;
+  const range = `${stampShanghai(gap.from)}起到 ${stampShanghai(gap.until)}`;
+  const why = `${GAP_BAR}（${range}）：下一个工作日 05:30 要点着新窗口，这段时间拼车不开新请求（决定 0120）`;
+  const stuck = f.live.ok && f.live.org === 'carpool' && (plan.action === 'stay' || plan.action === 'stuck');
+  return {
+    until: gap.until,
+    why,
+    alert: stuck
+      ? {
+          title: `${GAP_BAR}里独享切不过去：法国的 Claude 步骤等到 ${stampShanghai(gap.until)}`,
+          body: `${why}。会话用户本该挂到独享，可是：${plan.why}。这段时间选路不往拼车池派，Claude 步骤照"等路由"挂着，空档结束自动恢复；要现在就跑，处理上面说的独享问题。`,
+        }
+      : null,
+  };
+}
+
 function latestKnownReset(windows: ReadonlyArray<{ resetsAt: Date | null }>): Date | null {
   const known = windows.map((w) => w.resetsAt).filter((d): d is Date => d !== null);
   return known.length === windows.length && known.length > 0
@@ -152,12 +205,14 @@ export function decideOrgSwitch(
   const notes: string[] = [];
   const out = (plan: OrgPlan, ledger: OrgLedger = base, overdue?: string): OrgDecision => {
     const gated = helperGate(plan, f, policy);
+    const window = windowReport(f, policy, gated);
     return {
       plan: gated,
       ledger: gated === plan ? ledger : { ...ledger, backPending: null },
       channel,
       ...(overdue ? { overdue } : {}),
       notes,
+      ...(window ? { window } : {}),
     };
   };
   if (!f.live.ok) {
@@ -246,8 +301,10 @@ function onCarpool(
       fresh = true;
     }
   }
-  if (!outage) return out({ action: 'stay', why: '挂着拼车，没有拼车用不了的证据' }, ledger);
-  if (fresh) {
+  // 按时段（决定 0120）：没有「用不了」的证据，可现在在拼车空档里，也要挂到独享；不记恢复条件（出了空档按没有恢复条件的老判法切回）
+  const gap = policy.window ? carpoolGapAt(now, policy.window) : null;
+  if (!outage && !gap?.inGap) return out({ action: 'stay', why: '挂着拼车，没有拼车用不了的证据' }, ledger);
+  if (outage && fresh) {
     if (outage.mismatch) notes.push(outage.mismatch);
     // 切回拼车不久又被拒：记一次白切（超过 15 分钟才被拒的不算，记账清零）
     if (ledger.lastBack) {
@@ -257,9 +314,14 @@ function onCarpool(
       };
     }
   }
-  ledger = { ...ledger, outage };
-  const resetNote = outage.resetsAt ? `${stamp(outage.resetsAt)} 恢复` : '恢复时刻不知道';
-  const head = `${OUTAGE_NAMES[outage.kind]}（${outage.evidence}；${resetNote}）`;
+  let head: string;
+  if (outage) {
+    ledger = { ...ledger, outage };
+    const resetNote = outage.resetsAt ? `${stamp(outage.resetsAt)} 恢复` : '恢复时刻不知道';
+    head = `${OUTAGE_NAMES[outage.kind]}（${outage.evidence}；${resetNote}）`;
+  } else {
+    head = `${GAP_BAR}（到 ${gap?.inGap ? stampShanghai(gap.until) : ''}前拼车不开新请求，决定 0120）`;
+  }
   const gate = gateSwitch(f.accounts, 'carpool', 'solo');
   if (!gate.ok) return out({ action: 'stay', why: `${head}，${gate.why}` }, ledger);
   if (ledger.soloPause) {
@@ -322,6 +384,18 @@ function onSolo(
   out: Out,
 ): OrgDecision {
   const now = f.now;
+  // 拼车空档里（决定 0120）：不管拼车好没好，都不切回，等空档结束（宽限中的切回也撤掉）
+  const gap = policy.window ? carpoolGapAt(now, policy.window) : null;
+  if (gap?.inGap) {
+    return out(
+      {
+        action: 'stay',
+        why: `挂着独享；${GAP_BAR}（到 ${stampShanghai(gap.until)} 前拼车不开新请求，决定 0120），不切回拼车`,
+        later: { to: 'carpool', at: gap.until },
+      },
+      { ...base, onSoloSince: base.onSoloSince ?? now, backPending: null },
+    );
+  }
   const outage = base.outage;
   if (!outage) return onSoloWithoutRecord(f, base, out);
   const ledger0: OrgLedger = {
@@ -451,19 +525,22 @@ export interface OrgIntentV2 {
   why: string;
   drain: OrgKind | null;
   channelDown: string | null;
+  /** 拼车空档里（决定 0120）：拼车池新活不派，until 是空档结束的时刻；不在空档里为 null。 */
+  carpoolBar: { until: Date; why: string } | null;
 }
 
 export function intentOf(d: OrgDecision, live: OrgKind | null): OrgIntentV2 {
   const channelDown = d.channel.state === 'unavailable' ? d.channel.summary : null;
+  const carpoolBar = d.window ? { until: d.window.until, why: d.window.why } : null;
   const p = d.plan;
   if (p.action === 'switch' || p.action === 'wait') {
-    return { to: p.to, at: null, why: p.why, drain: null, channelDown };
+    return { to: p.to, at: null, why: p.why, drain: null, channelDown, carpoolBar };
   }
-  if (p.action === 'drain') return { to: p.to, at: null, why: p.why, drain: live, channelDown };
+  if (p.action === 'drain') return { to: p.to, at: null, why: p.why, drain: live, channelDown, carpoolBar };
   if (p.action === 'stay' && p.later) {
-    return { to: p.later.to, at: p.later.at, why: p.why, drain: null, channelDown };
+    return { to: p.later.to, at: p.later.at, why: p.why, drain: null, channelDown, carpoolBar };
   }
-  return { to: null, at: null, why: p.why, drain: null, channelDown };
+  return { to: null, at: null, why: p.why, drain: null, channelDown, carpoolBar };
 }
 
 /** 每读到新读数就更新恢复时刻（文档说窗口是「滚动」的，恢复时刻可能前后挪，方案 4.4）：只对 E1、接口说着到顶的那条读数。 */

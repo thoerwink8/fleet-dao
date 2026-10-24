@@ -658,6 +658,34 @@ describe('渠道不可用、切回宽限（#194）', () => {
     expect(codes(route('g'))).toEqual([]);
   });
 
+  it('拼车空档（决定 0120）：拼车池不派、等到空档结束（等得来）；不管挂着哪个、引擎打不打算切；独享池和非 Claude 路由不受影响', () => {
+    const bar = { until: at(2), why: '拼车窗口的空档（决定 0120）' };
+    for (const live of ['carpool', 'solo'] as const) {
+      const plan = {
+        to: live === 'carpool' ? ('solo' as const) : null,
+        at: null,
+        why: '空档',
+        carpoolBar: bar,
+      };
+      const blocks = blocksFor(claude('carpool'), entry('c', 0), withPlan(plan, live));
+      expect(blocks.map((b) => [b.code, b.wait, b.until])).toEqual([['org-not-live', 'org', at(2)]]);
+      expect(blocks[0]?.text).toContain('拼车窗口的空档');
+      expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'org', until: Date.parse(at(2)) });
+    }
+    // 独享池：挂着独享时照派；非 Claude 路由不受影响
+    const plan = { to: null, at: null, why: '空档', carpoolBar: bar };
+    expect(blocksFor(claude('solo'), entry('c', 0), withPlan(plan, 'solo'))).toEqual([]);
+    expect(codes(route('g'))).toEqual([]);
+    // 空档结束的时刻已过：仍挡，until 为空（等下一轮重算）
+    const stale = { ...plan, carpoolBar: { until: at(-1), why: bar.why } };
+    const [b] = blocksFor(claude('carpool'), entry('c', 0), withPlan(stale, 'carpool'));
+    expect(b?.until).toBeNull();
+    // 没给 carpoolBar：挂着拼车照派
+    expect(
+      blocksFor(claude('carpool'), entry('c', 0), withPlan({ to: null, at: null, why: 'x' }, 'carpool')),
+    ).toEqual([]);
+  });
+
   it('切回宽限中：挂着的这一类池新活先不派（等切号，任务不挂起）；另一类和没在宽限时的照常', () => {
     const plan = { to: 'carpool' as const, at: null, why: '切回拼车', drain: 'solo' as const };
     const drained = blocksFor(claude('solo'), entry('c', 0), withPlan(plan, 'solo'));
