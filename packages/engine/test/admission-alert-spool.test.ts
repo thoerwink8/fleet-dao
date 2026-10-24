@@ -89,14 +89,39 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
   it('第257条明确capacity；满额同key仍回原行且所有旧行保留', () => {
     const first = observation();
     expect(recordAdmissionAlert(path, first).kind).toBe('spooled');
-    for (let n = 1; n < 256; n++) expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
-    expect(recordAdmissionAlert(path, observation())).toEqual({ kind: 'unknown', code: 'capacity' });
+    // 产品路径每条都重开库、全表校验、fsync 提交（本机实测 258 次：重开约 2.6~3.0 秒、事务内全表校验+插入约 1.2~1.8 秒、COMMIT 约 4.4~6.3 秒、关库约 0.1~0.2 秒，合计 8~11 秒；验收机 fsync 慢，超 120 秒）：
+    // 第 2~254 条用夹具在一个事务里按产品同样的 key/payload/hash 直接插入，容量判定仍由最后几条产品路径覆盖。
+    const keys = [admissionAlertKey(first.identity)];
+    const filler = database();
+    filler.exec('BEGIN IMMEDIATE');
+    const insert = filler.prepare('INSERT INTO pending(key,payload,record_hash) VALUES(?,?,?)');
+    for (let n = 1; n < 254; n++) {
+      const o = observation();
+      const key = admissionAlertKey(o.identity);
+      keys.push(key);
+      insert.run(key, admissionAlertJson(o), admissionAlertRecordHash(o));
+    }
+    filler.exec('COMMIT');
+    filler.close();
+    for (let n = 254; n < 256; n++) {
+      const o = observation();
+      keys.push(admissionAlertKey(o.identity));
+      expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+    }
+    const overflow = observation();
+    expect(recordAdmissionAlert(path, overflow)).toEqual({ kind: 'unknown', code: 'capacity' });
     expect(recordAdmissionAlert(path, first).kind).toBe('spooled');
     const d = database();
     expect(d.prepare('SELECT count(*) n FROM pending').get()?.n).toBe(256);
+    const stored = d
+      .prepare('SELECT key FROM pending')
+      .all()
+      .map((r) => r.key);
     d.close();
-    // 257 次同步落盘（每次 fsync），慢盘上默认 5 秒不够。
-  }, 30000);
+    expect(stored.sort()).toEqual([...keys].sort());
+    expect(stored).not.toContain(admissionAlertKey(overflow.identity));
+    // 只剩 5 次产品路径，本机约 0.15 秒；守住 30 秒，别回到逐条走产品路径。
+  }, 30_000);
   it('实际写锁第二连接fail-fast busy，原事务回滚后重开成功', () => {
     const o = observation();
     recordAdmissionAlert(path, o);
