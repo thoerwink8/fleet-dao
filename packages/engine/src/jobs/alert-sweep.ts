@@ -39,7 +39,8 @@
 //   读不了记没查成，不撤）。
 // - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤；人拍的暂停不在这里，在设置 engine.poolHolds，只有人撤，#746）、
 //   session-org:*（引擎切号那一块：切成了、探通了、读到恢复时刻、组织读数定下来了、整池暂停的设置读得出了就撤，
-//   real/org-switch.ts；整池暂停到了复查日期的 session-org:pool-hold-overdue 也在这里：人撤了或续了期才撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
+//   real/org-switch.ts；carpool-yield:solo-down「独享不可用，引擎让出拼车给本机」：独享重新有可用账号就撤，人标已处理 = 手动放开，
+//   real/carpool-yield.ts；整池暂停到了复查日期的 session-org:pool-hold-overdue 也在这里：人撤了或续了期才撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
 //   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、
 //   watchdog:job:<任务>:…（看门狗 jobs/watchdog.ts：任务按期跑成了就撤）、watchdog:merge:<仓>:…
 //   （看门狗的「主线 N 小时没合 PR」，jobs/merge-stall.ts：合了或没有待做的单了就撤）、
@@ -127,6 +128,7 @@ export const EXPIRE_AFTER_MS = 3 * 24 * 60 * 60_000;
 export const SELF_RESOLVING_PREFIXES: readonly string[] = [
   'pool-hold:',
   'session-org:',
+  'carpool-yield:',
   'flow-config:',
   'deploy-lag:',
   'auto-release:',

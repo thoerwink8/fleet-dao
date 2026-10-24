@@ -21,6 +21,7 @@ import { type OrgLedger, OrgLedgerError, type SoloPause } from '../jobs/org-ledg
 import type { OrgPool, OrgReserveFacts } from '../jobs/org-switch.ts';
 import type { LiveOrgReading, OrgPlanView } from '../routing/index.ts';
 import { loadLedger } from './org-ledger.ts';
+import { loadHeldPools } from './pool-holds.ts';
 
 /** 账号状态读数多旧算「读不到」：定时读接口平时 5 分钟一次、紧的时候 1 分钟，三倍的余量。 */
 export const ACCOUNTS_FRESH_MS = 15 * 60_000;
@@ -83,6 +84,8 @@ export async function loadOrgSwitchFacts(
 ): Promise<OrgSwitchFactsNow> {
   const f = await sessionOrgFacts(db, { now: options.now });
   const reserveSetting = await readQuotaReserveSetting(db);
+  // 账号清单读的整池暂停不含「独享不可用而让出拼车」那一项（real/carpool-yield.ts）：它是由独享状态判出来的，不能再回头当拼车账号不可用
+  const rosterHeld = (await loadHeldPools(db, options.now, { ignoreYield: true })).all;
   const pools: Partial<Record<OrgKind, OrgPool>> = {};
   for (const p of f.pools) {
     const seen = pools[p.orgKind];
@@ -97,7 +100,7 @@ export async function loadOrgSwitchFacts(
   }
   return {
     pools,
-    poolList: f.pools.map((p) => ({ poolId: p.poolId, kind: p.orgKind, held: options.held.has(p.poolId) })),
+    poolList: f.pools.map((p) => ({ poolId: p.poolId, kind: p.orgKind, held: rosterHeld.has(p.poolId) })),
     busy: f.busy,
     busyOneShot: f.busyOneShot,
     poolIds: new Set(f.pools.map((p) => p.poolId)),

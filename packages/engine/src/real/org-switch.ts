@@ -32,8 +32,9 @@ import { type OrgDecision, type OrgPlan, stamp } from '../jobs/org-decision.ts';
 import { ledgerAfterSwitch, type OrgLedger, OrgLedgerError, withRead } from '../jobs/org-ledger.ts';
 import type { OrgSwitchRound, OrgSwitchTrigger, ProbedRoute } from '../jobs/org-switch.ts';
 import { ORG_NAMES } from '../routing/names.ts';
+import { syncCarpoolYield } from './carpool-yield.ts';
 import { type LedgerStore, ledgerStore } from './org-ledger.ts';
-import { decideFrom, loadOrgSwitchFacts, soloPauseOf } from './org-plan.ts';
+import { decideFrom, loadOrgSwitchFacts, rosterFromLedger, soloPauseOf } from './org-plan.ts';
 import { type HeldPools, loadHeldPools } from './pool-holds.ts';
 import {
   type OrgSighting,
@@ -501,6 +502,14 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     const live = await w.org({ by: trigger.by });
     const f = await facts();
     await publishPoolHolds(f.holds);
+    // 独享一个可用的都没有 → 让出拼车（real/carpool-yield.ts）；下一轮起 loadHeldPools 就读到了。写不进库只记日志，不拖累这一轮。
+    // 只看接口说的账号状态（被封、到期），不看整池暂停：独享池是人拍的暂停（「法国暂时不用独享号」）时本机在用独享，不是只剩拼车
+    try {
+      const apiOnly = f.poolList.map((p) => ({ ...p, held: false }));
+      await syncCarpoolYield(w.db, { roster: rosterFromLedger(ledger, apiOnly, t0), now: t0, by: ACTOR });
+    } catch (err) {
+      log('error', '会话用户切号：独享不可用时让出拼车这一步出错', { error: errMessage(err) });
+    }
     // 额度留量线读不到、认不出（种子没装上、值被人改坏）：要人看，引擎对这类池不派、不切；好了自己撤
     const reserveProblems = [
       ...new Set(

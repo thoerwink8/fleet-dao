@@ -13,6 +13,7 @@ import {
   auditLog,
   notifications,
   poolReservations,
+  resolveAlertWithReason,
   routes,
   runs,
   saveOrgState,
@@ -27,6 +28,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
 import { emptyLedger, serializeLedger } from '../../src/jobs/org-ledger.ts';
 import { probeOrgNow, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
+import { CARPOOL_YIELD_KEY } from '../../src/real/carpool-yield.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
 import type { OrgSwitchSessions } from '../../src/real/org-switch.ts';
 import {
@@ -43,6 +45,7 @@ import {
   orgDriftReporter,
   orgSwitchRound,
 } from '../../src/real/org-switch.ts';
+import { loadHeldPools } from '../../src/real/pool-holds.ts';
 import { routeProbeJob } from '../../src/real/route-probe.ts';
 import { realRuns } from '../../src/real/runs-writer.ts';
 import { createStorePorts, poolHoldKey } from '../../src/real/store-ports.ts';
@@ -1536,6 +1539,140 @@ describe('拼车窗口的空档（决定 0120）：工作日凌晨法国切独�
     s.advance(100 * MIN);
     await s.orgSwitch.now({ by: '定时读接口' });
     expect((await alertOf(ORG_WINDOW_ALERT))?.resolvedAt).not.toBeNull();
-    expect((await s.pick()).ok).toBe(true);
+    // 空档的挡法撤了；但独享还封着，批次 6 的让出拼车接着挡（#3687），不是空档的原因了
+    const after = await s.pick();
+    expect(after.ok).toBe(false);
+    expect(!after.ok && after.detail).not.toContain('拼车窗口的空档');
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedAt).toBeNull();
+  });
+});
+
+describe('独享一个可用的都没有：引擎让出拼车给本机（#3687 批次 6）', () => {
+  const soloGone = (at: Date): CarpoolApiRead => {
+    const ok = healthyRead(at);
+    return ok.ok
+      ? {
+          ...ok,
+          accounts: [
+            { id: 'carpool-1', kind: 'carpool', hasAssignedAccount: true, expiresAt: null },
+            { id: 'solo-1', kind: 'solo', hasAssignedAccount: false, expiresAt: null },
+          ],
+        }
+      : ok;
+  };
+  const unreadable = (at: Date): CarpoolApiRead => ({
+    ok: false,
+    requestedAt: at,
+    code: 'network',
+    why: '网断了',
+  });
+  const holds = async (s: ReturnType<typeof setup>) => (await loadHeldPools(t.db, s.now())).all;
+  let mode: 'healthy' | 'solo-gone' | 'unreadable' = 'healthy';
+  const api = (at: Date) =>
+    mode === 'solo-gone' ? soloGone(at) : mode === 'unreadable' ? unreadable(at) : healthyRead(at);
+  beforeEach(() => {
+    mode = 'healthy';
+  });
+
+  it('独享被封：开一条提醒（带开始时刻），拼车池算整池暂停，选路不往拼车派、切号也不往拼车切', async () => {
+    const s = setup({ api });
+    await s.round();
+    expect(await alertOf(CARPOOL_YIELD_KEY)).toBeUndefined();
+    expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+
+    mode = 'solo-gone';
+    s.advance(15 * MIN);
+    await s.round();
+    const a = await alertOf(CARPOOL_YIELD_KEY);
+    expect(a).toMatchObject({ title: '独享不可用，引擎让出拼车给本机', resolvedAt: null });
+    expect(a?.body).toContain('开始时刻（北京时间）');
+    expect(await holds(s)).toEqual(new Set(['claude-carpool']));
+    // 选路：拼车不派，独享被封派不了，Claude 的步骤等着（不是失败）
+    expect(await s.pick()).toMatchObject({ ok: false });
+    // 切号：不往拼车切（会话用户挂着独享时也不会切过去）
+    s.rig.answer('solo');
+    s.advance(15 * MIN);
+    await s.round();
+    expect(s.helperCalls).toEqual([]);
+  });
+
+  it('独享恢复可用：提醒自动撤，拼车池不再算暂停，选路又往拼车派', async () => {
+    const s = setup({ api });
+    mode = 'solo-gone';
+    await s.round();
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedAt).toBeNull();
+
+    mode = 'healthy';
+    s.advance(15 * MIN);
+    await s.round();
+    const a = await alertOf(CARPOOL_YIELD_KEY);
+    expect(a?.resolvedAt).not.toBeNull();
+    expect(a?.body).toContain('已撤：独享重新有明确可用的账号了');
+    expect(await holds(s)).toEqual(new Set());
+    // 让出期间路由探针没探拼车，下一轮探通了才派得出去
+    s.advance(15 * MIN);
+    await s.round();
+    expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+  });
+
+  it('和按时段的空档叠加：任一说不派拼车就不派；空档结束了，独享还封着就仍然让出', async () => {
+    const s = setup({ api });
+    mode = 'solo-gone';
+    // 下周一 04:00 北京时间：在空档（03:30–05:30）里，独享又封着
+    s.advance(new Date('2026-09-27T20:00:00Z').getTime() - NOW.getTime());
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedAt).toBeNull();
+    const inGap = await s.pick();
+    expect(inGap.ok).toBe(false);
+    // 05:30 之后：空档的挡法撤了，让出的还在
+    s.advance(100 * MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect(await holds(s)).toEqual(new Set(['claude-carpool']));
+    expect((await s.pick()).ok).toBe(false);
+  });
+
+  it('读不到账号状态：没开的不开，开着的不撤', async () => {
+    const s = setup({ api });
+    mode = 'unreadable';
+    await s.round();
+    expect(await alertOf(CARPOOL_YIELD_KEY)).toBeUndefined();
+
+    mode = 'solo-gone';
+    s.advance(15 * MIN);
+    await s.round();
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedAt).toBeNull();
+    mode = 'unreadable';
+    s.advance(15 * MIN);
+    await s.round();
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedAt).toBeNull();
+    expect(await holds(s)).toEqual(new Set(['claude-carpool']));
+  });
+
+  it('人把提醒标已处理 = 手动放开：这一段不再让出；独享恢复后重新武装，下次封号照常让出', async () => {
+    const s = setup({ api });
+    mode = 'solo-gone';
+    await s.round();
+    await resolveAlertWithReason(t.db, {
+      dedupeKey: CARPOOL_YIELD_KEY,
+      by: 'user:founder',
+      why: '我要用拼车',
+      at: s.now(),
+    });
+    expect(await holds(s)).toEqual(new Set());
+    s.advance(15 * MIN);
+    await s.round();
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedBy).toBe('user:founder');
+    expect(await holds(s)).toEqual(new Set());
+
+    mode = 'healthy';
+    s.advance(15 * MIN);
+    await s.round();
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedBy).toBe('engine:org-switch');
+
+    mode = 'solo-gone';
+    s.advance(15 * MIN);
+    await s.round();
+    expect((await alertOf(CARPOOL_YIELD_KEY))?.resolvedAt).toBeNull();
+    expect(await holds(s)).toEqual(new Set(['claude-carpool']));
   });
 });
