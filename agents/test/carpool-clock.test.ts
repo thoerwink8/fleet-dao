@@ -20,20 +20,35 @@ describe('plan', () => {
     expect(p).toMatchObject({ probe: true, org: 'solo' });
   });
   it('锚点已经打过就不再打；08:30 切回拼车', () => {
-    const s = { windowEnd: t('2026-10-27T10:30:00'), windowSource: 'api', lastProbeAt: t('2026-10-27T05:30:00') } as const;
+    const s = {
+      windowEnd: t('2026-10-27T10:30:00'),
+      windowSource: 'api',
+      lastProbeAt: t('2026-10-27T05:30:00'),
+    } as const;
     expect(plan(t('2026-10-27T07:00:00'), s)).toMatchObject({ probe: false, org: 'solo' });
     expect(plan(t('2026-10-27T08:31:00'), s)).toMatchObject({ probe: false, org: 'carpool' });
   });
   it('白天清零后 2 分钟打下一枪', () => {
-    const s = { windowEnd: t('2026-10-27T10:30:00'), windowSource: 'api', lastProbeAt: t('2026-10-27T05:30:00') } as const;
+    const s = {
+      windowEnd: t('2026-10-27T10:30:00'),
+      windowSource: 'api',
+      lastProbeAt: t('2026-10-27T05:30:00'),
+    } as const;
     expect(plan(t('2026-10-27T10:31:00'), s).probe).toBe(false);
     expect(plan(t('2026-10-27T10:32:00'), s)).toMatchObject({ probe: true, org: 'carpool' });
   });
   it('工作日凌晨空档：不打，窗口快结束时切独享', () => {
-    const s = { windowEnd: t('2026-10-28T01:40:00'), windowSource: 'api', lastProbeAt: t('2026-10-27T20:40:00') } as const;
+    const s = {
+      windowEnd: t('2026-10-28T01:40:00'),
+      windowSource: 'api',
+      lastProbeAt: t('2026-10-27T20:40:00'),
+    } as const;
     expect(plan(t('2026-10-28T01:00:00'), s)).toMatchObject({ probe: false, org: 'carpool' });
     expect(plan(t('2026-10-28T01:36:00'), s)).toMatchObject({ probe: false, org: 'solo' });
-    expect(plan(t('2026-10-28T03:00:00'), { ...none, lastProbeAt: s.lastProbeAt })).toMatchObject({ probe: false, org: 'solo' });
+    expect(plan(t('2026-10-28T03:00:00'), { ...none, lastProbeAt: s.lastProbeAt })).toMatchObject({
+      probe: false,
+      org: 'solo',
+    });
   });
   it('周末一清零就打、全程拼车', () => {
     const s = { windowEnd: null, windowSource: 'api', lastProbeAt: t('2026-10-31T01:00:00') } as const;
@@ -44,7 +59,9 @@ describe('plan', () => {
     expect(plan(t('2026-11-01T23:00:00'), none)).toMatchObject({ probe: true, org: 'carpool' });
   });
   it('刚打过 10 分钟内不再打', () => {
-    expect(plan(t('2026-10-31T03:05:00'), { ...none, lastProbeAt: t('2026-10-31T03:00:00') }).probe).toBe(false);
+    expect(plan(t('2026-10-31T03:05:00'), { ...none, lastProbeAt: t('2026-10-31T03:00:00') }).probe).toBe(
+      false,
+    );
   });
   it('读不到清零时刻：按上一枪 + 5 小时', () => {
     const s = { windowEnd: null, windowSource: 'unknown', lastProbeAt: t('2026-10-27T10:00:00') } as const;

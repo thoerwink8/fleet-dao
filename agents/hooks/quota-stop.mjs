@@ -9,7 +9,8 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const cut = (v, n) => (typeof v === 'string' ? v.replace(/rck_[A-Za-z0-9_-]+/g, 'rck_<抹掉>').slice(0, n) : undefined);
+const cut = (v, n) =>
+  typeof v === 'string' ? v.replace(/rck_[A-Za-z0-9_-]+/g, 'rck_<抹掉>').slice(0, n) : undefined;
 
 try {
   const input = JSON.parse(readFileSync(0, 'utf8') || '{}');

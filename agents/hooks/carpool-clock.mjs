@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// 本机拼车时钟（决定 0120，#3687）：Windows 任务计划每分钟跑一次 `node ~/.fleet-dao/hooks/carpool-clock.mjs tick`，
-// 到点才打探针、才切组织；没事就不出声。
+// 本机拼车时钟（决定 0120，#3687）：每分钟判一次，到点才打探针、才切组织；没事就不出声。
+// 能建计划任务的电脑每分钟跑 `tick`；不让建的（schtasks 拒绝访问）用启动文件夹的 vbs 登录时静默起 `loop`。
 //
 // 规则（北京时间，周一到周五算工作日）：
 // - 拼车一清零就打一枪最小探针点着下一个窗口；点了会盖住下一个工作日 05:30 的不点（空档）。
@@ -75,7 +75,12 @@ export function plan(now, s) {
   if (anchorDue) return { org, probe: true, why: '工作日 05:30 锚点' };
   // 刚打过一枪，接口记账可能还没跟上（用量还是 0）：别连着打。
   if (s.lastProbeAt !== null && now - s.lastProbeAt < RECENT_PROBE_MS) return { org, probe: false, why: '' };
-  if (blocked || morningHold) return { org, probe: false, why: blocked ? '空档：点了会盖住下一个工作日 05:30' : '上班前独享，窗口已在走' };
+  if (blocked || morningHold)
+    return {
+      org,
+      probe: false,
+      why: blocked ? '空档：点了会盖住下一个工作日 05:30' : '上班前独享，窗口已在走',
+    };
   if (s.windowSource === 'unknown') {
     const due = s.lastProbeAt === null || now - s.lastProbeAt >= WINDOW_MS + PROBE_AFTER_MS;
     return { org, probe: due, why: due ? '读不到清零时刻，按上一枪 + 5 小时打' : '' };
@@ -119,11 +124,24 @@ function writeState(st) {
   mkdirSync(join(dir, 'state'), { recursive: true });
   writeFileSync(stateFile, JSON.stringify(st, null, 2));
 }
-const oneLine = (s) => String(s).replace(/\s+/g, ' ').replace(/rck_[A-Za-z0-9_-]+/g, 'rck_<抹掉>').slice(0, 300);
+const oneLine = (s) =>
+  String(s)
+    .replace(/\s+/g, ' ')
+    .replace(/rck_[A-Za-z0-9_-]+/g, 'rck_<抹掉>')
+    .slice(0, 300);
 
 function reclaude(args, timeout = 60_000) {
-  const r = spawnSync('reclaude', args, { encoding: 'utf8', timeout, shell: process.platform === 'win32', cwd: probeCwd });
-  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error ? String(r.error.message) : null };
+  const r = spawnSync('reclaude', args, {
+    encoding: 'utf8',
+    timeout,
+    shell: process.platform === 'win32',
+    cwd: probeCwd,
+  });
+  return {
+    status: r.status,
+    out: `${r.stdout ?? ''}${r.stderr ?? ''}`,
+    error: r.error ? String(r.error.message) : null,
+  };
 }
 
 /** 读接口里的清零时刻。读不到回 { source: 'unknown', why }。 */
@@ -171,14 +189,21 @@ function probe() {
     ['-p', '--model', 'haiku', '--setting-sources', 'project', '--no-session-persistence', '只回复 ok'],
     180_000,
   );
-  return { ok: r.status === 0, why: r.status === 0 ? '' : `探针退出 ${r.status}：${oneLine(r.error ?? r.out)}` };
+  return {
+    ok: r.status === 0,
+    why: r.status === 0 ? '' : `探针退出 ${r.status}：${oneLine(r.error ?? r.out)}`,
+  };
 }
 
 export async function tick(now = Date.now()) {
   mkdirSync(probeCwd, { recursive: true });
   const st = readState();
   const w = await readWindow(st);
-  const p = plan(now, { windowEnd: w.windowEnd, windowSource: w.source, lastProbeAt: st.lastProbeAt ?? null });
+  const p = plan(now, {
+    windowEnd: w.windowEnd,
+    windowSource: w.source,
+    lastProbeAt: st.lastProbeAt ?? null,
+  });
 
   if (p.probe) {
     const sw = useOrg('carpool');
@@ -209,12 +234,41 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
       log(`这一轮出错：${oneLine(e.stack ?? e.message)}`);
       process.exitCode = 1;
     });
+  } else if (cmd === 'loop') {
+    // 这台电脑不让建计划任务（schtasks 拒绝访问）时的退路：启动文件夹的 vbs 登录时静默起这一条，每分钟 tick 一次。
+    // pid 文件挡重复：已经有一份活着就退出。
+    const pidFile = join(dir, 'state', 'carpool-clock.pid');
+    mkdirSync(join(dir, 'state'), { recursive: true });
+    try {
+      const old = Number(readFileSync(pidFile, 'utf8'));
+      if (old && old !== process.pid) {
+        process.kill(old, 0);
+        process.exit(0);
+      }
+    } catch {
+      // 没有 pid 文件，或那个进程已经没了：接着起。
+    }
+    writeFileSync(pidFile, String(process.pid));
+    log(`常驻循环起来了（pid ${process.pid}）`);
+    for (;;) {
+      await tick().catch((e) => log(`这一轮出错：${oneLine(e.stack ?? e.message)}`));
+      await new Promise((r) => setTimeout(r, 60_000 - (Date.now() % 60_000) + 1_000));
+    }
   } else if (cmd === 'plan') {
     const st = readState();
     const w = await readWindow(st);
-    console.log(JSON.stringify({ window: { ...w, windowEnd: w.windowEnd && new Date(w.windowEnd).toISOString() }, plan: plan(Date.now(), { windowEnd: w.windowEnd, windowSource: w.source, lastProbeAt: st.lastProbeAt ?? null }) }));
+    console.log(
+      JSON.stringify({
+        window: { ...w, windowEnd: w.windowEnd && new Date(w.windowEnd).toISOString() },
+        plan: plan(Date.now(), {
+          windowEnd: w.windowEnd,
+          windowSource: w.source,
+          lastProbeAt: st.lastProbeAt ?? null,
+        }),
+      }),
+    );
   } else {
-    console.log('用法：node carpool-clock.mjs tick | plan');
+    console.log('用法：node carpool-clock.mjs tick | loop | plan');
     process.exitCode = 2;
   }
 }
