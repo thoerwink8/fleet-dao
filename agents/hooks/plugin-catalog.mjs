@@ -34,6 +34,8 @@ export const PROCESS_HOOKS = [
     rewakeSummary: '本机工人到终态，已叫醒主线程',
   },
   { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30 },
+  // 回合因接口报错（额度、限流）结束时记一笔，给到点续跑用（决定 0120，#3687）
+  { event: 'StopFailure', script: 'quota-stop.mjs', timeout: 10 },
 ];
 
 // 退役过程钩子时把脚本名留在这里，加载器才能清掉已经装过的登记；只删目录项会让旧登记失去归属。

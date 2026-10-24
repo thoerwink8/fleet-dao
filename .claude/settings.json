@@ -68,6 +68,17 @@
           }
         ]
       }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/quota-stop.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
