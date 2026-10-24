@@ -225,6 +225,11 @@ export interface OrgPlanView {
    * 有账号恢复后自己消失。不给 = 渠道没问题。
    */
   channelDown?: string | null;
+  /**
+   * 拼车窗口的空档里（决定 0120，工作日凌晨）：带拼车组织类型的池新活不派，等到 until（空档结束）再派，任务不挂起；
+   * 不管会话用户现在挂的是哪个组织（挂着拼车、独享又切不过去时也不派）。不给 = 不在空档里。
+   */
+  carpoolBar?: { until: string; why: string } | null;
 }
 
 /**

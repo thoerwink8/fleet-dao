@@ -207,5 +207,8 @@ export async function orgPlanView(
     why: intent.why,
     drain: intent.drain,
     channelDown: intent.channelDown,
+    carpoolBar: intent.carpoolBar
+      ? { until: intent.carpoolBar.until.toISOString(), why: intent.carpoolBar.why }
+      : null,
   };
 }

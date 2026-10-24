@@ -4,8 +4,14 @@
 import type { ReserveHit } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { CarpoolApiRead, CarpoolOutage } from '../src/jobs/carpool-outage.ts';
+import { DEFAULT_WINDOW_SCHEDULE } from '../src/jobs/carpool-window.ts';
 import { type AccountStatus, judgeAccounts, type PoolAccount } from '../src/jobs/org-accounts.ts';
-import { decideOrgSwitch, intentOf, type OrgDecisionFacts } from '../src/jobs/org-decision.ts';
+import {
+  DEFAULT_ORG_DECISION_POLICY,
+  decideOrgSwitch,
+  intentOf,
+  type OrgDecisionFacts,
+} from '../src/jobs/org-decision.ts';
 import { emptyLedger, type OrgLedger } from '../src/jobs/org-ledger.ts';
 import type { OrgPool, OrgReserveFacts, OrgWindow } from '../src/jobs/org-switch.ts';
 
@@ -571,5 +577,139 @@ describe('intentOf：选路按它判「等切号」', () => {
     expect(intentOf(waitFor, 'solo')).toMatchObject({ to: 'carpool', at: at(60) });
     const none = decideOrgSwitch(facts());
     expect(intentOf(none, 'carpool')).toMatchObject({ to: null });
+  });
+});
+
+// 按时段（决定 0120，#3687 批次 5）：北京时间工作日凌晨的拼车空档里，挂着拼车就切独享、选路不派拼车；出了空档恢复。
+// 固定时钟：2026-10-27 周二。
+describe('拼车窗口的空档：工作日凌晨切独享（决定 0120）', () => {
+  const inGapAt = new Date('2026-10-26T19:00:00Z'); // 周二 03:00 北京时间
+  const outGapAt = new Date('2026-10-27T04:00:00Z'); // 周二 12:00 北京时间
+  const gapEnd = new Date('2026-10-26T21:30:00Z'); // 周二 05:30 北京时间
+  const soloBanned = verdict([acct('c1', 'carpool'), acct('c2', 'carpool'), acct('s', 'solo', 'banned')]);
+  const allBanned = verdict([acct('c', 'carpool', 'banned'), acct('s', 'solo', 'banned')]);
+
+  it('空档内挂着拼车、独享可用：切独享，选路带"拼车不派"到空档结束；不记恢复条件', () => {
+    const d = decideOrgSwitch(facts({ now: inGapAt }));
+    expect(d.plan).toMatchObject({ action: 'switch', to: 'solo' });
+    expect((d.plan as { why: string }).why).toContain('拼车窗口的空档');
+    expect((d.plan as { why: string }).why).toContain('决定 0120');
+    expect(d.ledger.outage).toBeNull();
+    expect(d.window?.until).toEqual(gapEnd);
+    expect(d.window?.alert).toBeNull();
+    expect(intentOf(d, 'carpool')).toMatchObject({ to: 'solo', carpoolBar: { until: gapEnd } });
+  });
+
+  it('空档内手上有 Claude 会话：能停就先停再切，停不下就等；两种都带"拼车不派"', () => {
+    const stop = decideOrgSwitch(facts({ now: inGapAt, busy: 2, canStopRunning: true }));
+    expect(stop.plan).toMatchObject({ action: 'switch', to: 'solo' });
+    expect((stop.plan as { why: string }).why).toContain('先停下');
+    expect(stop.window).toBeDefined();
+    const wait = decideOrgSwitch(facts({ now: inGapAt, busy: 2 }));
+    expect(wait.plan).toMatchObject({ action: 'wait', to: 'solo' });
+    expect(wait.window).toBeDefined();
+  });
+
+  it('出了空档：挂着拼车照常（拼车优先），没有"拼车不派"', () => {
+    const d = decideOrgSwitch(facts({ now: outGapAt }));
+    expect(d.plan).toEqual({ action: 'stay', why: '挂着拼车，没有拼车用不了的证据' });
+    expect(d.window).toBeUndefined();
+    expect(intentOf(d, 'carpool').carpoolBar).toBeNull();
+  });
+
+  it('【故意造出失败】空档内独享账号一个可用的都没有：不切，选路仍不派拼车，带提醒说明原因', () => {
+    for (const accounts of [soloBanned, allBanned]) {
+      const d = decideOrgSwitch(facts({ now: inGapAt, accounts }));
+      expect(d.plan.action).toBe('stay');
+      expect(d.window?.until).toEqual(gapEnd);
+      expect(d.window?.alert?.title).toContain('独享切不过去');
+      expect(d.window?.alert?.body).toContain('决定 0120');
+      expect(d.window?.alert?.body).toContain((d.plan as { why: string }).why);
+      expect(intentOf(d, 'carpool').carpoolBar).not.toBeNull();
+    }
+  });
+
+  it('【故意造出失败】空档内账号状态读不到：不切（读不到不当成可用），选路仍不派拼车', () => {
+    const d = decideOrgSwitch(facts({ now: inGapAt, accounts: verdict([], false) }));
+    expect(d.plan.action).toBe('stay');
+    expect(d.window?.alert).not.toBeNull();
+    expect(d.window).toBeDefined();
+  });
+
+  it('空档内人点了「引擎暂不用独享」或独享整池暂停：不切，选路仍不派拼车', () => {
+    const paused = decideOrgSwitch(
+      facts({
+        now: inGapAt,
+        ledger: led({
+          soloPause: { since: at(-60), by: 'frank', reason: '驾驶舱设置里开着「引擎暂不用独享」' },
+        }),
+      }),
+    );
+    expect(paused.plan.action).toBe('stay');
+    expect((paused.plan as { why: string }).why).toContain('暂不用独享');
+    expect(paused.window?.alert).not.toBeNull();
+    const held = decideOrgSwitch(
+      facts({ now: inGapAt, pools: { carpool: pool(), solo: pool([roomy], true) } }),
+    );
+    expect(held.plan.action).toBe('stay');
+    expect(held.window?.alert).not.toBeNull();
+  });
+
+  it('空档内挂着独享：不切回拼车（哪怕拼车记着的恢复条件到了），到空档结束再看', () => {
+    const d = decideOrgSwitch(
+      facts({
+        now: inGapAt,
+        live: { ok: true, org: 'solo' },
+        ledger: onSolo({ reads: [ok(-1, 5, null)] }),
+      }),
+    );
+    expect(d.plan).toMatchObject({ action: 'stay', later: { to: 'carpool', at: gapEnd } });
+    expect(d.window?.alert).toBeNull();
+    // 同一份事实不在空档里：不再被空档拦着（走拼车恢复的老判法，不是"空档里不切回"）
+    const after = decideOrgSwitch(
+      facts({ now: outGapAt, live: { ok: true, org: 'solo' }, ledger: onSolo({ reads: [ok(-1, 5, null)] }) }),
+    );
+    expect((after.plan as { why: string }).why).not.toContain('拼车窗口的空档');
+    expect(after.window).toBeUndefined();
+  });
+
+  it('空档内切到独享后（没有恢复条件），出了空档切回拼车', () => {
+    const switched = decideOrgSwitch(facts({ now: inGapAt, live: { ok: true, org: 'solo' } }));
+    expect(switched.plan).toMatchObject({ action: 'stay', later: { to: 'carpool', at: gapEnd } });
+    const back = decideOrgSwitch(
+      facts({ now: new Date(gapEnd.getTime() + MIN), live: { ok: true, org: 'solo' } }),
+    );
+    expect(back.plan).toMatchObject({ action: 'switch', to: 'carpool' });
+  });
+
+  it('空档内拼车本来就用不了（被拒）：照老理由切，不被空档盖掉；恢复条件照记', () => {
+    const rejection = e1(inGapAt, at(200));
+    const d = decideOrgSwitch(facts({ now: inGapAt, rejection }));
+    expect(d.plan).toMatchObject({ action: 'switch', to: 'solo' });
+    expect((d.plan as { why: string }).why).toContain('拼车本人 5 小时额度用满');
+    expect(d.ledger.outage).toEqual(rejection);
+    expect(d.window).toBeDefined();
+  });
+
+  it('不按时段（policy.window 为 null）：空档里也不切', () => {
+    const d = decideOrgSwitch(facts({ now: inGapAt }), { ...DEFAULT_ORG_DECISION_POLICY, window: null });
+    expect(d.plan.action).toBe('stay');
+    expect(d.window).toBeUndefined();
+  });
+
+  it('锚点可配：改成 06:00，05:45 还在空档里', () => {
+    const t = new Date('2026-10-26T21:45:00Z'); // 周二 05:45
+    const six = {
+      ...DEFAULT_ORG_DECISION_POLICY,
+      window: { ...DEFAULT_WINDOW_SCHEDULE, anchorMinutes: 360 },
+    };
+    expect(decideOrgSwitch(facts({ now: t }), six).plan).toMatchObject({ action: 'switch', to: 'solo' });
+    expect(decideOrgSwitch(facts({ now: t })).plan.action).toBe('stay');
+  });
+
+  it('会话用户挂的组织认不出：不切，也不报空档提醒', () => {
+    const d = decideOrgSwitch(facts({ now: inGapAt, live: { ok: false, why: '读不到' } }));
+    expect(d.plan.action).toBe('stay');
+    expect(d.window?.alert ?? null).toBeNull();
   });
 });
