@@ -39,6 +39,7 @@ import {
   ORG_STUCK_ALERT,
   ORG_SWITCH_ALERT,
   ORG_VERIFY_ALERT,
+  ORG_WINDOW_ALERT,
   orgDriftReporter,
   orgSwitchRound,
 } from '../../src/real/org-switch.ts';
@@ -1490,5 +1491,51 @@ describe('读接口的节奏（#194 方案 4.1）：切号前后各现读一次�
     const [note] = await newAudits('session-org.read-backoff');
     expect(note).toMatchObject({ ok: false, after: { fails: 1, waitMinutes: 1, code: 'throttled' } });
     expect(note?.reason).toContain('429');
+  });
+});
+
+// 按时段（决定 0120，#3687 批次 5）：北京时间工作日凌晨的拼车空档里切独享、选路不派拼车；独享不可用就不切、报提醒；出了空档撤。
+describe('拼车窗口的空档（决定 0120）：工作日凌晨法国切独享', () => {
+  // NOW 是周五 16:00 北京时间；推到下周一 04:00（空档 03:30–05:30 里）
+  const toMonday0400 = new Date('2026-09-27T20:00:00Z').getTime() - NOW.getTime();
+  const soloBanned = (at: Date): CarpoolApiRead => {
+    const r = healthyRead(at);
+    return r.ok
+      ? {
+          ...r,
+          accounts: [
+            { id: 'carpool-1', kind: 'carpool', hasAssignedAccount: true, expiresAt: null },
+            { id: 'solo-1', kind: 'solo', hasAssignedAccount: false, expiresAt: null },
+          ],
+        }
+      : r;
+  };
+
+  it('空档内两边账号都可用：没有被拒也切独享，不派拼车池；操作记录写明空档', async () => {
+    const s = setup();
+    s.advance(toMonday0400);
+    expect(await s.orgSwitch.now({ by: '定时读接口' })).toBe('solo');
+    expect(s.helperCalls).toEqual(['solo']);
+    expect(await alertOf(ORG_WINDOW_ALERT)).toBeUndefined();
+    const [sw] = await newAudits('session-org.switch');
+    expect(sw?.reason).toContain('拼车窗口的空档');
+  });
+
+  it('【故意造出的失败】空档内独享被封：不切、选路不派拼车、报提醒；出了空档自己撤', async () => {
+    const s = setup({ api: soloBanned });
+    s.advance(toMonday0400);
+    expect(await s.orgSwitch.now({ by: '定时读接口' })).toBeNull();
+    expect(s.helperCalls).toEqual([]);
+    const alarm = await alertOf(ORG_WINDOW_ALERT);
+    expect(alarm).toMatchObject({ level: 'alert', resolvedAt: null });
+    expect(alarm?.title).toContain('独享切不过去');
+    const picked = await s.pick();
+    expect(picked.ok).toBe(false);
+    expect(!picked.ok && picked.detail).toContain('拼车窗口的空档');
+    // 05:30 之后：提醒撤、拼车照派
+    s.advance(100 * MIN);
+    await s.orgSwitch.now({ by: '定时读接口' });
+    expect((await alertOf(ORG_WINDOW_ALERT))?.resolvedAt).not.toBeNull();
+    expect((await s.pick()).ok).toBe(true);
   });
 });

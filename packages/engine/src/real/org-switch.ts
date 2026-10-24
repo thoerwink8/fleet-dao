@@ -83,6 +83,8 @@ export const ORG_RESERVE_ALERT = `${SESSION_ORG_ALERT_PREFIX}reserve`;
 export const ORG_POOL_HOLD_ALERT = `${SESSION_ORG_ALERT_PREFIX}pool-hold`;
 /** 整池暂停过了复查日期还开着：不自动撤，提醒人撤或续期（#746）。 */
 export const ORG_POOL_HOLD_OVERDUE_ALERT = `${SESSION_ORG_ALERT_PREFIX}pool-hold-overdue`;
+/** 拼车窗口的空档里（决定 0120）独享切不过去：法国的 Claude 步骤等到空档结束，不碰拼车。空档结束、或独享能切了就撤。 */
+export const ORG_WINDOW_ALERT = `${SESSION_ORG_ALERT_PREFIX}window`;
 /** 切号账本认不出：引擎不切号，要人看（jobs/org-ledger.ts）。 */
 export const ORG_LEDGER_ALERT = `${SESSION_ORG_ALERT_PREFIX}ledger`;
 /**
@@ -404,6 +406,15 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     if (channel.alert)
       await alert(ORG_CHANNEL_ALERT, channel.alert.title, `${channel.alert.body}${fix ? `（${fix}）` : ''}`);
     else await settle(ORG_CHANNEL_ALERT, `渠道状态：${channel.summary}`);
+    if (decision.window?.alert) {
+      await alert(
+        ORG_WINDOW_ALERT,
+        decision.window.alert.title,
+        `${decision.window.alert.body}${fix ? `（${fix}）` : ''}`,
+      );
+    } else {
+      await settle(ORG_WINDOW_ALERT, decision.window ? '空档里已经切到独享（或正在切）' : '拼车空档结束了');
+    }
     if (channel.changed) {
       await audit('session-org.channel', {
         ...(before.channel ? { before: { state: before.channel.state } } : {}),

@@ -251,6 +251,16 @@ function orgBlock(route: RouteFacts, ctx: FilterContext): Block | null {
   if (plan?.channelDown) {
     return hard('org-not-live', `渠道不可用，${route.poolName}不派：${plan.channelDown}`);
   }
+  // 拼车窗口的空档（决定 0120）：拼车池不派，等到空档结束（等得来，任务不挂起）；独享可用时引擎已在切、独享不可用时就这样等
+  if (kind === 'carpool' && plan?.carpoolBar) {
+    const at = ahead(Date.parse(plan.carpoolBar.until), ctx.now);
+    return {
+      code: 'org-not-live',
+      text: `${route.poolName}暂不派：${plan.carpoolBar.why}`,
+      wait: 'org',
+      until: at === null ? null : new Date(at).toISOString(),
+    };
+  }
   if (liveOrg === undefined) {
     return hard(
       'org-not-live',

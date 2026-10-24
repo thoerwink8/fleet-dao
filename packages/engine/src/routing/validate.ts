@@ -55,6 +55,12 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
     if (typeof plan.why !== 'string' || !plan.why.trim()) {
       throw new RoutingInputError('选路判不了：引擎切号的打算没写为什么');
     }
+    if (plan.carpoolBar) {
+      time(plan.carpoolBar.until, '拼车空档结束的时刻');
+      if (typeof plan.carpoolBar.why !== 'string' || !plan.carpoolBar.why.trim()) {
+        throw new RoutingInputError('选路判不了：拼车空档没写为什么');
+      }
+    }
   }
   // 留量线设置的外壳认不出就不往下判：拿坏的输入会把该挡的当成不限
   const qr: unknown = input.quotaReserve;
