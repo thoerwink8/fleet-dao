@@ -32,21 +32,26 @@ export const ANCHOR_GRACE_MS = 15 * M;
 export const RECENT_PROBE_MS = 10 * M;
 const CST = 8 * H;
 
-/** 北京时间当天 0 点（UTC 毫秒）和星期几（0 = 周日）。 */
+/** @typedef {'carpool' | 'solo'} OrgKind */
+/** @typedef {{ windowEnd: number | null, windowSource: 'api' | 'estimate' | 'unknown', lastProbeAt: number | null }} ClockFacts */
+/** @typedef {{ windowEnd: number | null, source: 'api' | 'estimate' | 'unknown', why?: string }} WindowRead */
+/** @typedef {{ lastProbeAt?: number, org?: OrgKind }} ClockState */
+
+/** 北京时间当天 0 点（UTC 毫秒）和星期几（0 = 周日）。 @param {number} ms */
 function cstDay(ms) {
   const d = new Date(ms + CST);
   const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - CST;
   return { midnight, dow: d.getUTCDay() };
 }
-const isWeekday = (dow) => dow >= 1 && dow <= 5;
+const isWeekday = (/** @type {number} */ dow) => dow >= 1 && dow <= 5;
 
-/** 今天（北京时间）的锚点；不是工作日回 null。 */
+/** 今天（北京时间）的锚点；不是工作日回 null。 @param {number} now */
 export function todayAnchor(now) {
   const { midnight, dow } = cstDay(now);
   return isWeekday(dow) ? midnight + ANCHOR_MIN * M : null;
 }
 
-/** 严格晚于 now 的下一个工作日锚点。 */
+/** 严格晚于 now 的下一个工作日锚点。 @param {number} now */
 export function nextAnchor(now) {
   for (let i = 0; i <= 7; i++) {
     const { midnight, dow } = cstDay(now + i * 24 * H);
@@ -61,6 +66,9 @@ export function nextAnchor(now) {
  * s.windowEnd：当前拼车窗口的清零时刻（毫秒）；null = 没有在走的窗口。
  * s.windowSource：'api'（接口读到的）| 'estimate'（按上一枪 + 5 小时估）| 'unknown'（什么都不知道）。
  * s.lastProbeAt：上一枪的时刻，没有为 null。
+ * @param {number} now
+ * @param {ClockFacts} s
+ * @returns {{ org: OrgKind, probe: boolean, why: string }}
  */
 export function plan(now, s) {
   const a0 = todayAnchor(now);
@@ -90,11 +98,12 @@ export function plan(now, s) {
 }
 
 /** `reclaude org list` 的输出 → [{ id, kind, current }]。认不出的行跳过（前后的 Syncing config… 之类）。 */
-export function parseOrgList(out) {
+export function parseOrgList(/** @type {string} */ out) {
+  /** @type {{ id: string, kind: OrgKind, current: boolean }[]} */
   const orgs = [];
   for (const line of String(out).split(/\r?\n/)) {
     const m = /^\s*(\*)?\s*(\d+)\t[^\t]*\t(team|personal)\b/.exec(line);
-    if (m) orgs.push({ id: m[2], kind: m[3] === 'team' ? 'carpool' : 'solo', current: m[1] === '*' });
+    if (m) orgs.push({ id: m[2] ?? '', kind: m[3] === 'team' ? 'carpool' : 'solo', current: m[1] === '*' });
   }
   return orgs;
 }
@@ -109,10 +118,11 @@ const keyFile = join(dir, 'reclaude-api.key');
 const probeCwd = join(dir, 'tmp', 'carpool-probe');
 const BASE = 'https://www.reclaude.ai';
 
-function log(line) {
+function log(/** @type {string} */ line) {
   mkdirSync(join(dir, 'logs'), { recursive: true });
   appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`);
 }
+/** @returns {ClockState} */
 function readState() {
   try {
     return JSON.parse(readFileSync(stateFile, 'utf8'));
@@ -120,16 +130,17 @@ function readState() {
     return {};
   }
 }
-function writeState(st) {
+function writeState(/** @type {ClockState} */ st) {
   mkdirSync(join(dir, 'state'), { recursive: true });
   writeFileSync(stateFile, JSON.stringify(st, null, 2));
 }
-const oneLine = (s) =>
+const oneLine = (/** @type {unknown} */ s) =>
   String(s)
     .replace(/\s+/g, ' ')
     .replace(/rck_[A-Za-z0-9_-]+/g, 'rck_<抹掉>')
     .slice(0, 300);
 
+/** @param {string[]} args */
 function reclaude(args, timeout = 60_000) {
   const r = spawnSync('reclaude', args, {
     encoding: 'utf8',
@@ -144,9 +155,13 @@ function reclaude(args, timeout = 60_000) {
   };
 }
 
-/** 读接口里的清零时刻。读不到回 { source: 'unknown', why }。 */
+/**
+ * 读接口里的清零时刻。读不到回 { source: 'unknown', why }。
+ * @param {ClockState} st
+ * @returns {Promise<WindowRead>}
+ */
 async function readWindow(st) {
-  if (!existsSync(keyFile)) return estimate(st, '没有 Key 文件');
+  if (!existsSync(keyFile)) return readFromFrance(st);
   const key = readFileSync(keyFile, 'utf8').trim();
   if (!key.startsWith('rck_')) return estimate(st, 'Key 文件里不是 rck_ 开头的 Key');
   try {
@@ -155,22 +170,62 @@ async function readWindow(st) {
       signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) return estimate(st, `接口 ${res.status}`);
-    const body = await res.json();
+    const body = /** @type {{ resets_at_ms?: unknown, used_usd?: unknown }} */ (await res.json());
     const r = Number(body.resets_at_ms);
     // 零用量时接口给的清零时刻是「读取时刻 + 5 小时」、一直在漂（quota.md Q27），不是在走的窗口。
     if (Number(body.used_usd) === 0) return { windowEnd: null, source: 'api' };
     return { windowEnd: Number.isFinite(r) && r > Date.now() ? r : null, source: 'api' };
   } catch (e) {
-    return estimate(st, `接口没读成：${oneLine(e.message)}`);
+    return estimate(st, `接口没读成：${oneLine(e instanceof Error ? e.message : e)}`);
   }
 }
+/**
+ * 没有 Key 时读法国库：法国引擎每 1–5 分钟读一次拼车接口，存在 quota_windows（只读连接，不碰任何密钥）。
+ * 读数超过 15 分钟不当现值（quota.md Q11 同理），退回估算。
+ * @param {ClockState} st
+ * @returns {WindowRead}
+ */
+function readFromFrance(st) {
+  const sshFile = join(dir, 'france-ssh');
+  if (!existsSync(sshFile)) return estimate(st, '没有 Key 文件，也没配登法国的 ssh');
+  const host = (readFileSync(sshFile, 'utf8').split(/\r?\n/)[0] ?? '').trim();
+  if (!/^[A-Za-z0-9@._-]+$/.test(host) || host.startsWith('-'))
+    return estimate(st, 'france-ssh 里的名字认不出');
+  const sql =
+    "select coalesce(extract(epoch from resets_at)*1000,0)::bigint, coalesce(used,-1), extract(epoch from now()-read_at)::int from quota_windows where label='carpool_5h_usd' order by read_at desc limit 1;";
+  const r = spawnSync(
+    'ssh',
+    [
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'ConnectTimeout=10',
+      host,
+      `sudo -n -u fleet psql -X -q -t -A -d "dbname=fleet options='-c default_transaction_read_only=on'" -c "${sql}"`,
+    ],
+    { encoding: 'utf8', timeout: 30_000 },
+  );
+  const m = /^(\d+)\|(-?[\d.]+)\|(\d+)/m.exec(r.stdout ?? '');
+  if (r.status !== 0 || !m)
+    return estimate(st, `法国库没读成（退出 ${r.status}：${oneLine(r.stderr ?? '')}）`);
+  if (Number(m[3]) > 15 * 60) return estimate(st, `法国库的读数是 ${m[3]} 秒前的，太旧`);
+  const resets = Number(m[1]);
+  // 零用量时清零时刻在漂（Q27），当成没有在走的窗口。
+  if (Number(m[2]) === 0 || !(resets > Date.now())) return { windowEnd: null, source: 'api' };
+  return { windowEnd: resets, source: 'api' };
+}
+/**
+ * @param {ClockState} st
+ * @param {string} why
+ * @returns {WindowRead}
+ */
 function estimate(st, why) {
   const end = st.lastProbeAt ? st.lastProbeAt + WINDOW_MS : null;
   if (end !== null && end > Date.now()) return { windowEnd: end, source: 'estimate', why };
   return { windowEnd: null, source: st.lastProbeAt ? 'estimate' : 'unknown', why };
 }
 
-/** 切到 want 组织并回读核对。回 { ok, why }。 */
+/** 切到 want 组织并回读核对。回 { ok, why }。 @param {OrgKind} want */
 function useOrg(want) {
   const list = reclaude(['org', 'list']);
   const orgs = parseOrgList(list.out);
@@ -178,10 +233,30 @@ function useOrg(want) {
   if (orgs.find((o) => o.current)?.kind === want) return { ok: true, why: '已经挂着' };
   const target = orgs.filter((o) => o.kind === want);
   if (target.length !== 1) return { ok: false, why: `${want} 类型的组织有 ${target.length} 个` };
-  const use = reclaude(['org', 'use', target[0].id]);
+  const use = reclaude(['org', 'use', target[0]?.id ?? '']);
   const after = parseOrgList(reclaude(['org', 'list']).out).find((o) => o.current);
   if (after?.kind === want) return { ok: true, why: '切了' };
   return { ok: false, why: `org use 没切成（退出 ${use.status}：${oneLine(use.out)}）` };
+}
+
+/**
+ * 每分钟向 Windows 报一次「系统需要醒着」（SetThreadExecutionState(ES_SYSTEM_REQUIRED)，只重置空闲计时、不改电源设置），
+ * 电脑睡着就打不了 05:30 那一枪。循环停了就不再报，系统照原设置睡。合盖、手动睡眠拦不住。
+ */
+function stayAwake() {
+  if (process.platform !== 'win32') return;
+  spawnSync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-WindowStyle',
+      'Hidden',
+      '-Command',
+      'Add-Type -Namespace W -Name P -MemberDefinition \'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);\'; [void][W.P]::SetThreadExecutionState(1)',
+    ],
+    { timeout: 30_000, windowsHide: true },
+  );
 }
 
 function probe() {
@@ -251,6 +326,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     writeFileSync(pidFile, String(process.pid));
     log(`常驻循环起来了（pid ${process.pid}）`);
     for (;;) {
+      stayAwake();
       await tick().catch((e) => log(`这一轮出错：${oneLine(e.stack ?? e.message)}`));
       await new Promise((r) => setTimeout(r, 60_000 - (Date.now() % 60_000) + 1_000));
     }
