@@ -100,6 +100,8 @@ import {
   taskSettleMergedUpdate,
   taskStatusQuery,
 } from '../task-contract.ts';
+import { ARCHIVE_RETENTION_LIMITS, recycleArchives } from './archive-retention.ts';
+import { createArchiveRetentionDeps } from './archive-retention-wiring.ts';
 import type { ProcLook } from './complex-preserve.ts';
 import type { UserExec } from './exec.ts';
 import { mainCiRuns } from './main-ci-runs.ts';
@@ -276,7 +278,14 @@ export interface HourlyReconcileWiring {
   /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本；自动合并兜底用它列 PR、读文件、挂自动合并。 */
   gh: Pick<GitHub, 'auditMergedPrs' | 'readIssueState' | 'openIssue'> &
     Partial<
-      Pick<GitHub, 'readGroomFacts' | 'readIssueLabelEvents' | 'readIssueComments' | 'readIssueStates'>
+      Pick<
+        GitHub,
+        | 'readGroomFacts'
+        | 'readIssueLabelEvents'
+        | 'readIssueComments'
+        | 'readIssueStates'
+        | 'fetchCommitHead'
+      >
     > &
     Partial<Pick<GitHub, 'claims'>> &
     AutoMergeWiringGitHub;
@@ -737,6 +746,21 @@ export function hourlyReconcileJob(
       sessionTmpDir: SESSION_TMP_DIR,
       machine: w.machine,
       listDir: w.listDir ?? listDirEntries,
+      // 归档回收（#3699）：已推到远端、又没有未提交内容的归档，过保留期或超上限就删。
+      // 判据在 real/archive-retention.ts，这里只把真口子（GitHub 查提交、从 bundle 取 HEAD 树）接上。
+      recycleArchives: () =>
+        recycleArchives(
+          createArchiveRetentionDeps({
+            archiveDir: w.archiveDir,
+            repos: async () => (await managedRepos()).map((r) => ({ owner: r.owner, name: r.name })),
+            gh: w.gh,
+            // 和 mirrorBytes 同一条路：先试引擎镜像里现成的 HEAD 树，取不到再退回归档自己的 bundle。
+            mirrorRoot: w.mirrorRoot ?? defaultMirrorRoot(),
+            ...(w.gitBin === undefined ? {} : { gitBin: w.gitBin }),
+            ...(w.now ? { now: () => w.now?.().getTime() ?? Date.now() } : {}),
+          }),
+          ARCHIVE_RETENTION_LIMITS,
+        ),
       pendingCleanup: () => w.trees.pendingCleanup(),
       cleanupNamespace: () => w.trees.cleanupNamespace(),
       treeFor: (repo, branch) => w.trees.treeFor(repo, branch),
