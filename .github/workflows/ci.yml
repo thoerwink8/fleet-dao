@@ -12,6 +12,10 @@ name: ci
 # - 不用工作流级的 paths 过滤：必过检查每个 PR 都要触发，跳过的 job 由汇总核对（test/ci-plan.test.ts 核这份结构）。
 # - 加 job 要同时加进 ci-plan.ts 的 PLANNED_JOBS（或 ALWAYS_JOBS）和 check 的 needs。
 # - job 数 = 一个 PR 占的并发槽数（免费档同时 20 个）；小检查并进同一个 job 装一次依赖，墙钟不变、槽数少，别再拆回去。
+# - runs-on 钉 ubuntu-24.04，别写回 ubuntu-latest（2026-10-26）：GitHub 当天把 latest 指向 ubuntu26/20261026.180（26.04），
+#   而 ci-browser.ts 只认 24.04/noble 源、ci-postgres.ts 找 /usr/lib/postgresql/16（26.04 不再预装 PG16）、deploy 台靠免密 sudo，
+#   三者当天全红（PR #3701 的 e2e「Unknown CI distribution」、test pg 台 initdb ENOENT、deploy「sudo: a password is required」）。
+#   跑 PG16/Chromium/免密 sudo 的 job 都钉 24.04；要迁 26.04 是另一件事（得连 ci-browser、ci-postgres 的判据一起改）。
 # - 并进 lint 的几步各自 continue-on-error、最后统一判红：默认 step 红了后面就跳过，#566 就是 biome 先红把 tsc 跳过、漏了 7 个 TS2532（test/ci-plan.test.ts 钉着）。
 on:
   pull_request:
@@ -36,7 +40,7 @@ concurrency:
 jobs:
   # 各 job 的开关和测试分台：一律全套（ci-plan.ts 的 ciFullPlan），主线推送同树时整轮复用。列不出测试文件、装不了箱判红（退出码 2）。
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     # 只有这一个 job 多要 actions: read（读 PR 的运行记录找同树的检查）；别的 job 仍只读代码。
     permissions:
@@ -105,7 +109,7 @@ jobs:
   #   否则 PR 自己改宽规则、白名单就能放过自己（#115 第二意见）。除扫文件树，还按提交扫历史，只在 pull_request 上跑。
   lint:
     # 不等 changes：和它并行，少等一跳。每一样每轮都跑，没有开关。
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # PR 在 pr/、主线的卫生检查代码在 trusted/，并排放：biome check . 不会扫到 trusted/。
     defaults:
@@ -240,7 +244,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.tests != '[]'
     name: test (${{ matrix.label }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # FLEET_TEST_PG_URL 只给 pg 台；放在 job 上是为了算缓存键的那一步也看得到（有没有真 Postgres 是键的一部分）。
     env:
@@ -439,7 +443,7 @@ jobs:
   web:
     needs: changes
     if: needs.changes.outputs.web == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -464,7 +468,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.e2e == 'all'
     name: e2e (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -536,7 +540,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.deploy_matrix != '[]'
     name: deploy (${{ matrix.label }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -600,7 +604,7 @@ jobs:
   # 但发版要它绿：发版车预检（agents/skills/commander/scripts/release-train-lib.mjs 的 preflightCi）读被发提交上的 heavy 检查，红了或没跑就不发；
   # 主线上它红了整轮 ci 的结论也是 failure，自动发版闸（deploy/france/auto-release）本来就只认整轮 success。ci-rerun.yml 会重跑主线上失败的 job，也包括它。
   heavy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -693,7 +697,7 @@ jobs:
   check:
     if: always()
     needs: [changes, lint, test, web, e2e, deploy]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
