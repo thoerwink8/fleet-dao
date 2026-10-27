@@ -81,8 +81,16 @@ test.describe('版面预算：容器嵌套层数、一屏区块数', () => {
         await page.goto(path);
         await expect(page.locator('main')).toBeVisible();
         // 等这一页的数据读回来再量：还在画骨架时数进去的是占位块（首页读成前「在跑的任务」「系统状态」是普通 Section），
-        // 量出来的块数和真摆的块数不是一回事。networkidle 等这一轮请求静下来（500ms 内没有新请求）。
-        await page.waitForLoadState('networkidle');
+        // 量出来的块数和真摆的块数不是一回事。
+        // 先等骨架行消失——networkidle 不够：首页每 30 秒轮询一次，请求之间的空档也能静下来，量到的是「在读」占位。
+        await expect(page.locator('main [data-skeleton-row]')).toHaveCount(0);
+        // 再等两帧排版落定（networkidle 在这儿永远等不到：轮询一直在发请求，把用例拖到超时）。
+        await page.evaluate(
+          () =>
+            new Promise<void>((done) => {
+              requestAnimationFrame(() => requestAnimationFrame(() => done()));
+            }),
+        );
         const r = await measure(page);
         const budget = BUDGET[path] ?? DEFAULT_BUDGET;
         const detail = r.containers
