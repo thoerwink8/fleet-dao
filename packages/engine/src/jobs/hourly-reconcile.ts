@@ -95,6 +95,7 @@ export type HourlyReconcileStep = (typeof HOURLY_RECONCILE_STEPS)[number];
 /** 没把依赖接上就整步跳过（单测外壳可以不给；真装配会给）。跳过只记一笔，不算开始，也不算跑完。 */
 export const HOURLY_RECONCILE_OPTIONAL_STEPS = [
   'pending-cleanup',
+  'archive-retention',
   'save-inventory',
   'pool-hold-push',
   'main-red-push',
