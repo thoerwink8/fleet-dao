@@ -134,6 +134,18 @@
 
 /* ---------- 语义令牌（规范第二节） ---------- */
 @theme inline {
+  /*
+   * 尺寸一律按 px 算，不按 rem（#3697 拍板）：创始人浏览器默认字号是 12px，rem 跟着缩到 75%，
+   * 而字号是 px 不变，结果控件、留白、断点全挤。写 px 后「按设计值渲染」在任何浏览器设置下都成立。
+   * --spacing 是 Tailwind 数字档位（p-4 = 4×4px = 16px）的基数，跟参考工作台一样取 4px。
+   */
+  --spacing: 4px;
+  /* 断点也写 px：rem 断点会跟着根字号缩（12px 根字号下 md=48rem 只有 576px，手机会误进桌面版式）。 */
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+  --breakpoint-2xl: 1536px;
   /* Tailwind 默认色板（red-500、white、black……）整个不生成：颜色只许用下面这些语义名。 */
   --color-*: initial;
   /* 字号、圆角、阴影同理（#1855 收口）：Tailwind 默认的 text-xs、rounded-xl、shadow-lg 整个不生成，只剩下面定义的档位。 */
@@ -239,7 +251,7 @@
 
   /*
    * 字号五档加等宽一档（Arco）：字号和行高、字重绑在一起，页面不另配 leading-数字。手机和桌面同一套。
-   * 都写 rem，根字号不放大（1rem = 16px），下面就是像素：
+   * 都写 px（#3697 拍板），不再跟根字号缩：
    * meta 12/20：时间戳、表头、计数、标签里的字、辅助说明（中文最小 12）。
    * body 14/22：默认。列表行、表格、正文、按钮、输入、菜单。
    * heading 16/24（500）：卡片、抽屉、对话框标题。
@@ -248,28 +260,28 @@
    * mono 13/20：等宽的编号、提交号、代码。
    * canvas 11/14：只给画布（components/home/board/）用，画布随缩放放大。
    */
-  --text-meta: 0.75rem;
-  --text-meta--line-height: 1.25rem;
-  --text-body: 0.875rem;
-  --text-body--line-height: 1.375rem;
-  --text-heading: 1rem;
-  --text-heading--line-height: 1.5rem;
+  --text-meta: 12px;
+  --text-meta--line-height: 20px;
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-heading: 16px;
+  --text-heading--line-height: 24px;
   --text-heading--font-weight: 500;
-  --text-title: 1.25rem;
-  --text-title--line-height: 1.75rem;
+  --text-title: 20px;
+  --text-title--line-height: 28px;
   --text-title--font-weight: 600;
-  --text-display: 1.5rem;
-  --text-display--line-height: 2rem;
+  --text-display: 24px;
+  --text-display--line-height: 32px;
   --text-display--font-weight: 600;
-  --text-mono: 0.8125rem;
-  --text-mono--line-height: 1.25rem;
-  --text-canvas: 0.6875rem;
-  --text-canvas--line-height: 0.875rem;
+  --text-mono: 13px;
+  --text-mono--line-height: 20px;
+  --text-canvas: 11px;
+  --text-canvas--line-height: 14px;
 
   /* 圆角（Arco）：sm 2 按钮、输入、标签、菜单项、格子；md 4 卡片、浮层、对话框；lg 8 少用；full 头像、圆点、角标。 */
-  --radius-sm: 0.125rem;
-  --radius-md: 0.25rem;
-  --radius-lg: 0.5rem;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
 
   /*
    * 阴影：卡片没有阴影，靠浅灰底上的白卡片分层。只有两种：
@@ -306,12 +318,12 @@
    * 只许 components/layout/、components/ui/ 用（lint-design R10）：页面要的是版式组件，不是自己量尺寸。
    * 名字放 --spacing-* 下：h-*、p-*、gap-* 都认它。
    */
-  --spacing-control: 2rem;
-  --spacing-row: 2.5rem;
-  --spacing-row-tall: 3rem;
-  --spacing-section: 1.25rem;
-  --spacing-section-gap: 1rem;
-  --spacing-stack: 0.75rem;
+  --spacing-control: 32px;
+  --spacing-row: 40px;
+  --spacing-row-tall: 48px;
+  --spacing-section: 20px;
+  --spacing-section-gap: 16px;
+  --spacing-stack: 12px;
 }
 
 /*
@@ -325,40 +337,40 @@
    * 必须放在 --spacing-* 下：Tailwind v4 的 h-* 只认 --height/--spacing、w-* 只认 --width/--spacing/--container，
    * 先前写成 --size-* 时 h-topbar、w-sidebar 整个不生效（顶栏塌成 33px、侧栏按字宽缩）。src/test/theme-tokens.test.ts 钉住。
    */
-  /* 尺寸一律写 rem（用户在浏览器调大默认字号时整站一起变）。括号里是像素（1rem = 16px）。 */
-  --spacing-topbar: 3.75rem; /* 60 */
-  --spacing-sidebar: 220px; /* 220，写 px：左菜单宽不随根字号变（验收在 12px 根字号下量到 165） */
-  --spacing-sidebar-collapsed: 3.75rem; /* 60 */
-  --spacing-sidebar-sheet: 16.25rem; /* 260 */
-  /* 主页右侧抽屉（要你拍的 / 做完的）宽 22.5rem（360px）；≥1920 时停靠成一列、其余浮在画布上。 */
-  --spacing-drawer: 22.5rem;
+  /* 尺寸一律写 px（#3697 拍板）：不跟根字号缩，任何浏览器设置下都按设计值渲染。 */
+  --spacing-topbar: 60px;
+  --spacing-sidebar: 220px;
+  --spacing-sidebar-collapsed: 60px;
+  --spacing-sidebar-sheet: 260px;
+  /* 主页右侧抽屉（要你拍的 / 做完的）宽 360px；≥1920 时停靠成一列、其余浮在画布上。 */
+  --spacing-drawer: 360px;
   /* 主页画布右上角抽屉按钮占的宽（含边距），画布工具条的右端让出这一块，免得压在一起。三段（要你拍的 | 做完的 | 本机会话，#1991）。 */
-  --spacing-drawer-button: 22rem;
-  /* 模型目录桌面下列表定高，和 routing-browse 的 LIST_HEIGHT（440，JS 里乘根字号倍数）同一数。手机上不用，列表随页面滚。 */
-  --spacing-routing-window: 27.5rem; /* 440 */
-  /* 路由页「调整顺序」区域桌面（xl）下的高度：视口高减去顶栏、页头、页签、用途按钮和这一用途的标题（约 22rem，含底部留白），内部自己滚。 */
-  --spacing-routing-desk: max(24rem, calc(100dvh - 22rem));
-  /* 提需求页工作区（左列表右对话）桌面下的高度：视口高减去顶栏 3.75rem、页头和内边距（约 11rem），列表和对话各自在里面滚。只在 components/layout/pane.tsx 的 Workspace 里用。 */
-  --spacing-intake-desk: max(28rem, calc(100dvh - 11rem));
+  --spacing-drawer-button: 352px;
+  /* 模型目录桌面下列表定高，和 routing-browse 的 LIST_HEIGHT（440）同一数。手机上不用，列表随页面滚。 */
+  --spacing-routing-window: 440px;
+  /* 路由页「调整顺序」区域桌面（xl）下的高度：视口高减去顶栏、页头、页签、用途按钮和这一用途的标题（约 352px，含底部留白），内部自己滚。 */
+  --spacing-routing-desk: max(384px, calc(100dvh - 352px));
+  /* 提需求页工作区（左列表右对话）桌面下的高度：视口高减去顶栏 60px、页头和内边距（约 176px），列表和对话各自在里面滚。只在 components/layout/pane.tsx 的 Workspace 里用。 */
+  --spacing-intake-desk: max(448px, calc(100dvh - 176px));
   /* 弹层列表的最高：max-h-* 只认 --max-height/--height/--spacing，不认 --container。 */
-  --max-height-notifications-list: 22.5rem; /* 360 */
-  --max-height-command-list: 27.5rem; /* 440 */
+  --max-height-notifications-list: 360px;
+  --max-height-command-list: 440px;
   /* 命令面板列表最高 300px，和上面 command-list 的 440px 不是一档。max-h-* 认 --max-height。 */
-  --max-height-menu: 18.75rem; /* 300 */
-  /* 路由页渠道列表在 xl 下的最高：视口高减去 16rem。依据：渠道状态左侧列表（max-h-routing-pane）。 */
-  --max-height-routing-pane: calc(100dvh - 16rem);
-  /* 开关轨道高 1.15rem。h-* 只认 --height / --spacing。 */
-  --height-switch: 1.15rem;
+  --max-height-menu: 300px;
+  /* 路由页渠道列表在 xl 下的最高：视口高减去 256px。依据：渠道状态左侧列表（max-h-routing-pane）。 */
+  --max-height-routing-pane: calc(100dvh - 256px);
+  /* 开关轨道高 18.4px（原来写 1.15rem）。h-* 只认 --height / --spacing。 */
+  --height-switch: 18.4px;
   /* 基础件聚焦圈宽 3px（button、input、select、textarea、badge、toggle、switch 的聚焦圈）。
    * ring-* 只认 --ring-width。和自带的 ring-3 同是 3px，主题里只留这一档。 */
   --ring-width-focus: 3px;
-  /* 行下面展开的明细往右缩进 3rem，和行里名字的左边对齐：展开箭头 1rem + 间距 0.5rem + 序号 1rem + 间距 0.5rem（路由页路由行，#1914）。
+  /* 行下面展开的明细往右缩进 48px，和行里名字的左边对齐：展开箭头 16px + 间距 8px + 序号 16px + 间距 8px（路由页路由行，#1914）。
    * 只在 components/layout/list.tsx 的 RowDetail 里用，再加上行的左内边距（区块内边距令牌）。padding 认 --spacing。 */
-  --spacing-row-indent: 3rem;
+  --spacing-row-indent: 48px;
   /* 逾期竖线宽 3px。依据：定时任务失败、过期行左侧竖线（w-rail）。w-* 认 --width。 */
   --width-rail: 3px;
   /* run-timeline 在 md 的刻度左内边距，原来写死 172px。padding 认 --spacing。 */
-  --spacing-timeline-label: 10.75rem; /* 172 */
+  --spacing-timeline-label: 172px;
   /* 表格勾选标记下移 2px。translate 认 --translate。 */
   --translate-check: 2px;
   /* 开关打开时拇指平移到 calc(100% - 2px)，让出 2px 边。 */
@@ -370,41 +382,43 @@
    * 内容容器宽度：页面最大宽、各弹层。
    * 页面最大宽按宽屏铺满定（1920 屏去掉侧栏约 1690 宽，整块用上）；只在 2560 这类超宽屏上才封顶，免得一行字拉得太长。
    */
-  --container-cockpit: 115rem; /* 1840 */
-  --container-chat: 38rem; /* 608：提需求页对话居中一列的最大宽（宽屏两边留白是为了可读） */
-  --container-settings-row: 6rem; /* 96 */
+  --container-cockpit: 1840px;
+  --container-chat: 608px; /* 提需求页对话居中一列的最大宽（宽屏两边留白是为了可读） */
+  --container-settings-row: 96px;
   /* 设置页左侧页内导航宽（lg 以上）。 */
-  --container-settings-nav: 11rem; /* 176 */
+  --container-settings-nav: 176px;
   /* 字段行「标签左、控件右」的标签列宽（md 以上），依据：调研 3 块，标签列 160–200px。 */
-  --container-field-label: 11.25rem; /* 180 */
-  --container-quota-row: 16rem; /* 256：池名、封号或没查成、停用开关并排 */
+  --container-field-label: 180px;
+  --container-quota-row: 256px; /* 池名、封号或没查成、停用开关并排 */
   /* 额度页手机上一个窗口格的最小宽：两列排。 */
-  --container-quota-cell: 8.5rem;
-  --container-search: 23.75rem; /* 380 */
-  /* 任务列表的内容宽上限 80rem：1920 宽下十二栏拉到 1600 多，列间距过大（#1902）。只给 /tasks 用。 */
-  --container-task-table: 80rem;
-  --container-notifications: 23.75rem; /* 380 */
-  --container-usage: 21.25rem; /* 340 */
-  --container-routing-list: 22.5rem; /* 360 */
-  /* 健康条详情截断宽 320px（20rem）。依据：首页健康条详情（max-w-health-detail）。max-w 认 --container。 */
-  --container-health-detail: 20rem;
-  /* 菜单弹层最短宽 8rem。min-w 认 --container。 */
-  --container-menu: 8rem;
-  /* 窄屏弹层宽：两侧各留 1rem，即 calc(100% - 2rem)。 */
-  --container-dialog: calc(100% - 2rem);
+  --container-quota-cell: 136px;
+  --container-search: 380px;
+  /* 任务列表的内容宽上限 1280px：1920 宽下十二栏拉到 1600 多，列间距过大（#1902）。只给 /tasks 用。 */
+  --container-task-table: 1280px;
+  --container-notifications: 380px;
+  --container-usage: 340px;
+  --container-routing-list: 360px;
+  /* 健康条详情截断宽 320px。依据：首页健康条详情（max-w-health-detail）。max-w 认 --container。 */
+  --container-health-detail: 320px;
+  /* 菜单弹层最短宽 128px。min-w 认 --container。 */
+  --container-menu: 128px;
+  /* 窄屏弹层宽：两侧各留 16px，即 calc(100% - 32px)。 */
+  --container-dialog: calc(100% - 32px);
   /* 网格列 / 行。grid-cols / grid-rows 认这两个命名空间，值就是原先方括号里的轨道。 */
   --grid-template-columns-auto-fr: auto 1fr; /* channel-status 故障说明、pool-holds 暂停明细：原来写死 auto、1fr */
-  --grid-template-columns-release: 4.5rem minmax(0, 1fr); /* release-card 每一行：原来写死 4.5rem、剩余 */
-  --grid-template-columns-usage: 3.5rem minmax(0, 1fr); /* usage 花费行：原来写死 3.5rem、剩余 */
-  --grid-template-columns-timeline: 10rem 1fr; /* run-timeline 在 md：原来写死 160px（10rem）、剩余 */
-  --grid-template-columns-board: minmax(0, 26rem) minmax(0, 1fr); /* 2xl 起：最宽 26rem、剩余 */
+  --grid-template-columns-release: 72px minmax(0, 1fr); /* release-card 每一行：原来写死 72px、剩余 */
+  --grid-template-columns-usage: 56px minmax(0, 1fr); /* usage 花费行：原来写死 56px、剩余 */
+  --grid-template-columns-timeline: 160px 1fr; /* run-timeline 在 md：原来写死 160px、剩余 */
+  --grid-template-columns-board: minmax(0, 416px) minmax(0, 1fr); /* 2xl 起：最宽 416px、剩余 */
   --grid-template-rows-stack: auto 1fr; /* 行：自动、剩余 */
   --grid-template-rows-media: auto auto 1fr; /* 行：自动、自动、剩余 */
 }
 
 /*
- * 根字号不放大（#3509）：照 Arco 原样，1rem = 16px，浏览器 100% 下正文 14px、顶栏 60、菜单 220，手机桌面一样。
- * 理由：创始人 10-22 拍「字节怎么做我们就怎么做」。原来桌面放大到 125%（#1937）的那层整个删了，JS 里的定高行、窗口高、抽屉宽直接用设计值。
+ * 尺寸一律写 px（#3697 拍板，替代 #3509 的 rem 写法）：正文 14px、顶栏 60、菜单 220，手机桌面一样，不跟根字号缩。
+ * 为什么不再写 rem：创始人浏览器默认字号是 12px，rem 跟着缩到 75%，而字号是 px 不变，结果控件、留白、断点全挤。
+ * #3509 当时写 rem 的理由是「用户调大默认字号时整站一起变」，代价是浏览器默认字号被调小时整站一起缩、字号却不缩。
+ * 根字号本身不动（不给 html 写 font-size）：px 已经不依赖它，锁死反而挡住用户想看大字。
  */
 
 /* ---------- 基础 ---------- */
@@ -471,8 +485,8 @@
 
 /*
  * 额度页账号池（#1805）：一个池一行，各窗口一格（一行字加一根细进度条）。
- * 容器够宽（53.875rem，16px 根字号下 862px 起）时窗口按类排成对齐的列、表头显示；窄了每个池变一张卡，窗口两列排、格内自带窗口名，不横向滚动。
- * 容器查询里写 var() 不会生效，所以这里写同一个数。写 rem：容器查询的 rem 按实际根字号算。列数由行上的 --quota-kinds 给。
+ * 容器够宽（862px）时窗口按类排成对齐的列、表头显示；窄了每个池变一张卡，窗口两列排、格内自带窗口名，不横向滚动。
+ * 容器查询里写 var() 不会生效，所以这里写同一个数。写 px：不跟根字号缩。列数由行上的 --quota-kinds 给。
  */
 .quota-matrix {
   container-type: inline-size;
@@ -486,7 +500,7 @@
 .quota-pool {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(var(--container-quota-cell), 1fr));
-  gap: 0.5rem 0.75rem;
+  gap: 8px 12px;
 }
 
 .quota-pool-head {
@@ -503,7 +517,7 @@
   display: none;
 }
 
-@container quota-matrix (min-width: 53.875rem) {
+@container quota-matrix (min-width: 862px) {
   .quota-pool,
   .quota-head {
     grid-template-columns: var(--container-quota-row) repeat(var(--quota-kinds), minmax(0, 1fr));
@@ -511,7 +525,7 @@
   }
   .quota-head {
     display: grid;
-    gap: 0 0.75rem;
+    gap: 0 12px;
   }
   .quota-pool-head {
     grid-column: auto;
@@ -533,14 +547,14 @@
 /* 法国页多台对照（#1837）：手机一列上下叠，md 起每台一列（列数由元素上的 --env-cols 给）。 */
 @utility grid-cols-env-compare {
   grid-template-columns: minmax(0, 1fr);
-  @media (min-width: 48rem) {
+  @media (min-width: 768px) {
     grid-template-columns: repeat(var(--env-cols), minmax(0, 1fr));
   }
 }
 
 /* 对照列里占满六行的那一块（md 起；手机一列叠着，不占多行）。行数从 --fact-rows 取。 */
 @utility row-span-env-facts {
-  @media (min-width: 48rem) {
+  @media (min-width: 768px) {
     grid-row: span var(--fact-rows) / span var(--fact-rows);
   }
 }
@@ -562,7 +576,7 @@
 
 /* 思考档位表（/efforts）的一行：模型 | 路由 | 当前档位 | 改档位下拉（md 以上）。 */
 @utility grid-cols-efforts {
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.5fr) minmax(0, 8rem) 10rem;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.5fr) minmax(0, 128px) 160px;
 }
 
 /* 路由页「调整顺序」：左边模型先后、右边选中模型下的路由先后，并排（xl 以上）。左边略宽，一行要放下序号、名字、状态、开关和四个移动键。 */
@@ -685,12 +699,12 @@
 .skip-to-content:focus {
   position: fixed;
   z-index: 80;
-  top: 0.75rem;
-  left: 0.75rem;
+  top: 12px;
+  left: 12px;
   width: auto;
   height: auto;
   margin: 0;
-  padding: 0.5rem 0.875rem;
+  padding: 8px 14px;
   overflow: visible;
   clip-path: none;
   white-space: normal;
@@ -713,12 +727,12 @@
 /*
  * 首页手机页头（#2969）：流程开关、状态、刷新原来和标题挤在一行。
  * 健康条自己是 flex-1、min-w-0、内容靠右，开关被压到比内容窄，字就盖住旁边的状态。
- * 手机（<48rem，和 md 断点同一道）上：标题单独一行（Page 的 max-md:flex-col）；
+ * 手机（<768px，和 md 断点同一道）上：标题单独一行（Page 的 max-md:flex-col）；
  * 操作区里开关占满下一行，状态和刷新靠右。放得下并排，放不下就换行，谁也不缩到比内容窄。
  * 写在层外：要压过健康条上的 flex-1 / min-w-0。只在 [data-actions-layout=stack] 上生效，画布细栏不动。
  * 桌面不进这条，仍是标题左、开关和状态、刷新在右。
  */
-@media (width < 48rem) {
+@media (width < 768px) {
   [data-actions-layout="stack"] {
     display: flex;
     flex-flow: row wrap;

@@ -16,7 +16,7 @@ const rowBase =
   'flex w-full items-center gap-stack px-section text-left text-ink outline-none transition-colors duration-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-hover max-md:min-h-11';
 /** 一行的行高：单行取 h-row；两行（名字一行加一行小字）取 row-tall，和 RowFrame tall 一样。 */
 const rowHeight = {
-  single: 'min-h-row py-[calc((var(--spacing-row)-1.25rem)/2)]',
+  single: 'min-h-row py-[calc((var(--spacing-row)-20px)/2)]',
   tall: 'min-h-row-tall py-1.5',
 } as const;
 const rowHover = 'cursor-pointer hover:bg-fill-1';
@@ -39,7 +39,7 @@ export function RowFrame({
       data-tall={tall || undefined}
       className={cn(
         'group/row relative flex w-full items-center gap-stack px-section max-md:min-h-11',
-        tall ? 'min-h-row-tall py-1.5' : 'min-h-row py-[calc((var(--spacing-row)-1.25rem)/2)]',
+        tall ? 'min-h-row-tall py-1.5' : 'min-h-row py-[calc((var(--spacing-row)-20px)/2)]',
         className,
       )}
       {...rest}

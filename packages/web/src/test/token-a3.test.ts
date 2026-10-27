@@ -34,7 +34,7 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
 const TIERS: { name: string; why: string }[] = [
   { name: '--container-health-detail:', why: '320px' },
   { name: '--width-rail:', why: '3px' },
-  { name: '--max-height-routing-pane:', why: '16rem' },
+  { name: '--max-height-routing-pane:', why: '256px' },
 ];
 
 /** 这 12 处换掉之前的写死类名。五个文件里不能再出现。 */

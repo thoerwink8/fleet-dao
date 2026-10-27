@@ -110,7 +110,7 @@ export function Page({
       {/* 标题行：标题（后面跟 ⓘ）在左，操作和刷新在右。两边都从顶对齐、各自至少一个控件高并垂直居中，
           所以刷新和标题在同一行上对齐，不会被下面的说明拉低；说明在标题下面，最多一行。
           stackActions（首页）在手机上把操作区放到标题下面，不再跟标题挤一行。
-          桌面首页标题列至少 18rem：短标题（「主页 · 演练 WSL」）在桌面字号下要一行放完。
+          桌面首页标题列至少 288px：短标题（「主页 · 演练 WSL」）在桌面字号下要一行放完。
           操作区可以缩，健康条放不下就收成「状态」按钮，不能再把这一列挤成逐词三行。 */}
       <header
         className={cn(
@@ -123,7 +123,7 @@ export function Page({
         <div
           className={cn(
             'min-w-0 grow basis-52 lg:flex-1',
-            // 18rem（288px）：盖住「主页 · 演练 WSL」一行的字宽。只在 lg，手机仍按内容行宽。
+            // 288px（原来写 18rem）：盖住「主页 · 演练 WSL」一行的字宽。只在 lg，手机仍按内容行宽。
             stackActions && 'max-md:w-full max-md:grow-0 max-md:basis-auto lg:min-w-72',
           )}
           data-page-titlebar
@@ -140,7 +140,7 @@ export function Page({
           <div
             className={cn(
               'flex min-h-8 max-w-full flex-wrap items-center gap-2 max-md:min-h-10',
-              // 首页桌面：操作区让出标题的 18rem，自己可以缩到比内容窄，健康条再按剩下的宽决定摊开还是收成按钮。
+              // 首页桌面：操作区让出标题的 288px，自己可以缩到比内容窄，健康条再按剩下的宽决定摊开还是收成按钮。
               // 别的页仍不缩操作区（按钮不改行）。手机上不缩，避免开关被压扁盖住状态（#2969）。
               stackActions
                 ? 'max-md:w-full max-md:max-w-full max-md:shrink-0 lg:min-w-0 lg:shrink'

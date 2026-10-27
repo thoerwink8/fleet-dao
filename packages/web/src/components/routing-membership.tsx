@@ -95,7 +95,7 @@ function AddCandidateList({
   onPick: (modelId: string) => void;
 }) {
   const [scrollTop, setScrollTop] = useState(0);
-  // 根字号不放大（1rem = 16px），设计值就是像素
+  // 尺寸一律写 px（#3697），设计值就是像素，不跟根字号缩
   const rowHeight = ADD_ROW_HEIGHT;
   const listHeight = ADD_LIST_HEIGHT;
   const total = rows.length * rowHeight;

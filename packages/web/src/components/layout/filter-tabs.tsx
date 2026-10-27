@@ -103,8 +103,8 @@ export function FilterTabNote({ label, detail }: { label: string; detail: string
   );
 }
 
-/** 渐隐带的宽度（rem，跟着字号走，不写死像素）。 */
-const FADE = '1.5rem';
+/** 渐隐带的宽度（24px，尺寸一律写 px，不跟根字号缩）。 */
+const FADE = '24px';
 
 export function FilterTabs<Id extends string = string>({
   items,

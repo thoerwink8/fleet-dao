@@ -56,7 +56,7 @@ export function SidePanel({
         {...(style ? { style } : {})}
         className={cn(
           'gap-0 p-0',
-          phone ? 'h-dvh max-h-dvh w-full' : 'w-[min(var(--side-panel-w,35rem),90vw)] sm:max-w-none',
+          phone ? 'h-dvh max-h-dvh w-full' : 'w-[min(var(--side-panel-w,560px),90vw)] sm:max-w-none',
         )}
         {...rest}
       >

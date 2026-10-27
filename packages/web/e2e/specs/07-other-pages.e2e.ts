@@ -197,20 +197,30 @@ test.describe('其余页面', () => {
     await expect(page.getByText('这一页还没做')).toHaveCount(0);
   });
 
-  test('外壳尺寸生效：顶栏 60、侧栏 220（收起 48），根字号不放大（尺寸 token 放错命名空间时类名会静默失效）', async ({
+  test('外壳尺寸生效：顶栏 60、侧栏 220（收起 48）；根字号调成 12px 后像素值不变（尺寸写 px，#3697）', async ({
     page,
   }) => {
     await page.goto('/schedules');
     await expect(page.getByRole('heading', { level: 1, name: '定时任务' })).toBeVisible();
-    const header = await page.locator('main').evaluate((_m) => {
-      const top = document.querySelector('header')?.getBoundingClientRect().height; // 顶栏是文档里的第一个 header（页头在正文区里，在它后面）
-      const side = document.querySelector('aside')?.getBoundingClientRect().width;
-      const scale = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) / 16;
-      return { top, side, scale, wide: window.innerWidth >= 1280 };
+    const measure = () =>
+      page.locator('main').evaluate((_m) => {
+        const top = document.querySelector('header')?.getBoundingClientRect().height; // 顶栏是文档里的第一个 header（页头在正文区里，在它后面）
+        const side = document.querySelector('aside')?.getBoundingClientRect().width;
+        const scale = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) / 16;
+        return { top, side, scale, wide: window.innerWidth >= 1280 };
+      });
+    // 尺寸写 px（#3697）：顶栏 60，左菜单 ≥1280 默认展开 220、窄一点收成 48 宽的图标条
+    const at16 = await measure();
+    expect(at16.scale).toBe(1);
+    expect(at16.top).toBe(60);
+    expect(at16.side).toBe(at16.wide ? 220 : 48);
+    // 把根字号调成 12px（创始人浏览器的默认字号）：壳的像素值一个都不许变
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = '12px';
     });
-    // 根字号不放大（#3509，照 Arco：16px）；壳的尺寸写 rem：顶栏 60，左菜单 ≥1280 默认展开 220、窄一点收成 48 宽的图标条
-    expect(header.scale).toBe(1);
-    expect(header.top).toBe(60 * header.scale);
-    expect(header.side).toBe((header.wide ? 220 : 48) * header.scale);
+    const at12 = await measure();
+    expect(at12.scale).toBe(0.75);
+    expect(at12.top).toBe(60);
+    expect(at12.side).toBe(at16.side);
   });
 });
