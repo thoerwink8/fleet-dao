@@ -107,11 +107,34 @@ async function readHead(path: string): Promise<string | undefined> {
 }
 
 /**
+ * 算「带不走、删了就丢」的状态有几项。
+ *
+ * `stash` 每一项都是真东西（bundle 带不走），全算。
+ * `merge` 里混着两种：`MERGE_HEAD` / `MERGE_MSG` / `MERGE_MODE` / `AUTO_MERGE` / `CHERRY_PICK_HEAD` /
+ * `REVERT_HEAD` / `REBASE_HEAD` 是**没做完的操作**，删了就丢；`ORIG_HEAD` 只是 git 记的「上次 HEAD 在哪」，
+ * 它指向的提交在 HEAD 的历史里，bundle 里有，不算丢东西。线上 322 条归档（37G）全栽在这上面：
+ * 判据把 ORIG_HEAD 也算成未完成操作，一条都回收不掉（#3699）。
+ * 认不出名字的按「算一项」处理，宁可留着。
+ */
+function carriedCount(stash: unknown, merge: unknown): number {
+  const stashed = Array.isArray(stash) ? stash.length : 0;
+  let unfinished = 0;
+  for (const item of Array.isArray(merge) ? merge : []) {
+    const name = item && typeof item === 'object' ? (item as { name?: unknown }).name : undefined;
+    // ORIG_HEAD 指向的提交在 HEAD 历史里，bundle 带得走；别的（含认不出名字的）都按未完成操作算。
+    if (name === 'ORIG_HEAD') continue;
+    unfinished += 1;
+  }
+  return stashed + unfinished;
+}
+
+/**
  * state.json 记的东西：文件清单（路径 → 内容 sha256）、以及带不走的那几样（stash、没做完的合并/挑拣/变基）。
  * 没有 state.json 返回 null（干净归档）；读不成返回 undefined。
  *
  * `git bundle` 只带引用，带不走 stash 和 `.git/` 里那些操作状态文件——所以只要这两样有一样不是空的，
  * 这份归档就不是「工作区等于 HEAD」，删了就真丢了。这一条和保全那边 `recheckComplex` 的判法是同一个道理。
+ * `ORIG_HEAD` 不算（见 `carriedCount`）。
  */
 async function readSnapshotState(
   dir: string,
@@ -133,9 +156,7 @@ async function readSnapshotState(
       if (f.kind !== 'file' || typeof f.path !== 'string' || typeof f.sha256 !== 'string') continue;
       files.set(f.path, f.sha256);
     }
-    const stash = Array.isArray(row.stash) ? row.stash.length : 0;
-    const merge = Array.isArray(row.merge) ? row.merge.length : 0;
-    return { files, carried: stash + merge };
+    return { files, carried: carriedCount(row.stash, row.merge) };
   } catch {
     return undefined;
   }
