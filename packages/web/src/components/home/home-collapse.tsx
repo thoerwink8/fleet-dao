@@ -25,10 +25,12 @@ type FoldSectionProps = ComponentProps<typeof FoldSection>;
 /**
  * 工作台的一块：`FoldSection` 加上这一块自己的默认开合（三块常驻默认展开，其余默认收起）。
  * 默认值必须从这里给——`FoldSection` 自己不认工作台的「哪三块常驻」，只认传进来的 defaultOpen。
+ * 出错的那一块传 defaultOpen（#3707）：原因和重试不能被收起来，不然收起后只剩一行摘要，人不知道出了什么事。
  */
 export function HomeFoldSection({
   block,
+  defaultOpen,
   ...rest
-}: Omit<FoldSectionProps, 'block' | 'defaultOpen'> & { block: HomeBlockKey; children: ReactNode }) {
-  return <FoldSection block={block} defaultOpen={defaultOpenOf(block)} {...rest} />;
+}: Omit<FoldSectionProps, 'block'> & { block: HomeBlockKey; children: ReactNode }) {
+  return <FoldSection block={block} defaultOpen={defaultOpen ?? defaultOpenOf(block)} {...rest} />;
 }

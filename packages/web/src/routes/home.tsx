@@ -62,15 +62,23 @@ function FoldedSection({
   block,
   title,
   summary,
+  defaultOpen,
   children,
 }: {
   block: 'overview' | 'system';
   title: string;
   summary: string;
+  /** 出错的那一块传 true：原因和重试不藏在收起里（#3707）。 */
+  defaultOpen?: boolean;
   children: ReactNode;
 }) {
   return (
-    <HomeFoldSection block={block} title={title} summary={summary}>
+    <HomeFoldSection
+      block={block}
+      title={title}
+      summary={summary}
+      {...(defaultOpen === undefined ? {} : { defaultOpen })}
+    >
       {children}
     </HomeFoldSection>
   );
@@ -171,7 +179,12 @@ export default function Home() {
                   <Overview quota={state.data.health.quota} spend={state.data.spend} />
                 </FoldedSection>
               ) : (
-                <FoldedSection block="overview" title="数据概览" summary={pendingSummary(state.status)}>
+                <FoldedSection
+                  block="overview"
+                  title="数据概览"
+                  summary={pendingSummary(state.status)}
+                  defaultOpen={state.status === 'error'}
+                >
                   {state.status === 'error' ? (
                     <LoadError what={what} error={state.error} onRetry={state.retry} />
                   ) : state.status === 'notWired' ? (
