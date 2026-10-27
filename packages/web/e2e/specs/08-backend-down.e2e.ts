@@ -65,8 +65,12 @@ test.describe('后端不可用', () => {
   });
 
   test('后端回 500：同样写明没读成、给重试', async ({ page, request, stack, shot }) => {
-    // 定时任务不进左菜单（#3509），站内入口是法国页「更多」里的「定时任务」
+    // 定时任务不进左菜单（#3509），站内入口是法国页「更多」里的「定时任务」；「更多」默认收起（#3707），先展开
     await page.goto('/france');
+    const more = page.locator('[data-fold-block="more"]');
+    await expect(more).toHaveAttribute('data-open', 'false');
+    await more.locator('[data-section-toggle]').click();
+    await expect(more).toHaveAttribute('data-open', 'true');
     const all = page.getByRole('link', { name: /^定时任务/ });
     await expect(all).toBeVisible();
     await all.click();

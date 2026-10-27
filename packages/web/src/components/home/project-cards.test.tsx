@@ -3,7 +3,7 @@
 import { cleanup, render } from '@testing-library/react';
 import { afterEach, expect, test } from 'vitest';
 import { createMockApi } from '../../api/mock/server';
-import { ProjectCards } from './project-cards';
+import { ProjectCards, projectsSummary } from './project-cards';
 import type { HomeProject } from './types';
 
 afterEach(cleanup);
@@ -103,4 +103,12 @@ test('老后端没给项目：写没给，不画成还没有项目', () => {
   render(<ProjectCards projects={undefined} />);
   expect(document.querySelector('[data-project-cards="missing"]')?.textContent).toContain('项目这一块没给');
   expect(document.body.textContent).not.toContain('还没有项目');
+});
+
+// 收起时的一行摘要（#3707 批次 3）：几个仓、其中几个有问题；没给、还没有都照实写
+test('收起摘要：几个仓、其中几个有问题；没给和还没有照实写，不混成一样', () => {
+  expect(projectsSummary(undefined)).toBe('项目这一块没给');
+  expect(projectsSummary([])).toBe('还没有项目');
+  expect(projectsSummary(FOUR)).toBe('4 个仓 · 2 个有问题');
+  expect(projectsSummary([project({ id: 'a', repo: 'acme/ok' })])).toBe('1 个仓 · 都正常');
 });

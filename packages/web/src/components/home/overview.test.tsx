@@ -2,7 +2,7 @@
 // 数据概览：额度和本期估算两格；本期估算读不到写「没记」，不显示 $0；额度不是正常时多一行说明。
 import { cleanup, render } from '@testing-library/react';
 import { afterEach, expect, test } from 'vitest';
-import { Overview, spendMoney } from './overview';
+import { Overview, overviewSummary, spendMoney } from './overview';
 import type { HomeHealth, HomeSpend } from './types';
 
 afterEach(cleanup);
@@ -44,4 +44,17 @@ test('读到了：写出估算；额度紧时标橙并写是哪些池', () => {
   expect(document.querySelector('[data-spend-money]')?.textContent).toBe('$12.40');
   expect(document.querySelector('[data-stat][data-tone="stall"]')?.textContent).toContain('紧');
   expect(document.body.textContent).toContain('额度：中转站快清零');
+});
+
+// 收起时的一行摘要（#3707 批次 3）：额度状态 + 本期估算；读不到照实写，不写 0
+test('收起摘要：额度状态和本期估算都写出来；读不到写没记，不写 $0', () => {
+  expect(overviewSummary(QUOTA, { estimated: { state: 'ok', usd: 12.4 } })).toBe(
+    '额度 正常 · 本期估算 $12.40',
+  );
+  expect(overviewSummary({ state: 'tight', detail: '中转站快清零' }, undefined)).toBe(
+    '额度 紧 · 本期估算 没记',
+  );
+  expect(overviewSummary({ state: 'unknown', detail: '额度一次都还没读成' }, undefined)).toBe(
+    '额度 没查成 · 本期估算 没记',
+  );
 });

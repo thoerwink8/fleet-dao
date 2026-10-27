@@ -29,6 +29,14 @@ export function spendMoney(spend: HomeSpend | undefined): string {
   return formatUsd(spend.estimated.usd);
 }
 
+/**
+ * 收起时的一行摘要（#3707 批次 3）：额度现在怎样、本期估算多少钱。读不到照实写「没查成」「没记」，不写 0。
+ * 和正文里的两个数同一份来源，收起后也能看出有没有异常。
+ */
+export function overviewSummary(quota: HomeHealth['quota'], spend: HomeSpend | undefined): string {
+  return `额度 ${QUOTA_WORD[quota.state]} · 本期估算 ${spendMoney(spend)}`;
+}
+
 export function Overview({ quota, spend }: { quota: HomeHealth['quota']; spend: HomeSpend | undefined }) {
   const money = spendMoney(spend);
   const why = spend?.estimated.state === 'unread' ? spend.estimated.why : undefined;

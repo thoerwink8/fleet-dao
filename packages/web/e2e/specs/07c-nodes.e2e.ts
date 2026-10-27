@@ -157,8 +157,9 @@ test.describe('看板多机', () => {
     await expect(page.locator('[data-home-block="alarm"]')).toContainText('卡住报警只在本台看');
     expect(await page.locator('main a[href^="/tasks/"]').count()).toBe(0);
     expect(await page.locator('main a[href^="/notifications"]').count()).toBe(0);
-    // 要你拍的去答置灰（aria-disabled，悬停写要去那台上答）
-    for (const b of await page.locator('[data-home-block="ask"] button').all()) {
+    // 要你拍的去答置灰（aria-disabled，悬停写要去那台上答）。
+    // 区块头的收起开关（#3707 批次 3）不算：它是这一页的开关，不是要跨机器做的动作。
+    for (const b of await page.locator('[data-home-block="ask"] button:not([data-section-toggle])').all()) {
       await expect(b).toHaveAttribute('aria-disabled', 'true');
     }
   });
@@ -202,9 +203,12 @@ test.describe('看板多机', () => {
     expect(g.sameRow, `${g.vw} 标题和操作区不在同一行`).toBe(true);
     expect(g.actionsPastMain, `${g.vw} 操作区超出正文`).toBe(false);
     expect(g.hitRefresh, `${g.vw} 刷新点不着`).toBe(true);
-    // 健康条不在页头了：系统状态（流水线、中转、引擎进程）写在页里「系统状态」那一块，带着那台快照里的说明
+    // 健康条不在页头了：系统状态（流水线、中转、引擎进程）写在页里「系统状态」那一块，带着那台快照里的说明。
+    // 这一块默认收起（#3707 批次 3），引擎进程写在行尾摘要里；摘要宽窄屏各画一份、各藏一份，按当前屏宽露着的那份查。
     await expect(page.getByText('系统状态')).toBeVisible();
-    await expect(page.getByText('引擎进程')).toBeVisible();
+    await expect(page.locator('[data-fold-block="system"] [data-section-summary]:visible')).toContainText(
+      '引擎进程',
+    );
     await trigger.click();
     await expect(page.locator('[data-node-item="wsl"]')).toHaveAttribute('data-node-state', 'stale');
     await shot(page, '07c-失联');

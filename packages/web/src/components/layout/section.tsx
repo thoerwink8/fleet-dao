@@ -1,8 +1,11 @@
 // 区块（= Arco 的 Card，#3509，样稿 canvas/fd3.css `.card` `.card-head` `.card.flush`）：页面里的一块内容，带标题。
 // 白底、4 圆角、无阴影无描边，靠浅灰页底分层；内边距 20，头（标题 16/500 在左、操作在右）和正文之间 16。
 // flush：正文贴边（放列表和表格），头单独留 16 20 的边、和正文之间 12。
+// collapsible（#3707 批次 3）：头那一行变成开关，收起时正文不画、行尾换成 summary 一行摘要（几项、有没有异常）。
+// 开合由页面管（受控）：页面从网址参数 ?open= 读、点一下写回去，刷新不丢。没给 collapsible 就是老样子，没有开关。
 // 最多两层容器（页面 → 区块），区块里用分隔线和行，不再套卡片（规范第五节第 3 条）。两栏并排用 SectionGrid，不嵌套卡片。
-import type { ComponentProps, ReactNode } from 'react';
+import { ChevronRight } from 'lucide-react';
+import { type ComponentProps, type ReactNode, useId } from 'react';
 import { cn } from '../../lib/utils';
 import { type LayoutTone, solidClass } from './tone';
 
@@ -16,6 +19,10 @@ export function Section({
   footer,
   variant = 'card',
   tone,
+  collapsible,
+  open,
+  onToggle,
+  summary,
   children,
   className,
   ...rest
@@ -35,17 +42,41 @@ export function Section({
   variant?: 'card' | 'plain';
   /** 出问题的区块：左边一道状态色竖线。 */
   tone?: LayoutTone;
+  /**
+   * 头那一行变成开关，能收起（#3707 批次 3）。开合受控：给 open 和 onToggle，页面自己记在网址参数里。
+   * 不给就是老样子，不画开关。
+   */
+  collapsible?: boolean;
+  /** 现在开着还是合着（collapsible 时必给）。 */
+  open?: boolean;
+  /** 点了头那一行（collapsible 时必给）。 */
+  onToggle?: () => void;
+  /** 收起时行尾那一行摘要：写清几项、有没有异常，不能收起后什么都看不见。 */
+  summary?: ReactNode;
   children: ReactNode;
   className?: string;
-} & Omit<ComponentProps<'section'>, 'title' | 'children' | 'className'>) {
+} & Omit<ComponentProps<'section'>, 'title' | 'children' | 'className' | 'onToggle'>) {
   const card = variant === 'card';
   // 区块本身不留内边距的两种：flush（正文贴边，表格、列表）和 tight（正文只留左右）。这两种头单独留边。
   const edge = card && (flush || tight);
   const head = Boolean(title || actions);
+  // 收起：头那一行还是照画（标题、条数、操作都在），正文不画，行尾换成摘要。
+  const folding = collapsible === true && title !== undefined;
+  const shown = folding ? open === true : true;
+  const id = useId();
+  const headGap = cn(
+    !card && 'mb-stack',
+    card && !edge && 'mb-4',
+    card && edge && 'px-section pt-4',
+    card && flush && 'mb-3',
+    card && tight && !flush && 'mb-1',
+  );
+  const heading = title ? <h2 className="flex items-center gap-2 text-heading text-ink">{title}</h2> : null;
   return (
     <section
       data-variant={variant}
       data-tone={tone}
+      {...(folding ? { 'data-collapsible': true, 'data-open': shown } : {})}
       className={cn(
         'relative min-w-0',
         card && 'overflow-hidden rounded-md bg-card text-ink',
@@ -62,35 +93,80 @@ export function Section({
         />
       ) : null}
       {head ? (
-        <header
-          className={cn(
-            'flex items-center justify-between gap-4',
-            !card && 'mb-stack',
-            card && !edge && 'mb-4',
-            card && edge && 'px-section pt-4',
-            card && flush && 'mb-3',
-            card && tight && !flush && 'mb-1',
-          )}
-        >
-          <div className="min-w-0">
-            {title ? <h2 className="flex items-center gap-2 text-heading text-ink">{title}</h2> : null}
-            {description ? <p className="mt-0.5 text-meta text-ink-3">{description}</p> : null}
+        folding ? (
+          <header className={cn('flex items-center justify-between gap-4', headGap)}>
+            {/* 开关包标题和箭头（左半边）加行尾的摘要（收起时）；操作留在按钮外面（「全部通知」这类自己是按钮的东西不能套进按钮）。 */}
+            <button
+              type="button"
+              data-section-toggle
+              aria-expanded={shown}
+              aria-controls={id}
+              onClick={() => onToggle?.()}
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-brand-hover max-md:min-h-11"
+            >
+              <ChevronRight
+                aria-hidden
+                className={cn(
+                  'size-4 shrink-0 text-ink-3 transition-transform duration-200 ease-arco',
+                  shown && 'rotate-90',
+                )}
+              />
+              <div className="min-w-0">
+                {heading}
+                {description ? <p className="mt-0.5 text-meta text-ink-3">{description}</p> : null}
+              </div>
+              {/* 收起时行尾那一行摘要（决定 0121 第四条）：几项、有没有异常，收起后也看得见 */}
+              {!shown ? (
+                <span
+                  id={id}
+                  data-section-summary
+                  className="min-w-0 flex-1 truncate text-right text-meta font-normal text-ink-3 max-md:hidden"
+                >
+                  {summary}
+                </span>
+              ) : null}
+            </button>
+            {actions ? <div className="flex shrink-0 items-center gap-3 text-body">{actions}</div> : null}
+          </header>
+        ) : (
+          <header className={cn('flex items-center justify-between gap-4', headGap)}>
+            <div className="min-w-0">
+              {heading}
+              {description ? <p className="mt-0.5 text-meta text-ink-3">{description}</p> : null}
+            </div>
+            {actions ? <div className="flex shrink-0 items-center gap-3 text-body">{actions}</div> : null}
+          </header>
+        )
+      ) : null}
+      {folding && !shown ? (
+        // 窄屏行尾放不下摘要（头和行尾都窄）：摘要落到标题下面一行，仍然看得见，不折成两截。
+        // 屏宽的判法用 md（768px），和头那一行里 max-md:hidden 一致。
+        summary !== undefined && summary !== null && summary !== '' ? (
+          <div
+            data-section-summary
+            className={cn('mt-1 text-meta text-ink-3 md:hidden', edge && 'px-section pb-4')}
+          >
+            {summary}
           </div>
-          {actions ? <div className="flex shrink-0 items-center gap-3 text-body">{actions}</div> : null}
-        </header>
-      ) : null}
-      {toolbar ? (
-        // 没有头的区块（筛选条就是第一行）：toolbar 自己留上边
-        <div data-section-toolbar className={cn('border-b border-line px-section pb-3', !head && 'pt-4')}>
-          {toolbar}
-        </div>
-      ) : null}
-      <div className={cn(card && tight && !flush && 'px-section py-1')}>{children}</div>
-      {footer ? (
-        <div data-section-footer className="border-t border-line px-section py-2">
-          {footer}
-        </div>
-      ) : null}
+        ) : null
+      ) : (
+        <>
+          {toolbar ? (
+            // 没有头的区块（筛选条就是第一行）：toolbar 自己留上边
+            <div data-section-toolbar className={cn('border-b border-line px-section pb-3', !head && 'pt-4')}>
+              {toolbar}
+            </div>
+          ) : null}
+          <div id={folding ? id : undefined} className={cn(card && tight && !flush && 'px-section py-1')}>
+            {children}
+          </div>
+          {footer ? (
+            <div data-section-footer className="border-t border-line px-section py-2">
+              {footer}
+            </div>
+          ) : null}
+        </>
+      )}
     </section>
   );
 }

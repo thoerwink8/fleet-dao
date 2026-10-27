@@ -1,5 +1,6 @@
 // 工作台页头窄屏（#2969，#3509 改版后，#3533 起流程开关挪到法国页的引擎卡）：320 / 360 / 390 上刷新不裁切、不横滚；宽屏同样不横滚。
 // 健康条不再挤在页头：额度在「数据概览」，流水线、中转、引擎进程在「系统状态」；手机上「要你拍的」「在跑的任务」行尾不被截断。
+// 数据概览和系统状态默认收起（#3707 批次 3）：先点开再量，收起状态下的摘要行另有 02b 的用例管。
 // 组件测试没有版面，框在这里量。
 import type { Page } from '@playwright/test';
 import { expect, test } from '../support/fixtures.ts';
@@ -172,6 +173,15 @@ async function layout(page: Page): Promise<HeaderLayout> {
   return JSON.parse(lastRaw) as HeaderLayout;
 }
 
+/** 「数据概览」默认收起（#3707 批次 3）：先点开，量的是里面的两个数；收起状态下的摘要行由 02b 管。 */
+async function openOverview(page: Page) {
+  const block = page.locator('[data-fold-block="overview"]');
+  if ((await block.getAttribute('data-open')) === 'false') {
+    await block.locator('[data-section-toggle]').click();
+    await expect(block).toHaveAttribute('data-open', 'true');
+  }
+}
+
 test.describe('工作台页头窄屏', () => {
   test.beforeEach(async ({ login }) => login());
 
@@ -180,6 +190,7 @@ test.describe('工作台页头窄屏', () => {
       await page.setViewportSize({ width, height: 844 });
       await page.goto('/');
       await expect(page.getByRole('heading', { level: 1, name: '工作台' })).toBeVisible();
+      await openOverview(page);
       await expect(page.locator('[data-spend-line]')).toBeVisible();
       const m = await layout(page);
       expect(m.overflowDoc, `${width} 整页横滚`).toBeLessThanOrEqual(1);
@@ -195,6 +206,7 @@ test.describe('工作台页头窄屏', () => {
 
   test('宽屏：不横滚，刷新能点', async ({ page }) => {
     await page.goto('/');
+    await openOverview(page);
     await expect(page.locator('[data-spend-line]')).toBeVisible();
     const m = await layout(page);
     expect(m.overflowMain, '正文横滚').toBeLessThanOrEqual(1);

@@ -35,24 +35,53 @@ const COLUMNS: TableColumn<HomeProject>[] = [
   { key: 'milestone', title: '里程碑', render: (_, p) => milestoneText(p.milestone) },
 ];
 
+/**
+ * 收起时的一行摘要（#3707 批次 3）：几个仓、其中几个卡住了。没给这一块、还没有项目都照实写。
+ * 判法用 `projectProblem`（卡住，或还有要拍的），和「有问题排前面」同一份。
+ */
+export function projectsSummary(projects: readonly HomeProject[] | undefined): string {
+  if (projects === undefined) return '项目这一块没给';
+  if (projects.length === 0) return '还没有项目';
+  const stuck = projects.filter(projectProblem).length;
+  return stuck > 0 ? `${projects.length} 个仓 · ${stuck} 个有问题` : `${projects.length} 个仓 · 都正常`;
+}
+
+/** 收起区块的开关状态（#3707 批次 3）；不给就不收，老样子。 */
+export interface CollapsibleProps {
+  collapsible?: boolean;
+  open?: boolean;
+  onToggle?: () => void;
+}
+
 /** 每个仓一行。没给这一块（老后端）写明没给，不画成「还没有项目」。 */
-export function ProjectCards({ projects }: { projects: readonly HomeProject[] | undefined }) {
+export function ProjectCards({
+  projects,
+  collapsible,
+  open,
+  onToggle,
+}: { projects: readonly HomeProject[] | undefined } & CollapsibleProps) {
+  const folding = {
+    ...(collapsible
+      ? { collapsible, open: open === true, 'data-fold-block': 'projects', ...(onToggle ? { onToggle } : {}) }
+      : {}),
+  };
+  const summary = <>{projectsSummary(projects)}</>;
   if (projects === undefined) {
     return (
-      <Section title="项目" data-project-cards="missing">
+      <Section title="项目" data-project-cards="missing" summary={summary} {...folding}>
         <Text tone="muted">项目这一块没给</Text>
       </Section>
     );
   }
   if (projects.length === 0) {
     return (
-      <Section title="项目" data-project-cards="empty">
+      <Section title="项目" data-project-cards="empty" summary={summary} {...folding}>
         <EmptyState size="inline" title="还没有项目" />
       </Section>
     );
   }
   return (
-    <Section flush title="项目" data-project-cards>
+    <Section flush title="项目" data-project-cards summary={summary} {...folding}>
       <Table caption="项目" columns={COLUMNS} rows={sortProjects(projects)} rowKey="id" />
     </Section>
   );

@@ -31,12 +31,12 @@ import { List, ListRow } from '../layout/list';
 import { LoadError, LoadingRows } from '../layout/load-state';
 import { Notice } from '../layout/notice';
 import { RowMenu, RowMenuItem } from '../layout/row-menu';
-import { Section } from '../layout/section';
 import { Stack } from '../layout/stack';
 import { LevelDot, StatusBadge } from '../layout/status-badge';
 import { Table, type TableColumn } from '../layout/table';
 import { Tag } from '../layout/tag';
 import { Text } from '../layout/text';
+import { HomeFoldSection } from './home-collapse';
 import {
   type AskItem,
   askItems,
@@ -61,6 +61,48 @@ function BlockTitle({ name, count }: { name: string; count?: number | undefined 
       {count === undefined || count === 0 ? null : <Tag>{count}</Tag>}
     </>
   );
+}
+
+// —— 收起时的一行摘要（#3707 批次 3）——
+// 收起后不能什么都看不见：每块写清几项、有没有异常。读不到写「没读成」，不写成「没有」。
+
+/** 要你拍的：几件、有没有读成。 */
+export function askSummary(count: number | undefined, failed: boolean): string {
+  if (failed) return '没读成，展开看重试';
+  if (count === undefined) return '在读…';
+  return count === 0 ? '没有要你拍的' : `${count} 件等你拍`;
+}
+
+/** 在跑的任务：几件、其中几件卡住或等你。 */
+export function runSummary(rows: readonly RunRow[], count: number): string {
+  if (count === 0) return '现在没有在跑的单';
+  const stuck = rows.filter((r) => r.tone === 'fail' || r.tone === 'human').length;
+  return stuck > 0 ? `${count} 件在跑 · ${stuck} 件卡住或等你` : `${count} 件在跑 · 都正常`;
+}
+
+/** 卡住报警：几件、有没有没人接的。 */
+export function alarmSummary(
+  count: number | undefined,
+  failed: boolean,
+  nobody: number,
+  unread: number,
+): string {
+  if (failed) return '没读成，展开看重试';
+  if (count === undefined) return '在读…';
+  if (count === 0) return '没有卡住报警';
+  const bits = [`${count} 件卡住`];
+  if (nobody > 0) bits.push(`${nobody} 件还没人接`);
+  if (unread > 0) bits.push(`${unread} 件谁在修没查成`);
+  return bits.join(' · ');
+}
+
+/** 最近上线：最近一版是什么、多久前。 */
+export function shippedSummary(rows: readonly ShippedRow[], failed: boolean, now: number): string {
+  if (failed) return '没读成，展开看重试';
+  const top = rows[0];
+  if (!top) return '还没有发布记录';
+  const what = top.what ?? '标题没查成';
+  return `最近一版 ${formatAgo(top.at, now)}：${what}`;
 }
 
 /** 超过一页时区块底下的一行说明：只看了最近一页，不当成只有这些。 */
@@ -205,10 +247,12 @@ export function AskBlock() {
       : undefined;
   const list = q.data !== undefined && items.length > 0;
   return (
-    <Section
+    <HomeFoldSection
+      block="ask"
       flush={list}
       data-home-block="ask"
       title={<BlockTitle name="要你拍的" count={q.data ? items.length : undefined} />}
+      summary={askSummary(q.data ? items.length : undefined, Boolean(q.error))}
       actions={
         <Button variant="text" size="sm" href="/notifications">
           全部通知
@@ -240,7 +284,7 @@ export function AskBlock() {
           ) : null}
         </>
       )}
-    </Section>
+    </HomeFoldSection>
   );
 }
 
@@ -249,10 +293,12 @@ export function RemoteAskBlock({ decisions, machine }: { decisions: HomeDecision
   const now = useNow();
   const reason = `要去${machine}那台上答`;
   return (
-    <Section
+    <HomeFoldSection
+      block="ask"
       flush={decisions.length > 0}
       data-home-block="ask"
       title={<BlockTitle name="要你拍的" count={decisions.length} />}
+      summary={askSummary(decisions.length, false)}
     >
       {decisions.length === 0 ? (
         <EmptyState icon={CheckCheck} title="没有要你拍的" />
@@ -289,7 +335,7 @@ export function RemoteAskBlock({ decisions, machine }: { decisions: HomeDecision
           ))}
         </List>
       )}
-    </Section>
+    </HomeFoldSection>
   );
 }
 
@@ -307,11 +353,17 @@ export function AlarmBlock() {
   const q = useNotifications('open');
   const items = q.data ? askItems(q.data.items).filter((i) => i.kind === 'watchdog') : [];
   const list = q.data !== undefined && items.length > 0;
+  // 摘要要写「几件还没人接」「几件谁在修没查成」：判法和行里那一行用同一个 watchdogRepair
+  const states = items.map(({ n }) => watchdogRepair(n, now, q.data?.handlingProblem).state);
+  const nobody = states.filter((s) => s === 'waiting').length;
+  const unread = states.filter((s) => s === 'unknown').length;
   return (
-    <Section
+    <HomeFoldSection
+      block="alarm"
       flush={list}
       data-home-block="alarm"
       title={<BlockTitle name="卡住报警" count={q.data ? items.length : undefined} />}
+      summary={alarmSummary(q.data ? items.length : undefined, Boolean(q.error), nobody, unread)}
       actions={
         <Button variant="text" size="sm" href="/notifications">
           去处理
@@ -368,7 +420,7 @@ export function AlarmBlock() {
           })}
         </List>
       )}
-    </Section>
+    </HomeFoldSection>
   );
 }
 
@@ -476,10 +528,12 @@ function RunSection({
 }) {
   const has = rows.length > 0;
   return (
-    <Section
+    <HomeFoldSection
+      block="run"
       flush={has}
       data-home-block="run"
       title={<BlockTitle name="在跑的任务" count={count} />}
+      summary={runSummary(rows, count)}
       actions={
         all ? (
           <Button variant="text" size="sm" href="/tasks">
@@ -509,7 +563,7 @@ function RunSection({
           {extra}
         </>
       )}
-    </Section>
+    </HomeFoldSection>
   );
 }
 
@@ -639,11 +693,14 @@ export function ShippedBlock({ done }: { done: HomeDone[] }) {
   const now = useNow();
   const q = useFranceReleasedCommits();
   const rows = q.data?.state === 'ok' ? shippedRows(q.data.commits, done) : [];
+  const failed = Boolean(q.error) || q.data?.state === 'unreadable';
   return (
-    <Section
+    <HomeFoldSection
+      block="shipped"
       flush={rows.length > 0}
       data-home-block="shipped"
       title={<BlockTitle name="最近上线" />}
+      summary={shippedSummary(rows, failed, now)}
       actions={
         <Button variant="text" size="sm" href="/changelog">
           更新日志
@@ -665,24 +722,36 @@ export function ShippedBlock({ done }: { done: HomeDone[] }) {
           ))}
         </List>
       )}
-    </Section>
+    </HomeFoldSection>
   );
 }
 
 /** 看远程环境：上线记录是法国这台的发布历史，不顶着远程环境的名字列。 */
 export function RemoteShippedBlock() {
   return (
-    <Section flush data-home-block="shipped" title={<BlockTitle name="最近上线" />}>
+    <HomeFoldSection
+      block="shipped"
+      flush
+      data-home-block="shipped"
+      title={<BlockTitle name="最近上线" />}
+      summary="上线记录只在本台看"
+    >
       <EmptyState size="inline" icon={Rocket} title="上线记录只在本台看" hint="切回本台再看。" />
-    </Section>
+    </HomeFoldSection>
   );
 }
 
 /** 看远程环境：看门狗的卡是本台通知里的，不顶着远程环境的名字列。 */
 export function RemoteAlarmBlock() {
   return (
-    <Section flush data-home-block="alarm" title={<BlockTitle name="卡住报警" />}>
+    <HomeFoldSection
+      block="alarm"
+      flush
+      data-home-block="alarm"
+      title={<BlockTitle name="卡住报警" />}
+      summary="卡住报警只在本台看"
+    >
       <EmptyState size="inline" icon={ShieldCheck} title="卡住报警只在本台看" hint="切回本台再看。" />
-    </Section>
+    </HomeFoldSection>
   );
 }
