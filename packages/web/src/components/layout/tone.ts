@@ -59,40 +59,41 @@ export const inkClass: Record<LayoutTone, string> = {
   human: 'text-ink-human',
   stall: 'text-ink-stall',
   fail: 'text-ink-fail',
-  done: 'text-ink-done',
+  // 完成是常态，不上色（决定 0121 第 2 条）：灰墨，和「在等、叫停」同档。
+  done: 'text-ink-3',
   stop: 'text-ink-stop',
   doubt: 'text-ink-doubt',
 };
-/** 状态实色：点、竖线、图标。 */
+/** 状态实色：点、竖线、图标。完成态画灰（`ink-3`），绿只留给强调态（决定 0121 第 2 条）。 */
 export const solidClass: Record<LayoutTone, string> = {
   run: 'bg-st-run',
   wait: 'bg-st-wait',
   human: 'bg-st-human',
   stall: 'bg-st-stall',
   fail: 'bg-st-fail',
-  done: 'bg-st-done',
+  done: 'bg-ink-3',
   stop: 'bg-st-stop',
   doubt: 'bg-st-doubt',
 };
-/** 状态淡底（12%）。 */
+/** 状态淡底（12%）。完成态用中性底 `fill-2`，不铺绿。 */
 export const softClass: Record<LayoutTone, string> = {
   run: 'bg-st-run-soft',
   wait: 'bg-st-wait-soft',
   human: 'bg-st-human-soft',
   stall: 'bg-st-stall-soft',
   fail: 'bg-st-fail-soft',
-  done: 'bg-st-done-soft',
+  done: 'bg-fill-2',
   stop: 'bg-st-stop-soft',
   doubt: 'bg-st-doubt-soft',
 };
-/** 状态描边（40%）。 */
+/** 状态描边（40%）。完成态用中性边 `line-2`，不画绿边。 */
 export const lineClass: Record<LayoutTone, string> = {
   run: 'border-st-run-line',
   wait: 'border-st-wait-line',
   human: 'border-st-human-line',
   stall: 'border-st-stall-line',
   fail: 'border-st-fail-line',
-  done: 'border-st-done-line',
+  done: 'border-line-2',
   stop: 'border-st-stop-line',
   doubt: 'border-st-doubt-line',
 };

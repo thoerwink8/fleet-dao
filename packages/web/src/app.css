@@ -27,7 +27,7 @@
  * ---------- 八个状态 tone → 新色（按 understand/status-dict.json 的 level 对） ----------
  *   tone   含义         level        实色 st-*     淡底 st-*-soft   描边 st-*-line   字 ink-*
  *   run    在跑         processing   brand         brand-1          brand            brand-ink
- *   done   完成         success      success       success-1        success          success-ink
+ *   done   完成         success      ink-3（灰）   fill-2           line-2           ink-3（灰；决定 0121 第 2 条，绿只给强调态）
  *   stall  停滞         warning      warn          warn-1           warn             warn-ink
  *   doubt  疑似换模型   warning      warn          warn-1           warn             warn-ink
  *   fail   失败         error        fail          fail-1           fail             fail-ink

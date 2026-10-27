@@ -14,7 +14,7 @@
 
 - 单测：`npx vitest run packages/web/src/<文件>`（测试和源码放一起，界面行为的回归在 `packages/web/src/test/`）。
 - 慢测试的阶段记录：测试文件里 `installStageTrace()`（`packages/web/src/test/stage-trace.ts`）只加观测、不改超时和断言；超时前会往 stderr 打渲染、`findBy`/`waitFor` 等待和事件循环晚到各占多少。已装：`notifications-1950.test.tsx`（#3386，根因未知，本机没复现）、`release-recover-2027.test.tsx`。读数只能区分卡点，不是根因结论。
-- 界面检查：`packages/web/src/test/lint-design.test.ts` 跑 `packages/web/scripts/lint-design.ts`（CI 必过：R0–R20 全部严格，一条违规都不许有；R13–R20 是「页面只拼组件」，原来的迁移期基线已删，见 design 第五节）；本机在 `packages/web` 下 `node scripts/lint-design.ts --list` 看每一处违规。
+- 界面检查：`packages/web/src/test/lint-design.test.ts` 跑 `packages/web/scripts/lint-design.ts`（CI 必过：R0–R21 全部严格，一条违规都不许有；R13–R21 是「页面只拼组件」，原来的迁移期基线已删，见 design 第五节；R21 守「正常态不上绿」，决定 0121 第 2 条）；本机在 `packages/web` 下 `node scripts/lint-design.ts --list` 看每一处违规。
 - e2e（真库 + 真后端 + 真前端 + 真浏览器）：`packages/web/e2e/`，先 `pnpm pg:local start`，再 `E2E_PG_ADMIN_URL=... pnpm --filter @fleet-dao/web e2e`；没设这个变量直接失败。全套跑法见 `packages/web/e2e/README.md`。CI 一律全套：每个 PR 和主线推送都跑 e2e 全套（两种屏宽，决定 0101）。
 
 ## 常见坑

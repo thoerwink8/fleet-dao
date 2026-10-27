@@ -33,14 +33,8 @@ export const PROBE_KIND_WORD: Record<ProbeKind, { label: string; tone: Tone | 'd
   not_probed: { label: '没探', tone: 'stall' },
 };
 
-/** 格子的底色。没探用停滞黄，不通用失败红，疑似换模型用橙，三色分开。 */
-export const PROBE_KIND_BG: Record<ProbeKind, string> = {
-  passed: 'bg-st-done',
-  failed: 'bg-st-fail',
-  doubt: 'bg-st-doubt',
-  quota: 'bg-st-wait',
-  not_probed: 'bg-st-stall',
-};
+// 原来的 PROBE_KIND_BG（格子底色映射）一处也没在用，已删（决定 0121 第 2 条那条改动顺手减掉的死代码）。
+// 探测格子的颜色统一走 StatusBadge / LevelDot，按 PROBE_KIND_WORD 的 tone 取色。
 
 /** 额度耗尽的重置时间：上游明确给了才写时刻，没给就写没给（不从「约 20 分钟」之类推算）。 */
 export function quotaResetText(resetsAt: string | undefined): string {

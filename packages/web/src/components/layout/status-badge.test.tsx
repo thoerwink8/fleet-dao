@@ -44,6 +44,26 @@ describe('StatusBadge（字典键）', () => {
     expect(chip.querySelector('[data-level="error"]')).not.toBeNull();
   });
 
+  test('正常态画灰点，绿点只给强调的那几条（决定 0121 第 2 条）', () => {
+    const dotOf = (status: string) => {
+      const { container } = render(<StatusBadge status={status as never} />);
+      const dot = container.querySelector('[aria-hidden][data-level]') as HTMLElement;
+      cleanup();
+      return dot;
+    };
+    // 「已完成」「开着」「在线」这类正常态：灰点
+    for (const s of ['task:done', 'pr:open', 'machine:node:fresh']) {
+      expect(dotOf(s).className, s).toContain('bg-ink-3');
+      expect(dotOf(s).className, s).not.toContain('bg-success');
+      expect(dotOf(s).hasAttribute('data-emphasis'), s).toBe(false);
+    }
+    // 强调态：绿点
+    for (const s of ['task:round:merged', 'notification:repair:verified']) {
+      expect(dotOf(s).className, s).toContain('bg-success');
+      expect(dotOf(s).hasAttribute('data-emphasis'), s).toBe(true);
+    }
+  });
+
   test('unknown 画灰色「未知」，title 写在标签自己身上', () => {
     const { container } = render(<StatusBadge status="unknown" title="原值 brand_new" />);
     const chip = container.firstElementChild as HTMLElement;
