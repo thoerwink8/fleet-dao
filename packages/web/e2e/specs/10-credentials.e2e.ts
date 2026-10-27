@@ -1,9 +1,19 @@
 // 第十步：设置页「账密登录」一节（缺陷 D1，#926）。创始人在设置页看自己的账密现状、改密码：当前密码输错有明确提示（不被踢到登录页），
 // 改成功后这个浏览器不掉线、旧密码作废、新密码能登、操作记录里有 credentials.change。放在退出（09）之后：09 让所有会话作废，这里重新登。
 // 改密码的用例动的是同一份库，只在 1920 那一遍跑，而且用例末尾把密码改回备库给的那个（别的用例、重跑都靠它）。
+import type { Page } from '@playwright/test';
 import { expect, onlyDesktop, test } from '../support/fixtures.ts';
 
 const NEW_PASSWORD = 'e2e-brand-new-passphrase-1';
+
+/** 「账密登录」这一节默认收起（#3707 批次 3）：先点开再读里面的现状、表单。已经开着就不动。 */
+async function openAccount(page: Page) {
+  const block = page.locator('[data-fold-block="account"]');
+  if ((await block.getAttribute('data-open')) === 'false') {
+    await block.locator('[data-section-toggle]').click();
+    await expect(block).toHaveAttribute('data-open', 'true');
+  }
+}
 
 test.describe('设置页：账密登录', () => {
   test.beforeEach(async ({ login }) => login());
@@ -15,6 +25,7 @@ test.describe('设置页：账密登录', () => {
   }) => {
     await page.goto('/settings');
     await expect(page.getByRole('heading', { name: '账密登录' })).toBeVisible();
+    await openAccount(page);
     await expect(page.getByText(/已设账密：用户名/)).toContainText(stack.facts.username);
     // 设过账密时平时只写现状，点「改账密」才展开表单
     await expect(page.getByRole('form', { name: '改账密' })).toHaveCount(0);
@@ -42,6 +53,7 @@ test.describe('设置页：账密登录', () => {
     // 后端回 401（bad_current_password）是预期里的
     for (const s of ['HTTP 401', 'status of 401']) problems.allow(s);
     await page.goto('/settings');
+    await openAccount(page);
     await page.getByRole('button', { name: '改账密' }).click();
     const form = page.getByRole('form', { name: '改账密' });
     await form.getByLabel('当前密码', { exact: true }).fill('definitely-not-it-1');
@@ -80,6 +92,7 @@ test.describe('设置页：账密登录', () => {
       // 在路上的读取一律 401——页面会用新 Cookie 再读一次（useUpdateCredentials），但这里会把那一下当成失败请求。
       // 真人不会在页面打开 0.4 秒内点保存。
       await page.waitForLoadState('networkidle');
+      await openAccount(page);
       await page.getByRole('button', { name: '改账密' }).click();
       const form = page.getByRole('form', { name: '改账密' });
       await form.getByLabel('当前密码', { exact: true }).fill(stack.facts.password);

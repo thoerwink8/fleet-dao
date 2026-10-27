@@ -12,7 +12,7 @@ import type { StatusKey } from '../theme/status-dict';
 import { Entry, EntryGrid } from './layout/entry';
 import { LoadError, LoadingRows } from './layout/load-state';
 import { Notice } from './layout/notice';
-import { Section } from './layout/section';
+import { FoldSection } from './layout/section-fold';
 import { Stack } from './layout/stack';
 import { StatusBadge } from './layout/status-badge';
 import { Table, type TableColumn } from './layout/table';
@@ -215,6 +215,22 @@ function schedulesEntry(jobs: UseQueryResult<Jobs>): {
   return { meta };
 }
 
+/**
+ * 收起时的一行摘要（#3707 批次 3）：几个定时任务、有没有失败，另有几个零散页入口。
+ * 判法用 `schedulesEntry`（和正文那一格同一个来源），读不到照实写「没读到」。
+ */
+export function moreSummary(jobs: UseQueryResult<Jobs>): string {
+  const entries = `${ENTRIES.length + 1} 个入口`;
+  if (jobs.error) return `定时任务没读到 · ${entries}`;
+  if (!jobs.data) return `在读… · ${entries}`;
+  const list = jobs.data.jobs;
+  if (list.length === 0) return `没有定时任务 · ${entries}`;
+  const failed = list.filter((j) => j.lastRun?.outcome === 'failed').length;
+  return failed > 0
+    ? `定时任务 ${list.length} 项，失败 ${failed} · ${entries}`
+    : `定时任务 ${list.length} 项，都正常 · ${entries}`;
+}
+
 export function More({
   jobs,
   cli,
@@ -227,7 +243,7 @@ export function More({
   const [open, setOpen] = useState(false);
   const sched = schedulesEntry(jobs);
   return (
-    <Section title="更多">
+    <FoldSection block="more" title="更多" summary={moreSummary(jobs)}>
       <Stack>
         <EntryGrid>
           {ENTRIES.map(({ to, meta }) => {
@@ -256,6 +272,6 @@ export function More({
         </EntryGrid>
         {open ? <CliTools query={cli} now={now} /> : null}
       </Stack>
-    </Section>
+    </FoldSection>
   );
 }

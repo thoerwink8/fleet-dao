@@ -9,7 +9,11 @@ export interface AnchorItem {
   label: string;
 }
 
-export function Anchor({ items }: { items: readonly AnchorItem[] }) {
+/**
+ * `onPick`（#3707 批次 3）：点目录里的某一项时先叫一声，页面可以把收着的这一节展开再滚过去。
+ * 不传就只滚、只换高亮。
+ */
+export function Anchor({ items, onPick }: { items: readonly AnchorItem[]; onPick?: (id: string) => void }) {
   const [active, setActive] = useState(items[0]?.id);
 
   // 哪一节最靠近视口顶部就高亮哪一节；没有 IntersectionObserver（旧环境、测试）就只靠点击。
@@ -40,7 +44,10 @@ export function Anchor({ items }: { items: readonly AnchorItem[] }) {
             key={it.id}
             href={`#${it.id}`}
             {...(on ? { 'aria-current': 'location' as const } : {})}
-            onClick={() => setActive(it.id)}
+            onClick={() => {
+              setActive(it.id);
+              onPick?.(it.id);
+            }}
             className={cn(
               'block border-l-2 px-3 py-1 text-body transition-colors',
               on ? 'border-brand font-medium text-brand-ink' : 'border-line text-ink-2 hover:text-ink',

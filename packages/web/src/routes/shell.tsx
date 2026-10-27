@@ -6,6 +6,7 @@ import { ApiError, errorText, useLiveSync, useMe, useNotifications } from '../ap
 import { loginPath } from '../api/index';
 import { GatewayHealthLink } from '../components/gateway-health-link';
 import { Button } from '../components/layout/button';
+import { SectionFoldProvider } from '../components/layout/section-fold';
 import { isRemotePage, OnlyLocalNotice } from '../components/node-notice';
 import { RepoProvider } from '../components/repo-context';
 import { CommandMenu } from '../components/shell/command-menu';
@@ -16,6 +17,7 @@ import { useLocalState, useMediaQuery } from '../lib/hooks';
 import { useNodeSelection } from '../lib/node';
 import { useAppBadge, useBadgeCount } from '../lib/pwa/hooks';
 import { showSystemNotification } from '../lib/pwa/notify';
+import { useSectionOpen } from '../lib/section-open';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
 
@@ -103,6 +105,8 @@ function skipToContent(event: { preventDefault(): void }) {
 
 function Frame() {
   const location = useLocation();
+  // 各页区块的开合记在网址参数 ?open=（#3707 批次 3）：外壳包一次，工作台、设置页、法国页的各块都从这一处拿
+  const sectionOpen = useSectionOpen();
   // 左菜单收不收：人手动选过就按人选的（记在浏览器本地）；没选过按屏宽，≥1280 展开 220、768–1279 收成 48 宽的图标条（#3509，照 Arco Pro）
   const [picked, setPicked] = useLocalState<boolean | null>(`${brand.storagePrefix}sidebar-collapsed`, null);
   const menuRoom = useMediaQuery('(min-width: 1280px)');
@@ -133,7 +137,9 @@ function Frame() {
         onSearch={() => setCmdk(true)}
         contentId={CONTENT_ID}
       >
-        {onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
+        <SectionFoldProvider value={sectionOpen}>
+          {onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
+        </SectionFoldProvider>
       </AppFrame>
       {/* ⌘K 始终可用：远程环境、只在本台有的页上也能开 */}
       <CommandMenu open={cmdk} onOpenChange={setCmdk} />

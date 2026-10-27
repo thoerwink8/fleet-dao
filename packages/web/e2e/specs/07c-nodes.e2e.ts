@@ -157,8 +157,9 @@ test.describe('看板多机', () => {
     await expect(page.locator('[data-home-block="alarm"]')).toContainText('卡住报警只在本台看');
     expect(await page.locator('main a[href^="/tasks/"]').count()).toBe(0);
     expect(await page.locator('main a[href^="/notifications"]').count()).toBe(0);
-    // 要你拍的去答置灰（aria-disabled，悬停写要去那台上答）
-    for (const b of await page.locator('[data-home-block="ask"] button').all()) {
+    // 要你拍的去答置灰（aria-disabled，悬停写要去那台上答）。
+    // 区块头的收起开关（#3707 批次 3）不算：它是这一页的开关，不是要跨机器做的动作。
+    for (const b of await page.locator('[data-home-block="ask"] button:not([data-section-toggle])').all()) {
       await expect(b).toHaveAttribute('aria-disabled', 'true');
     }
   });

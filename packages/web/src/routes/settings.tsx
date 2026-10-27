@@ -13,6 +13,7 @@ import {
   errorText,
   useApi,
   useAudit,
+  useCredentials,
   useMe,
   usePools,
   useRepoCiPolicy,
@@ -20,7 +21,7 @@ import {
   useSettings,
   useUpdateSetting,
 } from '../api/client';
-import type { Me, Repo, Setting, SettingKey } from '../api/types';
+import type { Credentials, Me, Repo, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { useMasterView } from '../components/engine-master';
 import { EngineMasterRelation } from '../components/engine-master-relation';
@@ -37,6 +38,7 @@ import { Notice } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
 import { SaveButton } from '../components/layout/save-button';
 import { Section } from '../components/layout/section';
+import { FoldSection, useSectionFoldPage } from '../components/layout/section-fold';
 import { Stack } from '../components/layout/stack';
 import { Switch } from '../components/layout/switch';
 import { Table, type TableColumn } from '../components/layout/table';
@@ -550,6 +552,34 @@ const SECTIONS = [
   { id: 'about', label: '关于' },
 ] as const;
 
+// 默认收起的三节（#3707 批次 3）：仓库、运行设置、额度留量线三节常驻（改了要立刻看到），
+// 提醒、账密登录、关于收起，行尾一行摘要。开合记在 ?open=（lib/section-open.ts）。
+
+/** 提醒收起时的一行：免打扰时段开没开、开的是几点到几点。读不到写没读成，不写成「没开」。 */
+function notifySummary(s: Setting | undefined): string {
+  if (!s) return '设置在读…';
+  const parsed = SETTING_SCHEMAS['notify.quietHours'].safeParse(s.value);
+  if (!parsed.success) return '免打扰时段的值认不出';
+  if (!parsed.data) return '免打扰时段没开';
+  return `免打扰 ${parsed.data.start}–${parsed.data.end}`;
+}
+
+/** 账密登录收起时的一行：用户名是什么、多久前改过密码；还没设过照实写。 */
+function credentialsSummary(c: Credentials | undefined): string {
+  if (!c) return '账密状态在读…';
+  if (!c.hasPassword) return '还没设过账密，只能用飞书登录';
+  return `用户名 ${c.username ?? '（没有用户名）'}${
+    c.passwordChangedAt ? ` · 上次改密码 ${formatAgo(c.passwordChangedAt, Date.now())}` : ''
+  }`;
+}
+
+/** 关于收起时的一行：数据从哪来、减少动效开没开。 */
+function aboutSummary(source: 'http' | 'mock', signedIn: boolean, reduced: boolean): string {
+  return `${source === 'http' ? '真数据' : '假数据'} · 登录${signedIn ? '是创始人' : '没读到'} · 动效${
+    reduced ? '已减少' : '跟随系统'
+  }`;
+}
+
 /** 设置靠推送更新，没有自己的轮询。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
 const SETTINGS_STALE_AFTER_MS = 5 * TIME.MIN;
 
@@ -560,6 +590,10 @@ export default function Settings() {
   const now = useNow();
   const { repos, loading: reposLoading, error: reposError } = useRepo();
   const settings = useSettings();
+  // 收起时「账密登录」那一行要写用户名和多久前改过：和那一节里同一个读口（缓存共享，不另发请求）
+  const credentials = useCredentials();
+  // 页内目录点了收着的一节：先展开（写回 ?open=）再滚过去
+  const foldPage = useSectionFoldPage();
   const dispatch = useRepoDispatch();
   const ciPolicy = useRepoCiPolicy();
   const { view: masterView } = useMasterView();
@@ -626,7 +660,8 @@ export default function Settings() {
       }}
     >
       <Grid preset="side">
-        <Anchor items={SECTIONS} />
+        {/* 点目录跳到收着的一节：先展开再滚过去（#3707 批次 3）。没有上下文（单独渲染这一页）就只滚。 */}
+        <Anchor items={SECTIONS} {...(foldPage ? { onPick: (id: string) => foldPage.open(id) } : {})} />
         <Stack>
           {settings.data && settings.error ? (
             <LoadStale
@@ -752,7 +787,12 @@ export default function Settings() {
             </Section>
           )}
 
-          <Section id="notify" title="提醒">
+          <FoldSection
+            id="notify"
+            block="notify"
+            title="提醒"
+            summary={notifySummary(find('notify.quietHours'))}
+          >
             <Stack gap="lg">
               {/* 和运行设置同一条：出错只留报错横幅，读过之后的重拉也不画骨架。 */}
               {settings.data ? (
@@ -765,13 +805,23 @@ export default function Settings() {
               {/* 装成 APP、系统通知、角标（#2050）：都是浏览器现读的，不依赖后端设置 */}
               <PwaStatus />
             </Stack>
-          </Section>
+          </FoldSection>
 
-          <Section id="account" title="账密登录">
+          <FoldSection
+            id="account"
+            block="account"
+            title="账密登录"
+            summary={credentialsSummary(credentials.data)}
+          >
             <CredentialsSection />
-          </Section>
+          </FoldSection>
 
-          <Section id="about" title="关于">
+          <FoldSection
+            id="about"
+            block="about"
+            title="关于"
+            summary={aboutSummary(api.source, Boolean(me), theme.pref.motion === 'reduced')}
+          >
             <Stack gap="md">
               {api.source === 'http' ? null : (
                 <Notice tone="stall" role="status">
@@ -811,7 +861,7 @@ export default function Settings() {
                 操作记录里能看到每项设置是谁、什么时候改的：<TextLink to="/audit">去看操作记录</TextLink>。
               </Text>
             </Stack>
-          </Section>
+          </FoldSection>
         </Stack>
       </Grid>
     </Page>

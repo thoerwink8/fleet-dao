@@ -2,7 +2,7 @@
 // 额度在上面的指标里，引擎总开关在顶栏，不重复写；本机会话在「在跑的任务」里，不重复写。
 // 有问题持续显示、不伪装成失败：额度紧、有路由不通、引擎按配置关着是橙或灰；引擎开着却探不到在线的工人才是红；没查成不写成正常。
 import { useNow } from '../../lib/hooks';
-import type { StatusKey } from '../../theme/status-dict';
+import { type StatusKey, statusEntry } from '../../theme/status-dict';
 import { Descriptions, type DescriptionsItem } from '../layout/descriptions';
 import { Stack } from '../layout/stack';
 import { LevelDot, StatusBadge } from '../layout/status-badge';
@@ -53,6 +53,17 @@ export function systemItems(
       ...(health.engine.detail ? { hint: health.engine.detail } : {}),
     },
   ];
+}
+
+/**
+ * 收起时的一行摘要（#3707 批次 3）：流水线一句、中转和引擎各一个状态词，有没有异常一眼看得出。
+ * 状态词从字典取（R20：业务层不自己写状态中文），判法和正文那一行一致（`pipelineOf`、`ROUTES_STATUS`、`ENGINE_STATUS`）。
+ */
+export function systemSummary(health: HomeHealth, pipeline: HomePipeline | undefined, now: number): string {
+  const line = pipelineOf({ pipeline, now });
+  const routes = statusEntry(ROUTES_STATUS[health.routes.state]).label;
+  const engine = statusEntry(ENGINE_STATUS[health.engine.state]).label;
+  return `流水线 ${line.text} · 中转 ${routes} · 引擎进程 ${engine}`;
 }
 
 export function SystemStatus({

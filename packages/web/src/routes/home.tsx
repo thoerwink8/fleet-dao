@@ -8,6 +8,8 @@
 // 数据全用现成接口：/home、/notifications、/nodes/sessions、/france/released-commits（components/home/today.ts 文件头）。
 // 选了远程环境（?node=）读那台推来的快照：要你拍的只读、在跑的只列那台的引擎单；卡住报警、本机会话和上线记录是本台的，不顶着远程的名字列。
 // 页面只拼 components/layout 的件，不写样式类（design 第三节、lint-design R13–R20）。
+
+import type { ReactNode } from 'react';
 import { brand } from '#brand';
 import {
   isNotFound,
@@ -17,10 +19,11 @@ import {
   useLocalSessions,
   useNodeHome,
 } from '../api/client';
+import { HomeFoldSection, useHomeCollapse } from '../components/home/home-collapse';
 import { MissingEnv } from '../components/home/missing-env';
-import { Overview } from '../components/home/overview';
+import { Overview, overviewSummary } from '../components/home/overview';
 import { ProjectCards } from '../components/home/project-cards';
-import { SystemStatus } from '../components/home/system-status';
+import { SystemStatus, systemSummary } from '../components/home/system-status';
 import {
   AlarmBlock,
   AskBlock,
@@ -31,6 +34,7 @@ import {
   RunBlock,
   ShippedBlock,
 } from '../components/home/today-blocks';
+import type { HomeProject, HomeState } from '../components/home/types';
 import { Grid } from '../components/layout/grid';
 import { LoadError, LoadingRows, LoadStale } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
@@ -39,6 +43,7 @@ import { Stack } from '../components/layout/stack';
 import { SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
 import { TIME } from '../lib/format';
+import { useNow } from '../lib/hooks';
 import { useSelectedNodeId } from '../lib/node';
 import { useShownError } from '../lib/shown-error';
 
@@ -48,6 +53,46 @@ export function meta() {
 
 /** 本台主页靠推送更新、兜底轮询；远程快照每 30 秒重拉。超过 5 分钟还没再读成，刷新标「数据已过期」。 */
 const HOME_STALE_AFTER_MS = 5 * TIME.MIN;
+
+/**
+ * 默认收起的四块之一（决定 0121 第四条）：头和摘要照画，正文收起；开合记在 ?open=（lib/section-open.ts）。
+ * 用 HomeFoldSection（外壳已经包好 Provider）：它按工作台各块的默认开合，并自带 data-fold-block（e2e 按它数露着几块）。
+ */
+function FoldedSection({
+  block,
+  title,
+  summary,
+  children,
+}: {
+  block: 'overview' | 'system';
+  title: string;
+  summary: string;
+  children: ReactNode;
+}) {
+  return (
+    <HomeFoldSection block={block} title={title} summary={summary}>
+      {children}
+    </HomeFoldSection>
+  );
+}
+
+/** 收起时这一块还没读出数的摘要：在读就写「在读…」，读不到写「没读成」，不写成空的或 0。 */
+function pendingSummary(status: HomeState['status']): string {
+  if (status === 'error') return '没读成，展开看重试';
+  if (status === 'notWired') return '这一块还没接上';
+  return '在读…';
+}
+
+/** 「项目」这一块：收起的开关在 ProjectCards 里（它自己算摘要），这里只把开合传进去。 */
+function FoldedProjects({ projects }: { projects: HomeProject[] | undefined }) {
+  const fold = useHomeCollapse('projects');
+  return (
+    <ProjectCards
+      projects={projects}
+      {...(fold ? { collapsible: true, open: fold.open, onToggle: fold.onToggle } : {})}
+    />
+  );
+}
 
 export default function Home() {
   const nodeId = useSelectedNodeId();
@@ -66,6 +111,9 @@ export default function Home() {
         : remote.data;
   const machine = nodeName ?? nodeId ?? '';
   const what = nodeId === null ? '主页' : '这个环境';
+  // 七块的开合记在 ?open=（#3707 批次 3）：三块常驻默认展开，其余四块默认收起、行尾一行摘要。
+  // 上下文由外壳（routes/shell.tsx）包好，这一页不自己包。
+  const now = useNow();
   // 首屏一轮发完（经香港到法国每多一轮慢一趟）：本机会话、上线记录和主页、通知一起发，不等主页回来才由区块发
   useLocalSessions();
   useFranceReleasedCommits();
@@ -115,11 +163,15 @@ export default function Home() {
           ) : (
             <>
               {state.status === 'data' ? (
-                <Section title="数据概览">
+                <FoldedSection
+                  block="overview"
+                  title="数据概览"
+                  summary={overviewSummary(state.data.health.quota, state.data.spend)}
+                >
                   <Overview quota={state.data.health.quota} spend={state.data.spend} />
-                </Section>
+                </FoldedSection>
               ) : (
-                <Section title="数据概览">
+                <FoldedSection block="overview" title="数据概览" summary={pendingSummary(state.status)}>
                   {state.status === 'error' ? (
                     <LoadError what={what} error={state.error} onRetry={state.retry} />
                   ) : state.status === 'notWired' ? (
@@ -127,7 +179,7 @@ export default function Home() {
                   ) : (
                     <LoadingRows rows={2} />
                   )}
-                </Section>
+                </FoldedSection>
               )}
               <Grid preset="main">
                 <Stack>
@@ -155,15 +207,19 @@ export default function Home() {
                     <RemoteShippedBlock />
                   )}
                   {state.status === 'data' ? (
-                    <Section title="系统状态">
+                    <FoldedSection
+                      block="system"
+                      title="系统状态"
+                      summary={systemSummary(state.data.health, state.data.pipeline, now)}
+                    >
                       <SystemStatus health={state.data.health} pipeline={state.data.pipeline} />
-                    </Section>
+                    </FoldedSection>
                   ) : (
                     pending('系统状态')
                   )}
                 </Stack>
               </Grid>
-              {state.status === 'data' ? <ProjectCards projects={state.data.projects} /> : null}
+              {state.status === 'data' ? <FoldedProjects projects={state.data.projects} /> : null}
             </>
           )}
         </Stack>

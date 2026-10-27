@@ -167,11 +167,14 @@ describe('选了远程环境：主页', () => {
       const href = a.getAttribute('href') ?? '';
       expect(href.startsWith('/tasks/') || href.startsWith('/notifications'), href).toBe(false);
     }
-    // 要你拍的：去答按钮置灰、说明去那台上
-    await waitFor(() =>
-      expect(main.querySelectorAll('[data-home-block="ask"] button').length).toBeGreaterThan(0),
-    );
-    for (const b of main.querySelectorAll('[data-home-block="ask"] button')) {
+    // 要你拍的：去答按钮置灰、说明去那台上。
+    // 区块头的收起开关（#3707 批次 3）不算「去答按钮」：它是这一页的开关，不是要跨机器做的动作。
+    const askButtons = () =>
+      [...main.querySelectorAll('[data-home-block="ask"] button')].filter(
+        (b) => !b.hasAttribute('data-section-toggle'),
+      );
+    await waitFor(() => expect(askButtons().length).toBeGreaterThan(0));
+    for (const b of askButtons()) {
       expect(b.getAttribute('aria-disabled')).toBe('true');
     }
     // 看门狗的卡是本台通知里的：远程快照里写只在本台看
