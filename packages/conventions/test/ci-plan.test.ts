@@ -1731,9 +1731,12 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
       }
     }
     // 新加了 spec 却忘了接进映射表：改那一页的 PR 不会点到它（只有每夜才跑），这里拦住
-    // 例外：09-logout 测的是壳的账号菜单，壳（shell.tsx、topbar）不在表里——壳的改动本来就按「映射不到」走全套
-    // 14-num-width 测的是令牌（app.css 里 num 类和 body）：app.css 本来就映射不到、改了按全套走，不能为它单挂一页（挂了反而缩小范围）
-    const SHELL_ONLY = ['09-logout.e2e.ts', '14-num-width.e2e.ts'];
+    // 例外（横切的 spec，不挂某一页；挂了反而把「认不出就走全套」缩成一页）：
+    // - 09-logout 测的是壳的账号菜单，壳（shell.tsx、topbar）不在表里——壳的改动本来就按「映射不到」走全套
+    // - 14-num-width 测的是令牌（app.css 里 num 类和 body）：app.css 本来就映射不到、改了按全套走
+    // - 15-layout-budget 一次量 13 个页面的容器嵌套和一屏块数（#3708）：改哪一页都该跑，但改的是共享件
+    //   （`components/layout/`、`app.css`）时本来就按「映射不到」走全套，比单挂一页宽
+    const SHELL_ONLY = ['09-logout.e2e.ts', '14-num-width.e2e.ts', '15-layout-budget.e2e.ts'];
     for (const n of ALL_SPEC_FILES.filter((x) => !SHELL_ONLY.includes(x)))
       expect(seen.has(`${SPECS}${n}`), `${n} 没有任何页面指向它`).toBe(true);
     // 同一个文件不在两条里（两条说法打架）
