@@ -61,7 +61,8 @@ test.describe('设置页：账密登录', () => {
     await form.getByLabel('再输一遍新密码', { exact: true }).fill(NEW_PASSWORD);
     await form.getByRole('button', { name: '保存修改' }).click();
     await expect(form.getByText('当前密码不对')).toBeVisible();
-    await expect(page).toHaveURL(/\/settings$/);
+    // 还留在设置页（不踢到登录页）；开合记在 ?open=（#3707），所以只认路径、不管查询串
+    expect(new URL(page.url()).pathname).toBe('/settings');
     // 还登着：直接问后端
     const me = (await api.get('/api/me')) as { user: { displayName: string } };
     expect(me.user.displayName).toBe('创始人甲');
