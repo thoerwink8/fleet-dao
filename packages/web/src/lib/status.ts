@@ -33,27 +33,12 @@ export const toneText: Record<Tone, string> = {
   human: 'text-ink-human',
   stall: 'text-ink-stall',
   fail: 'text-ink-fail',
-  done: 'text-ink-done',
+  // 完成态的字色从绿墨改灰墨（决定 0121 第 2 条：正常态不上色，只有异常才亮）。
+  done: 'text-ink-3',
   stop: 'text-ink-stop',
 };
-export const toneBg: Record<Tone, string> = {
-  run: 'bg-st-run',
-  wait: 'bg-st-wait',
-  human: 'bg-st-human',
-  stall: 'bg-st-stall',
-  fail: 'bg-st-fail',
-  done: 'bg-st-done',
-  stop: 'bg-st-stop',
-};
-export const toneSoft: Record<Tone, string> = {
-  run: 'bg-st-run-soft',
-  wait: 'bg-st-wait-soft',
-  human: 'bg-st-human-soft',
-  stall: 'bg-st-stall-soft',
-  fail: 'bg-st-fail-soft',
-  done: 'bg-st-done-soft',
-  stop: 'bg-st-stop-soft',
-};
+// 底色映射（原 toneBg、toneSoft）没有页面在用，已删（决定 0121 第 2 条：正常态不上绿底，
+// 状态底色只剩橙、红两种，见 components/layout/status-badge.tsx 的 TAG）。
 export const toneIcon: Record<Tone, LucideIcon> = {
   run: CircleDot,
   wait: CircleDashed,

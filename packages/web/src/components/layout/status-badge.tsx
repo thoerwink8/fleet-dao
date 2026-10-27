@@ -4,17 +4,21 @@
 // 表格状态列里挤的时候传 variant="dot"，warning、error 也只画圆点加字。意思靠字传，颜色只是辅助。
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
-import { type Level, type StatusKey, statusEntry } from '../../theme/status-dict';
+import { emphasized, type Level, type StatusKey, statusEntry } from '../../theme/status-dict';
 import { badgeShape, inkClass, type LayoutTone, solidClass } from './tone';
 
-/** 小圆点（6px）：按等级上色；进行中带一圈浅蓝晕。只画点，字由旁边写。 */
+/** 小圆点（6px）：按等级上色；进行中带一圈浅蓝晕。只画点，字由旁边写。
+ *  success 也画灰点（决定 0121 第 2 条「正常状态只画灰点」）：绿只留给标了 emphasis 的那一瞬。 */
 const DOT: Record<Level, string> = {
   processing: 'bg-brand ring-3 ring-brand-1',
-  success: 'bg-success',
+  success: 'bg-ink-3',
   warning: 'bg-warn',
   error: 'bg-fail',
   default: 'bg-ink-3',
 };
+
+/** 强调态（刚成功的那一瞬）的点：绿。只有 statusEntry(…).emphasis 才用。 */
+const EMPHASIS_DOT = 'bg-success';
 
 /** 带底色的标签：只有橙、红两种（灰标签是 Tag）。 */
 const TAG: Partial<Record<Level, string>> = {
@@ -22,12 +26,16 @@ const TAG: Partial<Record<Level, string>> = {
   error: 'bg-fail-1 text-fail-ink',
 };
 
-export function LevelDot({ level }: { level: Level }) {
+export function LevelDot({ level, emphasis }: { level: Level; emphasis?: boolean }) {
   return (
     <span
       aria-hidden
       data-level={level}
-      className={cn('inline-block size-1.5 shrink-0 rounded-full', DOT[level])}
+      {...(emphasis ? { 'data-emphasis': '' } : {})}
+      className={cn(
+        'inline-block size-1.5 shrink-0 rounded-full',
+        emphasis && level === 'success' ? EMPHASIS_DOT : DOT[level],
+      )}
     />
   );
 }
@@ -100,8 +108,10 @@ export type StatusBadgeProps = DictProps | LegacyProps;
 
 export function StatusBadge(props: StatusBadgeProps): ReactNode {
   const legacy = props.status === undefined;
-  const level: Level = legacy ? TONE_LEVEL[props.tone] : statusEntry(props.status).level;
-  const label = legacy ? props.label : statusEntry(props.status).label;
+  const entry = legacy ? undefined : statusEntry(props.status);
+  const level: Level = legacy ? TONE_LEVEL[props.tone] : (entry as { level: Level }).level;
+  const label = legacy ? props.label : (entry as { label: string }).label;
+  const emphasis = entry !== undefined && emphasized(entry);
   const dotOnly = props.variant === 'dot';
   const tag = !dotOnly && TAG[level] !== undefined;
   return (
@@ -118,7 +128,7 @@ export function StatusBadge(props: StatusBadgeProps): ReactNode {
         legacy && props.className,
       )}
     >
-      {tag ? null : <LevelDot level={level} />}
+      {tag ? null : <LevelDot level={level} emphasis={emphasis} />}
       {label}
     </span>
   );

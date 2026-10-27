@@ -547,6 +547,32 @@ describe('R13–R20 业务层规则：造红的报、合规的放', () => {
   });
 });
 
+describe('R21 正常态上绿（决定 0121 第 2 条）', () => {
+  const r21Of = (src: string, file = PAGE) =>
+    scanSource(src, file)
+      .filter((h) => h.rule === 'R21')
+      .map((h) => h.cls);
+
+  test('造红的报：bg-success、bg-st-done、bg-st-done-soft 都算', () => {
+    expect(r21Of(`<span className="bg-success" />`)).toEqual(['bg-success']);
+    expect(r21Of(`<span className="bg-st-done" />`)).toEqual(['bg-st-done']);
+    expect(r21Of(`<span className="bg-st-done-soft" />`)).toEqual(['bg-st-done-soft']);
+  });
+
+  test('合规的放：灰点、橙红底、强调态那一处（status-badge.tsx 白名单）', () => {
+    expect(r21Of(`<span className="bg-ink-3" />`)).toEqual([]);
+    expect(r21Of(`<span className="bg-warn-1" />`)).toEqual([]);
+    expect(r21Of(`<span className="bg-fail-1" />`)).toEqual([]);
+    expect(r21Of(`<span className="bg-success" />`, 'src/components/layout/status-badge.tsx')).toEqual([]);
+  });
+
+  test('报错写清换成什么、规范第几节', () => {
+    const [hit] = scanSource(`<span className="bg-success" />`, PAGE).filter((h) => h.rule === 'R21');
+    expect(formatHit(hit as Hit)).toContain('bg-ink-3');
+    expect(formatHit(hit as Hit)).toContain('决定 0121');
+  });
+});
+
 describe('R13–R20 也是严格模式：没有基线，一条都不放', () => {
   const hitsOf = (src: string, file: string) =>
     scanSource(src, file).filter((h) => LAYER_RULES.includes(h.rule));

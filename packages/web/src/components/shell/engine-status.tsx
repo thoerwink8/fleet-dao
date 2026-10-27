@@ -10,8 +10,9 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 
 type Dot = 'success' | 'warning' | 'default';
 
+// 总开关开着是常态，不画绿（决定 0121 第 2 条「正常状态只画灰点」）：灰点；关着是警告，橙点。
 const DOT: Record<Dot, string> = {
-  success: 'bg-success',
+  success: 'bg-ink-3',
   warning: 'bg-warn',
   default: 'bg-ink-3',
 };

@@ -16,6 +16,21 @@ export const LEVELS: readonly Level[] = ['processing', 'success', 'warning', 'er
 export interface StatusEntry {
   readonly label: string;
   readonly level: Level;
+  /**
+   * 「刚刚成功、需要强调」的那一瞬（决定 0121 第 2 条）：只有这几条 success 画绿点，其余正常态一律灰点。
+   * 绿底只给这里，别处按「正常不上色」画 `ink-3`。数上限由 lint 的 R21 守着。
+   */
+  readonly emphasis?: true;
+}
+
+/** 这一条要不要画强调绿点：只有 success 且标了 emphasis 的才算。 */
+export function emphasized(entry: StatusEntry): boolean {
+  return entry.level === 'success' && entry.emphasis === true;
+}
+
+/** 圆点用哪个色令牌：正常态一律 `ink-3`（灰），只有强调态用 `success`（决定 0121 第 2 条）。 */
+export function dotTokenOf(entry: StatusEntry): 'success' | 'ink-3' {
+  return emphasized(entry) ? 'success' : 'ink-3';
 }
 
 export const STATUS_DICT = {
@@ -50,7 +65,7 @@ export const STATUS_DICT = {
     'pr:closed': { label: '已关闭', level: 'default' },
     'pr:unknown': { label: '没读到状态', level: 'warning' },
     // 一个回合怎么收场的（引擎的 RoundOutcome）；open 是还没收场，unrecorded 是回合表读到了却没记结局
-    'round:merged': { label: '做成了', level: 'success' },
+    'round:merged': { label: '做成了', level: 'success', emphasis: true },
     'round:verify_rejected': { label: '验收没过', level: 'error' },
     'round:ci_red': { label: 'CI 红了', level: 'error' },
     'round:leftover': { label: '交活有剩', level: 'warning' },
@@ -81,7 +96,7 @@ export const STATUS_DICT = {
     'repair:no-receipt': { label: '没收到回执', level: 'warning' },
     'repair:executing': { label: '执行中', level: 'processing' },
     'repair:verifying': { label: '核验中', level: 'processing' },
-    'repair:verified': { label: '已修复', level: 'success' },
+    'repair:verified': { label: '已修复', level: 'success', emphasis: true },
     'repair:failed': { label: '没修成', level: 'error' },
     'repair:unknown': { label: '结果未知', level: 'warning' },
     'repair:declined': { label: '没执行', level: 'default' },
@@ -91,7 +106,7 @@ export const STATUS_DICT = {
     'link:worker-active': { label: '已有任务在做', level: 'processing' },
     'link:linked': { label: '已关联，待处理', level: 'default' },
     // 「要你拍」拍完之后系统照着做的结果（lib/decision-result.ts 的四种）：没做成红，卡留着
-    'answer:done': { label: '照做了', level: 'success' },
+    'answer:done': { label: '照做了', level: 'success', emphasis: true },
     'answer:queued': { label: '交给引擎了', level: 'processing' },
     'answer:failed': { label: '没做成', level: 'error' },
     'answer:pending': { label: '记下了', level: 'default' },
@@ -102,7 +117,7 @@ export const STATUS_DICT = {
     'handling:unclaimed': { label: '没人在修', level: 'error' },
     'handling:pr_open': { label: 'PR 开着', level: 'processing' },
     'handling:merged': { label: '合进主线、等发布', level: 'success' },
-    'handling:deployed': { label: '法国已发布、等条件撤', level: 'success' },
+    'handling:deployed': { label: '法国已发布、等条件撤', level: 'success', emphasis: true },
   },
   job: {
     fresh: { label: '按期', level: 'success' },

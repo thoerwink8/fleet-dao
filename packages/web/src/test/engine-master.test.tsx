@@ -59,7 +59,9 @@ describe('顶栏的引擎状态（EngineStatus）', () => {
     renderApp(<EngineStatus />, { api: apiWith(ON) as unknown as FleetApi });
     const on = await screen.findByRole('button', { name: /总开关开着/ });
     expect(on.getAttribute('data-engine-master')).toBe('on');
-    expect(on.querySelector('.bg-success')).not.toBeNull();
+    // 开着是常态，画灰点（决定 0121 第 2 条）；绿只在强调态用。
+    expect(on.querySelector('.bg-ink-3')).not.toBeNull();
+    expect(on.querySelector('.bg-success')).toBeNull();
     cleanup();
     renderApp(<EngineStatus />, { api: apiWith(NEVER) as unknown as FleetApi });
     expect(await screen.findByRole('button', { name: /总开关关着/ })).toBeTruthy();

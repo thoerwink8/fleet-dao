@@ -1,8 +1,8 @@
 // 驾驶舱设计规范检查（#1847，规范 docs/design/驾驶舱界面.md 第八节）。并入了原来的 lint-arbitrary（#182、#1446）。
 // 扫 packages/web/src 下非测试的 .ts/.tsx：取出所有字符串字面量和模板串的静态段（className、cn()、cva、映射表都在里面），
 // 按空白切成类名，去掉变体前缀（md:、hover:、data-[…]:）后逐条按 R0–R10 判；.css 只判 R0。
-// R0–R20 全部严格模式：整个 src 一条违规都不许有，没有旧账清单、没有基线、没有例外名单
-// （例外只在本文件的 allowed() 里，写明理由）。R13–R20 是 #3509 驾驶舱改版的分层规则（页面只拼组件），迁移期曾是棘轮，
+// R0–R21 全部严格模式：整个 src 一条违规都不许有，没有旧账清单、没有基线、没有例外名单
+// （例外只在本文件的 allowed() 里，写明理由）。R13–R21 是 #3509 驾驶舱改版的分层规则（页面只拼组件），迁移期曾是棘轮，
 // 迁完（#3533）已改回严格。
 // 用法（在 packages/web 下）：
 //   node scripts/lint-design.ts                 检查，有一条违规就退出 1
@@ -38,7 +38,8 @@ export type RuleId =
   | 'R17'
   | 'R18'
   | 'R19'
-  | 'R20';
+  | 'R20'
+  | 'R21';
 
 /** 每条规则：名字和规范节号（报错里带上，照着去查）。 */
 export const RULES: Record<RuleId, { name: string; section: string }> = {
@@ -63,6 +64,7 @@ export const RULES: Record<RuleId, { name: string; section: string }> = {
   R18: { name: '容器套容器', section: '5' },
   R19: { name: '读失败显示成默认值', section: '5' },
   R20: { name: '状态不走字典、主按钮乱放', section: '5' },
+  R21: { name: '正常态上绿', section: '1.4、5' },
 };
 export const RULE_IDS = Object.keys(RULES) as RuleId[];
 /** 分层规则（#3509「页面只拼组件」）：R13–R20，和 R0–R12 一样是严格模式，一条都不许有。 */
@@ -109,6 +111,12 @@ export interface AllowRule {
 }
 
 export const ALLOWLIST: readonly AllowRule[] = [
+  {
+    rule: 'R21',
+    pattern: /^bg-success$/,
+    files: /^src\/components\/layout\/status-badge\.tsx$/,
+    reason: '强调态（刚成功、需要强调的那一瞬）的绿点：决定 0121 第 2 条只留这一处，别的正常态一律灰点。',
+  },
   {
     rule: 'R0',
     pattern: /var\(--/,
@@ -406,7 +414,14 @@ function componentTokenFile(file: string): boolean {
   return file.startsWith('src/components/layout/') || file.startsWith('src/components/ui/');
 }
 
+/** 正常态会用的绿底/绿点类名（决定 0121 第 2 条：正常只画灰点，绿只在强调态那一瞬）。 */
+const GREEN_NORMAL = /^bg-(?:success|st-done)(?:-soft)?$/;
+
 export function judgeUtility(util: string, file: string): [RuleId, string] | undefined {
+  // R21 正常态上绿：绿底/绿点只许在强调态那一处（白名单写理由）
+  if (GREEN_NORMAL.test(util) && !allowed('R21', util, file)) {
+    return ['R21', '正常态画灰点（bg-ink-3）；绿只给「刚刚成功、需要强调」的一瞬，见决定 0121 第 2 条'];
+  }
   // R10 组件令牌：h-control、p-section 这类类名，和写进任意值里的 var(--spacing-control)
   if ((COMPONENT_TOKEN_UTIL.test(util) || COMPONENT_TOKEN_VAR.test(util)) && !componentTokenFile(file)) {
     return ['R10', '用版式组件（Section、List、Toolbar……）或基础件（Button、Input……），页面不自己写组件令牌'];
@@ -1454,7 +1469,7 @@ export function countHits(hits: readonly Hit[]): Counts {
 }
 
 // ---------- 检查 ----------
-// R0–R20 全部严格：一条违规都不许有，没有基线、没有放行清单（迁移期的棘轮已在 #3533 收尾时删掉）。
+// R0–R21 全部严格：一条违规都不许有，没有基线、没有放行清单（迁移期的棘轮已在 #3533 收尾时删掉）。
 
 /** 检查：返回出错信息（空数组＝通过）。 */
 export function check(hits: readonly Hit[] = scan()): string[] {
@@ -1493,7 +1508,7 @@ function main() {
     console.error(`\n设计规范检查没过（${errors.length} 条）。规范：${DOC}。`);
     process.exit(1);
   }
-  console.log('设计规范检查通过（R0–R20 严格没有违规）。');
+  console.log('设计规范检查通过（R0–R21 严格没有违规）。');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
