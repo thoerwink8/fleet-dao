@@ -73,11 +73,19 @@ const SHAPE_FILES: readonly [string, ArchiveShape][] = [
   ['manifest.json', 'manifest'],
 ];
 
-/** 读一个归档目录的事实：结构、HEAD、字节数、写盘时刻。读不成的结构记 unknown。 */
-export async function readArchiveFacts(dir: string): Promise<ArchiveFacts> {
+/**
+ * 读一个归档目录的事实：结构、HEAD、字节数、写盘时刻。读不成的结构记 unknown。
+ *
+ * `bytes`/`at` 给调用方时用给的值，不再自己数一遍：`listEntries` 已经把每条的量算过了，
+ * 这里再数一遍等于把 125 万个文件 stat 两遍（线上 625 条归档跑了 624 秒，大头在这，#3699）。
+ */
+export async function readArchiveFacts(
+  dir: string,
+  known?: { bytes: number; at: number },
+): Promise<ArchiveFacts> {
   const names = await readdir(dir).catch(() => undefined);
-  const bytes = await dirBytes(dir);
-  const at = await dirMtime(dir);
+  const bytes = known?.bytes ?? (await dirBytes(dir));
+  const at = known?.at ?? (await dirMtime(dir));
   if (!names) return { dir, bytes, at, shape: 'unknown', head: '' };
   for (const [file, shape] of SHAPE_FILES) {
     if (!names.includes(file)) continue;
@@ -214,8 +222,8 @@ export async function recycleArchives(
   const candidates: ArchiveEntry[] = [];
   for (const entry of entries) {
     try {
-      const facts = await readArchiveFacts(entry.dir);
-      const verdict = await judgeArchive({ ...facts, bytes: entry.bytes, at: entry.at }, deps);
+      const facts = await readArchiveFacts(entry.dir, { bytes: entry.bytes, at: entry.at });
+      const verdict = await judgeArchive(facts, deps);
       if (verdict.recycle) candidates.push(entry);
     } catch (error) {
       failures.push(`${entry.dir}: ${error instanceof Error ? error.message : String(error)}`);
