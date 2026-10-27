@@ -34,18 +34,19 @@ function receipt(head: string, kind: 'receipt' | 'state' | 'manifest' = 'receipt
   return { [`${kind}.json`]: JSON.stringify({ head, identity: `${head}\n` }) };
 }
 
-/** state.json 带文件清单；可以带 stash / merge（这两样 bundle 带不走）。 */
+/** state.json 带文件清单；可以带 stash / merge（这两样 bundle 带不走）。merge 默认给 MERGE_HEAD（真没做完的合并）。 */
 function stateWith(
   head: string,
   files: Array<{ path: string; sha256: string }>,
-  extra: { stash?: number; merge?: number } = {},
+  extra: { stash?: number; merge?: number; mergeNames?: string[] } = {},
 ): Record<string, string> {
+  const mergeNames = extra.mergeNames ?? Array.from({ length: extra.merge ?? 0 }, () => 'MERGE_HEAD');
   return {
     'state.json': JSON.stringify({
       head,
       files: files.map((f) => ({ kind: 'file', ...f })),
       stash: Array.from({ length: extra.stash ?? 0 }, () => ({ ref: 'stash', sha256: 'x' })),
-      merge: Array.from({ length: extra.merge ?? 0 }, () => ({ sha256: 'y' })),
+      merge: mergeNames.map((name) => ({ name, sha256: 'y' })),
     }),
     'recovery.bundle': 'bundle',
   };
@@ -133,6 +134,38 @@ describe('归档回收判据', () => {
       stateWith('deadbeef', [{ path: 'a.ts', sha256: 'aaa' }], { stash: 2 }),
     );
     expect((await judgeArchive(await readArchiveFacts(withStash), deps())).recycle).toBe(false);
+  });
+
+  it('state.json 里只有 ORIG_HEAD 不算没做完的操作，照常回收（#3699）', async () => {
+    const dir = makeArchive(
+      'worktree-orighead',
+      stateWith('deadbeef', [{ path: 'a.ts', sha256: 'aaa' }], { mergeNames: ['ORIG_HEAD'] }),
+    );
+    expect(await judgeArchive(await readArchiveFacts(dir), deps())).toEqual({
+      recycle: true,
+      reason: 'HEAD 已在远端，工作区等于 HEAD',
+    });
+  });
+
+  it('ORIG_HEAD 之外还有真没做完的合并，仍然留着（#3699）', async () => {
+    const dir = makeArchive(
+      'worktree-orighead-plus',
+      stateWith('deadbeef', [{ path: 'a.ts', sha256: 'aaa' }], {
+        mergeNames: ['ORIG_HEAD', 'MERGE_HEAD'],
+      }),
+    );
+    expect(await judgeArchive(await readArchiveFacts(dir), deps())).toEqual({
+      recycle: false,
+      reason: '带 stash 或没做完的 git 操作（1 项）',
+    });
+  });
+
+  it('merge 里认不出名字的按未完成操作算，留着（#3699）', async () => {
+    const dir = makeArchive(
+      'worktree-unknown-merge',
+      stateWith('deadbeef', [{ path: 'a.ts', sha256: 'aaa' }], { mergeNames: ['SOMETHING_ELSE'] }),
+    );
+    expect((await judgeArchive(await readArchiveFacts(dir), deps())).recycle).toBe(false);
   });
 
   it('HEAD 树取不出就留着', async () => {
