@@ -203,9 +203,12 @@ test.describe('看板多机', () => {
     expect(g.sameRow, `${g.vw} 标题和操作区不在同一行`).toBe(true);
     expect(g.actionsPastMain, `${g.vw} 操作区超出正文`).toBe(false);
     expect(g.hitRefresh, `${g.vw} 刷新点不着`).toBe(true);
-    // 健康条不在页头了：系统状态（流水线、中转、引擎进程）写在页里「系统状态」那一块，带着那台快照里的说明
+    // 健康条不在页头了：系统状态（流水线、中转、引擎进程）写在页里「系统状态」那一块，带着那台快照里的说明。
+    // 这一块默认收起（#3707 批次 3），引擎进程写在行尾摘要里；摘要宽窄屏各画一份、各藏一份，按当前屏宽露着的那份查。
     await expect(page.getByText('系统状态')).toBeVisible();
-    await expect(page.getByText('引擎进程')).toBeVisible();
+    await expect(page.locator('[data-fold-block="system"] [data-section-summary]:visible')).toContainText(
+      '引擎进程',
+    );
     await trigger.click();
     await expect(page.locator('[data-node-item="wsl"]')).toHaveAttribute('data-node-state', 'stale');
     await shot(page, '07c-失联');
