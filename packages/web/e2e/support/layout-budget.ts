@@ -16,8 +16,8 @@
 // 一屏区块数怎么数：只算最外层（有容器祖先的不算，免得一个卡片套一个卡片数成两块）、
 // 顶边落在首屏里（`top < innerHeight`）、收起的块不算（`data-open="false"`，它们只露一行标题）。
 
-/** 量出来的一个容器：它的层数、以及够不够得着首屏。 */
-export interface ContainerReading {
+/** 量出来的一个容器：它的层数、以及够不够得着首屏。只在本文件里用，不外露。 */
+interface ContainerReading {
   /** 元素的简短描述（标签 + data-fold-block/data-home-block + 前两个类名），出问题时看得出是哪个。 */
   where: string;
   /** 往上数有几个容器祖先 + 1。 */
