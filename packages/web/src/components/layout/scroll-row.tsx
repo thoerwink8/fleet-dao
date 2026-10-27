@@ -5,7 +5,7 @@ export function ScrollRow({ children }: { children: ReactNode }) {
   return (
     <div
       data-scroll-row
-      style={{ '--fade-end': '1.5rem' } as CSSProperties}
+      style={{ '--fade-end': '24px' } as CSSProperties}
       className="scrollbar-thin flex items-center gap-2 overflow-x-auto whitespace-nowrap max-md:fade-edges-x"
     >
       {children}

@@ -608,7 +608,7 @@ function ModelPriority({
   const why =
     edit.disabledWhy ?? (filtering ? '正在筛选，只显示了一部分：清掉搜索和「只看已开启」再调先后' : null);
   // 不超过 50 个：按内容高度、随页面滚（不设内部滚动）；超过 50 个才开窗口（定高行、只画看得见的）
-  // 行高、窗口高是设计值；根字号不放大（1rem = 16px），设计值就是像素
+  // 行高、窗口高是设计值；尺寸一律写 px（#3697），设计值就是像素，不跟根字号缩
   const viewport = long
     ? mobile
       ? { height: LIST_HEIGHT, rowHeight: MOBILE_ROW_HEIGHT }

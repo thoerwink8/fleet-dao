@@ -82,7 +82,7 @@ export function revealOnMobile(id: string) {
   document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
-/** 现在的行高（像素）：根字号不放大（1rem = 16px，#3509 照 Arco），设计值就是像素。调用方已按 MOBILE_MQ 重画。 */
+/** 现在的行高（像素）：尺寸一律写 px（#3697），设计值就是像素，不跟根字号缩。调用方已按 MOBILE_MQ 重画。 */
 function rowHeightNow(mobile: boolean): number {
   return mobile ? MOBILE_ROW_HEIGHT : ROW_HEIGHT;
 }

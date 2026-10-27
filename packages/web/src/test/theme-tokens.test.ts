@@ -67,10 +67,10 @@ function* sourceFiles(dir: string): Generator<string> {
 
 const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
 
-/** 「--名字: 值;」读成像素（rem × 16）；不是 rem 就是 NaN。 */
-function remPx(name: string): number {
-  const v = css.match(new RegExp(`--${name}:\\s*([\\d.]+)rem;`))?.[1];
-  return v === undefined ? Number.NaN : Number.parseFloat(v) * 16;
+/** 「--名字: 值;」读成像素。尺寸一律写 px（#3697），不是 px 就是 NaN。 */
+function tokenPx(name: string): number {
+  const v = css.match(new RegExp(`--${name}:\\s*([\\d.]+)px;`))?.[1];
+  return v === undefined ? Number.NaN : Number.parseFloat(v);
 }
 
 describe('自定义尺寸 token 放对命名空间', () => {
@@ -108,9 +108,9 @@ describe('组件令牌只有一套（Arco，#3509）', () => {
       expect(tokens.get(name), name).toEqual(new Set(['spacing']));
     }
   });
-  test('控件高 32、行高 40、两行的行 48、卡片内边距 20、区块间距 16、区块内间距 12，都写 rem', () => {
+  test('控件高 32、行高 40、两行的行 48、卡片内边距 20、区块间距 16、区块内间距 12，都写 px', () => {
     expect(
-      ['control', 'row', 'row-tall', 'section', 'section-gap', 'stack'].map((n) => remPx(`spacing-${n}`)),
+      ['control', 'row', 'row-tall', 'section', 'section-gap', 'stack'].map((n) => tokenPx(`spacing-${n}`)),
     ).toEqual([32, 40, 48, 20, 16, 12]);
   });
   test('密度切换删了：没有 data-density，也没有紧凑那一组', () => {
@@ -122,7 +122,7 @@ describe('字号五档加等宽 13（Arco，#3509）', () => {
   /** 一档字号读成「字号/行高（字重）」，像素。 */
   function step(n: string): string {
     const w = css.match(new RegExp(`--text-${n}--font-weight:\\s*(\\d+);`))?.[1];
-    return `${remPx(`text-${n}`)}/${remPx(`text-${n}--line-height`)}${w ? ` ${w}` : ''}`;
+    return `${tokenPx(`text-${n}`)}/${tokenPx(`text-${n}--line-height`)}${w ? ` ${w}` : ''}`;
   }
   test('meta 12/20、body 14/22、heading 16/24 500、title 20/28 600、display 24/32 600、mono 13/20、canvas 11/14', () => {
     expect(['meta', 'body', 'heading', 'title', 'display', 'mono', 'canvas'].map(step)).toEqual([
@@ -141,23 +141,26 @@ describe('字号五档加等宽 13（Arco，#3509）', () => {
   });
 });
 
-describe('根字号不放大：照 Arco 原样，1rem = 16px（#3509）', () => {
+describe('尺寸一律写 px，不跟根字号缩（#3697，替代 #3509 的 rem 写法）', () => {
   test('没有 --root-scale，html 不改字号', () => {
     expect(css).not.toMatch(/--root-scale/);
     expect(css).not.toMatch(/html\s*\{[^}]*font-size/);
   });
-  test('顶栏 60 写 rem；左菜单固定 220px，不随根字号变', () => {
-    expect(remPx('spacing-topbar')).toBe(60);
+  test('顶栏 60、左菜单 220，都写 px', () => {
+    expect(tokenPx('spacing-topbar')).toBe(60);
     expect(css).toMatch(/--spacing-sidebar:\s*220px;/);
     for (const name of ['spacing-sidebar-collapsed', 'spacing-drawer', 'container-cockpit']) {
-      expect(css, name).toMatch(new RegExp(`--${name}:\\s*[\\d.]+rem;`));
+      expect(css, name).toMatch(new RegExp(`--${name}:\\s*[\\d.]+px;`));
     }
   });
   test('圆角 2 / 4 / 8', () => {
-    expect(['sm', 'md', 'lg'].map((n) => remPx(`radius-${n}`))).toEqual([2, 4, 8]);
+    expect(['sm', 'md', 'lg'].map((n) => tokenPx(`radius-${n}`))).toEqual([2, 4, 8]);
   });
-  test('【故意造出的失败】写成 px 的顶栏高读不成 rem', () => {
-    expect('--spacing-topbar: 52px;').not.toMatch(/--spacing-topbar:\s*[\d.]+rem;/);
+  test('app.css 里不再有写 rem 的值（注释里提到 rem 不算）', () => {
+    const values = css
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('*') && !line.trim().startsWith('/*'));
+    expect(values.filter((line) => /[\d.]+rem\b/.test(line))).toEqual([]);
   });
 });
 
