@@ -323,6 +323,51 @@ describe('每小时对账子步骤在途证据', () => {
     expect(run).toEqual({ runId: RUN, outcome: 'ok', scanned: 1, found: 0 });
   });
 
+  it('归档回收没接上就只记跳过，不算开始也不算跑完（#3699）', async () => {
+    const h = harness({});
+    const run = await runHourlyReconcileJob(h.deps);
+    assertStepEvidence(h.logs);
+    const rows = stepRows(h.logs).map(view);
+    expect(rows.filter((row) => row.step === 'archive-retention')).toEqual([
+      { runId: RUN, step: 'archive-retention', phase: 'skip' },
+    ]);
+    expect(run.outcome).toBe('ok');
+  });
+
+  it('归档回收接上了：记开始和耗时；回收里报的失败记进没查成，不记成回收过（#3699）', async () => {
+    const clock = fakeClock();
+    const h = harness({
+      now: clock.now,
+      recycleArchives: async () => {
+        clock.advance(14);
+        return { removed: [], kept: 0, bytesKept: 0, failures: ['worktree-a：HEAD 查不成'] };
+      },
+    });
+    const run = await runHourlyReconcileJob(h.deps);
+    assertStepEvidence(h.logs);
+    const rows = stepRows(h.logs).map(view);
+    expect(rows.filter((row) => row.step === 'archive-retention')).toEqual([
+      { runId: RUN, step: 'archive-retention', phase: 'start' },
+      { runId: RUN, step: 'archive-retention', phase: 'end', ms: 14 },
+    ]);
+    expect(run.why).toContain('worktree-a：HEAD 查不成');
+    expect(run.outcome).toBe('partial');
+  });
+
+  it('归档回收这一轮炸了：记失败、不记成回收过（#3699）', async () => {
+    const h = harness({
+      recycleArchives: async () => {
+        throw new Error('归档目录读不成');
+      },
+    });
+    const run = await runHourlyReconcileJob(h.deps);
+    assertStepEvidence(h.logs);
+    const rows = stepRows(h.logs).map(view);
+    expect(rows.filter((row) => row.step === 'archive-retention' && row.phase === 'failed')).toHaveLength(1);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('归档目录读不成');
+  });
+
   it('可选步骤返回没查成：记结束和耗时，这一轮仍是 partial，不记 ok', async () => {
     const clock = fakeClock();
     const h = harness({

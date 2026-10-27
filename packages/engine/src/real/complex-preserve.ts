@@ -13,6 +13,8 @@ import {
   readFile,
   readlink,
   realpath,
+  rename,
+  rm,
   unlink,
 } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
@@ -631,6 +633,43 @@ export async function archiveMode(path: string): Promise<number> {
     return (await handle.stat()).mode & 0o777;
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * 回收一个归档目录（整目录删）。只在归档根目录这一层用，路径不许跑到根外。
+ * 先核身份（是目录、不是符号链接、归属对得上），换名隔离，再删——和临时事务清理同一条路：
+ * 换名之后即使删到一半，也只剩一个 `<名字>-retiring`，不会再有东西往原名写。
+ * 返回 false 表示这个目录不该删（身份不对），调用方记「没查成」。
+ */
+export async function removeArchiveDir(path: string): Promise<boolean> {
+  const parts = archiveParts(path);
+  const name = parts[parts.length - 1] ?? '';
+  const parent = await openFromRoot(parts.slice(0, -1), constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    const full = `/proc/self/fd/${parent.fd}/${name}`;
+    let before: Awaited<ReturnType<typeof lstat>>;
+    try {
+      before = await lstat(full);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+      throw keep('ARCHIVE_FAILED', '回收前核身份读不成');
+    }
+    if (!before.isDirectory() || before.isSymbolicLink()) {
+      return false;
+    }
+    const retiring = `${name}-retiring-${randomUUID()}`;
+    const retiringPath = `/proc/self/fd/${parent.fd}/${retiring}`;
+    try {
+      await rename(full, retiringPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+      throw keep('ARCHIVE_FAILED', '回收换名失败');
+    }
+    await rm(retiringPath, { recursive: true, force: true });
+    return true;
+  } finally {
+    await parent.close();
   }
 }
 
