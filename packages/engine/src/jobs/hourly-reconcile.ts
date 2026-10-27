@@ -395,6 +395,14 @@ async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<Sched
     try {
       await runStep(deps, runId, 'archive-retention', async () => {
         const result = await recycleArchives();
+        // 清了什么、还剩多少都要报出来：只报失败的话，回收成功也看不见一行，
+        // 查「为什么归档没少」时只能靠目录自己数（#3699 线上就踩了这个）。
+        deps.log('info', '每小时对账：归档回收这一轮', {
+          removed: result.removed.length,
+          kept: result.kept,
+          bytesKept: result.bytesKept,
+          failed: result.failures.length,
+        });
         for (const failure of result.failures) trees.unchecked.push(`归档回收没成：${failure}`);
       });
     } catch (error) {

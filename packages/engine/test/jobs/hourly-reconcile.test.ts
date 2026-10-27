@@ -352,6 +352,27 @@ describe('每小时对账子步骤在途证据', () => {
     ]);
     expect(run.why).toContain('worktree-a：HEAD 查不成');
     expect(run.outcome).toBe('partial');
+    // 清了什么、还剩多少也要报：只报失败的话，回收成功在日志里看不见一行（#3699）
+    const summary = h.logs.find((row) => row.message === '每小时对账：归档回收这一轮');
+    expect(summary?.fields).toEqual({ removed: 0, kept: 0, bytesKept: 0, failed: 1 });
+  });
+
+  it('归档回收这一轮清了东西：日志里报清了几条、还剩多少字节（#3699）', async () => {
+    const h = harness({
+      recycleArchives: async () => ({
+        removed: [
+          { dir: 'worktree-a', bytes: 1, at: 0 },
+          { dir: 'worktree-b', bytes: 2, at: 0 },
+        ],
+        kept: 7,
+        bytesKept: 4096,
+        failures: [],
+      }),
+    });
+    const run = await runHourlyReconcileJob(h.deps);
+    const summary = h.logs.find((row) => row.message === '每小时对账：归档回收这一轮');
+    expect(summary?.fields).toEqual({ removed: 2, kept: 7, bytesKept: 4096, failed: 0 });
+    expect(run.outcome).toBe('ok');
   });
 
   it('归档回收这一轮炸了：记失败、不记成回收过（#3699）', async () => {
