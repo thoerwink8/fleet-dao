@@ -71,6 +71,7 @@ export const HOURLY_RECONCILE_STEPS = [
   'alerts-before-worktrees',
   'worktrees',
   'pending-cleanup',
+  'archive-retention',
   'save-inventory',
   'retire-workflow-alerts',
   'known-not-installed',
@@ -94,6 +95,7 @@ export type HourlyReconcileStep = (typeof HOURLY_RECONCILE_STEPS)[number];
 /** 没把依赖接上就整步跳过（单测外壳可以不给；真装配会给）。跳过只记一笔，不算开始，也不算跑完。 */
 export const HOURLY_RECONCILE_OPTIONAL_STEPS = [
   'pending-cleanup',
+  'archive-retention',
   'save-inventory',
   'pool-hold-push',
   'main-red-push',
@@ -123,6 +125,16 @@ export type HourlyReconcileJobDeps = WorktreeSweepDeps &
      */
     saveInventory?: (inventory: WorktreeInventory) => Promise<void>;
     pendingCleanup?: () => Promise<Record<string, unknown>[]>;
+    /**
+     * 回收工作树归档（#3699）：已推到远端、又没有未提交内容的，过保留期或超上限就删。
+     * 不给 = 这一轮不回收（单测外壳）；真装配总会给。删不成的由它自己记进 failures，不许记成回收过。
+     */
+    recycleArchives?: () => Promise<{
+      removed: unknown[];
+      kept: number;
+      bytesKept: number;
+      failures: string[];
+    }>;
     /**
      * 贴着「本机做」的开着的单（含标签时间线和评论）。三个都给才核；一个都不给就跳过（单测外壳）。
      * 只给了一部分记没查成，不当成「没有没人领的」。
@@ -375,6 +387,21 @@ async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<Sched
     }
   } else {
     await skipStep(deps, runId, 'pending-cleanup');
+  }
+  // 归档回收（#3699）：已推到远端、又没有未提交内容的归档，过保留期或超上限就回收。
+  // 不给口子 = 这一轮不回收（单测外壳）；真装配总会给。回收失败记 unchecked，不当成回收过。
+  const recycleArchives = deps.recycleArchives;
+  if (recycleArchives) {
+    try {
+      await runStep(deps, runId, 'archive-retention', async () => {
+        const result = await recycleArchives();
+        for (const failure of result.failures) trees.unchecked.push(`归档回收没成：${failure}`);
+      });
+    } catch (error) {
+      trees.unchecked.push(`归档回收这一轮没跑成：${errMessage(error)}`);
+    }
+  } else {
+    await skipStep(deps, runId, 'archive-retention');
   }
   const saveInventory = deps.saveInventory;
   if (saveInventory) {
