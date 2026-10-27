@@ -115,8 +115,7 @@ export const ALLOWLIST: readonly AllowRule[] = [
     rule: 'R21',
     pattern: /^bg-success$/,
     files: /^src\/components\/layout\/status-badge\.tsx$/,
-    reason:
-      '强调态（刚成功、需要强调的那一瞬）的绿点：决定 0121 第 2 条只留这一处，别的正常态一律灰点。',
+    reason: '强调态（刚成功、需要强调的那一瞬）的绿点：决定 0121 第 2 条只留这一处，别的正常态一律灰点。',
   },
   {
     rule: 'R0',
