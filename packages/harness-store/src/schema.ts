@@ -138,6 +138,27 @@ export const queueLimits = fleet2.table(
   (t) => [check('queue_limits_positive', sql`${t.maxInflight} > 0 and ${t.perMinute} > 0`)],
 );
 
+/**
+ * 会话令牌（#3775）：只存哈希，不存明文；一个令牌只绑一个会话、一个角色。
+ * revoked_at 非空即作废，开着的连接下一次核验时被关掉。
+ */
+export const sessionTokens = fleet2.table(
+  'session_tokens',
+  {
+    id: text('id').primaryKey(),
+    tokenHash: text('token_hash').notNull(),
+    sessionId: text('session_id').notNull(),
+    role: text('role').notNull(),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    revokedAt: timestamp('revoked_at', tz),
+  },
+  (t) => [
+    unique('session_tokens_hash_unique').on(t.tokenHash),
+    check('session_tokens_role_known', sql`${t.role} in ('commander', 'worker')`),
+    index('session_tokens_session_idx').on(t.sessionId),
+  ],
+);
+
 /** 第一个投影：每条流走到第几条、最后一条是什么类型。拿它证明「删了重建结果一致」。 */
 export const streamHeads = fleet2.table('stream_heads', {
   streamId: text('stream_id').primaryKey(),
