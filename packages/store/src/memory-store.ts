@@ -1033,6 +1033,22 @@ export function createMemoryStore(
         isSerial,
       );
     },
+    async listIssueEvents({ after, limit }) {
+      return data.audit
+        .filter((a) => a.target.startsWith('issue:') && Number(a.id) > after)
+        .sort((x, y) => Number(x.id) - Number(y.id))
+        .slice(0, limit)
+        .map((a) => ({
+          id: Number(a.id),
+          at: a.at,
+          actorKind: a.actor.kind,
+          actorId: a.actor.id,
+          action: a.action,
+          target: a.target,
+          after: a.after ?? null,
+          ok: a.ok,
+        }));
+    },
     async listSettings() {
       return [...data.settings].sort((a, b) => a.key.localeCompare(b.key));
     },

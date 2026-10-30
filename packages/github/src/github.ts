@@ -78,8 +78,10 @@ import {
   commentPull as commentOnPull,
   issueLabelNames,
   listClosedIssues,
+  listOpenIssues,
   type OpenIssueInput,
   type OpenIssueResult,
+  type OpenIssueRow,
   openIssue,
   readIssue,
   type UpdateIssueProgressInput,
@@ -220,6 +222,8 @@ export interface GitHub {
     since: Date;
     signal?: AbortSignal | undefined;
   }): Promise<ClosedIssueRow[]>;
+  /** 此刻开着的单（不含 PR），翻完页：开单服务（#3739）开之前查重用。读不到、翻不完抛错。 */
+  listOpenIssues(input: { repo: RepoRef; signal?: AbortSignal | undefined }): Promise<OpenIssueRow[]>;
   renewInteractionLimit(input: InteractionLimitInput, ctx?: ActivityContext): Promise<InteractionLimitResult>;
   /** 需求文档直接写进默认分支（「引擎」机器人身份，Contents API）。 */
   writeSpecDoc(input: WriteSpecDocInput, ctx?: ActivityContext): Promise<WriteSpecDocResult>;
@@ -453,6 +457,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
       ),
     appendIssueBody: (input, ctx) => appendIssueBody(deps, input, ctx),
     listClosedIssues: (input) => listClosedIssues(deps, input),
+    listOpenIssues: (input) => listOpenIssues(deps, input),
     renewInteractionLimit: (input, ctx) => renewInteractionLimit(deps, input, ctx),
     commitIdentity: (repo) => deps.bots.identity('agent', repo),
     claims: createClaimsGitHub(deps),

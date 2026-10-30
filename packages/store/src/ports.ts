@@ -11,6 +11,7 @@ import type {
   DecisionExecution,
   DecisionOption,
   FlowAssignment,
+  IntakeEvent,
   LocalSessionsReport,
   Model,
   NewFlowAssignment,
@@ -657,6 +658,11 @@ export interface OpsStore {
   appendAudit(entry: NewAuditEntry): Promise<string>;
   /** 按 (at, id) 倒序。 */
   listAudit(query: { target?: string | undefined } & PageRequest): Promise<Page<AuditRecord>>;
+  /**
+   * 开单账本（决定 0122）：操作记录里 target 以 `issue:` 开头、id 大于 after 的行，按 id 升序最多 limit 条。
+   * 库版走部分索引，读的行数只跟返回条数有关。读不到照抛。
+   */
+  listIssueEvents(query: { after: number; limit: number }): Promise<IntakeEvent[]>;
   listSettings(): Promise<SettingRecord[]>;
   /** expectedVersion 对不上就不改、返回 conflict（0 = 预期还没设过）。和操作记录同一事务。 */
   putSetting(
