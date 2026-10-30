@@ -22,6 +22,13 @@
       "when": 1793393074006,
       "tag": "0002_mute_energizer",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793396162073,
+      "tag": "0003_faithful_silverclaw",
+      "breakpoints": true
     }
   ]
 }

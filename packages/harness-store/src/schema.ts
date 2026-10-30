@@ -159,6 +159,63 @@ export const sessionTokens = fleet2.table(
   ],
 );
 
+/**
+ * 影子比对的批次清单（#3776）：冻结那一刻每张单的基线提交，新旧两边都从它起。冻结后不改，改了就另起一批。
+ */
+export const shadowBatchItems = fleet2.table(
+  'shadow_batch_items',
+  {
+    batchId: text('batch_id').notNull(),
+    repo: text('repo').notNull(),
+    issue: integer('issue').notNull(),
+    baseSha: text('base_sha').notNull(),
+    snapshotAt: timestamp('snapshot_at', tz).notNull(),
+  },
+  (t) => [
+    unique('shadow_batch_items_unique').on(t.batchId, t.repo, t.issue),
+    check('shadow_batch_items_sha', sql`${t.baseSha} ~ '^[0-9a-f]{40}$'`),
+  ],
+);
+
+/** 影子跑一次的产物：补丁只留在这里，不推、不开 PR，任何自动流程不消费它。 */
+export const shadowRuns = fleet2.table(
+  'shadow_runs',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    runId: text('run_id').notNull(),
+    batchId: text('batch_id').notNull(),
+    repo: text('repo').notNull(),
+    issue: integer('issue').notNull(),
+    baseSha: text('base_sha').notNull(),
+    /** 交回核验的四态（harness-dispatch 的 verify）。 */
+    verdict: text('verdict').notNull(),
+    patch: text('patch').notNull(),
+    wallMs: integer('wall_ms').notNull(),
+    tokens: integer('tokens'),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('shadow_runs_run_unique').on(t.runId),
+    check('shadow_runs_verdict_known', sql`${t.verdict} in ('unverified', 'passed', 'failed', 'unknown')`),
+    index('shadow_runs_batch_idx').on(t.batchId, t.id),
+  ],
+);
+
+/** 旧 PR 合并后拿合并 diff 给影子补丁评的分；旧的结果永远是权威，这里只记差多少。 */
+export const shadowCompare = fleet2.table(
+  'shadow_compare',
+  {
+    shadowRunId: bigint('shadow_run_id', { mode: 'number' }).primaryKey(),
+    batchId: text('batch_id').notNull(),
+    mergedPr: integer('merged_pr').notNull(),
+    mergedSha: text('merged_sha').notNull(),
+    /** compareDiffs 的结果：文件重合、改动行重合、两边各自多改的文件。 */
+    score: jsonb('score').notNull(),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+  },
+  (t) => [index('shadow_compare_batch_idx').on(t.batchId, t.shadowRunId)],
+);
+
 /** 第一个投影：每条流走到第几条、最后一条是什么类型。拿它证明「删了重建结果一致」。 */
 export const streamHeads = fleet2.table('stream_heads', {
   streamId: text('stream_id').primaryKey(),
