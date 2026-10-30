@@ -663,6 +663,16 @@ export interface OpsStore {
    * 库版走部分索引，读的行数只跟返回条数有关。读不到照抛。
    */
   listIssueEvents(query: { after: number; limit: number }): Promise<IntakeEvent[]>;
+  /**
+   * 记一行过程记录（#3741 片 2a，POST /api/nodes/notes）：action 是 progress.note / decision.handoff / report.daily / report.guards，
+   * target 是 issue:<repo>#<号> 或 progress:<repo>。幂等：同一个 after.repo + after.idempotencyKey 只留一行，重放回原来那行、created:false。
+   */
+  appendLedgerNote(input: {
+    actorId: string;
+    action: string;
+    target: string;
+    after: { repo: string; idempotencyKey: string } & Record<string, unknown>;
+  }): Promise<{ id: number; created: boolean }>;
   listSettings(): Promise<SettingRecord[]>;
   /** expectedVersion 对不上就不改、返回 conflict（0 = 预期还没设过）。和操作记录同一事务。 */
   putSetting(
