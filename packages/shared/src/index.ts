@@ -20,6 +20,7 @@ export * from './local-claims.ts';
 export * from './mirasim-executor.ts';
 export * from './model-prices.ts';
 export * from './node-claims.ts';
+export * from './node-dispatch.ts';
 export * from './org-ledger-doc.ts';
 export * from './pool-holds.ts';
 export * from './pool-slots.ts';
