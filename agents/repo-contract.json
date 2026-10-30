@@ -21,7 +21,7 @@
       "检查": { "type": "file", "path": "AGENTS.md" },
       "补法": {
         "type": "create",
-        "text": "# AGENTS.md\n\n<!-- repo-kind: 自用仓 -->\n\n本仓特有的规矩：\n\n- 需求方的确认、业务和技术决定记在 `docs/decisions.md`，一条写清谁、哪天、定了什么、为什么。\n- 起、停、检查都用仓根的 pnpm 命令：`pnpm dev`、`pnpm start`、`pnpm stop`、`pnpm check`。\n"
+        "text": "# AGENTS.md\n\n<!-- repo-kind: 自用仓 -->\n\n本仓特有的规矩：\n\n- 需求方的确认、业务和技术决定记在 `docs/decisions.md`，一条写清谁、哪天、定了什么、为什么。\n\n## 遇到什么就做什么\n\n| 时机 | 做什么 |\n|---|---|\n| 要动代码 | 先有单：`gh issue create` |\n| 以后要做的 | 开单，不在文档里另记待办 |\n| 要拍板、根因不清 | 先出讨论稿，等需求方定 |\n| 长期拍板 | 记进 `docs/decisions.md` |\n| 一时变通 | 进 `docs/PROGRESS.md` 的「生效中的临时调整」表 |\n| 起、停、检查 | 只用 `pnpm dev`、`pnpm start`、`pnpm stop`、`pnpm check` |\n"
       }
     },
     {
