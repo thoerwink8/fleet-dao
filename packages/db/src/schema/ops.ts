@@ -186,9 +186,16 @@ export const auditLog = pgTable(
     check('audit_log_failure_has_error', sql`${t.ok} or ${t.error} is not null`),
     index('audit_log_at_idx').on(t.at),
     index('audit_log_target_idx').on(t.target, t.at),
-    // 开单账本（决定 0122，queries/issue-events.ts）：只收 target 以 issue: 开头的行，读口按 id 往后扫、读的行数只跟返回条数有关。
-    // 查询里的 like 条件要和这里的写法一字不差，规划器才认得出走这个索引。
-    index('audit_log_issue_events_idx').on(t.id).where(sql`${t.target} like 'issue:%'`),
+    // 账本（决定 0122，queries/issue-events.ts）：只收 target 以 issue: 或 progress: 开头的行，读口按 id 往后扫、读的行数只跟返回条数有关。
+    // 查询里的 where 条件要和这里的写法一字不差，规划器才认得出走这个索引。
+    index('audit_log_ledger_events_idx')
+      .on(t.id)
+      .where(sql`${t.target} like 'issue:%' or ${t.target} like 'progress:%'`),
+    // 过程记录的幂等（POST /api/nodes/notes，#3741 片 2a）：同一个仓里同一个 idempotencyKey 只留一行。只管这四种 action，
+    // 开单账本的 issue.* 行重放时会重复记，不受它约束。
+    uniqueIndex('audit_log_ledger_note_key_idx')
+      .on(sql`(${t.after} ->> 'repo')`, sql`(${t.after} ->> 'idempotencyKey')`)
+      .where(sql`${t.action} in ('progress.note', 'decision.handoff', 'report.daily', 'report.guards')`),
   ],
 );
 

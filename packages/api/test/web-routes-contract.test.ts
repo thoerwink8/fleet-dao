@@ -53,6 +53,8 @@ describe('契约 ↔ 后端注册的路由', () => {
       !(r.path === '/api/nodes/claims' && (r.method === 'POST' || r.method === 'GET')) &&
       // 开单服务（决定 0122）的两个口同理：只认机器通行证，本机脚本、法国指挥官、Mirasim 调，浏览器不调；协议在 shared 的 intake.ts。
       !(r.path === '/api/nodes/issues' && r.method === 'POST') &&
+      // 过程记录（POST /api/nodes/notes，#3741 片 2a）同理，也只认通行证。
+      !(r.path === '/api/nodes/notes' && r.method === 'POST') &&
       !(r.path === '/api/nodes/events' && r.method === 'GET') &&
       // 本机交单给法国（POST /api/nodes/dispatch，#3739，协议在 shared 的 node-dispatch.ts）同理：只认通行证，本机命令和 MCP 调，浏览器不调。
       !(r.path === NODE_DISPATCH_FULL_PATH && r.method === 'POST');

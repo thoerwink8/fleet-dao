@@ -2,7 +2,7 @@
 // 要核的是「读的行数只跟返回条数有关，不跟表多大有关」：EXPLAIN (ANALYZE) 里走部分索引、没有顺序扫、没有被过滤掉的行。
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { issueEventsFilter, listIssueEvents } from '../src/queries/issue-events.ts';
+import { appendLedgerNote, issueEventsFilter, listIssueEvents } from '../src/queries/issue-events.ts';
 import { auditLog } from '../src/schema/ops.ts';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 
@@ -51,8 +51,104 @@ describe('listIssueEvents', () => {
     expect(await listIssueEvents(t.db, { after: all.at(-1)?.id ?? 0, limit: 10 })).toEqual([]);
   });
 
+  it('issue: 和 progress: 两个前缀的行一起读，别的前缀（含只是长得像的）不读', async () => {
+    await t.db
+      .insert(auditLog)
+      .values([
+        audit('progress.note', 'progress:p/q'),
+        audit('login', 'progressive:1'),
+        audit('decision.handoff', 'issue:p/q#9'),
+        audit('report.daily', 'progress:p/r'),
+      ]);
+    const got = (await listIssueEvents(t.db, { after: 0, limit: 1000 })).filter((e) =>
+      e.target.includes('p/'),
+    );
+    expect(got.map((e) => e.target)).toEqual(['progress:p/q', 'issue:p/q#9', 'progress:p/r']);
+  });
+
+  it('appendLedgerNote 幂等：同一个 repo + key 回原来那行；换 key、换仓是新行；issue.* 行同 key 不受约束', async () => {
+    const mk = (over: Record<string, unknown> = {}) => ({
+      at: new Date(),
+      actorKind: 'agent' as const,
+      actorId: 'node:test',
+      action: 'progress.note',
+      target: 'progress:n/m',
+      after: { repo: 'n/m', idempotencyKey: 'key-note-0001', text: 't' },
+      ...over,
+    });
+    const first = await appendLedgerNote(t.db, mk());
+    expect(first.created).toBe(true);
+    expect(await appendLedgerNote(t.db, mk({ action: 'report.daily' }))).toEqual({
+      id: first.id,
+      created: false,
+    });
+    const otherKey = await appendLedgerNote(
+      t.db,
+      mk({ after: { repo: 'n/m', idempotencyKey: 'key-note-0002' } }),
+    );
+    const otherRepo = await appendLedgerNote(
+      t.db,
+      mk({ target: 'progress:n/o', after: { repo: 'n/o', idempotencyKey: 'key-note-0001' } }),
+    );
+    expect([otherKey.created, otherRepo.created]).toEqual([true, true]);
+    // 开单账本的 issue.open 同 repo 同 key 重放会记两行，不能被唯一索引挡住
+    const issueRow = {
+      ...audit('issue.open', 'issue:n/m#1'),
+      after: { repo: 'n/m', idempotencyKey: 'key-note-0001' },
+    };
+    await t.db.insert(auditLog).values([issueRow, issueRow]);
+    // 并发重放只有一个写进去
+    const racing = await Promise.all(
+      [1, 2, 3].map(() =>
+        appendLedgerNote(t.db, mk({ after: { repo: 'n/m', idempotencyKey: 'key-note-race1' } })),
+      ),
+    );
+    expect(racing.filter((r) => r.created)).toHaveLength(1);
+    expect(new Set(racing.map((r) => r.id)).size).toBe(1);
+  });
+
+  it('两个前缀的读都走部分索引，读的行数和 limit 成正比（limit 3 读 3 行、limit 6 读 6 行）', async () => {
+    await t.db.execute(sql`
+      insert into audit_log (actor_kind, actor_id, action, target, via)
+      select 'ops', 'x', 'noise', 'task:' || g, 'ops' from generate_series(1, 30000) g`);
+    await t.db
+      .insert(auditLog)
+      .values(
+        [1, 2, 3, 4, 5, 6, 7, 8].flatMap((n) => [
+          audit('progress.note', `progress:plan/repo`),
+          audit('issue.open', `issue:plan/repo#${n}`),
+        ]),
+      );
+    await t.db.execute(sql`analyze audit_log`);
+    for (const limit of [3, 6]) {
+      const plan = rowsOf(
+        await t.db.execute(sql`
+          explain (analyze, costs off, timing off, summary off)
+          select id, at, actor_kind, actor_id, action, target, after, ok from audit_log
+          where id > 0 and ${issueEventsFilter}
+          order by id asc limit ${sql.raw(String(limit))}`),
+      )
+        .map((r) => Object.values(r).join(' '))
+        .join('\n');
+      expect(plan).toContain('audit_log_ledger_events_idx');
+      expect(plan).not.toMatch(/Seq Scan/);
+      expect(plan).not.toMatch(/Rows Removed by Filter/);
+      expect(plan).toMatch(new RegExp(`actual rows=${limit}\\b`));
+    }
+    // 只收 progress: 的读（比如以后单独筛）也走同一个索引
+    const planProgress = rowsOf(
+      await t.db.execute(sql`
+        explain (analyze, costs off, timing off, summary off)
+        select id from audit_log where id > 0 and ${issueEventsFilter} order by id asc limit 4`),
+    )
+      .map((r) => Object.values(r).join(' '))
+      .join('\n');
+    expect(planProgress).toContain('audit_log_ledger_events_idx');
+  });
+
   it('表里有大批别的操作记录时，读口照样走部分索引：没有顺序扫、没有被过滤掉的行，读的行数等于返回条数', async () => {
     // 前面五个账本行之后，塞三万条不相干的记录，再放五条账本行：往后读时必须跳过这三万条而不是一条条扫过去
+    const lastLedgerBeforeNoise = (await listIssueEvents(t.db, { after: 0, limit: 1000 })).at(-1)?.id ?? 0;
     await t.db.execute(sql`
       insert into audit_log (actor_kind, actor_id, action, target, via)
       select 'ops', 'x', 'noise', 'task:' || g, 'ops' from generate_series(1, 30000) g`);
@@ -61,10 +157,9 @@ describe('listIssueEvents', () => {
       .values([1, 2, 3, 4, 5].map((n) => audit('issue.open', `issue:late/repo#${n}`)));
     await t.db.execute(sql`analyze audit_log`);
 
-    const first = await listIssueEvents(t.db, { after: 0, limit: 3 });
-    const lastId = (await listIssueEvents(t.db, { after: 0, limit: 100 })).at(-1)?.id ?? 0;
-    // 往后读：after 落在三万条噪声之前，要读到的是噪声后面的账本行
-    const skipFrom = first.at(-1)?.id ?? 0;
+    const lastId = (await listIssueEvents(t.db, { after: 0, limit: 1000 })).at(-1)?.id ?? 0;
+    // 往后读：after 落在噪声之前（前面几条测试留下的最后一条账本行），要读到的是噪声后面的账本行
+    const skipFrom = lastLedgerBeforeNoise;
     const probe = await listIssueEvents(t.db, { after: skipFrom, limit: 3 });
     expect(probe.map((e) => e.target)).toEqual([
       'issue:late/repo#1',
@@ -83,7 +178,7 @@ describe('listIssueEvents', () => {
     )
       .map((r) => Object.values(r).join(' '))
       .join('\n');
-    expect(plan).toContain('audit_log_issue_events_idx');
+    expect(plan).toContain('audit_log_ledger_events_idx');
     expect(plan).not.toMatch(/Seq Scan/);
     expect(plan).not.toMatch(/Rows Removed by Filter/);
     expect(plan).toMatch(/actual rows=3\b/);
