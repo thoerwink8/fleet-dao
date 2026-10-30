@@ -53,7 +53,8 @@ function contractProblems(text: string): string[] {
     agents.检查.path !== 'AGENTS.md' ||
     !agents.补法?.text?.includes('docs/decisions.md') ||
     !agents.补法.text.split('\n').includes('<!-- repo-kind: 自用仓 -->') ||
-    /fleet-dao|AI|Claude|原话|引导|临时调整/.test(agents.补法.text)
+    /fleet-dao|AI|Claude|原话|引导/.test(agents.补法.text) ||
+    !agents.补法.text.includes('| 一时变通 |')
   )
     out.push('agents-md');
   // 不再要各仓有 docs/PROGRESS.md 的引导清单和临时调整表：AI 运营的事只记 fleet-dao

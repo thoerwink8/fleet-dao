@@ -119,7 +119,12 @@ describe('合同本身', () => {
     const text = readFileSync(join(root, 'AGENTS.md'), 'utf8');
     expect(text).toContain('docs/decisions.md');
     expect(text.split('\n')).toContain('<!-- repo-kind: 自用仓 -->');
-    expect(text).not.toMatch(/fleet-dao|AI|Claude|原话|引导|临时调整/);
+    expect(text).not.toMatch(/fleet-dao|AI|Claude|原话|引导/);
+    // 精简时机表（#3727）：以后要做的开单、一时变通进临时调整表，和通用段同一说法
+    expect(text).toContain('## 遇到什么就做什么');
+    expect(text).toContain('| 以后要做的 | 开单，不在文档里另记待办 |');
+    expect(text).toContain('「生效中的临时调整」表');
+    expect(text).not.toContain('起、停、检查都用仓根的 pnpm 命令');
   });
 
   it('装到机器上之后从同步专用检出读：路径和 sync-source.mjs 的 syncDirIn 是同一个', () => {
