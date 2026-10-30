@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { CI_POLICY_SOURCE_PREFIX } from '../../shared/src/ci-policy-bridge.ts';
 import { ghApi, githubResponseEvidence, githubTransportEvidence } from '../src/gh-api.ts';
 import {
   type GateDeps,
@@ -10,6 +11,7 @@ import {
   gateGitHub,
   gatePr,
   runMergeGate,
+  targetPrs,
 } from '../src/merge-gate.ts';
 import { founderQuoteLine, GATE_LINE } from '../src/pr-columns.ts';
 
@@ -578,12 +580,21 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(closed.written).toEqual([]);
   });
 
-  it('冷调用状态：开着的 PR 全重算（不只事件里那个头的）；别的 context（含已经去掉的 second-opinion、「认领对得上」）不算', async () => {
-    const w = world({ open: [{ number: 80 }, { number: 81 }] });
-    // 【故意造出的失败】#351 演练：一轮对账给几个 PR 贴状态，排队组只留最后一次运行、事件里是最后那个 PR 的头——
-    // 只算那一个的话，另一个 PR 就一直停在旧结论上；全重算了两个都写上
-    await run(w, 'status', { context: 'cold-verify', sha: MERGE, state: 'success' });
-    expect(w.written).toHaveLength(2);
+  it('冷调用状态只算头是这个提交的 PR，策略来源状态只算它点名的 PR；别的 context（含已经去掉的 second-opinion、「认领对得上」）不算', async () => {
+    // #3765：全重算让老 PR 的头攒满 1000 条状态、再写回 422；plan 不进排队组，每条状态事件各算各的，不会漏
+    const open = [
+      { number: 80, head: { sha: HEAD } },
+      { number: 81, head: { sha: MERGE } },
+    ];
+    const w = world({ open });
+    expect(await targetPrs('status', { context: 'cold-verify', sha: MERGE }, w.gh)).toEqual([81]);
+    expect(await targetPrs('status', { context: 'cold-verify', sha: 'nope' }, w.gh)).toEqual([]);
+    expect(await targetPrs('status', { context: 'cold-verify' }, w.gh)).toBe('状态事件里没有 sha');
+    expect(await targetPrs('status', { context: `${CI_POLICY_SOURCE_PREFIX}80`, sha: HEAD }, w.gh)).toEqual([
+      80,
+    ]);
+    await run(w, 'status', { context: 'cold-verify', sha: HEAD, state: 'success' });
+    expect(w.written).toHaveLength(1);
     const other = world();
     expect(await run(other, 'status', { context: 'ci', sha: HEAD })).toEqual({
       code: 0,
