@@ -945,3 +945,48 @@ describe('名额一节（按错误预算分档）', () => {
     expect(d.published[0]?.body ?? '').toContain('上次的档位没读成：读上次的名额档位：设置值认不出');
   });
 });
+
+describe('每日简报双写账本（#3741 片 2b）', () => {
+  it('账本写一次（键 = 日期），#1055 和飞书照旧各一份', async () => {
+    const ledger: { repo: string; idempotencyKey: string; text: string }[] = [];
+    const d = makeDeps({
+      ledger: async (x) => {
+        ledger.push(x);
+      },
+    });
+    await runDailyBriefJob(d.deps);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({ repo: 'acme/fleet-dao', idempotencyKey: 'daily-brief:2026-10-15' });
+    expect(ledger[0]?.text).toContain('【每日简报】2026-10-15');
+    expect(d.comments).toHaveLength(1);
+    expect(d.published).toHaveLength(1);
+  });
+
+  it('手动触发的键带时刻，不和定时那一行抢同一个键', async () => {
+    const keys: string[] = [];
+    const d = makeDeps({
+      ledger: async (x) => {
+        keys.push(x.idempotencyKey);
+      },
+    });
+    await runDailyBriefJob(d.deps, { manual: true });
+    expect(keys).toEqual([`daily-brief:2026-10-15:manual-${NOW.toISOString()}`]);
+  });
+
+  it('账本写失败：警告，飞书和 #1055 照发，这一轮不记失败', async () => {
+    const logs: { level: string; message: string }[] = [];
+    const d = makeDeps({
+      ledger: async () => {
+        throw new Error('db down');
+      },
+      log: (level, message) => {
+        logs.push({ level, message });
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('ok');
+    expect(d.comments).toHaveLength(1);
+    expect(d.published).toHaveLength(1);
+    expect(logs.some((l) => l.level === 'warn' && l.message.includes('没写进账本'))).toBe(true);
+  });
+});

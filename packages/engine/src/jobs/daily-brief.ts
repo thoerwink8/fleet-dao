@@ -151,6 +151,8 @@ export interface DailyBriefDeps {
   selfShareSave?(row: SelfShareRow): Promise<void>;
   /** 当前仍停着的任务，以及指挥官已经看过多少。读不到照抛。 */
   commanderSummary(): Promise<CommanderStalledSummary>;
+  /** 账本（#3741 片 2b，report.daily）：幂等，同一个 key 只留一行。写不进照抛，调用方只警告、不挡飞书和 #1055；没接上的不写。 */
+  ledger?(input: { repo: string; idempotencyKey: string; text: string }): Promise<void>;
   /** 写那一行提醒（有就原地更新）。写不进照抛。 */
   publish(input: { dedupeKey: string; title: string; body: string; link: string }): Promise<void>;
   /** 在 #1055 发评论（幂等：同一个 key 只发一条）。没发成照抛。 */
@@ -784,8 +786,20 @@ export async function runDailyBriefJob(
       }
     }
     const repo = await deps.selfRepo();
-    await deps.publish({ dedupeKey: key, title, body: briefPlain(sections), link: BRIEF_LINK });
     const footer = `<sub>引擎定时任务 ${DAILY_BRIEF_JOB.id} 发（${stamp(now)}，北京时间）；飞书团队群同时推了一条。只为四类事和 AI 判定要你拍的事即时推，其余都在这里。</sub>`;
+    // 双写（#3741 片 2b）：先写账本 report.daily（键 = #1055 评论的键：日期，手动触发带时刻），写不成只警告，下面飞书和 #1055 照旧
+    if (deps.ledger) {
+      try {
+        await deps.ledger({
+          repo: `${repo.owner}/${repo.name}`,
+          idempotencyKey: manual ? `daily-brief:${day}:manual-${now.toISOString()}` : `daily-brief:${day}`,
+          text: clip(briefMarkdown(title, sections, footer), 20_000),
+        });
+      } catch (err) {
+        deps.log('warn', '每日简报没写进账本（飞书和 #1055 照发）', { runId, why: errMessage(err) });
+      }
+    }
+    await deps.publish({ dedupeKey: key, title, body: briefPlain(sections), link: BRIEF_LINK });
     await deps.comment({
       repo,
       issueNumber: BRIEF_ISSUE,
