@@ -1,2 +1,0 @@
-DROP INDEX "audit_log_ledger_note_key_idx";--> statement-breakpoint
-CREATE UNIQUE INDEX "audit_log_ledger_note_key_idx" ON "audit_log" USING btree (("after" ->> 'repo'),("after" ->> 'idempotencyKey')) WHERE "audit_log"."action" in ('progress.note', 'decision.handoff', 'report.daily', 'report.guards', 'directive');
