@@ -207,6 +207,31 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
 
+  packages/harness-contract:
+    dependencies:
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+
+  packages/harness-store:
+    dependencies:
+      '@fleet-dao/harness-contract':
+        specifier: workspace:*
+        version: link:../harness-contract
+      drizzle-orm:
+        specifier: ^0.45.3
+        version: 0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+    devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.8
+        version: 0.5.8
+      drizzle-kit:
+        specifier: 0.31.11
+        version: 0.31.11(drizzle-orm@0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9))
+
   packages/hygiene: {}
 
   packages/jev:
