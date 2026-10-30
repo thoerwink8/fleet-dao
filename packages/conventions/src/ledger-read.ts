@@ -3,6 +3,11 @@
 // 收件箱 = 账本里 target 为 progress:<owner/name>、action 为 decision.handoff 的行（驾驶舱「要你拍」拍完写的），减去已被后来一条
 // progress.note「已迁 <行id>」/「已处理 <行id>」认领掉的。只看最近 INBOX_DAYS 天。
 // 读不到、回包认不出、翻页翻不动、翻太多页都抛 ProgressUnchecked（退出码 2），不当成「收件箱是空的」。
+// 增量：账本只追加，本机在 ~/.fleet-dao/ledger-inbox.json 按仓存 cursor（上次读到的最后一行 id）和 pending，
+// 每次只请求 cursor 之后的新行；没有状态文件才从 0 读一次全量，文件坏了当不存在重建（打一行说明）。
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { INBOX_DAYS, ProgressRefused, ProgressUnchecked } from './progress.ts';
 import { type ClaimsEndpoint, readClaimsEndpoint } from './work.ts';
 
@@ -108,10 +113,10 @@ async function readPage(get: LedgerEventsGet, after: number, limit: number): Pro
   return rows;
 }
 
-/** 按 id 往后翻页读完整本账（limit 用上限）。 */
-export async function readAllLedgerEvents(get: LedgerEventsGet): Promise<LedgerEvent[]> {
+/** 从 from（不含）按 id 往后翻页读到头（limit 用上限）；不给 from 就从 0 读整本账。 */
+export async function readAllLedgerEvents(get: LedgerEventsGet, from = 0): Promise<LedgerEvent[]> {
   const out: LedgerEvent[] = [];
-  let after = 0;
+  let after = from;
   for (let page = 0; page < LEDGER_PAGES_MAX; page += 1) {
     const rows = await readPage(get, after, LEDGER_PAGE);
     out.push(...rows);
@@ -141,30 +146,128 @@ const textOfAfter = (after: unknown): string => {
   return typeof t === 'string' ? t : '';
 };
 
-/** 收件箱：最近 INBOX_DAYS 天里还没被认领的 decision.handoff（旧到新）。repo 是 owner/name，只看这个仓的账。 */
-export async function ledgerInboxPending(
-  repo: string,
-  deps: { get: LedgerEventsGet; now?: () => Date },
-): Promise<LedgerHandoff[]> {
+/**
+ * 增量状态（只追加的账本只读上次之后的新行）：cursor＝上次读到的最后一行 id，pending＝还没被认领的引导，
+ * cleared＝最近认领掉的行 id（只留尾部，防文件无限长）。按仓分键存在一个文件里。
+ */
+export interface InboxState {
+  cursor: number;
+  pending: LedgerHandoff[];
+  cleared: number[];
+}
+export const CLEARED_KEEP = 200;
+export const inboxStatePath = (home = homedir()): string => join(home, '.fleet-dao', 'ledger-inbox.json');
+
+const isHandoff = (v: unknown): v is LedgerHandoff => {
+  const o = v as Record<string, unknown> | null;
+  return (
+    typeof o === 'object' &&
+    o !== null &&
+    typeof o.id === 'number' &&
+    typeof o.at === 'string' &&
+    typeof o.text === 'string'
+  );
+};
+const isState = (v: unknown): v is InboxState => {
+  const o = v as Record<string, unknown> | null;
+  return (
+    typeof o === 'object' &&
+    o !== null &&
+    typeof o.cursor === 'number' &&
+    Number.isInteger(o.cursor) &&
+    o.cursor >= 0 &&
+    Array.isArray(o.pending) &&
+    o.pending.every(isHandoff) &&
+    Array.isArray(o.cleared) &&
+    o.cleared.every((n) => typeof n === 'number')
+  );
+};
+
+/** 读状态文件：不存在 → 空（新机器）；解析不了或形状不对 → 空并说一行（当不存在重建）。 */
+function loadAll(file: string, warn: (l: string) => void): Record<string, unknown> {
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (e) {
+    if ((e as { code?: unknown } | null)?.code === 'ENOENT') return {};
+    warn(`收件箱状态文件 ${file} 读不了（${msg(e)}），从头读账本重建。`);
+    return {};
+  }
+  try {
+    const j = JSON.parse(text) as unknown;
+    if (typeof j === 'object' && j !== null && !Array.isArray(j)) return j as Record<string, unknown>;
+  } catch {
+    // 落到下面
+  }
+  warn(`收件箱状态文件 ${file} 坏了（解析不了），丢掉并从头读账本重建。`);
+  return {};
+}
+
+/** 临时文件加改名，防半截；写不成只警告（下次多读一点而已，不挡这次的结果）。 */
+function saveAll(file: string, all: Record<string, unknown>, warn: (l: string) => void): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(tmp, `${JSON.stringify(all)}\n`, 'utf8');
+    renameSync(tmp, file);
+  } catch (e) {
+    warn(`收件箱状态文件 ${file} 没写成（${msg(e)}）；下次会多读一段账本。`);
+  }
+}
+
+export interface InboxDeps {
+  get: LedgerEventsGet;
+  now?: () => Date;
+  /** 状态文件路径；不给就不存档，每次从 0 读（测试、一次性用）。 */
+  stateFile?: string;
+  warn?: (line: string) => void;
+}
+
+/**
+ * 收件箱：最近 INBOX_DAYS 天里还没被认领的 decision.handoff（旧到新）。repo 是 owner/name，只看这个仓的账。
+ * 给了 stateFile 就增量：只请求 cursor 之后的新行，更新 pending，最后写回；没有状态才从 0 读一次全量。
+ * 读不到抛 ProgressUnchecked，状态文件原样不动。
+ */
+export async function ledgerInboxPending(repo: string, deps: InboxDeps): Promise<LedgerHandoff[]> {
+  const warn = deps.warn ?? ((l: string) => console.error(l));
   const now = (deps.now ?? (() => new Date()))();
   const cutoff = now.getTime() - INBOX_DAYS * 86_400_000;
   const target = `progress:${repo}`;
-  const rows = (await readAllLedgerEvents(deps.get)).filter((r) => r.ok && r.target === target);
-  const handled = new Set<number>();
-  for (const r of rows) {
-    if (r.action !== NOTE_ACTION) continue;
-    const m = HANDLED_NOTE.exec(textOfAfter(r.after));
-    if (m?.[1]) handled.add(Number(m[1]));
+  const all = deps.stateFile ? loadAll(deps.stateFile, warn) : {};
+  const saved = all[repo];
+  const state: InboxState = isState(saved)
+    ? { cursor: saved.cursor, pending: [...saved.pending], cleared: [...saved.cleared] }
+    : { cursor: 0, pending: [], cleared: [] };
+  if (saved !== undefined && !isState(saved))
+    warn(`收件箱状态文件里 ${repo} 那段认不出，丢掉并从头读账本重建。`);
+  const events = await readAllLedgerEvents(deps.get, state.cursor);
+  const byId = new Map(state.pending.map((h) => [h.id, h]));
+  const cleared = new Set(state.cleared);
+  for (const r of events) {
+    if (!r.ok || r.target !== target) continue;
+    if (r.action === NOTE_ACTION) {
+      const m = HANDLED_NOTE.exec(textOfAfter(r.after));
+      if (m?.[1]) {
+        byId.delete(Number(m[1]));
+        cleared.add(Number(m[1]));
+      }
+    } else if (r.action === HANDOFF_ACTION && !cleared.has(r.id)) {
+      if (!Number.isFinite(Date.parse(r.at)))
+        throw new ProgressUnchecked(`法国账本行 ${r.id} 的时间认不出（${r.at}）。`);
+      byId.set(r.id, { id: r.id, at: r.at, text: textOfAfter(r.after) });
+    }
   }
-  const out: LedgerHandoff[] = [];
-  for (const r of rows) {
-    if (r.action !== HANDOFF_ACTION || handled.has(r.id)) continue;
-    const at = Date.parse(r.at);
-    if (!Number.isFinite(at)) throw new ProgressUnchecked(`法国账本行 ${r.id} 的时间认不出（${r.at}）。`);
-    if (at < cutoff) continue;
-    out.push({ id: r.id, at: r.at, text: textOfAfter(r.after) });
+  const pending = [...byId.values()].filter((h) => Date.parse(h.at) >= cutoff).sort((a, b) => a.id - b.id);
+  const last = events.at(-1);
+  if (deps.stateFile) {
+    const next: InboxState = {
+      cursor: last?.id ?? state.cursor,
+      pending,
+      cleared: [...cleared].slice(-CLEARED_KEEP),
+    };
+    saveAll(deps.stateFile, { ...all, [repo]: next }, warn);
   }
-  return out;
+  return pending;
 }
 
 /**
@@ -181,11 +284,7 @@ export function parseInboxId(raw: string): number {
 }
 
 /** 读收件箱里的一条（编号是账本行 id）；不在待处理里（已迁、已处理、超过 30 天、不是引导）的拒绝。 */
-export async function readLedgerHandoff(
-  id: number,
-  repo: string,
-  deps: { get: LedgerEventsGet; now?: () => Date },
-): Promise<LedgerHandoff> {
+export async function readLedgerHandoff(id: number, repo: string, deps: InboxDeps): Promise<LedgerHandoff> {
   const found = (await ledgerInboxPending(repo, deps)).find((h) => h.id === id);
   if (!found)
     throw new ProgressRefused(

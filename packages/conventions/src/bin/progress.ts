@@ -38,6 +38,7 @@ import { resolveRepo } from '../github-api.ts';
 import { ghRunner, issueNew } from '../issue-new.ts';
 import { noteIdempotencyKey, progressNoteWithLedger, writeLedgerNote } from '../ledger-note.ts';
 import {
+  inboxStatePath,
   type LedgerHandoff,
   ledgerInboxPending,
   liveLedgerEventsGet,
@@ -146,10 +147,12 @@ function ledgerRepo(): string {
   return repo;
 }
 const ledgerGet = liveLedgerEventsGet();
+/** 增量读：状态文件 ~/.fleet-dao/ledger-inbox.json（cursor 加 pending），只请求上次之后的新行 */
+const inboxDeps = { get: ledgerGet, stateFile: inboxStatePath() };
 
 /** 收件箱里的一条（账本行）；编号是账本行 id */
 async function inboxRow(id: number): Promise<LedgerHandoff> {
-  return readLedgerHandoff(id, ledgerRepo(), { get: ledgerGet });
+  return readLedgerHandoff(id, ledgerRepo(), inboxDeps);
 }
 
 /** 往账本记一条 progress.note 认领这一行；写不成就是没做完（不然这条会一直待处理、被重复搬），报 ProgressUnchecked。 */
@@ -210,7 +213,7 @@ async function pendingRows(): Promise<
   Array<{ id: string; head: string; text: string; owner: string; created: string; issue: string }>
 > {
   // 账本先读：读不到（退出码 2）就不往下，不拿仓里那一半冒充收件箱是空的
-  const inbox = await ledgerInboxPending(ledgerRepo(), { get: ledgerGet });
+  const inbox = await ledgerInboxPending(ledgerRepo(), inboxDeps);
   const repo = await listPending(git, gh, MAIN);
   const known = new Set((await listPaths(git, MAIN)).map((p) => p.replace(/^.*\//, '').replace(/\.md$/, '')));
   const rows = repo.map((d) => ({
