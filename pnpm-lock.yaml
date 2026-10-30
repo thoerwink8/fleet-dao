@@ -235,6 +235,8 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
 
+  packages/harness-runner: {}
+
   packages/harness-store:
     dependencies:
       '@fleet-dao/harness-contract':
