@@ -38,6 +38,15 @@
 - `pnpm project check|add`：装没装只信 `fleet-api project installations`（逐字段严格认，「没查成」退出码 2，不当没装）；冒烟单有没有只信列表直接列全和回执单号直读，搜索索引的空不算没有，回执对不上不补开第二张。`ci-policy-bridge.ts` 不得加 caller mode、策略快照或旧 off fallback，没收到响应头的网络失败重读一次，收到响应的不重读。
 - 本机显式退回协议（`managed-feedback*.ts`、`managed-work.ts`）：只接受可信 Actions Bot 的 COMMENTED 明确协议；工人退出码成功但交付没核上时只退避复核不再起 CLI；issue 已关闭、伪造本分支 PR、待审查都不算交付；返工用 `pnpm work rework <单号>`，同一代次只起一个工人；不手写 state/result，不杀进程。
 
+## fleet MCP（#3739，决定 0122）
+
+`pnpm mcp:fleet` 起 stdio MCP 服务（`src/bin/fleet-mcp.ts` → `src/fleet-mcp.ts`），4 个工具 `fleet_issue_open`、`fleet_dispatch`、`fleet_claim`、`fleet_events` 经法国 `/api/nodes/*` 开单、派单、领活、读账本。地址和通行证读 `~/.fleet-dao/local-sessions/config.json`（先 `pnpm local-sessions install`），法国回错一律 `isError` 带原因。字段以法国 shared 的 schema 为准，这里手写不引包。
+
+- 来源：环境变量 `FLEET_MCP_SOURCE` = `local-session`（默认）| `mirasim` | `harness-commander` | `harness-chat`，认不出启动即退出。
+- Claude Code：`claude mcp add fleet -s user -e FLEET_MCP_SOURCE=local-session -- pnpm --dir <本仓路径> mcp:fleet`
+- Mirasim：`~/.mirasim/mcp.json` 的 `mcpServers` 里加 `"fleet": {"command": "pnpm", "args": ["--dir", "<本仓路径>", "mcp:fleet"], "env": {"FLEET_MCP_SOURCE": "mirasim"}}`
+- `fleet_claim` 经 `pnpm work claim` 同一个 `work()`，要本机有 `gh`，只领本仓的单。
+
 ## 测试
 
 `bin/ci-runtime.ts` 包装原 Vitest run：同进程 reporter 保存白名单配置与有界资源快照，runner 另记真实退出码；默认未解析 maxWorkers、缓存来源保持 unknown。verify 后 always 诊断、通过才写缓存，仅上传三份 JSON（每份≤64KiB、7天），不上传原 report.json；观测失败独立报红，不覆盖测试失败。
