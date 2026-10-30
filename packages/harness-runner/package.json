@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/harness-runner",
+  "version": "0.0.0",
+  "private": true,
+  "description": "新内核的运行层（决定 0124）：起执行体进程、按实质事件判起步、时限从预算表派生、按会话标记收尸、脱敏",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
