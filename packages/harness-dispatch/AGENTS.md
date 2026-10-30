@@ -11,13 +11,12 @@
 - 交回先机械核验再记账，不让模型判（`verify.ts`）：`git diff --numstat` 对基线（含未跟踪文件）、越界路径（`allowedPaths` / `forbiddenPaths`，不许做里 `路径：xxx` 行也算禁止）、检查命令退出码。四态 `unverified | passed | failed | unknown`：工人没干净交活或越界或检查失败是 `failed`；有探测没跑成是 `unknown`，永远不当 `passed`；没改动、或既没范围又没检查命令是 `unverified`。核验在工人的工作目录里跑，那里的 git 配置和检查命令都是工人写的，所以走无凭据的工人环境、关掉 `core.fsmonitor`、diff 不跑外部程序。
 - 每次尝试结束记一条 `handback.recorded` 进指挥官的流 `session:<号>`（`runId`、`attempt`、`final`、`outcome`、`verdict`、`reasons`、证据：工人退出码/叫停原因/停在哪一步、diff 统计、越界路径、检查退出码和输出末尾、工人自己交的话），整条递归过脱敏器（H1），再 `completeJob`。工人自己交的话只当参考，不参与判定。
 - 只有确定没副作用的失败才退避重试（`retryJob`）：进程没起来、起步无进展、影子自检没过、工作环境没建成；记一条 `final: false` 的交回。别的（超时、被叫停、退出码非 0）记终局交回就停。
+- 调度器直接收成 `dead` 的活（排队时过了截止、领到 `max_attempts` 的毒活）不经 `processJob`：领活时经 `claimJobs` 的 `onDead` 在同一个事务里记终局交回（`outcome: dead`、`verdict: unknown`、原因取 `lastError`），收件箱不少一件；记不进去整次领取回滚。
 - 崩溃后重领不盲重派：重领时若已有终局交回，只补 `completeJob`；若上一次的 `worker:<runId>` 流有 `worker.spawned` 却没有对应交回，说明派工器在中途死了、工人做到哪不知道，记 `unknown` 的终局交回就停。
 - 提示词（`prompt.ts`）：指示类字段在块外，`context` 只出现在带随机标记的资料块里，块尾标记伪造不了（SEC1）。
 
 ## 没做的
 
-- 活在队列里等到过了截止时刻会被调度器直接收成 `dead`，没有交回记录；要补一条“死活”扫描，等后面的片接。
-- 领了 `max_attempts` 次还没做完的毒活同样由调度器收成 `dead`，不会有交回。
 - 重启后上一代遗留的工人进程由 `harness-runner` 的孤儿清扫处理，这里不管。
 - 工作环境怎么建（克隆、worktree、基线）由部署传进来的 `prepareWorkspace` 决定；`.gitignore` 掉的文件和仓外写入看不到，范围外写要靠影子用户的文件权限兜。
 

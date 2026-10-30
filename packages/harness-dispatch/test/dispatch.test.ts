@@ -234,6 +234,24 @@ describe('重复和重启', () => {
     expect((await jobRows())[0]?.state).toBe('done');
   });
 
+  it('排队时过了截止（调度器直接收成 dead）：不起工人，指挥官收件箱照样有一条终局交回', async () => {
+    const r = await rig({});
+    await spawnRequest('late-1');
+    await intakeSpawnRequests(t.db);
+    await t.pg.exec("update fleet2.jobs set deadline_at = now() - interval '1 second'");
+    expect(await r.d.poll()).toBe(0);
+    expect(r.runs()).toHaveLength(0);
+    const [hb] = await handbacks();
+    expect(hb?.payload).toMatchObject({
+      taskId: 'late-1',
+      final: true,
+      outcome: 'dead',
+      verdict: 'unknown',
+      reasons: ['过了截止时刻还没做完'],
+    });
+    expect((await jobRows())[0]?.state).toBe('dead');
+  });
+
   it('同时只跑一个（队列限速默认 1）：第二件等第一件完了才领', async () => {
     const r = await rig({ env: { FAKE_MODE: 'work-hang' } });
     await spawnRequest('q-1');

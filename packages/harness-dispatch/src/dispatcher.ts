@@ -210,7 +210,35 @@ export class Dispatcher {
     if (this.#stopped) return 0;
     const free = (this.#o.maxInflight ?? 1) - this.#running.size;
     if (free <= 0) return 0;
-    const jobs = await claimJobs(db, WORKER_QUEUE, free, this.#o.leaseMs ?? 60_000);
+    // 调度器直接收成 dead 的活（排队时过了截止、领到上限的毒活）不经 processJob：同一个事务里记终局交回，
+    // 指挥官收件箱里不会少一件
+    const redact = makeRedactor(secretsFromEnv(this.#o.hostEnv ?? process.env));
+    const jobs = await claimJobs(db, WORKER_QUEUE, free, this.#o.leaseMs ?? 60_000, {
+      onDead: async (tx, dead) => {
+        for (const d of dead) {
+          const parsed = Payload.safeParse(d.payload);
+          if (!parsed.success) continue;
+          const { sessionId, taskId } = parsed.data as unknown as DispatchPayload;
+          await appendToSession(
+            tx,
+            sessionId,
+            'handback.recorded',
+            redactDeep(
+              {
+                jobKey: d.key,
+                taskId,
+                attempt: d.attempts,
+                final: true,
+                outcome: 'dead',
+                verdict: 'unknown',
+                reasons: [d.lastError ?? '调度器收成了 dead'],
+              },
+              redact,
+            ),
+          );
+        }
+      },
+    });
     for (const job of jobs) {
       const p: Promise<void> = this.processJob(job)
         .then((o) => {

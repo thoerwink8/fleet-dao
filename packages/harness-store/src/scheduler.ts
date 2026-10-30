@@ -106,13 +106,22 @@ export async function schedule(
 /**
  * 领一个队列里到点的活：先把过了截止的收成 dead；再按限速算这次最多领几条（同时在领的、最近一分钟新领的都算），
  * 到点的 pending 和租约过期的 claimed 都能领；领到的 attempts 加一，超过上限的直接 dead、不交出去。
+ * 给了 onDead，这次收成 dead 的活在同一个事务里交给它（比如给派活的一方记交回）：它抛错整次领取回滚，
+ * 不会出现「活死了、却没人知道」。
  */
-export async function claimJobs(db: Db, queue: string, max: number, leaseMs: number): Promise<Job[]> {
+export async function claimJobs(
+  db: Db,
+  queue: string,
+  max: number,
+  leaseMs: number,
+  opts: { onDead?: (tx: Db, dead: Job[]) => Promise<void> } = {},
+): Promise<Job[]> {
   const token = randomUUID();
-  return db.transaction(async (tx) => {
+  return db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Db;
     const [limit] = await tx.select().from(queueLimits).where(eq(queueLimits.queue, queue)).for('update');
     if (!limit) throw new NoQueueLimitError(queue);
-    await tx
+    const expired = await tx
       .update(jobs)
       .set({
         state: 'dead',
@@ -128,7 +137,12 @@ export async function claimJobs(db: Db, queue: string, max: number, leaseMs: num
           isNotNull(jobs.deadlineAt),
           lt(jobs.deadlineAt, sql`now()`),
         ),
-      );
+      )
+      .returning();
+    const dead = expired.map(toJob);
+    const report = async () => {
+      if (opts.onDead && dead.length > 0) await opts.onDead(tx, dead);
+    };
     const [inflight] = await tx
       .select({ n: sql<number>`count(*)::int` })
       .from(jobs)
@@ -143,7 +157,10 @@ export async function claimJobs(db: Db, queue: string, max: number, leaseMs: num
       limit.maxInflight - Number(inflight?.n ?? 0),
       limit.perMinute - Number(recent?.n ?? 0),
     );
-    if (room <= 0) return [];
+    if (room <= 0) {
+      await report();
+      return [];
+    }
     const due = await tx
       .select({ id: jobs.id })
       .from(jobs)
@@ -159,7 +176,10 @@ export async function claimJobs(db: Db, queue: string, max: number, leaseMs: num
       .orderBy(asc(jobs.dueAt), asc(jobs.id))
       .limit(room)
       .for('update', { skipLocked: true });
-    if (due.length === 0) return [];
+    if (due.length === 0) {
+      await report();
+      return [];
+    }
     const rows = await tx
       .update(jobs)
       .set({
@@ -179,7 +199,7 @@ export async function claimJobs(db: Db, queue: string, max: number, leaseMs: num
       .returning();
     const over = rows.filter((r) => r.attempts > r.maxAttempts);
     if (over.length > 0) {
-      await tx
+      const poisoned = await tx
         .update(jobs)
         .set({
           state: 'dead',
@@ -193,8 +213,11 @@ export async function claimJobs(db: Db, queue: string, max: number, leaseMs: num
             jobs.id,
             over.map((r) => r.id),
           ),
-        );
+        )
+        .returning();
+      dead.push(...poisoned.map(toJob));
     }
+    await report();
     return rows.filter((r) => r.attempts <= r.maxAttempts).map(toJob);
   });
 }
