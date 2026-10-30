@@ -35,6 +35,7 @@
 - 查询轴：`issue:new`、`pr:open` 显式带 `--domain engine|api|mirasim --nature bug|perf|process`；`issue:batch` 母单必须提供两轴，子单可逐轴继承，整批写入前检查；`query-metadata.yml` 不猜、不改排期。
 - 母子单：`mother-manifest.ts` 严格读写正文 JSON 清单，批量写失败整批补偿；`issue:new --parent` 清单失败须明说子单已开已挂，不能建议重开。空母单只对批量创建标记报错。
 - 通行证只在内存和子进程环境变量，所有输出先 `redact`（`machine.ts`）；对外仓引导里原话只进私有待传目录，公开文件和单只用 meaning。
+- 创始人引导（#3764，决定 0123）：`pnpm progress directive` 只经账本写口（`directive-ledger.ts`，依赖 gh 和账本，不依赖 git）写 `directive` 行，不写 `docs/directives/`、不开 PR；`docs/directives/` 旧文件只读（`directives.ts`）；仓里只许有周汇总的意思（`directive-digest.ts`，`pnpm progress directive-digest`，写 `docs/directive-digest/`），原话不进任何仓内文件、单、PR、提交说明。`read --pending` 增量读账本（`ledger-read.ts`）再看挂的单。
 - `pnpm project check|add`：装没装只信 `fleet-api project installations`（逐字段严格认，「没查成」退出码 2，不当没装）；冒烟单有没有只信列表直接列全和回执单号直读，搜索索引的空不算没有，回执对不上不补开第二张。`ci-policy-bridge.ts` 不得加 caller mode、策略快照或旧 off fallback，没收到响应头的网络失败重读一次，收到响应的不重读。
 - 本机显式退回协议（`managed-feedback*.ts`、`managed-work.ts`）：只接受可信 Actions Bot 的 COMMENTED 明确协议；工人退出码成功但交付没核上时只退避复核不再起 CLI；issue 已关闭、伪造本分支 PR、待审查都不算交付；返工用 `pnpm work rework <单号>`，同一代次只起一个工人；不手写 state/result，不杀进程。
 

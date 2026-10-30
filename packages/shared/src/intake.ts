@@ -32,8 +32,13 @@ export const LEDGER_NOTE_KINDS = [
   'decision.handoff',
   'report.daily',
   'report.guards',
+  // 创始人引导（#3764，决定 0123）：text 是原话（只进私有库，不进公开仓），meaning 是不带原话的意思，category 是判的类，issue 是挂的单
+  'directive',
 ] as const;
 export const LEDGER_NOTE_TEXT_MAX = 20_000;
+/** 引导的类别（同 conventions 的 DIRECTIVE_KINDS；零安装区引不了包，两处各写一份，字面相同）。 */
+export const LEDGER_DIRECTIVE_CATEGORIES = ['ai', 'product', 'task', 'once', 'ops', 'discuss'] as const;
+export const LEDGER_DIRECTIVE_MEANING_MAX = 2_000;
 
 export const INTAKE_KINDS = ['需求', '缺陷', '杂项'] as const;
 export const INTAKE_DOMAINS = ['engine', 'api', 'mirasim'] as const;
@@ -158,8 +163,27 @@ export const LedgerNoteRequestSchema = z
     source: IntakeSourceSchema,
     /** 同一个仓里同一个 key 只记一行；重放回原来那行、created:false。 */
     idempotencyKey: IdempotencyKeySchema,
+    /** 只给 kind 是 directive 的用：不带原话的意思（必给）、类别（必给）、主人（会话目录名或「无主」）、他说话的时刻。 */
+    meaning: z.string().min(1).max(LEDGER_DIRECTIVE_MEANING_MAX).optional(),
+    category: z.enum(LEDGER_DIRECTIVE_CATEGORIES).optional(),
+    owner: z.string().min(1).max(128).optional(),
+    spokenAt: z.string().min(1).max(64).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((req, ctx) => {
+    if (req.kind !== 'directive') {
+      for (const k of ['meaning', 'category', 'owner', 'spokenAt'] as const)
+        if (req[k] !== undefined)
+          ctx.addIssue({ code: 'custom', path: [k], message: '只有 kind 是 directive 才许带' });
+      return;
+    }
+    if (req.issue === undefined)
+      ctx.addIssue({ code: 'custom', path: ['issue'], message: 'directive 要挂一张单' });
+    if (req.meaning === undefined)
+      ctx.addIssue({ code: 'custom', path: ['meaning'], message: 'directive 要给不带原话的意思' });
+    if (req.category === undefined)
+      ctx.addIssue({ code: 'custom', path: ['category'], message: 'directive 要给类别' });
+  });
 export type LedgerNoteRequest = z.infer<typeof LedgerNoteRequestSchema>;
 
 export const LedgerNoteResponseSchema = z

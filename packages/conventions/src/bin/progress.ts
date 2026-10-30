@@ -1,36 +1,37 @@
 import { progressSessionId } from '../progress-session.ts';
-// 进度和创始人引导的入口：pnpm progress note / progress directive / progress read。
-// 引导记在仓里 docs/directives/（../directives.ts），进度流水在置顶单 #1055（../progress.ts）；驾驶舱来的引导收件箱读法国账本（../ledger-read.ts，#3741 片 2c）。
-// 引导办没办完看它挂的单（文件里「单：#N」）：开着就是没办完、关了就是办完；不再有认领、标已处理（#2727）。
+// 进度和创始人引导的入口：pnpm progress note / progress directive / progress directive-digest / progress read。
+// 引导记进驾驶舱库（法国账本 directive 行，../directive-ledger.ts，决定 0123、#3764），不写 docs/directives/、不开分支、不开 PR；
+// docs/directives/ 里已有的文件留作档案（../directives.ts 照读）。进度流水在置顶单 #1055（../progress.ts）；驾驶舱来的引导收件箱和账本里的引导都读法国账本（../ledger-read.ts，增量）。
+// 引导办没办完看它挂的单：开着就是没办完、关了就是办完；不再有认领、标已处理（#2727）。
+// `directive-digest [--week 2026-W44] [--write]`：读整本账，生成那一周引导的意思汇总（不带原话），--write 写 docs/directive-digest/<周>.md（../directive-digest.ts）。
 // 退出码 0 = 成了；1 = 拒绝（参数不对、挂的单不是开着的、取不到原话要手填）；2 = 没查成、没写成（含 gh 读不到单）。
 // `read --pending` 给开会话钩子用：只列没办完的引导，一条一行
 // （编号<TAB>第一行<TAB>原话压成一行<TAB>主人<TAB>记下的时刻 ISO<TAB>挂的单号，没挂单的空）；
-// 读的是本地 origin/main 加 gh 读开着的单，加法国账本里 decision.handoff 最近 30 天没被认领的（第一列是账本行编号）；没有就输出空、退出码 0；账本读不到退出码 2。
+// 读的是法国账本（增量）里 directive 行挂的单还开着的、decision.handoff 最近 30 天没被认领的（第一列是账本行编号），加本地 origin/main 上旧档案里挂的单还开着的；
+// 没有就输出空、退出码 0；账本读不到退出码 2。
 // 主人＝本会话的血缘：CLAUDE_CODE_SESSION_ID 所属的 Mirasim 会话目录名（agents/hooks/founder-inbox.mjs 的 lineageOf）。
-// `directive --from-inbox <账本行编号>`：把驾驶舱答案收件箱（账本）里的一条搬进仓（挂单同 directive），再往账本记 progress.note「已迁 <编号>」；旧的 10 位评论号明确拒绝。
+// `directive --from-inbox <账本行编号>`：把驾驶舱答案收件箱（账本）里的一条记成 directive 行（挂单同 directive），再往账本记 progress.note「已迁 <编号>」；旧的 10 位评论号明确拒绝。
 // `directive` 和 `--from-inbox` 必须带 `--kind ai|product|task|once|ops|discuss`（决定 0111、0117），判类放在读 prompt-log、fetch、调 gh 之前；
 // 非 ai 不写文件、退出 0 并说去处，往账本记「已处理 <编号>」。
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { digestPath, isoWeekOf, renderDigest } from '../directive-digest.ts';
+import { ledgerPending, recordDirectiveToLedger } from '../directive-ledger.ts';
 import {
-  checkIssueOpen,
+  atDate,
   DirectiveRefused,
   directiveFromComment,
-  directiveIssueDraft,
-  formatDirective,
   type Git,
   type LineageInfo,
   listPaths,
   listPending,
   MAIN,
   mergeLogs,
-  proposeFile,
   readPromptLog,
-  recordDirective,
   resolveDirective,
 } from '../directives.ts';
 import { gitRunner } from '../git-runner.ts';
@@ -38,11 +39,12 @@ import { resolveRepo } from '../github-api.ts';
 import { ghRunner, issueNew } from '../issue-new.ts';
 import { noteIdempotencyKey, progressNoteWithLedger, writeLedgerNote } from '../ledger-note.ts';
 import {
+  directiveOfEvent,
   inboxStatePath,
   type LedgerHandoff,
-  ledgerInboxPending,
   liveLedgerEventsGet,
   parseInboxId,
+  readAllLedgerEvents,
   readLedgerHandoff,
 } from '../ledger-read.ts';
 import { flushPrivateQuotes, privatizeDirective, publicMeaning } from '../private-quotes.ts';
@@ -116,7 +118,6 @@ async function newIssue(draft: { title: string; body: string }): Promise<number>
     rmSync(dir, { recursive: true, force: true });
   }
 }
-const deps = { git, gh, newIssue };
 const privateApi = sshFleetApi(() => franceSshHost(), 'ssh', 30_000);
 const callingRoot = process.env.INIT_CWD || process.cwd();
 const kindHooks = await import(pathToFileURL(join(root, 'agents/hooks/repo-kind.mjs')).href);
@@ -171,51 +172,65 @@ async function markInbox(id: number, word: '已迁' | '已处理', where: string
     );
 }
 
-/** 收件箱里的一条搬进仓（挂 issue 这张单，没给就开一张），再往账本记「已迁 <行id>」 */
+/** 账本写引导要的接线：本仓、顺手开单、会话号（写口认的本机会话） */
+function directiveLedgerDeps() {
+  return { gh, repo: ledgerRepo(), newIssue, ref: sessionId() ?? hostname() };
+}
+
+/** --meaning：自用仓也必给（单和周汇总在公开仓，只用意思）；对外仓的由 privateRecord 先换成意思 */
+const meaningOf = (safeText: string, meaning: string | undefined): string => {
+  if (external) return safeText;
+  if (!meaning?.trim())
+    throw new DirectiveRefused(
+      '记引导必须给 --meaning "不带原话的意思"（单和周汇总在公开仓，原话只进驾驶舱库，决定 0123）。没记。',
+    );
+  return meaning.trim();
+};
+
+/** 收件箱里的一条记成账本 directive 行（挂 issue 这张单，没给就开一张），再往账本记「已迁 <行id>」 */
 async function importFromInbox(
   id: number,
   issue: number | undefined,
   meaning: string | undefined,
-): Promise<{ url: string; issue: number }> {
+): Promise<{ ledgerId: number; issue: number }> {
   const c = await inboxRow(id);
   const original = directiveFromComment(
     { id: c.id, head: PENDING_TAG + stamp(new Date(c.at)), owner: NO_OWNER, createdAt: c.at, text: c.text },
     issue ?? 1,
   );
+  const when = atDate(original.at) ?? new Date(c.at);
   const safe = await privateRecord(
-    { ...original, atDate: new Date(original.at.replace(' ', 'T').replace(' +0800', ':00+08:00')) },
+    { text: original.text, at: original.at, atDate: when, owner: NO_OWNER, source: original.source },
     meaning,
   );
-  let n = issue;
-  if (n !== undefined) await checkIssueOpen(gh, n);
-  else
-    n = await newIssue(
-      directiveIssueDraft({
-        text: safe.text,
-        at: safe.at,
-        source: `账本行 ${id}`,
-      }),
-    );
-  const d = { ...safe, issue: n };
-  const url = await proposeFile(deps, {
-    id: d.id,
-    path: d.path,
-    content: formatDirective(d),
-    title: `搬创始人引导 ${d.id} 进仓（从法国账本，挂单 #${n}）`,
-    did: `搬到 ${d.path}，挂单 #${n}，从法国账本收件箱`,
-  });
-  await markInbox(id, '已迁', `${d.path}（${url}）`);
-  return { url, issue: n };
+  const made = await recordDirectiveToLedger(
+    safe,
+    { meaning: meaningOf(safe.text, meaning), category: 'ai' },
+    directiveLedgerDeps(),
+    issue,
+  );
+  await markInbox(id, '已迁', `账本 directive 行 ${made.id}（挂单 #${made.issue}）`);
+  return { ledgerId: made.id, issue: made.issue };
 }
 
-/** 没办完的：仓里主线上挂的单还开着的（旧文件按状态行），加收件箱里还没搬进仓的 */
+/** 没办完的：账本里 directive 行挂的单还开着的，旧档案（主线上 docs/directives）挂的单还开着的（旧文件按状态行），加收件箱里还没认领的 */
 async function pendingRows(): Promise<
   Array<{ id: string; head: string; text: string; owner: string; created: string; issue: string }>
 > {
-  // 账本先读：读不到（退出码 2）就不往下，不拿仓里那一半冒充收件箱是空的
-  const inbox = await ledgerInboxPending(ledgerRepo(), inboxDeps);
+  // 账本先读：读不到（退出码 2）就不往下，不拿仓里那一半冒充账本是空的
+  // 账本里的引导办没办完看挂的单开着没有；读不到开着的单是没查成（抛 DirectiveUnchecked，退出码 2）
+  const ledger = await ledgerPending(ledgerRepo(), { inbox: inboxDeps, gh });
+  const inbox = ledger.handoffs;
   const repo = await listPending(git, gh, MAIN);
   const known = new Set((await listPaths(git, MAIN)).map((p) => p.replace(/^.*\//, '').replace(/\.md$/, '')));
+  const fromLedger = ledger.directives.map((d) => ({
+    id: String(d.id),
+    head: `${PENDING_TAG}${d.spokenAt || stamp(new Date(d.at))}`,
+    text: d.text,
+    owner: d.owner,
+    created: d.at,
+    issue: `#${d.issue}`,
+  }));
   const rows = repo.map((d) => ({
     id: d.id,
     head: `${PENDING_TAG}${d.at}`,
@@ -227,6 +242,7 @@ async function pendingRows(): Promise<
     })(),
     issue: d.issue === undefined ? '' : `#${d.issue}`,
   }));
+  rows.push(...fromLedger);
   for (const c of inbox) {
     if (known.has(String(c.id))) continue;
     rows.push({
@@ -256,6 +272,8 @@ try {
       kind: { type: 'string' },
       meaning: { type: 'string' },
       stdin: { type: 'boolean' },
+      week: { type: 'string' },
+      write: { type: 'boolean' },
     },
   });
   const issueArg = (): number | undefined => {
@@ -277,6 +295,8 @@ try {
     publicMeaning(values.meaning);
     if (positionals.length)
       throw new DirectiveRefused('对外仓原话只从 prompt-log 或 --stdin 读取，不接受命令行正文。');
+  } else if (cmd === 'directive' && kind === 'ai') {
+    meaningOf('', values.meaning); // 自用仓也要意思：先查，别等读完 prompt-log 才发现缺
   }
   if (cmd === 'directive' && kind !== undefined && kind !== 'ai') {
     // 不该记引导的类别：不写文件、不开单；收件箱的那条评论照样标成已处理并写明去处，退出 0。
@@ -310,7 +330,9 @@ try {
   } else if (cmd === 'directive' && values['from-inbox'] !== undefined) {
     const cid = parseInboxId(values['from-inbox']);
     const r = await importFromInbox(cid, issueArg(), values.meaning);
-    console.log(`搬进仓了（账本行 ${cid}，挂单 #${r.issue}），PR 已挂自动合并：${r.url}\n${KIND_JUDGE}`);
+    console.log(
+      `记成引导了（收件箱账本行 ${cid} → directive 行 ${r.ledgerId}，挂单 #${r.issue}），没写文件、没开 PR。\n${KIND_JUDGE}`,
+    );
   } else if (cmd === 'directive') {
     let text = positionals.join(' ');
     if (values.stdin) {
@@ -340,11 +362,33 @@ try {
       sessionId(),
     );
     const safe = await privateRecord(r, values.meaning);
-    const made = await recordDirective(safe, deps, issueArg());
-    console.log(
-      `记下创始人引导 ${made.id}（挂单 #${made.issue}，主：${safe.owner}，时间 ${safe.at}，来源 ${safe.source}）：${made.path}，PR 已挂自动合并 ${made.url}\n` +
-        `${external ? '意思' : '原话'}：${safe.text.replace(/\s+/g, ' ').slice(0, 200)}\n办完就是把单 #${made.issue} 关掉：干活的 PR 写 Closes #${made.issue}（合并自动关），这个文件不用再改。\n${KIND_JUDGE}`,
+    const made = await recordDirectiveToLedger(
+      safe,
+      { meaning: meaningOf(safe.text, values.meaning), category: 'ai' },
+      directiveLedgerDeps(),
+      issueArg(),
     );
+    console.log(
+      `记下创始人引导（账本行 ${made.id}${made.created ? '' : '，同一句已记过、这次是重放'}，挂单 #${made.issue}，主：${safe.owner}，时间 ${safe.at}，来源 ${safe.source}），没写文件、没开 PR。\n` +
+        `${external ? '意思' : '原话'}：${safe.text.replace(/\s+/g, ' ').slice(0, 200)}\n办完就是把单 #${made.issue} 关掉：干活的 PR 写 Closes #${made.issue}（合并自动关）。\n${KIND_JUDGE}`,
+    );
+  } else if (cmd === 'directive-digest') {
+    // 按周汇总意思（不带原话）：读整本账，不走增量状态
+    const week = values.week ?? isoWeekOf(new Date());
+    const events = await readAllLedgerEvents(ledgerGet);
+    const repoName = ledgerRepo();
+    const text = renderDigest(
+      week,
+      events.flatMap((e) => directiveOfEvent(e, repoName) ?? []),
+    );
+    if (values.write) {
+      const file = join(root, digestPath(week));
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, text, 'utf8');
+      console.log(`写了 ${digestPath(week)}（只有意思，没有原话）；用普通 PR 提交。`);
+    } else {
+      process.stdout.write(text);
+    }
   } else if (cmd === 'read') {
     const limit = values.limit === undefined ? 10 : Number(values.limit);
     if (!Number.isInteger(limit) || limit < 0)

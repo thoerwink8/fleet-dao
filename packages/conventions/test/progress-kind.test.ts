@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -65,6 +66,17 @@ beforeAll(() => {
       'if (isGh) {',
       '  const args = process.argv.slice(1).filter((a) => !/fake-gh|^[A-Za-z]:\\\\.*gh\\.exe$/.test(a));',
       "  fs.appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(args) + '\\n');",
+      // 挂的单：issue list 回 FAKE_OPEN_ISSUES 里的号（开着的），issue view 一律 OPEN
+      // node 把第一个参数当脚本路径，argv[1] 会被解析成绝对路径，所以取 basename 认子命令
+      "  const sub = path.basename(args[0] || '');",
+      "  if (sub === 'issue' && args[1] === 'list') {",
+      "    process.stdout.write(JSON.stringify(JSON.parse(process.env.FAKE_OPEN_ISSUES || '[]').map((number) => ({ number }))));",
+      '    process.exit(0);',
+      '  }',
+      "  if (sub === 'issue' && args[1] === 'view') {",
+      "    process.stdout.write('OPEN\\n');",
+      '    process.exit(0);',
+      '  }',
       '  const state = process.env.FAKE_GH_STATE;',
       "  const patch = args.indexOf('PATCH') >= 0;",
       '  if (patch) {',
@@ -88,7 +100,10 @@ beforeAll(() => {
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 /** 跑一次 bin。external=true 时调用目录是个带别人远端的空仓（对外仓）。 */
-function run(args: string[], opts: { external?: boolean; ledger?: unknown[]; ledgerDown?: boolean } = {}) {
+function run(
+  args: string[],
+  opts: { external?: boolean; ledger?: unknown[]; ledgerDown?: boolean; openIssues?: number[] } = {},
+) {
   const dir = mkdtempSync(join(root, 'run-'));
   const log = join(dir, 'gh.log');
   const home = join(dir, 'home');
@@ -122,6 +137,7 @@ function run(args: string[], opts: { external?: boolean; ledger?: unknown[]; led
       GH_REPO: 'o/r',
       FAKE_LEDGER: JSON.stringify(opts.ledger ?? [HANDOFF_ROW]),
       FAKE_LEDGER_LOG: ledgerLog,
+      FAKE_OPEN_ISSUES: JSON.stringify(opts.openIssues ?? []),
       ...(opts.ledgerDown ? { FAKE_LEDGER_DOWN: '1' } : {}),
       INIT_CWD: initCwd,
       HOME: home,
@@ -155,7 +171,8 @@ describe('pnpm progress directive 先判类', { timeout: 0 }, () => {
   it('不带 --kind：打出完整三路分拣表，每类都点到、判不准的出口在内', () => {
     const r = run(['directive', '问题里的原话']);
     for (const kind of ['once', 'task', 'discuss', 'ai', 'product', 'ops']) expect(r.stderr).toContain(kind);
-    expect(r.stderr).toContain('docs/directives/');
+    expect(r.stderr).toContain('驾驶舱库');
+    expect(r.stderr).not.toContain('记进 fleet-dao 的 docs/directives/');
     expect(r.stderr).toContain('本机 AI 记忆');
     expect(r.stderr).toContain('生效中的临时调整');
     expect(r.stderr).toContain('决定 0013 第 4 条');
@@ -255,11 +272,128 @@ describe('pnpm progress directive 先判类', { timeout: 0 }, () => {
     }
   });
 
-  it('--kind ai 照旧走记录流程：过了判类，到取原话那步（prompt-log 是空的，要手填）才停', () => {
-    const r = run(['directive', '--kind', 'ai']);
+  it('--kind ai 过了判类、给了意思，到取原话那步（prompt-log 是空的，要手填）才停', () => {
+    const r = run(['directive', '--kind', 'ai', '--meaning', '会话先读规矩', '--owner', '无主']);
     expect(r.status).toBe(1);
     expect(r.stderr).not.toContain(JUDGE);
-    expect(r.stderr).toContain('没记');
+    expect(r.stderr).toContain('prompt-log');
+    expect(r.stderr).toContain('手填');
     expect(r.stdout).not.toContain('没写文件');
+  });
+
+  it('--kind ai 不给 --meaning：退出 1，说明原话不进公开仓，一次 gh 和账本都没碰', () => {
+    const r = run([
+      'directive',
+      '--kind',
+      'ai',
+      '原话-secret',
+      '--at',
+      '2026-10-30 10:00',
+      '--owner',
+      '无主',
+    ]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('--meaning');
+    expect(r.calls).toEqual([]);
+    expect(r.posts).toEqual([]);
+  });
+});
+
+describe('pnpm progress directive 记进账本（#3764）', { timeout: 0 }, () => {
+  const dirsBefore = () => readdirSync('docs/directives', { recursive: true }).sort();
+
+  it('记一条：只 POST 一条 kind=directive 的账本行；不开 PR、不写 docs/directives/、不推分支', () => {
+    const before = dirsBefore();
+    const r = run(
+      [
+        'directive',
+        '--kind',
+        'ai',
+        '原话-secret-quote',
+        '--at',
+        '2026-10-30 10:00',
+        '--owner',
+        '无主',
+        '--meaning',
+        '会话先读规矩再动手',
+        '--issue',
+        '777',
+      ],
+      { openIssues: [777] },
+    );
+    expect({ status: r.status, stderr: r.stderr }).toEqual({ status: 0, stderr: '' });
+    expect(r.posts).toHaveLength(1);
+    expect(r.posts[0]).toMatchObject({
+      kind: 'directive',
+      repo: 'o/r',
+      issue: 777,
+      text: '原话-secret-quote',
+      meaning: '会话先读规矩再动手',
+      category: 'ai',
+      owner: '无主',
+      spokenAt: '2026-10-30 10:00 +0800',
+    });
+    // gh 只被用来查挂的单：没有 pr、没有 create
+    expect(r.calls.some((c) => c.includes('"pr"') || c.includes('"create"'))).toBe(false);
+    expect(r.stdout).toContain('没写文件、没开 PR');
+    expect(dirsBefore()).toEqual(before);
+  });
+
+  it('账本写不成：退出 2，说没记成，同样不写文件、不开 PR', () => {
+    const before = dirsBefore();
+    const r = run(
+      [
+        'directive',
+        '--kind',
+        'ai',
+        'x-quote',
+        '--at',
+        '2026-10-30 10:00',
+        '--owner',
+        '无主',
+        '--meaning',
+        '意思',
+        '--issue',
+        '777',
+      ],
+      { ledgerDown: true, openIssues: [777] },
+    );
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('往法国账本记引导没成');
+    expect(r.calls.some((c) => c.includes('"pr"'))).toBe(false);
+    expect(dirsBefore()).toEqual(before);
+  });
+
+  it('read --pending 从账本读到待办引导：挂的单开着才列，列出编号、原话、主人、单；挂的单关了不列', () => {
+    const row = {
+      id: 321,
+      at: new Date().toISOString(),
+      actorKind: 'agent',
+      actorId: 'node:x',
+      action: 'directive',
+      target: 'issue:o/r#777',
+      after: {
+        text: '账本里的原话',
+        meaning: '账本里的意思',
+        category: 'ai',
+        owner: 'dir-a',
+        spokenAt: '2026-10-30 10:00 +0800',
+      },
+      ok: true,
+    };
+    const open = run(['read', '--pending'], { ledger: [row], openIssues: [777] });
+    expect({ status: open.status, stderr: open.stderr }).toEqual({ status: 0, stderr: '' });
+    const line = open.stdout.split('\n').find((l) => l.startsWith('321\t'));
+    expect(line?.split('\t')).toEqual([
+      '321',
+      '【创始人引导·待处理】2026-10-30 10:00 +0800',
+      '账本里的原话',
+      'dir-a',
+      row.at,
+      '#777',
+    ]);
+    const closed = run(['read', '--pending'], { ledger: [row], openIssues: [] });
+    expect(closed.status).toBe(0);
+    expect(closed.stdout).not.toContain('321\t');
   });
 });

@@ -20,6 +20,8 @@ export const LEDGER_PAGE = 500;
 export const LEDGER_PAGES_MAX = 500;
 export const HANDOFF_ACTION = 'decision.handoff';
 export const NOTE_ACTION = 'progress.note';
+/** 创始人引导（pnpm progress directive 写的，#3764，决定 0123）：target 是 issue:<owner/name>#<挂的单> */
+export const DIRECTIVE_ACTION = 'directive';
 
 export interface LedgerEvent {
   id: number;
@@ -138,6 +140,26 @@ export interface LedgerHandoff {
   text: string;
 }
 
+/** 账本里一条创始人引导（action directive）。办没办完不在账本里：看挂的 issue 开着没有。 */
+export interface LedgerDirective {
+  /** 账本行 id */
+  id: number;
+  /** 行落库时刻（ISO） */
+  at: string;
+  /** 挂的单 */
+  issue: number;
+  /** 原话（对外仓这里是意思）；只在本机输出，不进仓内文件 */
+  text: string;
+  /** 不带原话的意思 */
+  meaning: string;
+  category: string;
+  owner: string;
+  /** 他说话的时刻（北京时间 YYYY-MM-DD HH:mm +0800）；老行没有给空 */
+  spokenAt: string;
+}
+/** 状态文件里最多留多少条引导（只留尾部，防文件无限长；周报不靠它，读整本账） */
+export const DIRECTIVES_KEEP = 2000;
+
 /** 认领标记：progress.note 的正文以「已迁 <行id>」或「已处理 <行id>」开头 */
 const HANDLED_NOTE = /^\s*已(?:迁|处理)\s+(\d+)/;
 
@@ -154,6 +176,8 @@ export interface InboxState {
   cursor: number;
   pending: LedgerHandoff[];
   cleared: number[];
+  /** 账本里的创始人引导（#3764）；老状态文件没有这个字段，当空 */
+  directives?: LedgerDirective[];
 }
 export const CLEARED_KEEP = 200;
 export const inboxStatePath = (home = homedir()): string => join(home, '.fleet-dao', 'ledger-inbox.json');
@@ -168,6 +192,21 @@ const isHandoff = (v: unknown): v is LedgerHandoff => {
     typeof o.text === 'string'
   );
 };
+const isDirective = (v: unknown): v is LedgerDirective => {
+  const o = v as Record<string, unknown> | null;
+  return (
+    typeof o === 'object' &&
+    o !== null &&
+    typeof o.id === 'number' &&
+    typeof o.at === 'string' &&
+    typeof o.issue === 'number' &&
+    typeof o.text === 'string' &&
+    typeof o.meaning === 'string' &&
+    typeof o.category === 'string' &&
+    typeof o.owner === 'string' &&
+    typeof o.spokenAt === 'string'
+  );
+};
 const isState = (v: unknown): v is InboxState => {
   const o = v as Record<string, unknown> | null;
   return (
@@ -179,9 +218,31 @@ const isState = (v: unknown): v is InboxState => {
     Array.isArray(o.pending) &&
     o.pending.every(isHandoff) &&
     Array.isArray(o.cleared) &&
-    o.cleared.every((n) => typeof n === 'number')
+    o.cleared.every((n) => typeof n === 'number') &&
+    (o.directives === undefined || (Array.isArray(o.directives) && o.directives.every(isDirective)))
   );
 };
+
+/** 账本行 → 引导；挂的单从 target（issue:<repo>#<号>）读，认不出的不是这个仓的引导，给 null */
+export function directiveOfEvent(r: LedgerEvent, repo: string): LedgerDirective | null {
+  if (!r.ok || r.action !== DIRECTIVE_ACTION) return null;
+  const m = /^issue:(.+)#([1-9]\d*)$/.exec(r.target);
+  if (!m || m[1]?.toLowerCase() !== repo.toLowerCase()) return null;
+  const a = (r.after ?? {}) as Record<string, unknown>;
+  const str = (k: string) => (typeof a[k] === 'string' ? (a[k] as string) : '');
+  if (!Number.isFinite(Date.parse(r.at)))
+    throw new ProgressUnchecked(`法国账本行 ${r.id} 的时间认不出（${r.at}）。`);
+  return {
+    id: r.id,
+    at: r.at,
+    issue: Number(m[2]),
+    text: str('text'),
+    meaning: str('meaning'),
+    category: str('category'),
+    owner: str('owner') || '无主',
+    spokenAt: str('spokenAt'),
+  };
+}
 
 /** 读状态文件：不存在 → 空（新机器）；解析不了或形状不对 → 空并说一行（当不存在重建）。 */
 function loadAll(file: string, warn: (l: string) => void): Record<string, unknown> {
@@ -229,6 +290,19 @@ export interface InboxDeps {
  * 读不到抛 ProgressUnchecked，状态文件原样不动。
  */
 export async function ledgerInboxPending(repo: string, deps: InboxDeps): Promise<LedgerHandoff[]> {
+  return (await ledgerSync(repo, deps)).handoffs;
+}
+
+/** 账本里这个仓记过的全部创始人引导（旧到新），同一次增量读带出来；办没办完由调用方看挂的单。 */
+export async function ledgerDirectives(repo: string, deps: InboxDeps): Promise<LedgerDirective[]> {
+  return (await ledgerSync(repo, deps)).directives;
+}
+
+/** 一趟增量读同时更新收件箱和引导两份（共用 cursor 和状态文件）。 */
+export async function ledgerSync(
+  repo: string,
+  deps: InboxDeps,
+): Promise<{ handoffs: LedgerHandoff[]; directives: LedgerDirective[] }> {
   const warn = deps.warn ?? ((l: string) => console.error(l));
   const now = (deps.now ?? (() => new Date()))();
   const cutoff = now.getTime() - INBOX_DAYS * 86_400_000;
@@ -236,14 +310,25 @@ export async function ledgerInboxPending(repo: string, deps: InboxDeps): Promise
   const all = deps.stateFile ? loadAll(deps.stateFile, warn) : {};
   const saved = all[repo];
   const state: InboxState = isState(saved)
-    ? { cursor: saved.cursor, pending: [...saved.pending], cleared: [...saved.cleared] }
-    : { cursor: 0, pending: [], cleared: [] };
+    ? {
+        cursor: saved.cursor,
+        pending: [...saved.pending],
+        cleared: [...saved.cleared],
+        directives: [...(saved.directives ?? [])],
+      }
+    : { cursor: 0, pending: [], cleared: [], directives: [] };
+  const directives = new Map((state.directives ?? []).map((d) => [d.id, d]));
   if (saved !== undefined && !isState(saved))
     warn(`收件箱状态文件里 ${repo} 那段认不出，丢掉并从头读账本重建。`);
   const events = await readAllLedgerEvents(deps.get, state.cursor);
   const byId = new Map(state.pending.map((h) => [h.id, h]));
   const cleared = new Set(state.cleared);
   for (const r of events) {
+    const dir = directiveOfEvent(r, repo);
+    if (dir) {
+      directives.set(dir.id, dir);
+      continue;
+    }
     if (!r.ok || r.target !== target) continue;
     if (r.action === NOTE_ACTION) {
       const m = HANDLED_NOTE.exec(textOfAfter(r.after));
@@ -259,15 +344,17 @@ export async function ledgerInboxPending(repo: string, deps: InboxDeps): Promise
   }
   const pending = [...byId.values()].filter((h) => Date.parse(h.at) >= cutoff).sort((a, b) => a.id - b.id);
   const last = events.at(-1);
+  const allDirectives = [...directives.values()].sort((a, b) => a.id - b.id);
   if (deps.stateFile) {
     const next: InboxState = {
       cursor: last?.id ?? state.cursor,
       pending,
       cleared: [...cleared].slice(-CLEARED_KEEP),
+      directives: allDirectives.slice(-DIRECTIVES_KEEP),
     };
     saveAll(deps.stateFile, { ...all, [repo]: next }, warn);
   }
-  return pending;
+  return { handoffs: pending, directives: allDirectives };
 }
 
 /**
