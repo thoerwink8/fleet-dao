@@ -3,6 +3,8 @@
 // - 外面来的引导的收件箱：驾驶舱「要你拍」拍完（packages/api 的 decision-handoff.ts，法国上没有仓的写权限）仍往这里贴
 //   【创始人引导·待处理】评论。开会话钩子把它和仓里的待处理引导一起列；pnpm progress directive --kind <类> --from-inbox <评论号>：ai 把它搬进仓（编号沿用评论号、挂一张单），其余类别不写文件、评论改成【创始人引导·已处理】写明去处（决定 0111），
 //   评论改成【创始人引导·已迁】并写上搬到哪。旧的引导（10-14 以前的 94 条）已整批搬进仓，这里留作只读归档。
+// 【#3741 片 2c】收件箱的读和认领已改走法国账本（./ledger-read.ts、bin/progress.ts）；下面 inboxPending、readInboxComment、
+// markMigrated、markHandled 是旧 #1055 评论的读写，双写期内保留不用，等真机验过再删。
 // 读的上限：不再从第一页读全量（原来读满 2000 条就报错，约 11-01 会撞）。收件箱只看最近 INBOX_DAYS 天里改过的评论
 // （GitHub 的 since 按更新时间筛；待处理的收件超过这么久没人动，开会话钩子早在 24 小时时就交给创始人拍了）；进度流水只读最后一页。
 // 全部经 gh：读不到、认不出、写完回读对不上，一律明确报错（ProgressUnchecked，退出码 2）；参数不对拒绝（ProgressRefused，退出码 1）。
@@ -66,7 +68,7 @@ export function kindDestination(kind: Exclude<DirectiveKind, 'ai'>, external: bo
 export const PROGRESS_USAGE =
   '用法：pnpm progress quotes:flush｜pnpm progress note "<一句话进度>"｜pnpm progress directive --kind <ai|product|task|once|ops|discuss> ["<创始人原话>" --at "<时间>"] [--meaning "<可公开的意思>"] [--stdin] [--owner <会话目录名|无主>] [--issue <单号>]' +
   '（不给原话就从 prompt-log 取本会话他最近一句；不给 --issue 就顺手开一张单，引导办没办完看这张单开着还是关了）｜' +
-  'pnpm progress directive --kind <类> --from-inbox <收件箱评论号> [--issue <单号>]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
+  'pnpm progress directive --kind <类> --from-inbox <账本行编号，见 progress read --pending 第一列> [--issue <单号>]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
 
 /** 参数不对、评论不是该办的那种：拒绝。入口退出码 1。 */
 export class ProgressRefused extends Error {

@@ -276,7 +276,7 @@ describe('同步那半只读本地', SLOW, () => {
       spawnBackground: () => ({ ok: true }),
       progress: () => ({ status: 1, stdout: '', stderr: 'git 找待处理的引导报错：boom' }),
     });
-    expect(lines.join('\n')).toMatch(/创始人引导（进度单 #1055）没查成/);
+    expect(lines.join('\n')).toMatch(/创始人引导（法国账本收件箱）没查成/);
   });
 
   it('不在 git 仓里也一样：同步、整池暂停照后台的结果说', () => {

@@ -691,7 +691,7 @@ export function directiveFromComment(
     issue,
     at: at.text,
     owner: c.owner,
-    source: `#1055 评论 ${c.id}`,
+    source: `法国账本行 ${c.id}`,
     text: c.text,
     log: [],
     path: directivePath(id, at.date),

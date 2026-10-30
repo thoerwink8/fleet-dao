@@ -1,15 +1,15 @@
 import { progressSessionId } from '../progress-session.ts';
 // 进度和创始人引导的入口：pnpm progress note / progress directive / progress read。
-// 引导记在仓里 docs/directives/（../directives.ts），进度流水和驾驶舱来的引导收件箱在置顶单 #1055（../progress.ts）。
+// 引导记在仓里 docs/directives/（../directives.ts），进度流水在置顶单 #1055（../progress.ts）；驾驶舱来的引导收件箱读法国账本（../ledger-read.ts，#3741 片 2c）。
 // 引导办没办完看它挂的单（文件里「单：#N」）：开着就是没办完、关了就是办完；不再有认领、标已处理（#2727）。
 // 退出码 0 = 成了；1 = 拒绝（参数不对、挂的单不是开着的、取不到原话要手填）；2 = 没查成、没写成（含 gh 读不到单）。
 // `read --pending` 给开会话钩子用：只列没办完的引导，一条一行
 // （编号<TAB>第一行<TAB>原话压成一行<TAB>主人<TAB>记下的时刻 ISO<TAB>挂的单号，没挂单的空）；
-// 读的是本地 origin/main 加 gh 读开着的单，加 #1055 收件箱最近 30 天；没有就输出空、退出码 0。
+// 读的是本地 origin/main 加 gh 读开着的单，加法国账本里 decision.handoff 最近 30 天没被认领的（第一列是账本行编号）；没有就输出空、退出码 0；账本读不到退出码 2。
 // 主人＝本会话的血缘：CLAUDE_CODE_SESSION_ID 所属的 Mirasim 会话目录名（agents/hooks/founder-inbox.mjs 的 lineageOf）。
-// `directive --from-inbox <评论号>`：把驾驶舱答案收件箱（#1055）里的一条搬进仓（挂单同 directive），原评论改成已迁。
+// `directive --from-inbox <账本行编号>`：把驾驶舱答案收件箱（账本）里的一条搬进仓（挂单同 directive），再往账本记 progress.note「已迁 <编号>」；旧的 10 位评论号明确拒绝。
 // `directive` 和 `--from-inbox` 必须带 `--kind ai|product|task|once|ops|discuss`（决定 0111、0117），判类放在读 prompt-log、fetch、调 gh 之前；
-// 非 ai 不写文件、退出 0 并说去处，收件箱的那条评论改成已处理。
+// 非 ai 不写文件、退出 0 并说去处，往账本记「已处理 <编号>」。
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
@@ -36,24 +36,28 @@ import {
 import { gitRunner } from '../git-runner.ts';
 import { resolveRepo } from '../github-api.ts';
 import { ghRunner, issueNew } from '../issue-new.ts';
-import { noteIdempotencyKey, progressNoteWithLedger } from '../ledger-note.ts';
+import { noteIdempotencyKey, progressNoteWithLedger, writeLedgerNote } from '../ledger-note.ts';
+import {
+  type LedgerHandoff,
+  ledgerInboxPending,
+  liveLedgerEventsGet,
+  parseInboxId,
+  readLedgerHandoff,
+} from '../ledger-read.ts';
 import { flushPrivateQuotes, privatizeDirective, publicMeaning } from '../private-quotes.ts';
 import {
   type DirectiveKind,
-  inboxPending,
   isDirectiveKind,
   KIND_JUDGE,
   kindDestination,
-  markHandled,
-  markMigrated,
+  NO_OWNER,
   PENDING_TAG,
   PROGRESS_ISSUE,
   PROGRESS_USAGE,
   ProgressRefused,
   ProgressUnchecked,
-  readInboxComment,
   recentComments,
-  textOf,
+  stamp,
 } from '../progress.ts';
 import { franceSshHost, sshFleetApi } from '../project-world.ts';
 
@@ -135,14 +139,46 @@ async function privateRecord<T extends { text: string; atDate: Date; owner: stri
   return saved.directive;
 }
 
-/** 收件箱里的一条搬进仓（挂 issue 这张单，没给就开一张），再把原评论改成「已迁」 */
+/** 本仓 owner/name；认不出就是没查成，不退回别的仓 */
+function ledgerRepo(): string {
+  const repo = resolveRepo(process.env, root).repo;
+  if (!repo) throw new ProgressUnchecked('认不出本仓 owner/name，没法读法国账本里的收件箱。');
+  return repo;
+}
+const ledgerGet = liveLedgerEventsGet();
+
+/** 收件箱里的一条（账本行）；编号是账本行 id */
+async function inboxRow(id: number): Promise<LedgerHandoff> {
+  return readLedgerHandoff(id, ledgerRepo(), { get: ledgerGet });
+}
+
+/** 往账本记一条 progress.note 认领这一行；写不成就是没做完（不然这条会一直待处理、被重复搬），报 ProgressUnchecked。 */
+async function markInbox(id: number, word: '已迁' | '已处理', where: string): Promise<void> {
+  const r = await writeLedgerNote(
+    { repo: ledgerRepo(), warn: () => {} },
+    {
+      kind: 'progress.note',
+      text: `${word} ${id}：${where}`,
+      idempotencyKey: `inbox-${word === '已迁' ? 'migrated' : 'handled'}:${id}`,
+    },
+  );
+  if (!r.ok)
+    throw new ProgressUnchecked(
+      `往法国账本记「${word} ${id}」没成（${r.why}）：这条还会显示为待处理，修好后重跑认领。`,
+    );
+}
+
+/** 收件箱里的一条搬进仓（挂 issue 这张单，没给就开一张），再往账本记「已迁 <行id>」 */
 async function importFromInbox(
   id: number,
   issue: number | undefined,
   meaning: string | undefined,
 ): Promise<{ url: string; issue: number }> {
-  const c = await readInboxComment(id, { gh });
-  const original = directiveFromComment({ ...c, text: textOf(c) }, issue ?? 1);
+  const c = await inboxRow(id);
+  const original = directiveFromComment(
+    { id: c.id, head: PENDING_TAG + stamp(new Date(c.at)), owner: NO_OWNER, createdAt: c.at, text: c.text },
+    issue ?? 1,
+  );
   const safe = await privateRecord(
     { ...original, atDate: new Date(original.at.replace(' ', 'T').replace(' +0800', ':00+08:00')) },
     meaning,
@@ -154,7 +190,7 @@ async function importFromInbox(
       directiveIssueDraft({
         text: safe.text,
         at: safe.at,
-        source: `#${PROGRESS_ISSUE} 评论 ${id}`,
+        source: `账本行 ${id}`,
       }),
     );
   const d = { ...safe, issue: n };
@@ -162,14 +198,10 @@ async function importFromInbox(
     id: d.id,
     path: d.path,
     content: formatDirective(d),
-    title: `搬创始人引导 ${d.id} 进仓（从 #${PROGRESS_ISSUE}，挂单 #${n}）`,
-    did: `搬到 ${d.path}，挂单 #${n}，从 #${PROGRESS_ISSUE} 收件箱`,
+    title: `搬创始人引导 ${d.id} 进仓（从法国账本，挂单 #${n}）`,
+    did: `搬到 ${d.path}，挂单 #${n}，从法国账本收件箱`,
   });
-  await markMigrated(
-    external ? { ...c, head: PENDING_TAG + safe.at, body: PENDING_TAG + safe.at + '\n\n' + safe.text } : c,
-    `${d.path}（${url}）`,
-    { gh },
-  );
+  await markInbox(id, '已迁', `${d.path}（${url}）`);
   return { url, issue: n };
 }
 
@@ -177,6 +209,8 @@ async function importFromInbox(
 async function pendingRows(): Promise<
   Array<{ id: string; head: string; text: string; owner: string; created: string; issue: string }>
 > {
+  // 账本先读：读不到（退出码 2）就不往下，不拿仓里那一半冒充收件箱是空的
+  const inbox = await ledgerInboxPending(ledgerRepo(), { get: ledgerGet });
   const repo = await listPending(git, gh, MAIN);
   const known = new Set((await listPaths(git, MAIN)).map((p) => p.replace(/^.*\//, '').replace(/\.md$/, '')));
   const rows = repo.map((d) => ({
@@ -190,14 +224,14 @@ async function pendingRows(): Promise<
     })(),
     issue: d.issue === undefined ? '' : `#${d.issue}`,
   }));
-  for (const c of await inboxPending({ gh })) {
+  for (const c of inbox) {
     if (known.has(String(c.id))) continue;
     rows.push({
       id: String(c.id),
-      head: c.head,
-      text: textOf(c),
-      owner: c.owner,
-      created: c.createdAt,
+      head: `${PENDING_TAG}${stamp(new Date(c.at))}`,
+      text: c.text,
+      owner: NO_OWNER,
+      created: c.at,
       issue: '',
     });
   }
@@ -246,11 +280,10 @@ try {
     const where = kindDestination(kind, external);
     const fromInbox = values['from-inbox'];
     if (fromInbox !== undefined) {
-      const cid = Number(fromInbox);
-      if (!Number.isInteger(cid) || cid <= 0)
-        throw new ProgressRefused(`--from-inbox ${fromInbox} 不对，要收件箱评论号。`);
-      await markHandled(await readInboxComment(cid, { gh }), where, { gh });
-      console.log(`评论 ${cid} 判成 ${kind}，已标成已处理，没写文件。记在：${where}。`);
+      const cid = parseInboxId(fromInbox);
+      await inboxRow(cid);
+      await markInbox(cid, '已处理', `记在 ${where}（判成不进创始人引导，决定 0111）`);
+      console.log(`账本行 ${cid} 判成 ${kind}，已标成已处理，没写文件。记在：${where}。`);
     } else {
       console.log(`判成 ${kind}，不进创始人引导，没写文件。记在：${where}。`);
     }
@@ -272,11 +305,9 @@ try {
     );
     console.log(`贴到 #${PROGRESS_ISSUE} 了：${c.url}`);
   } else if (cmd === 'directive' && values['from-inbox'] !== undefined) {
-    const cid = Number(values['from-inbox']);
-    if (!Number.isInteger(cid) || cid <= 0)
-      throw new ProgressRefused(`--from-inbox ${values['from-inbox']} 不对，要收件箱评论号。`);
+    const cid = parseInboxId(values['from-inbox']);
     const r = await importFromInbox(cid, issueArg(), values.meaning);
-    console.log(`搬进仓了（评论 ${cid}，挂单 #${r.issue}），PR 已挂自动合并：${r.url}\n${KIND_JUDGE}`);
+    console.log(`搬进仓了（账本行 ${cid}，挂单 #${r.issue}），PR 已挂自动合并：${r.url}\n${KIND_JUDGE}`);
   } else if (cmd === 'directive') {
     let text = positionals.join(' ');
     if (values.stdin) {
@@ -327,7 +358,7 @@ try {
       console.log(`#${PROGRESS_ISSUE} 最近 ${recent.length} 条（旧到新）：`);
       for (const c of recent) console.log(`\n[${c.id}] ${c.body.trim()}`);
       console.log(
-        `\n没办完的创始人引导 ${rows.length} 条（docs/directives 挂的单还开着，和 #${PROGRESS_ISSUE} 收件箱）：`,
+        `\n没办完的创始人引导 ${rows.length} 条（docs/directives 挂的单还开着，和法国账本收件箱）：`,
       );
       for (const r of rows)
         console.log(

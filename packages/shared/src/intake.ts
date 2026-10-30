@@ -39,7 +39,14 @@ export const INTAKE_KINDS = ['需求', '缺陷', '杂项'] as const;
 export const INTAKE_DOMAINS = ['engine', 'api', 'mirasim'] as const;
 export const INTAKE_NATURES = ['bug', 'perf', 'process'] as const;
 export const INTAKE_MILESTONES = ['当前', '未排期'] as const;
-export const INTAKE_SOURCE_KINDS = ['local-session', 'harness-commander', 'harness-chat', 'mirasim'] as const;
+export const INTAKE_SOURCE_KINDS = [
+  'local-session',
+  'harness-commander',
+  'harness-chat',
+  'mirasim',
+  'engine',
+  'api',
+] as const;
 
 export const INTAKE_REF_MAX = 200;
 /** 幂等键：可见字符、不含空白，会写进单子正文的来源行，所以字符集收窄。 */

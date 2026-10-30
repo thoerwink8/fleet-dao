@@ -26,6 +26,18 @@ const COMMENT = {
   body: '【创始人引导·待处理】2026-10-22 02:26\n\n原话：字节是怎么做的，我们就怎么做吧',
 };
 
+/** 账本里一条待处理的 decision.handoff（行 id 123；时间用现在，免得过 30 天） */
+const HANDOFF_ROW = {
+  id: 123,
+  at: new Date().toISOString(),
+  actorKind: 'api',
+  actorId: 'api:decision-handoff',
+  action: 'decision.handoff',
+  target: 'progress:o/r',
+  after: { text: '创始人已选：字节是怎么做的，我们就怎么做吧（通知 n1）' },
+  ok: true,
+};
+
 beforeAll(() => {
   mkdirSync(bin, { recursive: true });
   const preload = join(root, 'fake-gh.cjs');
@@ -33,6 +45,22 @@ beforeAll(() => {
     preload,
     [
       "const fs = require('node:fs'), path = require('node:path');",
+      // 假法国账本（#3741 片 2c）：GET events 回 FAKE_LEDGER 里的行；POST notes 记进 FAKE_LEDGER_LOG
+      'if (process.env.FAKE_LEDGER) {',
+      '  globalThis.fetch = async (url, init) => {',
+      "    if (process.env.FAKE_LEDGER_DOWN) throw new Error('connect ECONNREFUSED');",
+      "    if (String(url).includes('/api/nodes/events')) {",
+      "      const after = Number(new URL(String(url)).searchParams.get('after'));",
+      '      const events = JSON.parse(process.env.FAKE_LEDGER).filter((e) => e.id > after);',
+      '      return new Response(JSON.stringify({ events, next: events.length ? events[events.length - 1].id : after }), { status: 200 });',
+      '    }',
+      "    if (String(url).includes('/api/nodes/notes')) {",
+      "      fs.appendFileSync(process.env.FAKE_LEDGER_LOG, init.body + '\\n');",
+      '      return new Response(JSON.stringify({ id: 999, created: true }), { status: 200 });',
+      '    }',
+      "    return new Response('not found', { status: 404 });",
+      '  };',
+      '}',
       "const isGh = /^gh(\\.exe)?$/.test(path.basename(process.execPath)) || process.env.FAKE_GH_WRAP === '1';",
       'if (isGh) {',
       '  const args = process.argv.slice(1).filter((a) => !/fake-gh|^[A-Za-z]:\\\\.*gh\\.exe$/.test(a));',
@@ -60,14 +88,21 @@ beforeAll(() => {
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 /** 跑一次 bin。external=true 时调用目录是个带别人远端的空仓（对外仓）。 */
-function run(args: string[], opts: { external?: boolean } = {}) {
+function run(args: string[], opts: { external?: boolean; ledger?: unknown[]; ledgerDown?: boolean } = {}) {
   const dir = mkdtempSync(join(root, 'run-'));
   const log = join(dir, 'gh.log');
   const home = join(dir, 'home');
   const promptLog = join(dir, 'prompt-log');
+  const ledgerLog = join(dir, 'ledger-posts.log');
   mkdirSync(home);
   mkdirSync(promptLog);
+  mkdirSync(join(home, '.fleet-dao', 'local-sessions'), { recursive: true });
+  writeFileSync(
+    join(home, '.fleet-dao', 'local-sessions', 'config.json'),
+    JSON.stringify({ url: 'http://fr.invalid', token: 'T' }),
+  );
   writeFileSync(log, '');
+  writeFileSync(ledgerLog, '');
   let initCwd = process.cwd();
   if (opts.external) {
     initCwd = join(dir, 'ext');
@@ -84,6 +119,10 @@ function run(args: string[], opts: { external?: boolean } = {}) {
       FAKE_GH_STATE: join(dir, 'state.txt'),
       FAKE_GH_BODY: COMMENT.body,
       FAKE_GH_URL: COMMENT.html_url,
+      GH_REPO: 'o/r',
+      FAKE_LEDGER: JSON.stringify(opts.ledger ?? [HANDOFF_ROW]),
+      FAKE_LEDGER_LOG: ledgerLog,
+      ...(opts.ledgerDown ? { FAKE_LEDGER_DOWN: '1' } : {}),
       INIT_CWD: initCwd,
       HOME: home,
       USERPROFILE: home,
@@ -92,7 +131,11 @@ function run(args: string[], opts: { external?: boolean } = {}) {
   });
   const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean);
   const state = join(dir, 'state.txt');
-  return { ...r, calls, patched: existsSync(state) ? readFileSync(state, 'utf8') : null };
+  const posts = readFileSync(ledgerLog, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as { kind: string; text: string; repo: string });
+  return { ...r, calls, posts, patched: existsSync(state) ? readFileSync(state, 'utf8') : null };
 }
 
 describe('pnpm progress directive 先判类', { timeout: 0 }, () => {
@@ -119,7 +162,7 @@ describe('pnpm progress directive 先判类', { timeout: 0 }, () => {
     expect(r.stderr).toContain('判不准按产品');
   });
 
-  it('--kind discuss：指到起稿命令，不写文件、退出 0；--from-inbox 评论改成已处理', () => {
+  it('--kind discuss：指到起稿命令，不写文件、退出 0；--from-inbox 往账本记已处理', () => {
     const r = run(['directive', '--kind', 'discuss', '一次提了好几点']);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('pnpm discuss:new');
@@ -127,8 +170,10 @@ describe('pnpm progress directive 先判类', { timeout: 0 }, () => {
     expect(r.calls).toEqual([]);
     const inbox = run(['directive', '--kind', 'discuss', '--from-inbox', '123']);
     expect(inbox.status).toBe(0);
-    expect(inbox.patched).toMatch(/^【创始人引导·已处理】/);
-    expect(inbox.patched).toContain('pnpm discuss:new');
+    expect(inbox.patched).toBeNull();
+    expect(inbox.posts).toHaveLength(1);
+    expect(inbox.posts[0]?.text).toMatch(/^已处理 123：/);
+    expect(inbox.posts[0]?.text).toContain('pnpm discuss:new');
   });
 
   it('--kind 的值认不出：退出 1，打出判法，一次 gh 都没调', () => {
@@ -164,15 +209,50 @@ describe('pnpm progress directive 先判类', { timeout: 0 }, () => {
     expect(r.calls).toEqual([]);
   });
 
-  it('--from-inbox 带 product：评论改写成已处理并写明去处，退出 0', () => {
+  it('--from-inbox 带 product：往账本记已处理并写明去处，退出 0，不再改 #1055 评论', () => {
     const r = run(['directive', '--kind', 'product', '--from-inbox', '123']);
     expect(r.status).toBe(0);
-    expect(r.calls.some((c) => c.includes('PATCH'))).toBe(true);
-    expect(r.patched).not.toBeNull();
-    expect(r.patched).toMatch(/^【创始人引导·已处理】/);
-    expect(r.patched).toContain('记在 ');
-    expect(r.patched).toContain('设计文档');
+    expect(r.calls.some((c) => c.includes('PATCH'))).toBe(false);
+    expect(r.posts).toHaveLength(1);
+    expect(r.posts[0]).toMatchObject({ kind: 'progress.note', repo: 'o/r' });
+    expect(r.posts[0]?.text).toMatch(/^已处理 123：记在 /);
+    expect(r.posts[0]?.text).toContain('设计文档');
     expect(r.stdout).toContain('已标成已处理');
+  });
+
+  it('--from-inbox 旧的 10 位评论号：退出 1，说明改读账本和新用法，账本一次没碰', () => {
+    const r = run(['directive', '--kind', 'product', '--from-inbox', '4398046511']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('旧的 #1055 评论号');
+    expect(r.stderr).toContain('progress read --pending');
+    expect(r.posts).toEqual([]);
+  });
+
+  it('--from-inbox 的编号不在待处理里（已迁过）：退出 1，不再记', () => {
+    const migrated = {
+      ...HANDOFF_ROW,
+      id: 124,
+      action: 'progress.note',
+      after: { text: '已迁 123：docs/directives/x.md' },
+    };
+    const r = run(['directive', '--kind', 'product', '--from-inbox', '123'], {
+      ledger: [HANDOFF_ROW, migrated],
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('不在 o/r 的待处理引导里');
+    expect(r.posts).toEqual([]);
+  });
+
+  it('【故意造出的失败】法国账本读不到：--from-inbox 和 read --pending 都退出 2，不当成没有', () => {
+    for (const args of [
+      ['directive', '--kind', 'product', '--from-inbox', '123'],
+      ['read', '--pending'],
+    ]) {
+      const r = run(args, { ledgerDown: true });
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('读法国账本没成');
+      expect(r.stdout).toBe('');
+    }
   });
 
   it('--kind ai 照旧走记录流程：过了判类，到取原话那步（prompt-log 是空的，要手填）才停', () => {
