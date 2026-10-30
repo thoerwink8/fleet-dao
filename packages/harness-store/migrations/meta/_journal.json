@@ -8,6 +8,13 @@
       "when": 1793391542895,
       "tag": "0000_heavy_captain_midlands",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793392003534,
+      "tag": "0001_thick_iron_lad",
+      "breakpoints": true
     }
   ]
 }

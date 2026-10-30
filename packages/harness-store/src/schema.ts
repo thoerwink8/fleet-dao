@@ -86,6 +86,58 @@ export const projectionCheckpoints = fleet2.table('projection_checkpoints', {
   updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
 });
 
+/**
+ * 调度器的活（#3774，决定 0124 第 3 条：不用 Temporal，自建）。一行一件到点要做的事：定时、重试、续轮都是它。
+ * state：pending 等到点；claimed 有人领着（续租靠心跳）；done 做完；cancelled 被取消（领着的人下次心跳就知道）；dead 重试到顶。
+ * deadline_at 是绝对截止时刻：子活继承父活的，自己只能更早；过了截止还没做完的不再领、直接 dead。
+ */
+export const jobs = fleet2.table(
+  'jobs',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    queue: text('queue').notNull(),
+    key: text('key').notNull(),
+    /** 父活的 key：取消父活时一路取消下去；截止时刻不晚于父活。 */
+    parentKey: text('parent_key'),
+    payload: jsonb('payload').notNull(),
+    state: text('state').notNull().default('pending'),
+    dueAt: timestamp('due_at', tz).notNull().defaultNow(),
+    deadlineAt: timestamp('deadline_at', tz),
+    attempts: integer('attempts').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(5),
+    leaseUntil: timestamp('lease_until', tz),
+    claimToken: text('claim_token'),
+    claimedAt: timestamp('claimed_at', tz),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('jobs_key_unique').on(t.key),
+    check('jobs_state_known', sql`${t.state} in ('pending', 'claimed', 'done', 'cancelled', 'dead')`),
+    check(
+      'jobs_claim_fields',
+      sql`(${t.state} = 'claimed') = (${t.leaseUntil} is not null and ${t.claimToken} is not null)`,
+    ),
+    check('jobs_attempts_range', sql`${t.attempts} >= 0 and ${t.maxAttempts} >= 1`),
+    index('jobs_due_idx').on(t.queue, t.dueAt).where(sql`${t.state} = 'pending'`),
+    index('jobs_lease_idx').on(t.leaseUntil).where(sql`${t.state} = 'claimed'`),
+    index('jobs_claimed_at_idx').on(t.queue, t.claimedAt),
+    index('jobs_parent_idx').on(t.parentKey).where(sql`${t.parentKey} is not null`),
+  ],
+);
+
+/** 每个队列的限速：同时在领的上限、每分钟新领的上限。停机后积压一起到期时靠它限住追赶速度。没有行的队列不让领。 */
+export const queueLimits = fleet2.table(
+  'queue_limits',
+  {
+    queue: text('queue').primaryKey(),
+    maxInflight: integer('max_inflight').notNull(),
+    perMinute: integer('per_minute').notNull(),
+  },
+  (t) => [check('queue_limits_positive', sql`${t.maxInflight} > 0 and ${t.perMinute} > 0`)],
+);
+
 /** 第一个投影：每条流走到第几条、最后一条是什么类型。拿它证明「删了重建结果一致」。 */
 export const streamHeads = fleet2.table('stream_heads', {
   streamId: text('stream_id').primaryKey(),
