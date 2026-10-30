@@ -1,6 +1,6 @@
-// 关单要有证据（#241；#654 起证据是「合并了的 PR / 子单都关了 / --note」，不再是 specs/<号>-<短名>/结果.md）：
-// pnpm issue:close 的每条路。【故意造出的失败】几条：没证据拒关；读不到 GitHub、读不到时间线、时间线没读全就报错不关——
-// 拿改动前的代码（没有这个脚本、gh issue close 直接关）跑都是红的。
+// 没有 PR 的关单必须带证据（#241；#3740 起证据只认 --note，不再认「时间线上有合并了的 PR 提到它」「子单都关了」）：
+// pnpm issue:close 的每条路。【故意造出的失败】几条：没带 --note 拒关；读不到 GitHub、认不出、没关成就报错不关——
+// 拿改动前的代码（没有这个脚本、gh issue close 直接关；或者 #3740 前不写 note 也能凭时间线关）跑都是红的。
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,32 +14,11 @@ const REPO_URL = 'https://api.github.com/repos/o/r';
 const ok = (data: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(data), stderr: '' });
 const fail = (stderr: string, code = 1): GhResult => ({ code, stdout: '', stderr });
 
-/** 时间线上的一条「谁提到了它」：merged = 合并了的 PR，open = 没合并的 PR，issue = 一张单子提到的。 */
-function mention(number: number, over: { kind?: 'merged' | 'open' | 'issue'; repo?: string } = {}) {
-  const kind = over.kind ?? 'merged';
-  return {
-    event: 'cross-referenced',
-    source: {
-      type: 'issue',
-      issue: {
-        number,
-        html_url: `https://github.com/o/r/${kind === 'issue' ? 'issues' : 'pull'}/${number}`,
-        repository_url: over.repo ?? REPO_URL,
-        ...(kind === 'issue'
-          ? {}
-          : { pull_request: { merged_at: kind === 'merged' ? '2026-10-02T23:31:56Z' : null } }),
-      },
-    },
-  };
-}
-
 interface World {
   issue: Record<string, unknown>;
   /** --superseded-by 指向的那张单长什么样（默认是一张开着的单）。 */
   byIssue: Record<string, unknown> | null;
   subs: unknown;
-  /** 时间线，一页一页（每页最多 100 条）。 */
-  timeline: unknown[][];
   /** 按调用的前缀故意坏掉。 */
   broken: { match: (args: string[]) => boolean; result: GhResult }[];
   closeResult: GhResult;
@@ -65,7 +44,6 @@ function world(over: Partial<World> = {}): World & { gh: (args: string[]) => Pro
       repository_url: REPO_URL,
     },
     subs: [],
-    timeline: [[mention(300)]],
     broken: [],
     closeResult: { code: 0, stdout: '', stderr: '' },
     afterClose: { state: 'closed', state_reason: 'completed' },
@@ -87,10 +65,6 @@ function world(over: Partial<World> = {}): World & { gh: (args: string[]) => Pro
       return ok(w.byIssue);
     }
     if (path === 'repos/{owner}/{repo}/issues/241/sub_issues?per_page=100') return ok(w.subs);
-    const page = /^repos\/\{owner\}\/\{repo\}\/issues\/241\/timeline\?per_page=100&page=(\d+)$/.exec(
-      path ?? '',
-    );
-    if (page?.[1]) return ok(w.timeline[Number(page[1]) - 1] ?? []);
     return fail(`假 gh 不认得：${args.join(' ')}`);
   };
   return Object.assign(w, { gh });
@@ -98,107 +72,69 @@ function world(over: Partial<World> = {}): World & { gh: (args: string[]) => Pro
 
 const run = (w: ReturnType<typeof world>, ...argv: string[]) => issueClose(argv.length ? argv : ['241'], w);
 const closeCalls = (w: World) => w.calls.filter((a) => a[0] === 'issue' && a[1] === 'close');
-const timelineCalls = (w: World) => w.calls.filter((a) => (a[1] ?? '').includes('/timeline?'));
+const timelineCalls = (w: World) => w.calls.filter((a) => (a[1] ?? '').includes('/timeline'));
 const startsWith = (prefix: string) => (args: string[]) => (args[1] ?? '').startsWith(prefix);
-const NO_TIMELINE = {
-  match: startsWith('repos/{owner}/{repo}/issues/241/timeline'),
-  result: fail('不该读时间线'),
-};
 
-describe('pnpm issue:close：有证据才关（合并了的 PR / 子单都关了 / --note）', () => {
-  it('合并了的 PR 提到它：关成「完成」，评论里贴 PR 链接，关完回读确认', async () => {
-    const w = world({ timeline: [[mention(301), mention(300)]] });
-    const r = await run(w);
+describe('pnpm issue:close：没有 PR 的收尾，--note 必填才关', () => {
+  it('--note：关成「完成」，评论里写那一句，关完回读确认；不去读时间线', async () => {
+    const w = world();
+    const r = await run(w, '241', '--note', '香港 nginx 已改好并 reload');
     expect(r).toEqual({
       outcome: 'closed',
       number: 241,
       issueUrl: 'https://github.com/o/r/issues/241',
-      evidence: '合并了的 PR #300、#301',
+      evidence: '--note：香港 nginx 已改好并 reload',
     });
     const [close] = closeCalls(w);
     expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'completed']);
-    expect(close?.[6]).toContain(
-      '[#300](https://github.com/o/r/pull/300)、[#301](https://github.com/o/r/pull/301)',
-    );
+    expect(close?.[6]).toContain('做完了：香港 nginx 已改好并 reload');
+    expect(timelineCalls(w)).toEqual([]);
     // 关完又读了一次这张单（回读）
     expect(w.calls.at(-1)).toEqual(['api', 'repos/{owner}/{repo}/issues/241']);
   });
 
-  it('单号写成 #241、前面带 -- 都认', async () => {
-    expect((await run(world(), '#241')).outcome).toBe('closed');
-    expect((await run(world(), '--', '241')).outcome).toBe('closed');
+  it('单号写成 #241、前面带 -- 都认；--note=… 的写法也认', async () => {
+    expect((await run(world(), '#241', '--note', '手工清好了')).outcome).toBe('closed');
+    expect((await run(world(), '--', '241', '--note', '手工清好了')).outcome).toBe('closed');
+    expect((await run(world(), '241', '--note=手工清好了')).outcome).toBe('closed');
   });
 
-  it('【故意造出的失败】时间线上只有没合并的 PR、别的仓的 PR、单子提到的：都不算证据，拒关，一次关单都不发', async () => {
-    const w = world({
-      timeline: [
-        [
-          mention(300, { kind: 'open' }),
-          mention(301, { repo: 'https://api.github.com/repos/x/y' }),
-          mention(302, { kind: 'issue' }),
-          { event: 'labeled' },
-        ],
-      ],
-    });
+  it('【故意造出的失败】没带 --note：拒关，说清要写 note、有 PR 的写 Closes，一次关单都不发', async () => {
+    const w = world();
     const err = await run(w).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CloseRefused);
-    expect((err as Error).message).toMatch(/^#241 没有合并了的 PR 提到它、下面也没有子单，没关/);
-    expect((err as Error).message).toContain('--note');
+    expect((err as Error).message).toMatch(/^#241 没带 --note，没关/);
+    expect((err as Error).message).toContain('Closes #241');
     expect(closeCalls(w)).toEqual([]);
+    // 显式 --reason completed 也一样
+    const w2 = world();
+    await expect(run(w2, '241', '--reason', 'completed')).rejects.toBeInstanceOf(CloseRefused);
+    expect(closeCalls(w2)).toEqual([]);
   });
 
-  it('下面的子单都关了（母单）：没有 PR 提到它也行，评论里写是哪几张子单', async () => {
+  it('【故意造出的失败】下面的子单都关了、也有合并了的 PR 提到它：这些不再当证据，没 --note 照拒', async () => {
     const w = world({
-      timeline: [[]],
       subs: [
-        { number: 301, state: 'closed' },
         { number: 300, state: 'closed' },
+        { number: 301, state: 'closed' },
       ],
     });
-    const r = await run(w);
-    expect(r).toMatchObject({ outcome: 'closed', evidence: '子单 #300、#301 都关了' });
-    expect(closeCalls(w)[0]?.[6]).toContain('子单 #300、#301 都关了');
-  });
-
-  it('--note：没有 PR 的收尾（配置、手工操作）——不去读时间线，评论里写那一句', async () => {
-    const w = world({ broken: [NO_TIMELINE] });
-    const r = await run(w, '241', '--note', '香港 nginx 已改好并 reload');
-    expect(r).toMatchObject({ outcome: 'closed', evidence: '--note：香港 nginx 已改好并 reload' });
-    expect(closeCalls(w)[0]?.[6]).toContain('做完了：香港 nginx 已改好并 reload');
+    await expect(run(w)).rejects.toBeInstanceOf(CloseRefused);
+    expect(closeCalls(w)).toEqual([]);
     expect(timelineCalls(w)).toEqual([]);
   });
 
-  it('--note=… 的写法也认；写了两次、没写值、只有空格都拒关', async () => {
-    expect((await run(world(), '241', '--note=手工清好了')).outcome).toBe('closed');
+  it('--note 写了两次、没写值、只有空格都拒关，一次 gh 都不调', async () => {
     for (const argv of [
       ['241', '--note'],
       ['241', '--note', '  '],
+      ['241', '--note='],
       ['241', '--note', 'a', '--note', 'b'],
     ]) {
       const w = world();
       await expect(issueClose(argv, w)).rejects.toBeInstanceOf(CloseRefused);
       expect(w.calls).toEqual([]);
     }
-  });
-
-  it('时间线分页：第一页满 100 条、合并了的 PR 在第二页：读到第二页才认', async () => {
-    const full = Array.from({ length: 100 }, () => ({ event: 'labeled' }));
-    const w = world({ timeline: [full, [mention(300)]] });
-    const r = await run(w);
-    expect(r).toMatchObject({ outcome: 'closed', evidence: '合并了的 PR #300' });
-    expect(timelineCalls(w).map((a) => a[1])).toEqual([
-      'repos/{owner}/{repo}/issues/241/timeline?per_page=100&page=1',
-      'repos/{owner}/{repo}/issues/241/timeline?per_page=100&page=2',
-    ]);
-  });
-
-  it('【故意造出的失败】时间线 10 页读完还有下一页：算没读全，报错不关（不当成「没有」），提示用 --note', async () => {
-    const full = Array.from({ length: 100 }, () => ({ event: 'labeled' }));
-    const w = world({ timeline: Array.from({ length: 10 }, () => full) });
-    const err = await run(w).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(CloseUnchecked);
-    expect((err as Error).message).toMatch(/时间线超过 1000 条，没读全，没关.*--note/);
-    expect(closeCalls(w)).toEqual([]);
   });
 
   it('下面还有开着的子单：拒关，列出是哪几张（带 --note 也一样）', async () => {
@@ -221,7 +157,9 @@ describe('pnpm issue:close：有证据才关（合并了的 PR / 子单都关了
     const pr = world({
       issue: { number: 241, state: 'open', pull_request: {}, html_url: 'u', repository_url: REPO_URL },
     });
-    await expect(run(pr)).rejects.toThrow(new CloseRefused('#241 是 PR，不是单，没关。'));
+    await expect(run(pr, '241', '--note', 'x')).rejects.toThrow(
+      new CloseRefused('#241 是 PR，不是单，没关。'),
+    );
     for (const argv of [[], ['abc'], ['241', '242'], ['0']]) {
       const w = world();
       await expect(issueClose(argv, w)).rejects.toBeInstanceOf(CloseRefused);
@@ -250,19 +188,14 @@ describe('pnpm issue:close：有证据才关（合并了的 PR / 子单都关了
 });
 
 describe('pnpm issue:close --superseded-by / --reason：关掉被取代的、不做完的', () => {
-  it('--superseded-by <号>：不要证据（不读时间线），关成 not_planned，评论写「被 #<号> 取代」', async () => {
-    const w = world({
-      timeline: [[]],
-      broken: [NO_TIMELINE],
-      afterClose: { state: 'closed', state_reason: 'not_planned' },
-    });
+  it('--superseded-by <号>：不要 --note，关成 not_planned，评论写「被 #<号> 取代」', async () => {
+    const w = world({ afterClose: { state: 'closed', state_reason: 'not_planned' } });
     const r = await issueClose(['241', '--superseded-by', '999'], w);
     expect(r).toEqual({ outcome: 'closed', number: 241, issueUrl: 'https://github.com/o/r/issues/241' });
     const [close] = closeCalls(w);
     // gh 命令行要带空格的 not planned，不是 not_planned（真 gh 对后者报 invalid argument）
     expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'not planned']);
     expect(close?.[6]).toContain('被 #999 取代');
-    expect(timelineCalls(w)).toEqual([]);
   });
 
   it('--superseded-by 隐含 not_planned；同时给 --reason completed 会拒关', async () => {
@@ -287,37 +220,18 @@ describe('pnpm issue:close --superseded-by / --reason：关掉被取代的、不
     expect(closeCalls(w2)).toEqual([]);
   });
 
-  it('【故意造出的失败】没证据也不传 --superseded-by：照走 completed，被拒关（显式写 --reason completed 一样）', async () => {
-    for (const argv of [['241'], ['241', '--reason', 'completed']]) {
-      const w = world({ timeline: [[]] });
-      const err = await issueClose(argv, w).catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(CloseRefused);
-      expect((err as Error).message).toMatch(/没有合并了的 PR 提到它/);
-      expect(closeCalls(w)).toEqual([]);
-    }
-  });
-
-  it('--reason duplicate：不查证据，关成 duplicate，评论里说清；带 --note 就把那句话写进评论', async () => {
-    const w = world({
-      timeline: [[]],
-      broken: [NO_TIMELINE],
-      afterClose: { state: 'closed', state_reason: 'duplicate' },
-    });
+  it('--reason duplicate：不要证据，关成 duplicate，评论里说清；带 --note 就把那句话写进评论', async () => {
+    const w = world({ afterClose: { state: 'closed', state_reason: 'duplicate' } });
     const r = await issueClose(['241', '--reason', 'duplicate', '--note', '和 #200 是同一件事'], w);
     expect(r.outcome).toBe('closed');
     const [close] = closeCalls(w);
     expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'duplicate']);
     expect(close?.[6]).toContain('duplicate');
     expect(close?.[6]).toContain('和 #200 是同一件事');
-    expect(timelineCalls(w)).toEqual([]);
   });
 
-  it('--reason not_planned（不带 superseded-by）：不查证据，关成 not_planned', async () => {
-    const w = world({
-      timeline: [[]],
-      broken: [NO_TIMELINE],
-      afterClose: { state: 'closed', state_reason: 'not_planned' },
-    });
+  it('--reason not_planned（不带 superseded-by）：不要证据，关成 not_planned', async () => {
+    const w = world({ afterClose: { state: 'closed', state_reason: 'not_planned' } });
     const r = await issueClose(['241', '--reason', 'not_planned'], w);
     expect(r.outcome).toBe('closed');
     const [close] = closeCalls(w);
@@ -374,30 +288,6 @@ describe('pnpm issue:close：【故意造出的失败】读不到、认不出、
       /^gh 读 #241 的子单失败/,
     ],
     [
-      '读不到时间线',
-      {
-        broken: [{ match: startsWith('repos/{owner}/{repo}/issues/241/timeline'), result: fail('HTTP 502') }],
-      },
-      /^gh 读 #241 的时间线失败（退出码 1）：HTTP 502，没关。$/,
-    ],
-    [
-      '时间线读回来不是列表',
-      {
-        broken: [
-          {
-            match: startsWith('repos/{owner}/{repo}/issues/241/timeline'),
-            result: { code: 0, stdout: '{}', stderr: '' },
-          },
-        ],
-      },
-      /时间线：读回来的不是列表/,
-    ],
-    [
-      '时间线里有一条交叉引用认不出',
-      { timeline: [[{ event: 'cross-referenced', source: {} }]] },
-      /时间线：有一条交叉引用认不出/,
-    ],
-    [
       '读回来的不是 JSON',
       {
         broken: [
@@ -417,7 +307,7 @@ describe('pnpm issue:close：【故意造出的失败】读不到、认不出、
       /要的是 #241，读回来的是 242，没关/,
     ],
     [
-      '单子读回来没有 repository_url（没法判是不是同一个仓提到的）',
+      '单子读回来没有 repository_url',
       { issue: { number: 241, state: 'open', html_url: 'u' } },
       /repository_url 认不出，没关/,
     ],
@@ -435,7 +325,7 @@ describe('pnpm issue:close：【故意造出的失败】读不到、认不出、
 
   it.each(cases)('%s', async (_name, over, message) => {
     const w = world(over);
-    const err = await run(w).catch((e: unknown) => e);
+    const err = await run(w, '241', '--note', '做完了').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CloseUnchecked);
     expect((err as Error).message).toMatch(message);
     // 关单那一步之前坏的，一次关单都没发
@@ -455,7 +345,7 @@ describe('入口的退出码', { timeout: 0 }, () => {
   });
 
   it('【故意造出的失败】gh 起不来（读不到 GitHub）：没关，退出码 2，不是 0', () => {
-    const r = runChild(process.execPath, [bin, '241'], {
+    const r = runChild(process.execPath, [bin, '241', '--note', '做完了'], {
       env: { ...process.env, PATH: emptyPath, Path: emptyPath },
     });
     expect(r.status).toBe(2);
