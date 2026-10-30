@@ -10,7 +10,10 @@ const MIRRORS = '/etc/apt/apt-mirrors.txt';
 const REQUIRED_SUITES = ['noble', 'noble-updates', 'noble-backports', 'noble-security'];
 const COMPONENTS = ['main', 'restricted', 'universe', 'multiverse'];
 const ubuntuUri = (value: string) =>
-  /^https?:\/\/(?:azure\.archive|archive|security)\.ubuntu\.com\/ubuntu\/?$/.test(value);
+  // Canonical's own archive hosts; runners on AWS get the per-region `<region>.ec2.archive` mirror.
+  /^https?:\/\/(?:azure\.archive|[a-z]{2}-[a-z]+-\d\.ec2\.archive|archive|security)\.ubuntu\.com\/ubuntu\/?$/.test(
+    value,
+  );
 
 function regularText(file: string): string {
   const st = lstatSync(file);
