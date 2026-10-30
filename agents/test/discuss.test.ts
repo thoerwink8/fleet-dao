@@ -151,11 +151,19 @@ function fakeCursor(): string {
       "  process.stdout.write(process.env.FAKE_MODELS ?? 'Available models\\ngpt-5.6-luna-high - GPT\\nkimi-k3-low - Kimi\\nglm-5.2-high - GLM\\ngrok-4.7-low-fast - Grok\\n');",
       '  process.exitCode = Number(process.env.FAKE_MODELS_EXIT ?? 0);',
       '} else {',
+      '  let lockOwned = false;',
+      '  if (process.env.FAKE_LOCK) {',
+      "    const fs = await import('node:fs');",
+      '    if (fs.existsSync(process.env.FAKE_LOCK)) process.exit(9);',
+      "    fs.writeFileSync(process.env.FAKE_LOCK, 'held');",
+      '    lockOwned = true;',
+      '  }',
       "  let stdinData = '';",
       "  process.stdin.on('data', (d) => {",
       '    stdinData += d;',
       '  });',
-      "  process.stdin.on('end', () => {",
+      "  process.stdin.on('end', async () => {",
+      '    if (process.env.FAKE_SLEEP_MS) await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_SLEEP_MS)));',
       "    if (process.env.FAKE_DUMP_ENV === '1') {",
       "      const keys = ['SHELL', 'MSYSTEM', 'MSYSTEM_PREFIX', 'MSYSTEM_CHOST', 'TERM'];",
       '      process.stdout.write(',
@@ -178,6 +186,7 @@ function fakeCursor(): string {
       "      const nonce = (/^核对码：(\\S+)/m.exec(stdinData) ?? [])[1] ?? '';",
       "      process.stdout.write(nonce + '\\n' + (process.env.FAKE_ANSWER ?? ''));",
       '    }',
+      "    if (lockOwned) (await import('node:fs')).rmSync(process.env.FAKE_LOCK, { force: true });",
       '  });',
       '}',
       '',
@@ -402,12 +411,40 @@ describe('ask.mjs：按当前 Cursor 账号能力选择，family 之间不冒充
     expect(r.out).not.toContain('不该调用模型');
   });
 
-  it.each(['31', 'NaN', '0'])('limit %s 不得绕过30秒上限', (limit) => {
+  it.each(['901', 'NaN', '0'])('limit %s 不得绕过900秒上限', (limit) => {
     const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--limit', limit], {
       home: temp('home'),
     });
     expect(r.code).toBe(2);
-    expect(r.err).toContain('不超过 30 秒');
+    expect(r.err).toContain('不超过 900 秒');
+  });
+
+  it('允许超过旧的30秒上限', () => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--limit', '31'], {
+      home: temp('home'),
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).not.toContain('不超过');
+  });
+});
+
+describe('ask.mjs：多家询问串行，避免同时改 Cursor 配置', SLOW, () => {
+  it('同一次问多家时不重叠启动 cursor-agent', () => {
+    const lock = join(temp('lock'), 'cursor.lock');
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--models', 'gpt,kimi'], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: {
+        FAKE_LOGGED: '1',
+        FAKE_ANSWER: '合法答案',
+        FAKE_LOCK: lock,
+        FAKE_SLEEP_MS: '50',
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('## gpt');
+    expect(r.out).toContain('## kimi');
+    expect(r.out).not.toContain('退出码 9');
   });
 });
 

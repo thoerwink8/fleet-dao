@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-// 讨论用的一问一答：同一段题面并行问几家，每家一个 cursor-agent 只读会话（空目录、不读仓），硬上限 30 秒。
+// 讨论用的一问一答：同一段题面依次问几家，每家一个 cursor-agent 只读会话（空目录、不读仓），默认 5 分钟。
 // 超时、退出码非 0、没有输出都照实记成「没答上」，不当成答了。这台机器没装 cursor-agent、没登录，一家都不问，直接说清。
 //
-//   node ask.mjs --text 题面.md --round <0|1|2…> [--models gpt[,kimi,glm,grok]] [--limit 30] [--out 目录]
+//   node ask.mjs --text 题面.md --round <0|1|2…> [--models gpt[,kimi,glm,grok]] [--limit 秒] [--out 目录]
 //   --round 0 是各自独立答；1 起是挑错，题面必须带【推演】段（walkthrough.mjs），缺了不发、退出码 2。
 //   不给 --models 只问 GPT（「和 gpt 讨论就够了」）。结论落在 ~/.local/share/second-opinion/runs/。
 //
 // 退出码：0 至少一家答上；2 一家都没答上、参数不对，或这台机器缺 cursor-agent。
-// 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；五家齐跑 + 工人把进程数顶满、宿主崩过）。
+// cursor-agent 会在启动时改同一份 ~/.cursor/cli-config.json；多进程同时启动会撞 EPERM，
+// 所以同一次询问里的几家必须串行。这样牺牲并发，换来多家都能拿到真实结果。
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -22,10 +23,11 @@ import { missingWalkthrough } from './walkthrough.mjs';
 
 export { MODELS };
 
-const MAX_PAR = 3;
+const DEFAULT_LIMIT_SEC = 5 * 60;
+const MAX_LIMIT_SEC = 15 * 60;
 
 function args(argv) {
-  const o = { models: 'gpt', limit: 30 };
+  const o = { models: 'gpt', limit: DEFAULT_LIMIT_SEC };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--text') o.text = argv[++i];
@@ -137,8 +139,8 @@ export function askOne(
 
 async function main() {
   const o = args(process.argv.slice(2));
-  if (!Number.isFinite(o.limit) || o.limit <= 0 || o.limit > 30)
-    throw new Error('--limit 必须大于 0 且不超过 30 秒');
+  if (!Number.isFinite(o.limit) || o.limit <= 0 || o.limit > MAX_LIMIT_SEC)
+    throw new Error(`--limit 必须大于 0 且不超过 ${MAX_LIMIT_SEC} 秒`);
   if (!o.text) throw new Error('要 --text 题面文件');
   const prompt = readFileSync(o.text, 'utf8');
   if (!prompt.trim()) throw new Error(`${o.text} 是空的`);
@@ -164,7 +166,7 @@ async function main() {
     const results = [];
     const queue = [...keys];
     await Promise.all(
-      Array.from({ length: Math.min(MAX_PAR, queue.length) }, async () => {
+      Array.from({ length: Math.min(1, queue.length) }, async () => {
         while (queue.length) {
           const k = queue.shift();
           const model = resolveModel(k, available);
