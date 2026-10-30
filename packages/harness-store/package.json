@@ -1,0 +1,23 @@
+{
+  "name": "@fleet-dao/harness-store",
+  "version": "0.0.0",
+  "private": true,
+  "description": "新内核的存储（决定 0124）：独立 schema fleet2 的事件表、投影、命令回执、outbox",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "db:generate": "drizzle-kit generate && biome format --write migrations"
+  },
+  "dependencies": {
+    "@fleet-dao/harness-contract": "workspace:*",
+    "drizzle-orm": "^0.45.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "drizzle-kit": "0.31.11"
+  }
+}

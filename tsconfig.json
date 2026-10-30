@@ -8,6 +8,12 @@
       "path": "packages/shared"
     },
     {
+      "path": "packages/harness-contract"
+    },
+    {
+      "path": "packages/harness-store"
+    },
+    {
       "path": "packages/core"
     },
     {
