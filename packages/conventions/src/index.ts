@@ -121,6 +121,8 @@ export {
   modulePaths,
   rankSimilar,
   type SimilarItem,
+  STRONG_THRESHOLD,
+  strongMatches,
 } from './issue-similar.ts';
 export {
   currentVersion,

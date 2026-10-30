@@ -29,6 +29,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
 import { implicitRepoView, type MilestoneDetail, resolveRepo, toMilestoneDetail } from './github-api.ts';
+import { type FranceIntake, type IntakeBody, idempotencyKeyOf, intakeViaFrance } from './issue-intake.ts';
 import type { SimilarReport } from './issue-similar.ts';
 import {
   type DomainValue,
@@ -74,6 +75,13 @@ export interface IssueNewDeps {
    * 只提示：它不抛、不拦开单，读不到就在报告里写「没查成」。
    */
   similar?: ((q: { title: string; body: string }) => Promise<SimilarReport>) | undefined;
+  /**
+   * 法国的开单通道（issue-intake.ts，决定 0122）：给了就先走法国 POST /api/nodes/issues，没接上才退回 gh 直连；
+   * 不给（测试、不走法国）就直接 gh。母单（--mother）不走法国：母单标签要和建单同一次贴上。
+   */
+  france?: FranceIntake | undefined;
+  /** 退回 gh 时打一行提示（为什么退回）；不给就不打。 */
+  warn?: ((line: string) => void) | undefined;
 }
 
 export interface IssueNewResult {
@@ -97,11 +105,18 @@ export interface IssueNewResult {
   similar?: SimilarReport | undefined;
   /** 本机做的单「怎么算做完」里要 diff 外证据的条目：照开，入口提示改写（交给引擎的单这种直接拒开）。 */
   offDiff?: OffDiffItem[] | undefined;
+  /** 开单走的是法国接口（true）还是 gh 直连（false，含退回）。 */
+  viaFrance?: boolean | undefined;
+  /** 法国回 merged:true：并进了 number 这张单，没开新单；挂母单、排先后、领单都跳过。 */
+  merged?: true | undefined;
+  /** 法国回 created:false 且没并单：这次重试命中的是之前开过的同一张。 */
+  existing?: true | undefined;
 }
 
 export const USAGE =
   '用法：pnpm issue:new --kind 需求|缺陷|杂项 --domain engine|api|mirasim --nature bug|perf|process --milestone 当前 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]' +
-  ' [--allow-pr-body-acceptance "<理由>"]' +
+  ' [--allow-pr-body-acceptance "<理由>"] [--force | --merge-into 单号]' +
+  '（开单先走法国的开单服务，连不上、401、503 才退回 gh 直连；法国回 409 同题强命中：打出候选、退出码 1，确实是新的加 --force 照开，其实是同一件事加 --merge-into <号> 并进那张单；422 正文问题同样不退回；--merge-into 只有法国能做，连不上就不开）' +
   '（--domain、--nature 每轴恰好一个，和类别同一次贴上：标签名是「域:…」「性质:…」，只用来筛，不参与派工和合并；' +
   '--milestone 写「当前」挂开着的那个版本（一周一版、到期自动收口，别写死 v<N>），也认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节（--kind 缺陷 另要写了字的「## 影响」：会让哪项结果变差），' +
   '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
@@ -362,9 +377,6 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   const tooLong = issueBodyTooLong(body);
   if (tooLong) throw new Error(tooLong);
 
-  // 开单之前查（开出来的新单不会和自己比）；只提示、不拦，查不动也往下开
-  const similar = await deps.similar?.({ title: o.title, body });
-
   const picked = o.milestone === UNSCHEDULED ? undefined : await resolveMilestone(deps.gh, o.milestone);
   const milestone = picked?.title ?? UNSCHEDULED;
   // 要排进版本先后的：挂版本（v<N> 开头）、不是子单（子单在母单页面上排，不进这层）；未排期、旧的 P 阶段没有先后
@@ -374,12 +386,106 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       : undefined;
   if (o.orderAfter !== undefined) checkOrderAfter(o.orderAfter, milestone, version);
   if (o.parent !== undefined) await checkParent(deps.gh, o.parent);
+
+  // 先走法国的开单服务（决定 0122）：法国查过相似单，本机不再重复查。母单、法国不认的里程碑写法（具体版本名）直接 gh。
+  // 子单对法国报「未排期」（和 gh 路径一样先不带里程碑），挂母单时再挂里程碑。
+  const franceMilestone: IntakeBody['milestone'] | undefined =
+    o.parent !== undefined || o.milestone === UNSCHEDULED
+      ? '未排期'
+      : o.milestone === CURRENT
+        ? '当前'
+        : undefined;
+  if (o.mergeInto !== undefined && (!deps.france || o.mother || franceMilestone === undefined)) {
+    throw new Error(
+      `--merge-into 只有法国的开单服务能做，这次没走法国（${
+        !deps.france
+          ? '没配法国开单通道'
+          : o.mother
+            ? '母单直接 gh 开'
+            : `--milestone ${o.milestone} 不是「当前」「未排期」`
+      }），单没开。`,
+    );
+  }
+  let number: number | undefined;
+  let url = '';
+  let merged = false;
+  let existing = false;
+  let viaFrance = false;
+  if (deps.france && !o.mother && franceMilestone !== undefined) {
+    const out = await intakeViaFrance(deps.france.post, {
+      repo: deps.france.repo,
+      kind: o.kind,
+      domain: o.domain,
+      nature: o.nature,
+      milestone: franceMilestone,
+      title: o.title,
+      body,
+      local: o.local,
+      source: { kind: 'local-session', ref: deps.france.ref },
+      idempotencyKey: idempotencyKeyOf(o.title, body),
+      ...(o.force ? { force: true as const } : {}),
+      ...(o.mergeInto === undefined ? {} : { mergeInto: o.mergeInto }),
+    });
+    if (out.kind === 'refused') throw new Error(out.lines.join('\n'));
+    if (out.kind === 'fallback') {
+      if (o.mergeInto !== undefined) {
+        throw new Error(`${out.why}；--merge-into 只有法国能做，不退回 gh，单没开。`);
+      }
+      deps.warn?.(`退回 gh 直连开单：${out.why}。`);
+    } else {
+      ({ number, url, merged } = out);
+      existing = !out.created && !out.merged;
+      viaFrance = true;
+    }
+  }
+  if (merged && number !== undefined) {
+    // 并进了别的单：没开新单，挂母单、排先后、领单都不做
+    return { number, url, milestone, merged: true, viaFrance: true };
+  }
+
+  // 走 gh 才在本机查相似单（开出来的新单不会和自己比）；只提示、不拦，查不动也往下开
+  const similar = viaFrance ? undefined : await deps.similar?.({ title: o.title, body });
+
+  if (number === undefined) {
+    ({ number, url } = await createViaGh(deps.gh, o, { createBodyPath, milestone }));
+  }
+  const { parent } = o;
+  const local = o.local || undefined;
+  const mother = o.mother || undefined;
+  if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone });
+  const order =
+    version === undefined
+      ? undefined
+      : await orderIntoVersion(deps.gh, { number, url, version, after: o.orderAfter });
+  const offDiff = checked.offDiffHits.length > 0 ? checked.offDiffHits : undefined;
+  return {
+    number,
+    url,
+    milestone,
+    parent,
+    local,
+    mother,
+    order,
+    similar,
+    offDiff,
+    viaFrance: viaFrance || undefined,
+    existing: existing || undefined,
+  };
+}
+
+/** 退回路径：gh 直连开单（原来 issueNew 里的那一步，判法不变）。 */
+async function createViaGh(
+  gh: Gh,
+  o: Options,
+  ctx: { createBodyPath: string; milestone: string },
+): Promise<{ number: number; url: string }> {
+  const { createBodyPath, milestone } = ctx;
   // 仓上没有查询轴标签时，gh issue create --label 会直接拒。先把六个都建上（已有则 --force 只改说明）。
   for (const spec of QUERY_LABEL_SPECS) {
-    const failed = labelCreateFailure(spec, await deps.gh(queryLabelCreateArgs(spec)));
+    const failed = labelCreateFailure(spec, await gh(queryLabelCreateArgs(spec)));
     if (failed) throw new Error(`${failed}单没开。`);
   }
-  const created = await deps.gh([
+  const created = await gh([
     'issue',
     'create',
     '--title',
@@ -411,17 +517,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       `gh 退出码是 0，可输出里认不出单号：${detail(created)}。单多半已经开了，去 GitHub 按标题「${o.title}」找一下。`,
     );
   }
-  const number = Number(n);
-  const { parent } = o;
-  const local = o.local || undefined;
-  const mother = o.mother || undefined;
-  if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone });
-  const order =
-    version === undefined
-      ? undefined
-      : await orderIntoVersion(deps.gh, { number, url, version, after: o.orderAfter });
-  const offDiff = checked.offDiffHits.length > 0 ? checked.offDiffHits : undefined;
-  return { number, url, milestone, parent, local, mother, order, similar, offDiff };
+  return { number: Number(n), url };
 }
 
 interface Options {
@@ -444,6 +540,10 @@ interface Options {
    * 没给且命中就拒开；给了就照开并把这句话追加进那一节末尾。
    */
   allowPrBodyAcceptance: string | undefined;
+  /** 法国回 409 同题强命中时照开。 */
+  force: boolean;
+  /** 不开新单，并进这张单（只有法国能做）。 */
+  mergeInto: number | undefined;
 }
 
 function parse(argv: readonly string[]): Options {
@@ -464,6 +564,8 @@ function parse(argv: readonly string[]): Options {
         local: { type: 'boolean' },
         'order-after': { type: 'string' },
         'allow-pr-body-acceptance': { type: 'string' },
+        force: { type: 'boolean' },
+        'merge-into': { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -474,7 +576,11 @@ function parse(argv: readonly string[]): Options {
   const str = (v: string | boolean | undefined): string | undefined =>
     typeof v === 'string' ? v.trim() : undefined;
   /** 单号参数：写成 192 或 #192；没给是 undefined，认不出就拒（还没调 gh）。 */
-  const issueArg = (flag: 'parent' | 'order-after', what: string, example: number): number | undefined => {
+  const issueArg = (
+    flag: 'parent' | 'order-after' | 'merge-into',
+    what: string,
+    example: number,
+  ): number | undefined => {
     const raw = values[flag];
     if (raw === undefined) return undefined;
     const m = /^#?([1-9]\d*)$/.exec(str(raw) ?? '');
@@ -505,6 +611,16 @@ function parse(argv: readonly string[]): Options {
   if (orderAfter !== undefined && milestone === UNSCHEDULED) {
     throw new Error(`--order-after 和 --milestone ${UNSCHEDULED} 不能一起用：未排期的单没有先后。${USAGE}`);
   }
+  const mergeInto = issueArg('merge-into', '要并进的那张单', 450);
+  const force = values.force === true;
+  if (force && mergeInto !== undefined) {
+    throw new Error(`--force（照开）和 --merge-into（并进别的单）不能一起用。${USAGE}`);
+  }
+  if (mergeInto !== undefined && (mother || parent !== undefined)) {
+    throw new Error(
+      `--merge-into 不能和 --mother、--parent 一起用：并单不开新单，没有母子关系可挂。${USAGE}`,
+    );
+  }
   const allowRaw = values['allow-pr-body-acceptance'];
   const allowPrBodyAcceptance = allowRaw === undefined ? undefined : str(allowRaw);
   if (allowRaw !== undefined && !allowPrBodyAcceptance) {
@@ -522,6 +638,8 @@ function parse(argv: readonly string[]): Options {
     local: values.local === true,
     orderAfter,
     allowPrBodyAcceptance,
+    force,
+    mergeInto,
   };
 }
 

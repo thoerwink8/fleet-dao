@@ -1,4 +1,4 @@
-// 关单脚本入口：pnpm issue:close <单号> [--note "做成了什么"] [--reason …] [--superseded-by <号>]（见 ../issue-close.ts）。
+// 关单脚本入口：pnpm issue:close <单号> --note "做成了什么" [--reason …] [--superseded-by <号>]（见 ../issue-close.ts）。
 // 退出码 0 = 关上了（或本来就关着）；1 = 拒关（没有证据、子单还开着、是 PR、参数不对）；2 = 没查成、没关成。
 import { fileURLToPath } from 'node:url';
 import { CloseRefused, issueClose } from '../issue-close.ts';

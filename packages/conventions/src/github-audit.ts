@@ -275,7 +275,7 @@ function motherFindings(open: readonly PlanIssue[]): { found: Finding[]; unknown
       found.push({
         issue: i.number,
         key: `mother-done:${i.number}`,
-        text: `#${i.number} 的 ${i.subIssues} 张子单都关了，它自己还开着：做完了就 pnpm issue:close ${i.number}；还有活没拆成子单就补开子单`,
+        text: `#${i.number} 的 ${i.subIssues} 张子单都关了，它自己还开着：做完了就 pnpm issue:close ${i.number} --note "做成了什么"；还有活没拆成子单就补开子单`,
       });
     }
     if (i.subIssues > 0 && !isMother) {
@@ -399,7 +399,7 @@ function mergedButOpenFindings(open: readonly PlanIssue[], pulls: readonly PullB
     found.push({
       issue: i.number,
       key: `merged-open:${i.number}:${p.number}`,
-      text: `#${i.number} 开着，但 PR #${p.number}「${p.title}」（${p.mergedAt}）合并了，它的「需求」栏 Refs 着这张单、没有别的 PR 还挂着它：做完了就 pnpm issue:close ${i.number}；还没做完，请在那张 PR 的「需求」栏那一行写明「分片、关不了它」`,
+      text: `#${i.number} 开着，但 PR #${p.number}「${p.title}」（${p.mergedAt}）合并了，它的「需求」栏 Refs 着这张单、没有别的 PR 还挂着它：做完了就 pnpm issue:close ${i.number} --note "做成了什么"；还没做完，请在那张 PR 的「需求」栏那一行写明「分片、关不了它」`,
     });
   }
   return found;

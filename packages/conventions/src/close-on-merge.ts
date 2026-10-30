@@ -1,7 +1,9 @@
 // PR 合并那一步自动收口（#995 拍 1 的 A，决定 0020 第 1 条）：.github/workflows/close-on-merge.yml 在 PR 合并后跑
 // node packages/conventions/src/bin/close-on-merge.ts --pr <号>，这里读这张 PR「需求」栏挂的单，该关的用 issueClose 的逻辑关。
-// 为什么要有它：关单只有「PR 写 Closes（合并时 GitHub 自己关）」和「人手 pnpm issue:close」两条，都要人主动做；
-// 没写 Closes、只写 Refs 的活做完了没人关（#593、#76、#323 就是这么一直挂着的）。
+// 为什么要有它：没写 Closes、只写 Refs 的活做完了没人关（#593、#76、#323 就是这么一直挂着的）。
+// 保留的理由（#3740 要把关单收成「Closes 自动关」「issue:close --note」两条）：GitHub 原生 Closes 已经覆盖 Closes 的单，
+// 这里只补裸 Refs 叶子单；pr:open 现在拒裸 Refs，本仓新 PR 基本走不到，但已装的外部项目（project.ts 的 fleet-close-on-merge.yml
+// 调用方）还 uses 这个 workflow@main，删了会让它们的 CI 当场红，要先迁完外部项目再删，另开一片。
 // 条件收紧到「这张单明摆着是做完了的一张叶子单」，误关有意留着的单比漏关更糟（漏关有 github-audit 每天的「有合并 PR 提到、却还开着」兜底）：
 // - 这张 PR 已经合进主线；引擎任务流程的 PR（分支 fleet/<单号>-t<8 位>）不碰：引擎的单它自己关；
 // - 只看「需求」栏里同仓的 Closes / Refs；Refs 那一行写了「分片、关不了它」的是有意只挂不关，不碰；

@@ -15,6 +15,7 @@ export * from './flow-mode.ts';
 export * from './flow-purposes.ts';
 export * from './groom.ts';
 export * from './home-flow.ts';
+export * from './intake.ts';
 export * from './issue-workflows.ts';
 export * from './local-claims.ts';
 export * from './mirasim-executor.ts';
