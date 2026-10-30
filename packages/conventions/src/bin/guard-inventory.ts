@@ -6,8 +6,10 @@ import { parseArgs } from 'node:util';
 import { runMain } from '../exit.ts';
 import { collectGuardInventory, renderGuardInventory } from '../guard-inventory.ts';
 import { weeklyGuardProgress } from '../guard-inventory-progress.ts';
+import { resolveRepo } from '../github-api.ts';
 import { ghRunner } from '../issue-new.ts';
-import { PROGRESS_ISSUE, progressNote } from '../progress.ts';
+import { progressNoteWithLedger } from '../ledger-note.ts';
+import { PROGRESS_ISSUE } from '../progress.ts';
 import { fsRepo } from '../repo.ts';
 
 runMain(async () => {
@@ -39,7 +41,16 @@ runMain(async () => {
           return comments.map((c) => c.body as string);
         },
         async note(note) {
-          await progressNote(note, { gh });
+          // 双写（#3741 片 2b）：先写法国账本（CI 里没有机器通行证时只警告），再照旧贴 #1055；幂等键用当天日期
+          await progressNoteWithLedger(
+            note,
+            { gh },
+            {
+              repo: resolveRepo(process.env, root).repo,
+              kind: 'report.guards',
+              idempotencyKey: `guard-inventory:${now.toISOString().slice(0, 10)}`,
+            },
+          );
         },
       });
       console.log(`库存周报：${result}`);

@@ -479,3 +479,39 @@ describe('「要你拍」带选项（#1915）', () => {
     });
   });
 });
+
+describe('拍板转交双写账本（#3741 片 2b）', () => {
+  const ledgerRows = (h: ReturnType<typeof harness>) =>
+    h.store.data.audit.filter((a) => a.action === 'decision.handoff');
+
+  it('账本写一次 decision.handoff（带通知 id 和选项），#1055 和任务单照旧写', async () => {
+    const { commenter, posted } = recorder();
+    const h = harness({ decisionCommenter: commenter });
+    withSelfRepo(h);
+    const s = await h.login();
+    const body = AnswerNotificationResponse.parse(
+      await (await answer(h, s, IDS.notification2, { optionId: 'approve' })).json(),
+    );
+    const rows = ledgerRows(h);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.target).toBe('progress:thoerwink8/fleet-dao');
+    const after = rows[0]?.after as { text: string; idempotencyKey: string };
+    expect(after.text).toContain(`批，合进去（通知 ${IDS.notification2}）`);
+    expect(after.idempotencyKey).toBe(`decision-answer:${IDS.notification2}:${body.answer.id}`);
+    expect(posted).toHaveLength(2);
+  });
+
+  it('账本写失败：只警告，#1055 和任务单照写', async () => {
+    const { commenter, posted } = recorder();
+    const h = harness({ decisionCommenter: commenter });
+    withSelfRepo(h);
+    vi.spyOn(h.store, 'appendLedgerNote').mockRejectedValue(new Error('db down'));
+    const s = await h.login();
+    const body = AnswerNotificationResponse.parse(
+      await (await answer(h, s, IDS.notification2, { optionId: 'approve' })).json(),
+    );
+    expect(body.handoff?.progress.ok).toBe(true);
+    expect(posted).toHaveLength(2);
+    expect(h.logs.some((l) => l.level === 'warn' && l.fields?.why === 'db down')).toBe(true);
+  });
+});

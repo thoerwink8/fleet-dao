@@ -34,7 +34,9 @@ import {
   resolveDirective,
 } from '../directives.ts';
 import { gitRunner } from '../git-runner.ts';
+import { resolveRepo } from '../github-api.ts';
 import { ghRunner, issueNew } from '../issue-new.ts';
+import { noteIdempotencyKey, progressNoteWithLedger } from '../ledger-note.ts';
 import { flushPrivateQuotes, privatizeDirective, publicMeaning } from '../private-quotes.ts';
 import {
   type DirectiveKind,
@@ -49,7 +51,6 @@ import {
   PROGRESS_USAGE,
   ProgressRefused,
   ProgressUnchecked,
-  progressNote,
   readInboxComment,
   recentComments,
   textOf,
@@ -258,7 +259,17 @@ try {
     console.log('私有原话补传：成功 ' + result.sent + '，未传成 ' + result.remaining + '（内容不回显）。');
     if (result.remaining) process.exitCode = 2;
   } else if (cmd === 'note') {
-    const c = await progressNote(positionals.join(' '), { gh });
+    const noteText = positionals.join(' ');
+    // 双写（#3741 片 2b）：先写法国账本（失败只警告），再照旧贴 #1055
+    const c = await progressNoteWithLedger(
+      noteText,
+      { gh },
+      {
+        repo: resolveRepo(process.env, root).repo,
+        kind: 'progress.note',
+        idempotencyKey: noteIdempotencyKey('progress-note', noteText, new Date()),
+      },
+    );
     console.log(`贴到 #${PROGRESS_ISSUE} 了：${c.url}`);
   } else if (cmd === 'directive' && values['from-inbox'] !== undefined) {
     const cid = Number(values['from-inbox']);

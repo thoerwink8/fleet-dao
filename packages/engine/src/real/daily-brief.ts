@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  appendLedgerNote,
   commanderStalledSummary,
   type Db,
   executorLineStats,
@@ -70,6 +71,22 @@ export function dailyBriefJob(w: {
     selfShareReadings: selfShareFacts({ db: w.db, client: w.gh.deps.client }),
     selfSharePrevious: () => readSelfShare(w.db),
     selfShareSave: (row) => writeSelfShare(w.db, row, SELF_SHARE_ACTOR),
+    async ledger(x) {
+      await appendLedgerNote(w.db, {
+        at: now(),
+        actorKind: 'agent',
+        actorId: 'engine:daily-brief',
+        action: 'report.daily',
+        target: `progress:${x.repo}`,
+        after: {
+          nodeId: 'engine',
+          repo: x.repo,
+          text: x.text,
+          source: { kind: 'engine', ref: 'daily-brief' },
+          idempotencyKey: x.idempotencyKey,
+        },
+      });
+    },
     async publish(x) {
       await upsertAlert(w.db, { ...x, level: 'daily', taskId: null });
     },
