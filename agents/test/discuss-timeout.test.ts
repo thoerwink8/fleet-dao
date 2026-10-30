@@ -130,6 +130,29 @@ it('终止进程树失败须返回未确认收尾，不能说停掉了或清理�
   }
 });
 
+it('每家拿到各自独立的 CURSOR_CONFIG_DIR，且都在本次临时目录下、互不相同', async () => {
+  const dir = mkdtempSync(join(workspace, 'discuss-cfg-'));
+  const seen: Record<string, string | undefined> = {};
+  const mk = (key: string) =>
+    ((_file: string, _args: string[], options: SpawnOptions) => {
+      seen[key] = options.env?.CURSOR_CONFIG_DIR;
+      return spawn(process.execPath, ['-e', 'process.stdin.resume();process.stdin.on("end",()=>{})'], {
+        ...options,
+        shell: false,
+      });
+    }) as typeof spawn;
+  try {
+    await Promise.all(['a', 'b'].map((k) => ask.askOne(k, 'no-model', 'x', 0.3, dir, { spawnFn: mk(k) })));
+    expect(seen.a).toBeTruthy();
+    expect(seen.b).toBeTruthy();
+    expect(seen.a).not.toBe(seen.b);
+    expect(seen.a?.startsWith(dir)).toBe(true);
+    expect(seen.b?.startsWith(dir)).toBe(true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 it('执行体早退且关闭 stdin：报告原始非零退出，不被 EPIPE 或超时改写', { timeout: 10_000 }, async () => {
   const dir = mkdtempSync(join(workspace, 'discuss-early-exit-'));
   const spawnFn = ((_file: string, _args: string[], options: SpawnOptions) =>
