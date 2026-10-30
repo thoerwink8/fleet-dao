@@ -1,6 +1,6 @@
 // 影子比对（#3776，讨论稿第五节 3「比对」）：冻结批次清单、存影子补丁、旧 PR 合并后拿合并 diff 给影子补丁评分。
 // 两边的 diff 先规范化（按文件、去掉空白和格式化差异）再比；旧的结果永远是权威，这里只记差多少。
-import { and, asc, eq, gt } from 'drizzle-orm';
+import { and, asc, eq, gt, sql } from 'drizzle-orm';
 import { shadowBatchItems, shadowCompare, shadowRuns } from './schema.ts';
 import { type Db, PAGE_MAX } from './store.ts';
 
@@ -189,6 +189,54 @@ export async function recordCompare(
     });
     return score;
   });
+}
+
+/** 影子静默的报警线：批次里还有单没跑出产物、最近一条产物（没有就按冻结时刻）早于这么久，就报。 */
+export const SHADOW_SILENCE_MS = 24 * 60 * 60 * 1000;
+
+export type ShadowSilence =
+  | { kind: 'idle' }
+  | { kind: 'ok'; pending: number; lastAt: Date }
+  | { kind: 'silent'; pending: number; lastAt: Date; silentMs: number };
+
+/**
+ * 防「影子静默不跑」：一批里还有没产物的单，最近一条产物（或冻结时刻）离数据库 now() 超过报警线就是 silent。
+ * 只读这一批的清单行和产物里最大的时刻，读的行数和批次大小成正比，不和产物表大小成正比。
+ */
+export async function shadowSilence(
+  db: Db,
+  batchId: string,
+  thresholdMs = SHADOW_SILENCE_MS,
+): Promise<ShadowSilence> {
+  const [items] = await db
+    .select({
+      // 单表查询里 drizzle 的列不带表名，子查询里同名列会认到内层表：这里写全名
+      pending: sql<number>`(count(*) filter (where not exists (
+        select 1 from fleet2.shadow_runs r
+        where r.batch_id = fleet2.shadow_batch_items.batch_id
+          and r.repo = fleet2.shadow_batch_items.repo
+          and r.issue = fleet2.shadow_batch_items.issue
+      )))::int`,
+      frozenAt: sql<string | null>`max(${shadowBatchItems.snapshotAt})::text`,
+    })
+    .from(shadowBatchItems)
+    .where(eq(shadowBatchItems.batchId, batchId));
+  if (!items?.frozenAt || items.pending === 0) return { kind: 'idle' };
+  const [runs] = await db
+    .select({
+      lastRunAt: sql<string | null>`max(${shadowRuns.createdAt})::text`,
+      now: sql<string>`now()::text`,
+    })
+    .from(shadowRuns)
+    .where(eq(shadowRuns.batchId, batchId));
+  const frozenAt = new Date(items.frozenAt);
+  const lastRunAt = runs?.lastRunAt ? new Date(runs.lastRunAt) : undefined;
+  const lastAt = lastRunAt && lastRunAt > frozenAt ? lastRunAt : frozenAt;
+  if (!runs?.now) throw new Error('读不到数据库时刻');
+  const silentMs = new Date(runs.now).getTime() - lastAt.getTime();
+  return silentMs > thresholdMs
+    ? { kind: 'silent', pending: items.pending, lastAt, silentMs }
+    : { kind: 'ok', pending: items.pending, lastAt };
 }
 
 export interface CompareRow {

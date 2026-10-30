@@ -8,6 +8,7 @@ import {
   normalizeDiff,
   recordCompare,
   recordShadowRun,
+  shadowSilence,
 } from '../src/shadow.ts';
 import { createTestDb, type TestDb } from '../src/testing.ts';
 
@@ -132,5 +133,35 @@ describe('落库', () => {
     expect(page1.map((r) => r.issue)).toEqual([1, 2]);
     const page2 = await listCompare(t.db, 'b1', page1[1]?.shadowRunId, 2);
     expect(page2.map((r) => [r.issue, r.score.fileJaccard])).toEqual([[3, 0]]);
+  });
+});
+
+describe('影子静默报警', () => {
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+
+  it('没有批次、或批次全跑完：不报', async () => {
+    expect(await shadowSilence(t.db, 'none')).toEqual({ kind: 'idle' });
+    await freezeBatch(t.db, 'b1', [{ ...item(1), snapshotAt: old }]);
+    await recordShadowRun(t.db, run('r1', 1, ''));
+    expect(await shadowSilence(t.db, 'b1')).toEqual({ kind: 'idle' });
+  });
+
+  it('冻结了一整天还一条产物都没有：报 silent', async () => {
+    await freezeBatch(t.db, 'b1', [
+      { ...item(1), snapshotAt: old },
+      { ...item(2), snapshotAt: old },
+    ]);
+    expect(await shadowSilence(t.db, 'b1')).toMatchObject({ kind: 'silent', pending: 2 });
+  });
+
+  it('最近刚出过一条、还有没跑的：不报，按最近那条算', async () => {
+    await freezeBatch(t.db, 'b1', [
+      { ...item(1), snapshotAt: old },
+      { ...item(2), snapshotAt: old },
+    ]);
+    await recordShadowRun(t.db, run('r1', 1, ''));
+    const s = await shadowSilence(t.db, 'b1');
+    expect(s).toMatchObject({ kind: 'ok', pending: 1 });
+    expect(s.kind === 'ok' && s.lastAt.getTime()).toBeGreaterThan(old.getTime());
   });
 });
