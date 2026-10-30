@@ -102,9 +102,38 @@ afterAll(() => rmSync(root, { recursive: true, force: true }));
 /** 跑一次 bin。external=true 时调用目录是个带别人远端的空仓（对外仓）。 */
 function run(
   args: string[],
-  opts: { external?: boolean; ledger?: unknown[]; ledgerDown?: boolean; openIssues?: number[] } = {},
+  opts: {
+    external?: boolean;
+    ledger?: unknown[];
+    ledgerDown?: boolean;
+    openIssues?: number[];
+    /** 旧档案那一路读的是 origin/main：CI 的检出没有这个 ref，所以给它一个空档案的临时仓（GIT_DIR），不碰真检出 */
+    emptyArchive?: boolean;
+  } = {},
 ) {
   const dir = mkdtempSync(join(root, 'run-'));
+  let gitDir: string | undefined;
+  if (opts.emptyArchive) {
+    gitDir = join(dir, 'archive.git');
+    runChild('git', ['init', '-q', '--bare', gitDir]);
+    const c = runChild('git', [
+      `--git-dir=${gitDir}`,
+      '-c',
+      'user.name=t',
+      '-c',
+      'user.email=t@example.invalid',
+      'commit-tree',
+      '4b825dc642cb6eb9a060e54bf8d69288fbee4904',
+      '-m',
+      'empty',
+    ]);
+    runChild('git', [
+      `--git-dir=${gitDir}`,
+      'update-ref',
+      'refs/remotes/origin/main',
+      String(c.stdout).trim(),
+    ]);
+  }
   const log = join(dir, 'gh.log');
   const home = join(dir, 'home');
   const promptLog = join(dir, 'prompt-log');
@@ -139,6 +168,7 @@ function run(
       FAKE_LEDGER_LOG: ledgerLog,
       FAKE_OPEN_ISSUES: JSON.stringify(opts.openIssues ?? []),
       ...(opts.ledgerDown ? { FAKE_LEDGER_DOWN: '1' } : {}),
+      ...(gitDir ? { GIT_DIR: gitDir } : {}),
       INIT_CWD: initCwd,
       HOME: home,
       USERPROFILE: home,
@@ -381,7 +411,11 @@ describe('pnpm progress directive 记进账本（#3764）', { timeout: 0 }, () =
       },
       ok: true,
     };
-    const open = run(['read', '--pending'], { ledger: [row], openIssues: [777] });
+    const open = run(['read', '--pending'], {
+      ledger: [row],
+      openIssues: [777],
+      emptyArchive: true,
+    });
     expect({ status: open.status, stderr: open.stderr }).toEqual({ status: 0, stderr: '' });
     const line = open.stdout.split('\n').find((l) => l.startsWith('321\t'));
     expect(line?.split('\t')).toEqual([
@@ -392,7 +426,11 @@ describe('pnpm progress directive 记进账本（#3764）', { timeout: 0 }, () =
       row.at,
       '#777',
     ]);
-    const closed = run(['read', '--pending'], { ledger: [row], openIssues: [] });
+    const closed = run(['read', '--pending'], {
+      ledger: [row],
+      openIssues: [],
+      emptyArchive: true,
+    });
     expect(closed.status).toBe(0);
     expect(closed.stdout).not.toContain('321\t');
   });
