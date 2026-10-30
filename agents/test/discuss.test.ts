@@ -402,12 +402,12 @@ describe('ask.mjs：按当前 Cursor 账号能力选择，family 之间不冒充
     expect(r.out).not.toContain('不该调用模型');
   });
 
-  it.each(['31', 'NaN', '0'])('limit %s 不得绕过30秒上限', (limit) => {
+  it.each(['301', 'NaN', '0'])('limit %s 不得绕过300秒硬顶', (limit) => {
     const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--limit', limit], {
       home: temp('home'),
     });
     expect(r.code).toBe(2);
-    expect(r.err).toContain('不超过 30 秒');
+    expect(r.err).toContain('不超过 300 秒');
   });
 });
 

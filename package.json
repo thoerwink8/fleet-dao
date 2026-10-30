@@ -50,6 +50,7 @@
     "project:add": "node packages/conventions/src/bin/project.ts add",
     "project:check": "node packages/conventions/src/bin/project.ts check",
     "work": "node packages/conventions/src/bin/work.ts",
+    "mcp:fleet": "node packages/conventions/src/bin/fleet-mcp.ts",
     "line:stats": "node packages/db/src/bin/line-stats.ts",
     "repo:check": "node agents/hooks/repo-contract.mjs check",
     "repo:init": "node agents/hooks/repo-contract.mjs init",

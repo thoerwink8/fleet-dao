@@ -5,6 +5,7 @@
 import {
   AUTH_PREFIX,
   AuthRoutes,
+  NODE_DISPATCH_FULL_PATH,
   PublicAcceptanceRoute,
   PublicCiPolicyRoute,
   WEB_API_PREFIX,
@@ -49,7 +50,9 @@ describe('契约 ↔ 后端注册的路由', () => {
       !/^\/api\/(feishu|intents?|drafts?|nodes\/report)(\/|$)/.test(r.path) &&
       !(r.method === 'POST' && r.path === '/api/nodes/sessions') &&
       // 同一路径的 GET（#3388，别的机器领单前看谁领着什么）同样只认通行证，本机脚本调，浏览器不调。
-      !(r.path === '/api/nodes/claims' && (r.method === 'POST' || r.method === 'GET'));
+      !(r.path === '/api/nodes/claims' && (r.method === 'POST' || r.method === 'GET')) &&
+      // 本机交单给法国（POST /api/nodes/dispatch，#3739，协议在 shared 的 node-dispatch.ts）同理：只认通行证，本机命令和 MCP 调，浏览器不调。
+      !(r.path === NODE_DISPATCH_FULL_PATH && r.method === 'POST');
     const extra = registered
       .filter(
         (r) => (r.path.startsWith(`${WEB_API_PREFIX}/`) || r.path.startsWith(`${AUTH_PREFIX}/`)) && own(r),

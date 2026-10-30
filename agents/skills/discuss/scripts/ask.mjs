@@ -1,8 +1,14 @@
 #!/usr/bin/env node
-// 讨论用的一问一答：同一段题面并行问几家，每家一个 cursor-agent 只读会话（空目录、不读仓），硬上限 30 秒。
+// 讨论用的一问一答：同一段题面并行问几家，每家一个 cursor-agent 只读会话（空目录、不读仓），每家有硬超时。
 // 超时、退出码非 0、没有输出都照实记成「没答上」，不当成答了。这台机器没装 cursor-agent、没登录，一家都不问，直接说清。
 //
-//   node ask.mjs --text 题面.md --round <0|1|2…> [--models gpt[,kimi,glm,grok]] [--limit 30] [--out 目录]
+// 超时：默认 DEFAULT_LIMIT_SEC、硬顶 MAX_LIMIT_SEC。决定 0006 里的 30 秒是创始人的「短讨论预算」，不是实测出来的
+// 上限（超时/空输出不算成功那一条保留）。2026-10-30 本机实测：cursor-agent 回一个字就要 26–29 秒（--version 7 秒、
+// status 3 秒，余下是模型调用；带不带 --model 没差别），30 秒上限下真实题面一家都答不完。所以只放宽单家上限；
+// 并发上限 MAX_PAR、超时杀整棵进程树、收尾等管道关闭、核对码这些防护都不动。最坏整轮耗时 = 轮数 × 单家上限
+// （ceil(家数 / MAX_PAR) 轮），硬顶下 4 家最多 2 × 300 秒。
+//
+//   node ask.mjs --text 题面.md --round <0|1|2…> [--models gpt[,kimi,glm,grok]] [--limit 180] [--out 目录]
 //   --round 0 是各自独立答；1 起是挑错，题面必须带【推演】段（walkthrough.mjs），缺了不发、退出码 2。
 //   不给 --models 只问 GPT（「和 gpt 讨论就够了」）。结论落在 ~/.local/share/second-opinion/runs/。
 //
@@ -11,8 +17,17 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MODELS, readCursorModels, resolveModel } from './cursor-models.mjs';
@@ -23,9 +38,43 @@ import { missingWalkthrough } from './walkthrough.mjs';
 export { MODELS };
 
 const MAX_PAR = 3;
+export const DEFAULT_LIMIT_SEC = 180;
+export const MAX_LIMIT_SEC = 300;
+
+/**
+ * 每家一个独立的 Cursor 配置目录（CURSOR_CONFIG_DIR）：cursor-agent 启动和退出时都会原子改写
+ * <配置目录>/cli-config.json（写临时文件再 rename），几家并发改同一个文件，Windows 上 rename 被占就报
+ * EPERM（2026-10-30 GPT 实测撞过）。配置目录里先放一份当前配置的拷贝（cli-config.json、auth.json，
+ * 有才拷），登录态在 Windows 上不在这个目录里（实测空目录下 status 仍是已登录），在 Linux/macOS 可能在
+ * auth.json 里，所以拷上；整个目录随题面临时目录一起删，不碰全局的 ~/.cursor。
+ * @param {string} dir 本次讨论的临时目录
+ * @param {string} key 这一家的名字
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export function isolatedCursorEnv(dir, key, env = cursorAgentEnv()) {
+  const cfg = join(dir, `cursor-config-${key}`);
+  mkdirSync(cfg, { recursive: true });
+  const base =
+    env.CURSOR_CONFIG_DIR?.trim() ||
+    (env.XDG_CONFIG_HOME?.trim() ? join(env.XDG_CONFIG_HOME, 'cursor') : join(homedir(), '.cursor'));
+  const bases = [base, join(homedir(), '.cursor'), join(homedir(), '.config', 'cursor')];
+  for (const name of ['cli-config.json', 'auth.json']) {
+    for (const b of bases) {
+      try {
+        if (existsSync(join(b, name))) {
+          copyFileSync(join(b, name), join(cfg, name));
+          break;
+        }
+      } catch {
+        // 拷不到就让 cursor-agent 用空配置起，登录与否由它自己判
+      }
+    }
+  }
+  return { ...env, CURSOR_CONFIG_DIR: cfg };
+}
 
 function args(argv) {
-  const o = { models: 'gpt', limit: 30 };
+  const o = { models: 'gpt', limit: DEFAULT_LIMIT_SEC };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--text') o.text = argv[++i];
@@ -67,7 +116,7 @@ export function askOne(
         windowsHide: true,
         shell: process.platform === 'win32',
         detached: process.platform !== 'win32',
-        env: cursorAgentEnv(),
+        env: isolatedCursorEnv(dir, key),
       },
     );
     child.stdin.on('error', () => {
@@ -137,8 +186,8 @@ export function askOne(
 
 async function main() {
   const o = args(process.argv.slice(2));
-  if (!Number.isFinite(o.limit) || o.limit <= 0 || o.limit > 30)
-    throw new Error('--limit 必须大于 0 且不超过 30 秒');
+  if (!Number.isFinite(o.limit) || o.limit <= 0 || o.limit > MAX_LIMIT_SEC)
+    throw new Error(`--limit 必须大于 0 且不超过 ${MAX_LIMIT_SEC} 秒`);
   if (!o.text) throw new Error('要 --text 题面文件');
   const prompt = readFileSync(o.text, 'utf8');
   if (!prompt.trim()) throw new Error(`${o.text} 是空的`);
