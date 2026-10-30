@@ -64,7 +64,7 @@ import { pgOrgSwitch } from './org-switch-view.ts';
 import { pgProbeHistory } from './probe-history.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
-import { repairDispatcher } from './repair-dispatch.ts';
+import { dispatchRunner, repairDispatcher } from './repair-dispatch.ts';
 import { pgRequestChat } from './request-chat-pg.ts';
 import { startRequestProgressWatch } from './request-progress.ts';
 import { pgRequests } from './request-store-pg.ts';
@@ -269,6 +269,8 @@ async function assemble(): Promise<{
       list: (now) => listLocalClaims(db, now),
       workflows: temporal.control,
     }),
+    // 本机交单给法国（#3739）：复用看门狗修复的派单，起 dispatch-issue 本体（不带 --force，准入同一套）；输出多留一些，列得全没过的原因
+    nodeDispatch: repairDispatcher(dispatchRunner(4000)),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),
     // 提需求（#2049）：需求、消息、每人的置顶和读到哪；删了满 30 天的由引擎的 request-sweep 硬删

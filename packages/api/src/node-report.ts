@@ -29,6 +29,7 @@ import { ApiError, errorBody, readJson, reply } from './http.ts';
 import { registerIntakeReceiver } from './intake.ts';
 import { registerLocalClaimsReceiver } from './local-claims.ts';
 import { registerLocalSessionsReceiver } from './local-sessions.ts';
+import { registerNodeDispatchReceiver } from './node-dispatch.ts';
 import { readNodeKeys } from './node-keys.ts';
 
 /** 通行证明文的哈希（和 fleet-api node-key new 打印的、FLEET_NODE_KEYS 里贴的同一个算法）。 */
@@ -101,6 +102,8 @@ export function nodeReportRoutes(deps: Deps): Hono<{ Variables: { nodeId: string
   registerLocalClaimsReceiver(app, deps, authenticate);
   // 开单服务（决定 0122）：POST /api/nodes/issues 开单、GET /api/nodes/events 读账本，同一个头、同一套钥匙
   registerIntakeReceiver(app, deps, authenticate);
+  // 本机交单给法国（#3739）：同一个头、同一套钥匙，复用看门狗修复的派单（和 fleet-api dispatch-issue 不带 --force 同一套准入）
+  registerNodeDispatchReceiver(app, deps, authenticate);
 
   app.post(NODE_REPORT_PATH, authenticate, oversize, async (c) => {
     const nodeId = c.get('nodeId');
