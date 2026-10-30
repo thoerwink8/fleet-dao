@@ -177,7 +177,8 @@ export async function intakeViaFrance(post: IntakePost, body: IntakeBody): Promi
   if (res.status === 401) {
     return {
       kind: 'fallback',
-      why: '法国不认本机的机器通行证（HTTP 401），去配：pnpm local-sessions install --url <法国地址>',
+      // 法国没这个路由时也落到登录那一层回 401（开单服务还没发上去），所以两种可能都写上
+      why: '法国回 HTTP 401：要么开单接口还没发到法国（看法国在用的版本），要么本机机器通行证不对（pnpm local-sessions install --url <法国地址>）',
     };
   }
   if (res.status === 404) return { kind: 'fallback', why: '法国回 HTTP 404，开单接口可能还没上线' };
