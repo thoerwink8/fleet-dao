@@ -1,0 +1,18 @@
+# 影子工人的出网限制（/etc/fleet-dao/fleet2-shadow.nft，模板 deploy/france/fleet2-shadow.nft）。单独一张 nft 表：
+# 载不进去也不碰 fleet-firewall 那张。排在 fleet2-shadow.slice 之后：规则按它的 cgroup 认，slice 不在就载不进。
+# 停掉它影子工人就不受出网限制：影子自检读回这张表，表不在不起影子工人。
+[Unit]
+Description=fleet-dao 新内核影子工人的出网限制（nft 表 inet fleet2_shadow）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/specs/3770-harness-rewrite/讨论稿.md
+Requires=fleet2-shadow.slice
+After=fleet2-shadow.slice
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/fleet-dao/fleet2-shadow.nft
+ExecReload=/usr/sbin/nft -f /etc/fleet-dao/fleet2-shadow.nft
+ExecStop=/usr/sbin/nft delete table inet fleet2_shadow
+
+[Install]
+WantedBy=multi-user.target

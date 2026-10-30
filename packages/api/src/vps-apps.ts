@@ -229,4 +229,7 @@ export function isSystemService(unit: string): boolean {
 /** deploy/france 下不算「上线项目」的常驻单元和为什么（.socket、.timer、.path 只是触发器，按后缀整类不算）。 */
 export const NOT_APPS: Readonly<Record<string, string>> = {
   'fleet-firewall.service': '一次性载入 nft 表，不留进程、不占磁盘',
+  'fleet2-shadow-firewall.service':
+    '一次性载入新内核影子工人的 nft 表 inet fleet2_shadow，不留进程、不占磁盘',
+  'fleet2-shadow.slice': '新内核影子工人的 cgroup，只给 nft 认连接用，自己不跑东西',
 };

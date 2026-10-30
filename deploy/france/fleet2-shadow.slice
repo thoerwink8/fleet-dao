@@ -1,0 +1,13 @@
+# 新内核影子工人的 slice（#3775）：影子工人的进程都放在它下面，fleet2-shadow.nft 按这个 cgroup 认出网。
+# 常驻：nft 载入规则时要它已经在（cgroup 路径解析成 inode），所以开机就起、不随最后一个进程退出而消失。
+[Unit]
+Description=fleet-dao 新内核影子工人的 slice（出网按它限）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/specs/3770-harness-rewrite/讨论稿.md
+Before=slices.target
+
+[Slice]
+MemoryMax=4G
+TasksMax=512
+
+[Install]
+WantedBy=slices.target

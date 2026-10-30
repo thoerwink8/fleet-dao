@@ -140,6 +140,11 @@ SSHD_SESSION_USER_DROPIN=/etc/ssh/sshd_config.d/51-fleet-dao-session-user.conf
 # 避开旧系统仍留着共用的 4316（wire.ts 的 assertNotRealMirasimInTests 连测试里都拒它）和同机可能还没清干净的
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
 MIRASIM_SESSION_PORT=4318
+# 新内核影子工人的出网限制（人工档，lib/human-tier.sh 的 setup_fleet2_shadow，#3775）：影子工人的进程都在这个 slice 下，
+# nft 表 inet fleet2_shadow 按它的 cgroup 把发往 443 的重定向到出网关（packages/harness-egress，只听回环）、其余出网拒
+FLEET2_SHADOW_SLICE=fleet2-shadow.slice
+FLEET2_EGRESS_PORT=7344
+FLEET2_SHADOW_NFT_FILE=/etc/fleet-dao/fleet2-shadow.nft
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
 MIRASIM_RETIRED_FILE=$DEPLOY_DIR/france/mirasim-retired
 # 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
@@ -1122,6 +1127,7 @@ readback() {
   readback_mirasim
   readback_wireguard
   readback_firewall
+  readback_fleet2_shadow
   readback_sshd_hardening
   readback_session_ssh_scope
   readback_fail2ban_sshd "$DEPLOY_DIR/france/fail2ban-sshd.jail" 10.99.0.0/24
@@ -1776,6 +1782,7 @@ main() {
     setup_user_slice_cap
     setup_sudoers
     setup_firewall
+    setup_fleet2_shadow
     setup_sshd_hardening
     setup_session_ssh
     setup_fail2ban_sshd "$DEPLOY_DIR/france/fail2ban-sshd.jail"
