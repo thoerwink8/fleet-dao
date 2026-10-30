@@ -154,6 +154,37 @@ describe('取消和截止', () => {
   });
 });
 
+describe('死活在同一个事务里交给派活的一方', () => {
+  it('过截止的、毒活（领到上限）都交给 onDead，各一次', async () => {
+    await schedule(t.db, { queue: 'q', key: 'late', payload: { who: 'late' } });
+    await schedule(t.db, { queue: 'q', key: 'poison', payload: { who: 'poison' }, maxAttempts: 1 });
+    await t.db.update(jobs).set({ deadlineAt: sql`now() - interval '1 second'` }).where(eq(jobs.key, 'late'));
+    const seen: string[] = [];
+    const onDead = async (_tx: unknown, dead: { key: string; state: string }[]) => {
+      for (const d of dead) seen.push(`${d.key}:${d.state}`);
+    };
+    expect((await claimJobs(t.db, 'q', 5, LEASE, { onDead })).map((j) => j.key)).toEqual(['poison']);
+    await expireLeases();
+    expect(await claimJobs(t.db, 'q', 5, LEASE, { onDead })).toEqual([]);
+    expect(seen.sort()).toEqual(['late:dead', 'poison:dead']);
+  });
+
+  it('onDead 抛错：整次领取回滚，活还在、下次再报', async () => {
+    await schedule(t.db, { queue: 'q', key: 'late', payload: {} });
+    await t.db.update(jobs).set({ deadlineAt: sql`now() - interval '1 second'` }).where(eq(jobs.key, 'late'));
+    const boom = async () => {
+      throw new Error('收件箱写不进');
+    };
+    await expect(claimJobs(t.db, 'q', 5, LEASE, { onDead: boom })).rejects.toThrow('收件箱写不进');
+    expect((await stateOf('late'))?.state).toBe('pending');
+    const seen: string[] = [];
+    await claimJobs(t.db, 'q', 5, LEASE, {
+      onDead: async (_tx, d) => void seen.push(...d.map((x) => x.key)),
+    });
+    expect(seen).toEqual(['late']);
+  });
+});
+
 describe('健康数字', () => {
   it('看得出积压、租约过期还挂着的、dead', async () => {
     await schedule(t.db, { queue: 'q', key: 'x', payload: {} });

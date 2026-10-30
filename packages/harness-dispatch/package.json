@@ -1,0 +1,22 @@
+{
+  "name": "@fleet-dao/harness-dispatch",
+  "version": "0.0.0",
+  "private": true,
+  "description": "新内核的派工层（决定 0124）：读派工请求、排进调度器、起工人、心跳续租、机械核验交回、记进指挥官收件箱",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/harness-api": "workspace:*",
+    "@fleet-dao/harness-contract": "workspace:*",
+    "@fleet-dao/harness-runner": "workspace:*",
+    "@fleet-dao/harness-store": "workspace:*",
+    "@fleet-dao/harness-workers": "workspace:*",
+    "drizzle-orm": "^0.45.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
+  }
+}
