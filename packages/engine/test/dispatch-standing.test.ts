@@ -123,4 +123,25 @@ describe('readDispatchStanding', () => {
     );
     expect(got).toMatchObject({ kind: 'redispatch', generation: 2 });
   });
+
+  it('新内核的单（owner = harness，决定 0124）：不问 Temporal，直接判归新内核；queued、stopped 也不接手', async () => {
+    let asked = false;
+    for (const state of ['queued', 'stopped', 'running'] as const) {
+      const got = await readDispatchStanding(
+        {
+          async issueTask() {
+            return { id: 'task-1', state, executor: 'engine', owner: 'harness' };
+          },
+          async taskGenerations() {
+            asked = true;
+            return ended();
+          },
+        },
+        'repo',
+        12,
+      );
+      expect(got).toEqual({ kind: 'harness' });
+    }
+    expect(asked).toBe(false);
+  });
 });

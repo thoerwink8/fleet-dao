@@ -736,6 +736,20 @@
       "when": 1793385688613,
       "tag": "0104_confused_carmella_unuscione",
       "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1793391120079,
+      "tag": "0105_clammy_sabretooth",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1793391127529,
+      "tag": "0106_tasks_fencing_trigger",
+      "breakpoints": true
     }
   ]
 }
