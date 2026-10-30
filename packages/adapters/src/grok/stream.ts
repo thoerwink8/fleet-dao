@@ -184,6 +184,7 @@ export class GrokStreamReader {
     }
     this.#s.frames++;
     const type = str(frame.type) ?? '(无 type)';
+    if (type !== '(无 type)') effect.protocolFrame = true;
     if (type === 'text') {
       effect.activity = true;
       this.#text += typeof frame.data === 'string' ? frame.data : '';

@@ -100,6 +100,30 @@ describe.skipIf(!onPosix)('走文件跑会话', { timeout: 30_000 }, () => {
     expect(seen.map((e) => e.seq)).toEqual([...seen.map((e) => e.seq)].sort((a, b) => a - b));
   });
 
+  it('接回时只有「Syncing config…」也不算协议帧：超过起动预算判 startup_timeout', async () => {
+    const io = tempDir('fleet-io-');
+    const output = join(tempDir(), 'syncing-config.out');
+    writeFileSync(output, 'Syncing config…\n');
+    const release = new AbortController();
+    const s = spec({ limits: { startupMs: 10_000, killGraceMs: 300 } });
+    runClaudeCode(s, {
+      command: fakeAgent({ replay: output, after: 'hang' }),
+      io: { dir: io, pollMs: 20, release: release.signal },
+    });
+    await until(() => existsSync(join(io, IO_FILES.out)) && outLines(io) === 1);
+    release.abort();
+    const report = await runClaudeCode(
+      { ...s, prompt: '', limits: { startupMs: 300, killGraceMs: 300 } },
+      {
+        command: fakeAgent({}),
+        io: { dir: io, attach: true, pollMs: 20, exitGraceMs: 100 },
+      },
+    );
+    expect(report.firstLineMs).toBeDefined();
+    expect(report.killed?.reason).toBe('startup_timeout');
+    expect(judgeClaudeRun(report)).toMatchObject({ outcome: 'failed', reason: 'startup_timeout' });
+  });
+
   it('引擎重启：接回在跑的会话，确认过的行只重放不再报、之后的照常报；会话接着干完，结局收得到', async () => {
     const io = tempDir('fleet-io-');
     const files = tempDir();

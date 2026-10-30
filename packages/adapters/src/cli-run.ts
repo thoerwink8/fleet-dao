@@ -21,6 +21,8 @@ import type { RateLimitReading, TranscriptEntry } from './types.ts';
 /** 读一行带来的变化。 */
 export interface LineEffect {
   events: ProgressEvent[];
+  /** 这一行是执行体协议帧，解除起动判死。 */
+  protocolFrame?: boolean;
   /** 这一行说明会话在干活（模型在说、在想、工具在跑）；停滞计时从这里重来。 */
   activity: boolean;
   rateLimit?: RateLimitReading;
@@ -142,6 +144,10 @@ export async function runCliAgent<E extends LineEffect>(
         const effect = plan.read(line);
         const meta: LineMeta = { seq: control.seq, replay: control.seq < (options.replayUntil ?? 0) };
         lastSeq = meta.seq;
+        if (effect.protocolFrame) {
+          control.ready();
+          if (!meta.replay) control.touch();
+        }
         if (!meta.replay) {
           if (effect.activity) control.touch();
           plan.inspect?.(effect, control);
