@@ -756,7 +756,7 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     expect(hook.checkTemporary(repo({ 'docs/PROGRESS.md': plan('') }), git, NOW)).toEqual([]);
   });
 
-  it('到了最迟复查日期（含今天）：一行列出来，提醒照读法②问创始人', () => {
+  it('到了最迟复查日期（含今天）：一行列出来，提醒问创始人续还是撤', () => {
     const today = row('停法国池', '机器坏了', '创始人 2026-10-01「先停」', '机器修好', '2026-10-06');
     const later = row('只开一条路由', '额度紧', '创始人 2026-10-01「先这样」', '额度恢复', '2026-10-20');
     const dir = repo({ 'docs/PROGRESS.md': plan(subagent + today + later) });
@@ -764,7 +764,7 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('临时调整到了最迟复查日期 2 条（docs/PROGRESS.md，今天 2026-10-06）');
     expect(lines[0]).toContain('不开子代理（最迟 2026-10-05）；停法国池（最迟 2026-10-06）');
-    expect(lines[0]).toContain('读法②问创始人');
+    expect(lines[0]).toContain('问创始人续还是撤：续就改复查日期，撤就删这一行');
     expect(lines[0]).not.toContain('只开一条路由');
   });
 
