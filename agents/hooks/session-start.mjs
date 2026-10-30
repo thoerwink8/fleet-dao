@@ -565,8 +565,8 @@ export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
 
 /**
  * fleet-dao 的创始人引导（只收 AI 做法类，pnpm progress directive --kind ai）记在仓里 docs/directives/，挂的单还开着就是没办完；
- * #1055 只剩进度流水和驾驶舱答案的收件箱：这里起
- * `progress.ts read --pending` 读没处理的几条，硬超时 PROGRESS_MS。不是 fleet-dao 不出声（别的仓不记引导：
+ * 驾驶舱答案的收件箱读法国账本（#3741 片 2c，decision.handoff 行；#1055 只剩进度流水）：这里起
+ * `progress.ts read --pending` 读没处理的几条（账本读不到它退出 2，这里就说没查成），硬超时 PROGRESS_MS。不是 fleet-dao 不出声（别的仓不记引导：
  * 通用段「我拍的板」那条）；查不成出一行「没查成」，不挡开会话。
  * 优先用同步专用检出里那份脚本，没有再用会话所在检出里的。
  */
@@ -574,7 +574,7 @@ export const PROGRESS_MS = 8_000;
 /** 引导挂了多久、本会话又接不了，就提醒指挥官自己接着办 */
 export const STALE_DIRECTIVE_MS = 24 * 60 * 60_000;
 const PROGRESS_SCRIPT = join('packages', 'conventions', 'src', 'bin', 'progress.ts');
-const PROGRESS_NOT_CHECKED = '创始人引导（进度单 #1055）没查成';
+const PROGRESS_NOT_CHECKED = '创始人引导（法国账本收件箱）没查成';
 
 /** 在仓根起 progress.ts read --pending：{ status, stdout, stderr, error, timeoutMs } */
 export function progressRunner(timeoutMs = PROGRESS_MS) {

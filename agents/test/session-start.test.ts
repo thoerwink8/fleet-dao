@@ -1434,18 +1434,18 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
   it('【故意造出的失败】脚本退出 2（gh 没成）、超时、输出认不出、找不到脚本：说一行没查成，不当成没有待办', () => {
     const dir = fleetRepo();
     expect(check(dir, fakeRun({ status: 2, stderr: 'gh 读 #1055 的评论报错：network down\n' }).run)).toEqual([
-      '创始人引导（进度单 #1055）没查成：gh 读 #1055 的评论报错：network down。',
+      '创始人引导（法国账本收件箱）没查成：gh 读 #1055 的评论报错：network down。',
     ]);
     const slow = fakeRun({
       status: null,
       error: Object.assign(new Error('spawnSync node ETIMEDOUT'), { code: 'ETIMEDOUT' }),
       timeoutMs: 8_000,
     });
-    expect(check(dir, slow.run)).toEqual(['创始人引导（进度单 #1055）没查成：超过 8 秒没完。']);
+    expect(check(dir, slow.run)).toEqual(['创始人引导（法国账本收件箱）没查成：超过 8 秒没完。']);
     expect(check(dir, fakeRun({ stdout: '乱七八糟\n' }).run)[0]).toMatch(/没查成：progress\.ts 的输出认不出/);
     const f = fakeRun({ stdout: row(1, 'h', 't') });
     expect(check(dir, f.run, join(dir, 'nope.ts'))).toEqual([
-      '创始人引导（进度单 #1055）没查成：找不到 packages/conventions/src/bin/progress.ts。',
+      '创始人引导（法国账本收件箱）没查成：找不到 packages/conventions/src/bin/progress.ts。',
     ]);
     expect(f.calls).toEqual([]);
   });
@@ -1457,7 +1457,7 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
     const started = Date.now();
     const lines = check(dir, hook.progressRunner(1_000), sleeper);
     expect(Date.now() - started).toBeLessThan(8_000);
-    expect(lines).toEqual(['创始人引导（进度单 #1055）没查成：超过 1 秒没完。']);
+    expect(lines).toEqual(['创始人引导（法国账本收件箱）没查成：超过 1 秒没完。']);
     expect(hook.PROGRESS_MS).toBe(8_000);
   });
 });

@@ -94,7 +94,7 @@ describe('引导文件', () => {
     expect(directivePath('1', t)).toBe('docs/directives/2026-10/1.md');
   });
 
-  it('#1055 评论搬进仓：编号沿用评论号，挂单，时间认不出用贴上的时刻', () => {
+  it('收件箱的一条搬进仓：编号沿用账本行号，挂单，时间认不出用落库的时刻', () => {
     const d = directiveFromComment(
       {
         id: 6122256111,
@@ -109,7 +109,7 @@ describe('引导文件', () => {
     expect(d.status).toBeUndefined();
     expect(d.at).toBe('2026-10-12 18:00 +0800');
     expect(d.path).toBe('docs/directives/2026-10/6122256111.md');
-    expect(d.source).toBe('#1055 评论 6122256111');
+    expect(d.source).toBe('法国账本行 6122256111');
   });
 });
 
