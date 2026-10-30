@@ -117,6 +117,7 @@ import { judgeSelfCheckJob } from './judge-self-check.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
 import { productionMemoryPeak } from './memory-peak.ts';
 import { readMergeWaitChecks } from './merge-wait-checks.ts';
+import { withNoRulesFallback } from './no-rules-fallback.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
@@ -898,11 +899,17 @@ export function realPortsFromEnv(
   // 引擎自己的 git（抓主线、推分支）也经这一档登记的代理出网：直连 github.com 不通时（Connection reset，
   // 动手前建工作树就卡在抓主线上，#786 同一个根）；git 认 http(s)_proxy 环境变量，gitEnv 照搬父环境里除凭据外的变量。
   // 只给 git 这一份环境，引擎进程自己的环境和起会话的环境（只从白名单抄）都不动；法国不登记代理、环境原样。
-  const gh = createGitHub({
-    ledger: pgLedger(db),
-    locker: pgLocker(db),
-    env: gitNetworkEnv(env as Record<string, string | undefined>, config.sessionProxy),
-  });
+  const gh = withNoRulesFallback(
+    createGitHub({
+      ledger: pgLedger(db),
+      locker: pgLocker(db),
+      env: gitNetworkEnv(env as Record<string, string | undefined>, config.sessionProxy),
+    }),
+    async (repo) => {
+      const row = await findRepoProfile(db, repo.owner, repo.name);
+      return row ? parseRepoProfile(row.profile).mergeSignals : [];
+    },
+  );
   // 每次受管删树都在 audit_log 留一条含树名、dev/ino 的回执（#3474）
   const trees = helperWorkTrees({
     root: config.workRoot,
