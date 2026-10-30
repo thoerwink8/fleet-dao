@@ -1,5 +1,7 @@
 // 驾驶舱 e2e 的偶发失败（决定 0093）：首跑红、重试过了的用例 Playwright 标成 flaky，这一轮不算红（retries=1，packages/web/e2e/playwright.config.ts）。
-// 同一条用例在近 10 轮主线 e2e 里偶发（首跑红、同一次运行里重试才过）到 2 次就算「常偶发」；重试也红的是真红，不算（#2735）。常偶发的开一张单（限期修、带最近几次失败的链接），单里写明把它加进隔离集
+// 同一条用例在主线 e2e 里连续 FLAKY_CONSECUTIVE（3）轮偶发（首跑红、同一次运行里重试才过）才算「常偶发」（决定 0122 第 5 条，#3741）；重试也红的是真红，不算（#2735）。
+// 连续的意思：只数主线推送的轮（定时、PR 的轮不在输入里，workflow 只列 push），中间有一轮这条用例没偶发（通过、真红、跳过或没跑到它）就清零重数；
+// 整轮坏了的轮跳过，既不计数也不清零。常偶发的开一张单（限期修、带最近几次失败的链接），单里写明把它加进隔离集
 // （packages/web/e2e/quarantine.json：照跑、照报，不挡这一轮；ci.yml 的 e2e job 跳过它们、e2e-quarantine.yml 每天单跑，按它挑用例的是 packages/web/e2e/support/quarantine.ts）。
 // 先判整轮（#2499）：一轮里首跑红的用例超过这一轮用例数的一半、或报告里有全局准备/备库的错，这轮记「整轮坏了」，不计入任何用例的次数，
 // 只汇成一张固定标题的「主线 e2e 整轮坏了」单（同一时间只一张），免得环境坏一次就给每条用例各开一张偶发单。
@@ -160,20 +162,28 @@ export interface FlakyFinding {
   urls: string[];
 }
 
+/** 扫描最多看几轮有报告的主线推送；要不小于 FLAKY_CONSECUTIVE。 */
 export const FLAKY_WINDOW = 10;
-export const FLAKY_THRESHOLD = 2;
+/**
+ * 同一用例连续这么多轮（主线推送，整轮坏了的跳过）都偶发才开单（决定 0122 第 5 条）。
+ * 出处：#3741 评论里的历史核对——拿主线历史各轮报告按「连续 N 轮偶发」回放，3 轮能挡住隔轮零星的偶发、又不漏真在反复的用例。
+ */
+export const FLAKY_CONSECUTIVE = 3;
 /** 一轮里达阈值的用例超过这么多条：只开一张汇总单，不逐条开（#2735）。 */
 export const FLAKY_SUMMARY_OVER = 5;
 /** 一次扫描最多新开几张单（整轮坏了、汇总、逐条偶发都算）：多出来的这次不开，下次扫描再说（#2735）。 */
 export const MAX_NEW_ISSUES = 3;
 
 /**
- * runs 是新的在前的若干轮（调用方给近 FLAKY_WINDOW 轮）。数每条用例偶发的轮数，达 threshold 的列出来。
+ * runs 是新的在前的若干轮（调用方给近 FLAKY_WINDOW 轮的主线推送）。每条用例数「连续偶发的轮数」，窗口里最长的一段达 threshold 的列出来：
+ * 整轮坏了的轮跳过（不计数不清零）；其余轮里这条用例没偶发（通过、真红、跳过、没跑到）就清零。bad 仍是窗口里偶发的总轮数，urls 是那几轮。
  * 只数 `flaky`（同一次运行里首跑红、重试才过）：真红（`failed`，重试也红）是改坏了，红在主线 CI 上、由提交的人修，
  * 不是偶发——原来把它也数进去，真坏一次就按用例逐条开单（10-15 起机器人开了 253 张，#2735）。
  */
-export function flakyTests(runs: readonly RunOutcomes[], threshold = FLAKY_THRESHOLD): FlakyFinding[] {
+export function flakyTests(runs: readonly RunOutcomes[], threshold = FLAKY_CONSECUTIVE): FlakyFinding[] {
   const tally = new Map<string, FlakyFinding>();
+  const cur = new Map<string, number>();
+  const best = new Map<string, number>();
   for (const run of runs) {
     if (isBrokenRound(run)) continue;
     for (const [id, { key, outcome }] of run.outcomes) {
@@ -186,9 +196,17 @@ export function flakyTests(runs: readonly RunOutcomes[], threshold = FLAKY_THRES
       }
       tally.set(id, f);
     }
+    for (const id of tally.keys()) {
+      if (run.outcomes.get(id)?.outcome === 'flaky') {
+        const n = (cur.get(id) ?? 0) + 1;
+        cur.set(id, n);
+        if (n > (best.get(id) ?? 0)) best.set(id, n);
+      } else cur.set(id, 0);
+    }
   }
-  return [...tally.values()]
-    .filter((f) => f.bad >= threshold && f.urls.length > 0)
+  return [...tally.entries()]
+    .filter(([id, f]) => (best.get(id) ?? 0) >= threshold && f.urls.length > 0)
+    .map(([, f]) => f)
     .sort((a, b) => b.bad - a.bad || keyText(a.key).localeCompare(keyText(b.key)));
 }
 
@@ -290,7 +308,7 @@ export function brokenRoundBody(urls: readonly string[]): string {
 export function flakySummaryBody(findings: readonly FlakyFinding[], until: string): string {
   return issueSections({
     scene: [
-      `近 ${FLAKY_WINDOW} 轮主线 e2e 里有 ${findings.length} 条用例偶发（同一次运行里首跑红、重试才过）达到阈值（${FLAKY_THRESHOLD} 次）。超过 ${FLAKY_SUMMARY_OVER} 条一起出现多半是同一个根子（时序、夹具、环境），所以只开这一张汇总单，不逐条开。**限期 ${until} 前修掉。**`,
+      `近 ${FLAKY_WINDOW} 轮主线 e2e 里有 ${findings.length} 条用例连续 ${FLAKY_CONSECUTIVE} 轮偶发（同一次运行里首跑红、重试才过）。超过 ${FLAKY_SUMMARY_OVER} 条一起出现多半是同一个根子（时序、夹具、环境），所以只开这一张汇总单，不逐条开。**限期 ${until} 前修掉。**`,
       '',
       ...findings.map(
         (f) => `- \`${keyText(f.key)}\`：${f.bad}/${f.ran}，最近一次 ${f.urls[0] ?? '（没有链接）'}`,
@@ -446,7 +464,7 @@ export function issueBody(f: FlakyFinding, until: string, quarantined: boolean):
   const entry = JSON.stringify({ file: f.key.file, title: f.key.title, issue: 0, until });
   return issueSections({
     scene: [
-      `驾驶舱 e2e 的用例 \`${keyText(f.key)}\` 在近 ${FLAKY_WINDOW} 轮主线 e2e 里偶发（首跑红、重试才过）${f.bad} 次（跑了 ${f.ran} 次），达到偶发阈值（${FLAKY_THRESHOLD} 次，决定 0093）。**限期 ${until} 前修掉。**`,
+      `驾驶舱 e2e 的用例 \`${keyText(f.key)}\` 在近 ${FLAKY_WINDOW} 轮主线 e2e 里偶发（首跑红、重试才过）${f.bad} 次（跑了 ${f.ran} 次），其中连续 ${FLAKY_CONSECUTIVE} 轮主线推送都偶发，达到开单条件（决定 0093、0122）。**限期 ${until} 前修掉。**`,
       '',
       quarantined
         ? '它已经在隔离集（`packages/web/e2e/quarantine.json`）里：照跑、照报，不挡发版。'
