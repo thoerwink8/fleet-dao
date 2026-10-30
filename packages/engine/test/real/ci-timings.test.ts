@@ -1,4 +1,4 @@
-// 每天刷新耗时表的 GitHub 接线：注入假的请求，不连 GitHub。
+// 每周刷新耗时表的 GitHub 接线：注入假的请求，不连 GitHub。
 // 开 PR 的顺序（建分支、写文件、开 PR、挂自动合并）、碰到标准路径时什么都不写、日志认不出时记没查成。
 import { readFileSync } from 'node:fs';
 import { parseRunLog, STANDARD_PATHS_FILE, TIMINGS_FILE } from '@fleet-dao/conventions';
@@ -181,7 +181,7 @@ describe('耗时表的 GitHub 接线', () => {
     });
     const pr = await github.openPr({
       title: '刷新 CI 测试耗时表',
-      body: '**需求**：无：每天定时刷新 CI 测试耗时表，没有对应的单\n',
+      body: '**需求**：无：每周定时刷新 CI 测试耗时表，没有对应的单\n',
       content,
       baseCommit: COMMIT,
       at: AT,

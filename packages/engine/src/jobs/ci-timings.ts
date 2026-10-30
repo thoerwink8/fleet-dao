@@ -1,14 +1,14 @@
-// 每天刷新 CI 测试耗时表（#921 第 1 条）：取最近几轮 PR 触发、真跑了测试的 ci.yml 日志，重写 test-timings.json，开一个自己带检查地合的 PR。
+// 每周刷新 CI 测试耗时表（#921 第 1 条；决定 0123 起由每天改每周）：取最近几轮 PR 触发、真跑了测试的 ci.yml 日志，重写 test-timings.json，开一个自己带检查地合的 PR。
 // 取数、合并、写成什么样都复用 conventions 的 ci-timings（parseRunLog / medianOfRuns / mergeTimings / renderTimings），这里只排一轮怎么跑。
 // 改这里之前必须知道：
-// - 这是定时任务，不进 CI（#299：CI 的判定只看检出来的文件）。钟点登记在 jobs/schedules.ts，由进程内定时器每天跑一次。
+// - 这是定时任务，不进 CI（#299：CI 的判定只看检出来的文件）。钟点登记在 jobs/schedules.ts，由进程内定时器每周跑一次。
 // - 只取 PR 触发的全量日志（#1192 验收）：最近 40 次 PR 触发的绿的 ci.yml 里，头 5 次至少 4 台 `test (` 成功的（台数门槛和
 //   `pnpm ci:timings` 同一组常量）。主线运行不算：主线多半复用同树的 PR 检查、根本不跑测试；小 PR 只有一两台的也不算。
-// - 先按现表的 source 重写再比字节：一样就不开 PR。source 里的日期和运行编号每天都会换，不拿它当「表变了」。
+// - 先按现表的 source 重写再比字节：一样就不开 PR。source 里的日期和运行编号每次都会换，不拿它当「表变了」。
 //   表里仍缺文件、文件和毫秒却没变时同样不开，缺多少只记日志。
 // - 日志读不到、运行列表认不出、一轮都没有、某一轮一个文件都没认出来、量到的文件全都不在仓里：记没查成再抛，不开 PR、不记成功。
 //   耗时表文件还不存在不算没查成，按没有旧表重写并开 PR。
-// - 不标 needsMaster：总开关每次发版都会关（#1086），标了每天这一轮几乎跑不上。这一轮不拉单、不起会话。
+// - 不标 needsMaster：总开关每次发版都会关（#1086），标了每周这一轮几乎跑不上。这一轮不拉单、不起会话。
 
 import {
   medianOfRuns,
@@ -28,21 +28,21 @@ import type { ScheduleRunLog } from './github-reconcile.ts';
 
 export { timingsSource };
 
-/** 一天一次（耗时表只靠仓里这份，分台读它；要勤，新文件和变慢的文件才不会拖慢最慢那台）。 */
-export const CI_TIMINGS_EVERY_MINUTES = 24 * 60;
+/** 七天一次（决定 0123：每天一个 PR 太吵，耗时表一周刷新一次够用；只记录类 PR 不挂单，减量）。 */
+export const CI_TIMINGS_EVERY_MINUTES = 7 * 24 * 60;
 /**
- * 每天 06:00（北京时间，UTC+8）= 前一天 22:00 UTC。epoch 是 00:00 UTC，再过 22 小时。
- * 1970-01-01 22:00 UTC 起每天一格。
+ * 每周一 06:00（北京时间，UTC+8）= 周日 22:00 UTC。epoch（1970-01-01）是周四 00:00 UTC，
+ * 到 1970-01-04（周日）22:00 UTC 是 3 天 22 小时；此后每七天一格。
  */
-export const CI_TIMINGS_OFFSET_MINUTES = 22 * 60;
+export const CI_TIMINGS_OFFSET_MINUTES = 3 * 24 * 60 + 22 * 60;
 /** 下日志比别的定时任务慢，超过一小时还没回才记超时（只记日志，不另起一轮）。 */
 export const CI_TIMINGS_OVERDUE_MINUTES = 60;
 
 export const CI_TIMINGS_JOB = {
   id: 'ci-timings',
   name: '刷新 CI 测试耗时表',
-  schedule: '每天 06:00（北京时间）',
-  // 两天没跑成才算过期：一天一次，多给一格余量。
+  schedule: '每周一 06:00（北京时间）',
+  // 两周没跑成才算过期：一周一次，多给一格余量。
   expectEveryMinutes: CI_TIMINGS_EVERY_MINUTES * 2,
 } as const;
 
@@ -114,7 +114,7 @@ function prBody(rounds: number): string {
   return [
     `**做了什么**：用最近 ${rounds} 轮 PR 触发、真跑了测试的 ci.yml 日志重写 \`${TIMINGS_FILE}\`（取日志、合并、写法复用 pnpm ci:timings）。`,
     '',
-    '**需求**：无：每天定时刷新 CI 测试耗时表，没有对应的单',
+    '**需求**：无：每周定时刷新 CI 测试耗时表，没有对应的单',
     '',
   ].join('\n');
 }
@@ -149,7 +149,7 @@ async function refresh(deps: CiTimingsJobDeps): Promise<ScheduleResult> {
   const at = deps.now();
   const freshSource = timingsSource(names, at);
   const old = typeof parsed === 'string' ? undefined : parsed;
-  // source 每天都会换成今天的日期和这几轮的运行编号。先沿用现表的 source 重写：字节一样就说明文件和毫秒没变，不开 PR。
+  // source 每次都会换成当天的日期和这几轮的运行编号。先沿用现表的 source 重写：字节一样就说明文件和毫秒没变，不开 PR。
   const keptSource = old?.source ?? freshSource;
   const mergedKept = mergeTimings(old, measured, head.testFiles, keptSource);
   if (measured.size > 0 && [...measured.keys()].every((f) => !head.testFiles.includes(f))) {

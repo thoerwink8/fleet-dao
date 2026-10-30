@@ -1,8 +1,8 @@
-// 引擎的定时任务（design 第四节；#921 起多一个每天刷新耗时表，#1365 起多一个判断题自检，#1935 起多一个用量补记，#1969 起多一个命令行工具版本，#1971 起多一个命令行工具升级）：每个任务的钟点格子、补跑窗口、一轮怎么跑，出处在这里；
-// 每天刷新耗时表和判断题自检的格子在 jobs/schedules.ts（单子点名登记在那里），这里只把它们装进来。
+// 引擎的定时任务（design 第四节；#921 起多一个每周刷新耗时表，#1365 起多一个判断题自检，#1935 起多一个用量补记，#1969 起多一个命令行工具版本，#1971 起多一个命令行工具升级）：每个任务的钟点格子、补跑窗口、一轮怎么跑，出处在这里；
+// 每周刷新耗时表和判断题自检的格子在 jobs/schedules.ts（单子点名登记在那里），这里只把它们装进来。
 // 调度本身在 jobs/timers.ts。任务编号 = 登记表（real/jobs.ts 的 ENGINE_JOBS）上的编号。原来 8 个的格子是 Temporal Schedule 的
 // interval + offset，没改；耗时表是新的，周一 06:00（北京时间）。#1078 起不再建 Temporal Schedule，进程内定时器按这些格子跑。
-// 引擎总开关（#1086）关着时只有标了 needsMaster 的拉单不跑（全流程巡检随决定 0093 删了）。看家检查关着照跑。每天刷新耗时表也不标：它不拉单、
+// 引擎总开关（#1086）关着时只有标了 needsMaster 的拉单不跑（全流程巡检随决定 0093 删了）。看家检查关着照跑。每周刷新耗时表也不标：它不拉单、
 // 不起会话，而总开关每次发版都会关，标了就几乎刷不上。
 import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
@@ -193,7 +193,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
     },
     // 判断题自检（#1365）。格子在 jobs/schedules.ts。不标 needsMaster：总开关关着也要能把红灯探回来。
     judgeSelfCheckSchedule(() => runJudgeSelfCheckJob(judgeSelfCheck())),
-    // 每天刷新 CI 测试耗时表（#921）。格子在 jobs/schedules.ts。不标 needsMaster：见文件头。
+    // 每周刷新 CI 测试耗时表（#921）。格子在 jobs/schedules.ts。不标 needsMaster：见文件头。
     ciTimingsSchedule(() => runCiTimingsJob(ciTimings())),
     changelogSchedule(() => runChangelogJob(changelog())),
     {

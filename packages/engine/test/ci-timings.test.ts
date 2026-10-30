@@ -1,4 +1,4 @@
-// 每天刷新 CI 测试耗时表（#921 第 1 条）：注入假的 GitHub 客户端，不连 GitHub。
+// 每周刷新 CI 测试耗时表（#921 第 1 条）：注入假的 GitHub 客户端，不连 GitHub。
 // 三条：表变了就开 PR；表里没缺文件、重写结果和现表相同就不开；日志读不到或没有可用的全量运行记没查成（故意造出的失败）。
 import { mergeTimings, renderTimings } from '@fleet-dao/conventions';
 import type { ScheduleResult } from '@fleet-dao/db';
@@ -82,15 +82,18 @@ function table(files: Record<string, number>, source: string): string {
 const SAME = { [A]: 100, [B]: 20 };
 const SAME_SOURCE = timingsSource(['ci.yml run 101', 'ci.yml run 102'], NOW);
 
-describe('每天刷新耗时表', () => {
-  it('登记在 schedules.ts：每天 06:00（北京时间）一格', () => {
+describe('每周刷新耗时表', () => {
+  it('登记在 schedules.ts：每周一 06:00（北京时间）一格，间隔 7 天（决定 0123）', () => {
     const job = ciTimingsSchedule(() => Promise.resolve());
     expect(job.id).toBe('ci-timings');
     expect(job.everyMinutes).toBe(CI_TIMINGS_EVERY_MINUTES);
-    expect(job.everyMinutes).toBe(24 * 60);
-    const day = Date.parse('2026-10-05T06:00:00+08:00');
-    expect(latestSlot(job, day)).toBe(day);
-    expect(latestSlot(job, day - 1)).toBe(day - 24 * 60 * 60 * 1000);
+    expect(job.everyMinutes).toBe(7 * 24 * 60);
+    const monday = Date.parse('2026-10-05T06:00:00+08:00'); // 2026-10-05 是周一
+    expect(new Date(monday).getUTCDay()).toBe(0); // UTC 周日 22:00
+    expect(latestSlot(job, monday)).toBe(monday);
+    expect(latestSlot(job, monday - 1)).toBe(monday - 7 * 24 * 60 * 60 * 1000);
+    // 周一之后一周内都还是这一格，不会每天出一格
+    expect(latestSlot(job, monday + 3 * 24 * 60 * 60 * 1000)).toBe(monday);
   });
 
   it('重写结果和现表不同：开一个 PR，正文不写 Closes', async () => {
