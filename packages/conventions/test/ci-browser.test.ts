@@ -173,7 +173,12 @@ describe('CI browser preparation', () => {
       ),
     ).not.toThrow();
     expect(() => validateUbuntuSources(s, null)).toThrow();
-    expect(() => validateUbuntuSources(s, 'https://example.org/ubuntu priority:1')).toThrow();
+    expect(() => validateUbuntuSources(s, 'https://example.org/ubuntu priority:1')).toThrow(
+      'Unknown Ubuntu mirror list: ["https://example.org/ubuntu priority:1"]',
+    );
+    expect(() => validateUbuntuSources(s, '# only a comment\n')).toThrow(
+      'Unknown Ubuntu mirror list: no entries',
+    );
   });
   it('loads original Parts/Main once before disabling implicit loads and applying final source settings', () => {
     const f = fixture();
