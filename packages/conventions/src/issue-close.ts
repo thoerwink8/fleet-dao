@@ -126,7 +126,10 @@ export async function issueClose(argv: readonly string[], deps: IssueCloseDeps):
 const noteBlock = (note: string | undefined): string => (note === undefined ? '\n\n' : `\n\n${note}\n\n`);
 
 /** completed 的证据只认 --note（#3740）：必填、非空（parseArgs 已拒空串），没有就拒关。 */
-function completedEvidence(issue: IssueFacts, note: string | undefined): { evidence: string; comment: string } {
+function completedEvidence(
+  issue: IssueFacts,
+  note: string | undefined,
+): { evidence: string; comment: string } {
   if (note !== undefined && note !== '') {
     return {
       evidence: `--note：${note}`,

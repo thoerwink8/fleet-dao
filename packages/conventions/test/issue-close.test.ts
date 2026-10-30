@@ -157,7 +157,9 @@ describe('pnpm issue:close：没有 PR 的收尾，--note 必填才关', () => {
     const pr = world({
       issue: { number: 241, state: 'open', pull_request: {}, html_url: 'u', repository_url: REPO_URL },
     });
-    await expect(run(pr, '241', '--note', 'x')).rejects.toThrow(new CloseRefused('#241 是 PR，不是单，没关。'));
+    await expect(run(pr, '241', '--note', 'x')).rejects.toThrow(
+      new CloseRefused('#241 是 PR，不是单，没关。'),
+    );
     for (const argv of [[], ['abc'], ['241', '242'], ['0']]) {
       const w = world();
       await expect(issueClose(argv, w)).rejects.toBeInstanceOf(CloseRefused);
