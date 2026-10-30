@@ -15,6 +15,13 @@
       "when": 1793392003534,
       "tag": "0001_thick_iron_lad",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793393074006,
+      "tag": "0002_mute_energizer",
+      "breakpoints": true
     }
   ]
 }

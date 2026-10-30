@@ -17,6 +17,11 @@ export const EVENT_TYPES = [
   'worker.spawned',
   'worker.settled',
   'handback.recorded',
+  // 接口层（#3775）：MCP 工具调用落成的事件，这一片只记账，外部动作由后面的片接。
+  'worker.spawn.requested',
+  'worker.stop.requested',
+  'worker.progress.reported',
+  'worker.result.submitted',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -46,6 +51,20 @@ export function parseEvent(raw: unknown): { ok: true; event: NewEvent } | { ok: 
   const parsed = NewEvent.safeParse(raw);
   return parsed.success ? { ok: true, event: parsed.data } : { ok: false, why: parsed.error.message };
 }
+
+/** 会话令牌的角色：指挥官（只读加派工）和工人（只报进度、交结果）。令牌只绑一个会话、一个角色。 */
+export const SESSION_ROLES = ['commander', 'worker'] as const;
+export type SessionRole = (typeof SESSION_ROLES)[number];
+
+/** 派工单：六项全必填且不能空，缺一项在 schema 层就拒。 */
+export const SpawnWorkerInput = {
+  task: z.string().min(1),
+  expected: z.string().min(1),
+  must_do: z.string().min(1),
+  must_not: z.string().min(1),
+  context: z.string().min(1),
+  stop_when: z.string().min(1),
+};
 
 /** 外部动作的种类：所有对外副作用只经 outbox，按种类分发。 */
 export const OUTBOX_KINDS = ['git.push', 'github.pr.open', 'github.comment', 'github.merge'] as const;
