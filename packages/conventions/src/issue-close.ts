@@ -1,9 +1,9 @@
-// pnpm issue:close <号>（#241；#654 起证据改了）：一张单做完了，关的时候要留下「凭什么算做完」——
-//   ① 有合并了的 PR 提到它（时间线上的交叉引用，GitHub 自己记的）；② 它下面的子单都关了（母单）；
-//   ③ 关的人写一句 --note（没有 PR 的事：配置、手工操作）。三样都没有就拒关。
-// 以前要主线上有 specs/<号>-<短名>/结果.md：那是在 PR 之外又存了一份「做成了什么」，两份各写各的（#654 删了）。
-// 绝大多数单子不走这里：PR 的「需求」栏下面写 Closes #号，合并时 GitHub 自己关，PR 就是交付记录。这个脚本管的是没有 PR 的
-// 收尾——母单、做完了没人关的、不做了的。
+// pnpm issue:close <号> --note "…"（#241；#654 改过；#3740 收成关单两条路之一）：
+//   ① 有 PR 的活：PR 的「需求」栏下面写 Closes #号，合并时 GitHub 自己关，PR 就是交付记录；
+//   ② 没有 PR 的收尾（母单、配置、手工操作、做完了没人关的、不做了的）：用这个命令。
+// 关成「完成」必须带证据：--note 必填且非空，写一句凭什么算做完，没有就拒关。以前还认「时间线上有合并了的 PR 提到它」和
+// 「子单都关了」当证据、不写 note 也能关：那两样是机器猜的，会把「提到过」当「做完了」，#3740 删了，要关就自己写一句。
+// 更早要主线上有 specs/<号>-<短名>/结果.md（#654 删了）。
 // 经 gh 读写：读不到 GitHub、读回来认不出一律明确报错、不关（CloseUnchecked，退出码 2），条件不够的拒关（CloseRefused，
 // 退出码 1），不拿「没读到」当「没有」，也不拿「没报错」当「关上了」（关完回读）。
 import type { Gh, GhResult } from './issue-new.ts';
@@ -12,10 +12,10 @@ import { managedCloseGate } from './managed-work.ts';
 // —— pnpm issue:close <号> ——
 
 export const CLOSE_USAGE =
-  '用法：pnpm issue:close <单号> [--note "做成了什么"] [--reason <completed|not_planned|duplicate>] [--superseded-by <号>]' +
-  '（默认走 completed：要有合并了的 PR 提到这张单（评论里贴 PR 链接），或者它下面的子单都关了，或者 --note 写一句凭什么算做完；' +
+  '用法：pnpm issue:close <单号> --note "做成了什么" [--reason <completed|not_planned|duplicate>] [--superseded-by <号>]' +
+  '（默认走 completed：--note 必填、不能为空，写一句凭什么算做完；有 PR 的活不走这里，PR 写 Closes #号 合并时自动关；' +
   '--superseded-by 关成 not_planned、评论里写「被 #<号> 取代」；' +
-  '--reason 单独用：只换关成的样子，completed 才要证据，其余「子单、是 PR」规则照走；--note 的话写进评论）';
+  '--reason not_planned|duplicate 只换关成的样子，不要证据，「子单、是 PR」规则照走；--note 的话写进评论）';
 
 /** 拒关：条件不够（没有证据、子单还开着、是 PR、参数不对）。入口退出码 1。 */
 export class CloseRefused extends Error {
@@ -50,11 +50,6 @@ export type IssueCloseResult =
 
 /** 子单一次读 100 张，到了就算没读全。 */
 const SUB_ISSUES_MAX = 100;
-/** 时间线一页 100 条，最多读 10 页；还没读完就算没读全。 */
-const TIMELINE_PAGE = 100;
-const TIMELINE_PAGES_MAX = 10;
-/** 评论里最多列几个 PR / 子单。 */
-const SHOWN = 5;
 
 export async function issueClose(argv: readonly string[], deps: IssueCloseDeps): Promise<IssueCloseResult> {
   const args = parseArgs(argv);
@@ -86,7 +81,7 @@ export async function issueClose(argv: readonly string[], deps: IssueCloseDeps):
   const openSubs = subs.filter((s) => s.state === 'open').map((s) => s.number);
   if (openSubs.length > 0) {
     throw new CloseRefused(
-      `#${n} 下面还有 ${openSubs.length} 张子单开着（${openSubs.map((s) => `#${s}`).join('、')}），没关：子单都做完、各自用 pnpm issue:close 关了，再关这张。`,
+      `#${n} 下面还有 ${openSubs.length} 张子单开着（${openSubs.map((s) => `#${s}`).join('、')}），没关：子单都做完、各自用 Closes 或 pnpm issue:close --note 关了，再关这张。`,
     );
   }
 
@@ -94,7 +89,7 @@ export async function issueClose(argv: readonly string[], deps: IssueCloseDeps):
   if (supersededBy !== undefined) await checkSupersededBy(gh, n, supersededBy);
 
   // completed 要有证据；superseded-by（或显式 --reason not_planned / duplicate）跳过这一项。
-  const done = isCompleted ? await completedEvidence(gh, issue, subs, args.note) : undefined;
+  const done = isCompleted ? completedEvidence(issue, args.note) : undefined;
 
   const comment =
     supersededBy !== undefined
@@ -130,42 +125,17 @@ export async function issueClose(argv: readonly string[], deps: IssueCloseDeps):
 
 const noteBlock = (note: string | undefined): string => (note === undefined ? '\n\n' : `\n\n${note}\n\n`);
 
-/**
- * completed 的证据，先后：--note（关的人自己写了，不再去读时间线）→ 合并了的 PR → 子单都关了（开着的上面已经拒了）。
- * 都没有就拒关。读不到、认不出抛 CloseUnchecked（不拿「没读到」当「没有」）。
- */
-async function completedEvidence(
-  gh: Gh,
-  issue: IssueFacts,
-  subs: readonly SubIssue[],
-  note: string | undefined,
-): Promise<{ evidence: string; comment: string }> {
-  if (note !== undefined) {
+/** completed 的证据只认 --note（#3740）：必填、非空（parseArgs 已拒空串），没有就拒关。 */
+function completedEvidence(issue: IssueFacts, note: string | undefined): { evidence: string; comment: string } {
+  if (note !== undefined && note !== '') {
     return {
       evidence: `--note：${note}`,
       comment: `做完了：${note}\n\n（pnpm issue:close --note 关的，没有 PR 的收尾。）`,
     };
   }
-  const prs = await mergedPullsMentioning(gh, issue);
-  if (prs.length > 0) {
-    const shown = prs.slice(0, SHOWN);
-    const more = prs.length > SHOWN ? ` 等 ${prs.length} 个` : '';
-    return {
-      evidence: `合并了的 PR ${shown.map((p) => `#${p.number}`).join('、')}${more}`,
-      comment: `做完了：见合并了的 PR ${shown.map((p) => `[#${p.number}](${p.url})`).join('、')}${more}。\n\n（pnpm issue:close 查过有合并了的 PR 提到它才关的。）`,
-    };
-  }
-  if (subs.length > 0) {
-    const list = subs.map((s) => `#${s.number}`);
-    const shown = list.slice(0, SHOWN).join('、') + (list.length > SHOWN ? ` 等 ${list.length} 张` : '');
-    return {
-      evidence: `子单 ${shown} 都关了`,
-      comment: `做完了：子单 ${shown} 都关了。\n\n（pnpm issue:close 查过子单都关了才关的。）`,
-    };
-  }
   throw new CloseRefused(
-    `#${issue.number} 没有合并了的 PR 提到它、下面也没有子单，没关：它是怎么做完的？有 PR 的话在 PR 的「需求」栏写上它（或 Closes #${issue.number}），合并后重跑；` +
-      '没有 PR 的事（配置、手工操作）用 --note "做成了什么" 关，一句话写进评论。',
+    `#${issue.number} 没带 --note，没关：关成「完成」要写一句凭什么算做完（pnpm issue:close ${issue.number} --note "做成了什么"）。` +
+      `有 PR 的活不走这里：在 PR 的「需求」栏另起一行写 Closes #${issue.number}，合并时 GitHub 自己关。`,
   );
 }
 
@@ -314,44 +284,6 @@ async function subIssues(gh: Gh, n: number): Promise<SubIssue[]> {
     out.push({ number: o.number, state: o.state });
   }
   return out.sort((a, b) => a.number - b.number);
-}
-
-/**
- * 同仓里提到过这张单、而且已经合并了的 PR（时间线上的 cross-referenced 事件，GitHub 自己记的；PR 正文、评论里写了 #号 就有）。
- * 读不到、认不出、读了 10 页还没读完都抛 CloseUnchecked：没读全不能说「没有」。
- */
-async function mergedPullsMentioning(gh: Gh, issue: IssueFacts): Promise<{ number: number; url: string }[]> {
-  const found = new Map<number, string>();
-  for (let page = 1; page <= TIMELINE_PAGES_MAX; page += 1) {
-    const events = await readJson(
-      gh,
-      ['api', `repos/{owner}/{repo}/issues/${issue.number}/timeline?per_page=${TIMELINE_PAGE}&page=${page}`],
-      `读 #${issue.number} 的时间线`,
-    );
-    if (!Array.isArray(events)) {
-      throw new CloseUnchecked(`gh 读 #${issue.number} 的时间线：读回来的不是列表，没关。`);
-    }
-    for (const e of events) {
-      const ev = isObject(e) ? e : {};
-      if (ev.event !== 'cross-referenced') continue;
-      const from = isObject(ev.source) && isObject(ev.source.issue) ? ev.source.issue : undefined;
-      if (!from || typeof from.number !== 'number' || typeof from.html_url !== 'string') {
-        throw new CloseUnchecked(
-          `gh 读 #${issue.number} 的时间线：有一条交叉引用认不出（没有 source.issue 的 number、html_url），没关。`,
-        );
-      }
-      if (from.repository_url !== issue.repoUrl) continue; // 别的仓提到的不算
-      if (!isObject(from.pull_request)) continue; // 是单子提到的，不是 PR
-      const merged = from.pull_request.merged_at;
-      if (typeof merged === 'string' && merged) found.set(from.number, from.html_url);
-    }
-    if (events.length < TIMELINE_PAGE) {
-      return [...found].sort((a, b) => a[0] - b[0]).map(([number, url]) => ({ number, url }));
-    }
-  }
-  throw new CloseUnchecked(
-    `#${issue.number} 的时间线超过 ${TIMELINE_PAGES_MAX * TIMELINE_PAGE} 条，没读全，没关：用 --note "做成了什么" 自己写一句凭什么算做完。`,
-  );
 }
 
 async function readJson(gh: Gh, args: string[], what: string): Promise<unknown> {
