@@ -239,6 +239,71 @@ export async function shadowSilence(
     : { kind: 'ok', pending: items.pending, lastAt };
 }
 
+/** 读旧 PR 的合并结果（只读 GitHub，由部署传进来）：没合并回 undefined，读不成抛。 */
+export type MergedReader = (
+  repo: string,
+  issue: number,
+) => Promise<{ pr: number; sha: string; diff: string } | undefined>;
+
+export interface CompareSweep {
+  scored: number;
+  /** 旧 PR 还没合并的，下一轮再看。 */
+  waiting: number;
+  /** 读合并结果失败的，原因各记一条，下一轮再试。 */
+  failed: { shadowRunId: number; error: string }[];
+  /** 下一轮从这里往后读；读到头回 0。 */
+  nextAfter: number;
+}
+
+/**
+ * 给一批里还没评分的影子产物评分：按产物号往后读一页，每条问一次旧 PR 合没合，合了就评。
+ * 一页一轮，读的行数和页大小成正比；没合并、读失败的留着下一轮再看，不当成评过。
+ */
+export async function sweepCompare(
+  db: Db,
+  batchId: string,
+  readMerged: MergedReader,
+  opts: { afterRunId?: number; limit?: number } = {},
+): Promise<CompareSweep> {
+  const limit = Math.min(opts.limit ?? 20, PAGE_MAX);
+  const page = await db
+    .select({ id: shadowRuns.id, repo: shadowRuns.repo, issue: shadowRuns.issue })
+    .from(shadowRuns)
+    .leftJoin(shadowCompare, eq(shadowCompare.shadowRunId, shadowRuns.id))
+    .where(
+      and(
+        eq(shadowRuns.batchId, batchId),
+        gt(shadowRuns.id, opts.afterRunId ?? 0),
+        sql`${shadowCompare.shadowRunId} is null`,
+      ),
+    )
+    .orderBy(asc(shadowRuns.id))
+    .limit(limit);
+  const out: CompareSweep = { scored: 0, waiting: 0, failed: [], nextAfter: 0 };
+  for (const r of page) {
+    let merged: Awaited<ReturnType<MergedReader>>;
+    try {
+      merged = await readMerged(r.repo, r.issue);
+    } catch (err) {
+      out.failed.push({ shadowRunId: r.id, error: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
+    if (!merged) {
+      out.waiting++;
+      continue;
+    }
+    await recordCompare(db, {
+      shadowRunId: r.id,
+      mergedPr: merged.pr,
+      mergedSha: merged.sha,
+      mergedDiff: merged.diff,
+    });
+    out.scored++;
+  }
+  out.nextAfter = page.length === limit ? (page.at(-1)?.id ?? 0) : 0;
+  return out;
+}
+
 export interface CompareRow {
   shadowRunId: number;
   repo: string;

@@ -9,6 +9,7 @@ import {
   recordCompare,
   recordShadowRun,
   shadowSilence,
+  sweepCompare,
 } from '../src/shadow.ts';
 import { createTestDb, type TestDb } from '../src/testing.ts';
 
@@ -133,6 +134,29 @@ describe('落库', () => {
     expect(page1.map((r) => r.issue)).toEqual([1, 2]);
     const page2 = await listCompare(t.db, 'b1', page1[1]?.shadowRunId, 2);
     expect(page2.map((r) => [r.issue, r.score.fileJaccard])).toEqual([[3, 0]]);
+  });
+});
+
+describe('按页给没评分的影子产物评分', () => {
+  it('合了的评、没合的等、读失败的记下；评过的下一轮不再读；分页接着往后', async () => {
+    await freezeBatch(t.db, 'b1', [item(1), item(2), item(3), item(4)]);
+    for (const i of [1, 2, 3, 4]) await recordShadowRun(t.db, run(`r${i}`, i, diff('a.ts', `+${i}`)));
+    const asked: number[] = [];
+    const reader = async (_repo: string, issue: number) => {
+      asked.push(issue);
+      if (issue === 2) return undefined;
+      if (issue === 3) throw new Error('GitHub 503');
+      return { pr: 100 + issue, sha: SHA, diff: diff('a.ts', `+${issue}`) };
+    };
+    const first = await sweepCompare(t.db, 'b1', reader, { limit: 3 });
+    expect(first).toMatchObject({ scored: 1, waiting: 1, failed: [{ error: 'GitHub 503' }] });
+    expect(first.nextAfter).toBeGreaterThan(0);
+    const second = await sweepCompare(t.db, 'b1', reader, { afterRunId: first.nextAfter, limit: 3 });
+    expect(second).toMatchObject({ scored: 1, waiting: 0, nextAfter: 0 });
+    asked.length = 0;
+    await sweepCompare(t.db, 'b1', reader);
+    expect(asked).toEqual([2, 3]);
+    expect((await listCompare(t.db, 'b1')).map((r) => r.mergedPr)).toEqual([101, 104]);
   });
 });
 
