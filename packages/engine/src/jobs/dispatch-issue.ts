@@ -196,6 +196,9 @@ async function hardFailure(
 
   const standing = await readDispatchStanding(deps, repo, issueNumber);
   if (standing.kind === 'uncertain') return { failure: fail('workflow_unknown', standing.why) };
+  if (standing.kind === 'harness') {
+    return { failure: fail('already_dispatched', '这张单归新内核（tasks.owner = harness），旧引擎不派') };
+  }
   if (standing.kind === 'dispatched') {
     return {
       failure: fail(

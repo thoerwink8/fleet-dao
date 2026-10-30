@@ -993,6 +993,10 @@ async function admitIssue(
       skip(t, slug, issue.number, { reason: 'already_dispatched', why: '已经派出过' });
       return null;
     }
+    if (standing.kind === 'harness') {
+      skip(t, slug, issue.number, { reason: 'already_dispatched', why: '归新内核（tasks.owner = harness）' });
+      return null;
+    }
     if (standing.kind === 'redispatch') generation = standing.generation;
     if (standing.kind === 'redispatch' || standing.kind === 'adopt') returnedAt = standing.returnedAt ?? null;
   }

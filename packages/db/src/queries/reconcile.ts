@@ -105,7 +105,14 @@ export async function stopTaskRows(db: Db, taskIds: readonly string[], reason: s
   const updated = await db
     .update(tasks)
     .set({ state: 'stopped', lastProblem: reason })
-    .where(and(inArray(tasks.id, [...taskIds]), notInArray(tasks.state, [...TERMINAL_TASK_STATES])))
+    .where(
+      and(
+        inArray(tasks.id, [...taskIds]),
+        notInArray(tasks.state, [...TERMINAL_TASK_STATES]),
+        // 新内核的单（决定 0124）由新内核自己收，旧对账不碰
+        eq(tasks.owner, 'v1'),
+      ),
+    )
     .returning({ id: tasks.id });
   return updated.length;
 }

@@ -4,7 +4,7 @@
 // 例外「重新派」：本机领过又退回法国（租约到期退回，或本机放手）、退回之后一直没人接的行——任务行 stopped、执行方 engine、
 // 各代都已结束、操作记录里最近一条退回晚于最后一代结束的时刻。本机领单不新起一代，只算「派出过」就永远接不回来（#3033、#3258）。
 
-import type { TaskExecutor, TaskState } from '@fleet-dao/shared';
+import type { TaskExecutor, TaskOwner, TaskState } from '@fleet-dao/shared';
 import { MAX_TASK_GENERATION } from '@fleet-dao/shared/task-redo';
 import { errMessage } from '@fleet-dao/shared/util';
 
@@ -16,6 +16,8 @@ export interface IssueTaskRow {
   state: TaskState;
   /** 执行方。老装配不给就认不出「退回」，不会判成重新派。 */
   executor?: TaskExecutor | undefined;
+  /** 归哪套系统（决定 0124）：harness 是新内核的单，旧引擎不派、不接手、不重新派。老装配不给按 v1。 */
+  owner?: TaskOwner | undefined;
   /**
    * 操作记录里最近一次退回法国队列的时刻（task.local.expire 且 how=returned，或本机放手 released）；从没退回过是 null。
    * 只有 stopped + engine 的行才需要读，别的行给 null 也不影响判断。
@@ -40,6 +42,8 @@ export type DispatchStanding =
   /** 退回法国队列后没人接的行：准入全过、有空位后起下一代（generation = 已有代数 + 1）。returnedAt 是那次退回的时刻。 */
   | { kind: 'redispatch'; taskId: string; generation: number; returnedAt: Date }
   | { kind: 'dispatched' }
+  /** 新内核的单（tasks.owner = harness）：旧引擎一律不碰。 */
+  | { kind: 'harness' }
   | { kind: 'uncertain'; why: string };
 
 export function dispatchStanding(
@@ -47,6 +51,7 @@ export function dispatchStanding(
   generations: TaskGenerationFacts | null,
 ): DispatchStanding {
   if (task === null) return { kind: 'open' };
+  if (task.owner === 'harness') return { kind: 'harness' };
   if (generations === null || !generations.ok) {
     const detail = generations && !generations.ok && generations.why ? generations.why : '没有回结果';
     return {
@@ -108,6 +113,7 @@ export async function readDispatchStanding<R>(
 ): Promise<DispatchStanding> {
   const task = await deps.issueTask(repo, issueNumber);
   if (task === null) return dispatchStanding(null, null);
+  if (task.owner === 'harness') return dispatchStanding(task, null);
   let generations: TaskGenerationFacts;
   try {
     generations = await deps.taskGenerations(repo, issueNumber);

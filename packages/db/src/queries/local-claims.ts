@@ -78,12 +78,21 @@ export async function claimLocalTask(
         id: tasks.id,
         state: tasks.state,
         executor: tasks.executor,
+        owner: tasks.owner,
         phase: tasks.phase,
         doing: tasks.doing,
       })
       .from(tasks)
       .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, input.issueNumber)))
       .for('update');
+    if (row?.owner === 'harness') {
+      // 码沿用 engine_has_it（另一执行方手上有）：本机领单的客户端已认它，不为新内核另加一个码
+      return {
+        ok: false,
+        code: 'engine_has_it',
+        why: '这张单归新内核（决定 0124，tasks.owner = harness），本机不接；要本机做先在新驾驶舱把它放回旧系统',
+      } as const;
+    }
     let tookOver = false;
     if (row && row.executor !== 'local' && ENGINE_HOLDS.includes(row.state)) {
       if (!(isParked(row) && input.takeOver)) {
