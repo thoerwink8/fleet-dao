@@ -10,6 +10,7 @@
 - 对外副作用只经 outbox，至少一次投递：领取用 `FOR UPDATE SKIP LOCKED` 加租约和领取令牌，收尾要令牌对得上（`LostClaimError`）；结果不知道记 `unknown`、到点领出来先查证，不盲重试；令牌（所有权）对不上进 `dead`；重试到上限进 `dead`。
 - 读都有页上限 `PAGE_MAX`，按游标往后读，读的行数和页大小成正比。
 - 时刻按数据库 `now()` 判，不用应用时钟。
+- 调度器（`src/scheduler.ts`，#3774，不用 Temporal）：一行 `jobs` 一件到点要做的事，`key` 唯一即幂等。领取同 outbox（SKIP LOCKED、租约、令牌），续租靠 `heartbeat`，回 `lost` 或 `cancelled` 的要立刻停手。没在 `queue_limits` 登记的队列不让领（`NoQueueLimitError`）：停机后积压一起到期，靠它的同时在领上限和每分钟上限限住追赶速度。子活截止不晚于父活，过截止不领、进 `dead`；取消顺着 `parent_key` 一路传下去。领的次数到 `max_attempts` 还没做完（毒活）进 `dead`。故障矩阵里库断线、只读、重启这几类在 CI 的 pg 台和法国真机测，不在 PGlite。
 
 ## 迁移和测试
 
