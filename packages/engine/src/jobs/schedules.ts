@@ -1,4 +1,4 @@
-// 定时任务的格子登记。每天刷新 CI 测试耗时表（#921）和判断题自检（#1365）的格子在这里，
+// 定时任务的格子登记。每周刷新 CI 测试耗时表（#921）和判断题自检（#1365）的格子在这里，
 // engine-timers.ts 把它们装进进程内定时器。钟点由 jobs/timers.ts 按这里的格子跑。单子点名的登记文件就是这个。
 
 import { CHANGELOG_JOB } from './changelog.ts';
@@ -28,7 +28,7 @@ export function changelogSchedule(run: () => Promise<unknown>): TimerJob {
 }
 
 /**
- * 每天 06:00（北京时间）一轮。不标 needsMaster：总开关每次发版都会关（#1086），标了每天这一轮几乎跑不上。
+ * 每周一 06:00（北京时间）一轮（决定 0123）。不标 needsMaster：总开关每次发版都会关（#1086），标了这一轮几乎跑不上。
  * 这一轮不拉单、不起会话。
  */
 export function ciTimingsSchedule(run: () => Promise<unknown>): TimerJob {
