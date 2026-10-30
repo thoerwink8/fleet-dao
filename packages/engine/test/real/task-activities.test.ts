@@ -1075,6 +1075,18 @@ describe('挂自动合并', () => {
     expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
   });
 
+  it('仓不允许自动合并（免费私有仓）：挂不上就直接合', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        throw new GitHubError('GRAPHQL_ERROR', 'GraphQL 出错：Auto merge is not allowed for this repository');
+      },
+      mergePr: async () => mergedOk('f'.repeat(40), false),
+    });
+    expect(await run(f.gh)).toEqual({ armed: false, merged: true, mergeCommit: 'f'.repeat(40) });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+  });
+
   const cleanButBehind = (over: Partial<Record<string, unknown>> = {}) =>
     fakeGh({
       readPull: async () => pullFacts(),
