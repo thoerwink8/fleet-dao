@@ -13,6 +13,7 @@
 - 只有确定没副作用的失败才退避重试（`retryJob`）：进程没起来、起步无进展、影子自检没过、工作环境没建成；记一条 `final: false` 的交回。别的（超时、被叫停、退出码非 0）记终局交回就停。
 - 调度器直接收成 `dead` 的活（排队时过了截止、领到 `max_attempts` 的毒活）不经 `processJob`：领活时经 `claimJobs` 的 `onDead` 在同一个事务里记终局交回（`outcome: dead`、`verdict: unknown`、原因取 `lastError`），收件箱不少一件；记不进去整次领取回滚。
 - 崩溃后重领不盲重派：重领时若已有终局交回，只补 `completeJob`；若上一次的 `worker:<runId>` 流有 `worker.spawned` 却没有对应交回，说明派工器在中途死了、工人做到哪不知道，记 `unknown` 的终局交回就停。
+- 影子自检的真实探测（`shadow-probes.ts`，接 `harness-workers` 的 `ShadowProbes`）：影子工人和会话用户同一个用户，家目录里的推送凭据（`.git-credentials`、`gh` 的 `hosts.yml`、`.netrc`、`.ssh/id_*`）和全局 git 凭据助手工人都拿得到，有一样就没过；出网规则看 `fleet2-shadow-firewall.service` 在跑且出网关的口连得上；outbox 装了任何真实处理器就没过。查不了一律 `unknown`。
 - 提示词（`prompt.ts`）：指示类字段在块外，`context` 只出现在带随机标记的资料块里，块尾标记伪造不了（SEC1）。
 
 ## 没做的
