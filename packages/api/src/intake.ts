@@ -7,6 +7,8 @@
 // - 幂等：idempotencyKey 原样当 GitHub 那边的幂等键；同一个 key 重放回原来那张、created:false。key 同时写进单子正文的来源行（单键），
 //   查重时靠它认出「就是这次自己开的那张」，重放不会被自己拦成重复。
 // - 查重只看开着的单（conventions 的 rankSimilar，纯字面打分；强命中线 STRONG_THRESHOLD），读候选失败回 503，不当成「没有重复」。
+// - 过程记录（#3741 片 2a）：POST /api/nodes/notes 写 progress.note / decision.handoff / report.daily / report.guards，target = issue:<repo>#<号>（挂单）
+//   或 progress:<repo>；同一个仓同一个 idempotencyKey 只留一行（库里唯一索引），重放回原来那行、created:false。读口 GET /api/nodes/events 两个前缀一起读。
 // - 账本：不另建表，三种 action（issue.open / issue.merge / issue.duplicate_refused）写进 audit_log，target = issue:<owner>/<name>#<号>，
 //   actor = agent / node:<环境编号>，via = agent（和本机领单同一个写法）。重放也记一条（after.created 是 false），免得「开成了、记账前挂了」后重试时账上缺这一笔。
 import {
@@ -34,6 +36,10 @@ import {
   type IntakeIssueRequest,
   IntakeIssueRequestSchema,
   IntakeIssueResponseSchema,
+  LEDGER_NOTES_PATH,
+  LEDGER_PROGRESS_TARGET_PREFIX,
+  LedgerNoteRequestSchema,
+  LedgerNoteResponseSchema,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { Hono, MiddlewareHandler } from 'hono';
@@ -73,12 +79,20 @@ const big = bodyLimit({
   onError: (c) => c.json(errorBody('too_large', '开单的请求超过 256 KB，没收'), 413),
 });
 
+const bigNote = bodyLimit({
+  maxSize: 256 * 1024,
+  onError: (c) => c.json(errorBody('too_large', '过程记录的请求超过 256 KB，没收'), 413),
+});
+
 /** 单子正文末尾那行可见的来源说明；单键也写在里面（查重靠它认出自己）。 */
 export function sourceLine(req: Pick<IntakeIssueRequest, 'source' | 'idempotencyKey'>): string {
   return `来源：${req.source.kind} ${req.source.ref}（单键 ${req.idempotencyKey}）`;
 }
 
-const sourceOf = (req: IntakeIssueRequest) => ({ kind: req.source.kind, ref: req.source.ref });
+const sourceOf = (req: Pick<IntakeIssueRequest, 'source'>) => ({
+  kind: req.source.kind,
+  ref: req.source.ref,
+});
 
 /** 正文的所有问题（一次列全）：四节、缺陷的「影响」、怎么算做完、PR 正文、diff 外证据、超长。没有问题回空。 */
 export function bodyProblems(
@@ -292,7 +306,43 @@ export function registerIntakeReceiver(
     });
   });
 
-  // 读账本：operation log 里 target 以 issue: 开头的行，按 id 升序往后读
+  // 过程记录（#3741 片 2a）：写一行账本，不碰 GitHub（所以不要 intakeIssues 端口）。幂等靠库里的唯一索引，重放回原来那行。
+  app.post(LEDGER_NOTES_PATH, authenticate, bigNote, async (c) => {
+    const nodeId = c.get('nodeId');
+    const req = await readJson(c, LedgerNoteRequestSchema);
+    const managed = (await deps.store.listRepos()).find(
+      (r) => `${r.owner}/${r.name}`.toLowerCase() === req.repo.toLowerCase(),
+    );
+    if (!managed) throw new ApiError(404, 'unknown_repo', `${req.repo} 不是法国管的仓，记不了过程`);
+    // 用库里登记的写法，大小写不同的同一个仓不会各记一份、也不会绕开幂等
+    const repo = `${managed.owner}/${managed.name}`;
+    const target =
+      req.issue === undefined
+        ? `${LEDGER_PROGRESS_TARGET_PREFIX}${repo}`
+        : `${INTAKE_TARGET_PREFIX}${repo}#${req.issue}`;
+    let got: { id: number; created: boolean };
+    try {
+      got = await deps.store.appendLedgerNote({
+        actorId: `node:${nodeId}`,
+        action: req.kind,
+        target,
+        after: {
+          nodeId,
+          repo,
+          ...(req.issue === undefined ? {} : { number: req.issue }),
+          text: req.text,
+          source: sourceOf(req),
+          idempotencyKey: req.idempotencyKey,
+        },
+      });
+    } catch (err) {
+      log.warn('过程记录写不进账本', { nodeId, repo, error: errMessage(err) });
+      throw new ApiError(503, 'ledger_unwritable', '写不进账本（库写失败），这条过程没记');
+    }
+    return reply(c, LedgerNoteResponseSchema, got);
+  });
+
+  // 读账本：operation log 里 target 以 issue: 或 progress: 开头的行，按 id 升序往后读
   app.get(INTAKE_EVENTS_PATH, authenticate, async (c) => {
     const q = readQuery(c, IntakeEventsQuerySchema);
     let events: Awaited<ReturnType<Deps['store']['listIssueEvents']>>;

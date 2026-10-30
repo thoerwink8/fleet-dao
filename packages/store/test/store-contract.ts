@@ -497,6 +497,32 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.listIssueEvents({ after: all.at(-1)?.id ?? 0, limit: 10 })).toEqual([]);
       });
 
+      it('过程记录（#3741 片 2a）：appendLedgerNote 同仓同 key 幂等，读口 issue: 和 progress: 一起给', async () => {
+        const input = (over: Record<string, unknown> = {}) => ({
+          actorId: 'node:x',
+          action: 'progress.note',
+          target: 'progress:a/b',
+          after: { repo: 'a/b', idempotencyKey: 'key-note-0001', text: 'hi' },
+          ...over,
+        });
+        const first = await store.appendLedgerNote(input());
+        expect(first.created).toBe(true);
+        expect(await store.appendLedgerNote(input())).toEqual({ id: first.id, created: false });
+        const other = await store.appendLedgerNote(
+          input({
+            action: 'decision.handoff',
+            target: 'issue:a/b#5',
+            after: { repo: 'a/b', idempotencyKey: 'key-note-0002', text: 'ho' },
+          }),
+        );
+        expect(other.created).toBe(true);
+        const all = await store.listIssueEvents({ after: 0, limit: 100 });
+        expect(all.map((e) => [e.id, e.action, e.target])).toEqual([
+          [first.id, 'progress.note', 'progress:a/b'],
+          [other.id, 'decision.handoff', 'issue:a/b#5'],
+        ]);
+      });
+
       it('刚好翻完一页整数条：最后一页没有下一页游标；少取一条就有（操作记录、通知同一个判法）', async () => {
         for (let i = 0; i < 3; i++) {
           tick();

@@ -4,7 +4,8 @@
 // 改这里之前必须知道：
 // - 请求体全部 strict，多一个字段 400；正文缺节、缺陷缺「影响」回 422 并一次列全；强命中重复回 409 带候选，force / mergeInto 才绕得开。
 // - idempotencyKey 由调用方给，同一个 key 对同一个仓只开一张（或只留一条并单评论）；重放回原来那张、created:false。
-// - 账本不另建表：读的是 audit_log 里 target 以 `issue:` 开头的行（action: issue.open / issue.merge / issue.duplicate_refused）。
+// - 账本不另建表：读的是 audit_log 里 target 以 `issue:` 或 `progress:` 开头的行（action: issue.open / issue.merge / issue.duplicate_refused，
+//   以及下面 POST /api/nodes/notes 写的 progress.note / decision.handoff / report.daily / report.guards，决定 0122、母单 #3741 片 2a）。
 import { z } from 'zod';
 
 /** 在 /api 下的路径（和 LOCAL_CLAIMS_PATH 同一个写法）。 */
@@ -20,6 +21,19 @@ export const INTAKE_AUDIT = {
 
 /** 账本行的 target 前缀：`issue:<owner>/<name>#<号>`。 */
 export const INTAKE_TARGET_PREFIX = 'issue:';
+/** 不挂单的过程记录的 target 前缀：`progress:<owner>/<name>`。读口（GET /api/nodes/events）和 issue: 一起读。 */
+export const LEDGER_PROGRESS_TARGET_PREFIX = 'progress:';
+
+/** 过程记录（POST /api/nodes/notes，#3741 片 2a）：路径在 /api 下。 */
+export const LEDGER_NOTES_PATH = '/nodes/notes';
+/** 过程记录的 kind，同时就是账本行的 action。 */
+export const LEDGER_NOTE_KINDS = [
+  'progress.note',
+  'decision.handoff',
+  'report.daily',
+  'report.guards',
+] as const;
+export const LEDGER_NOTE_TEXT_MAX = 20_000;
 
 export const INTAKE_KINDS = ['需求', '缺陷', '杂项'] as const;
 export const INTAKE_DOMAINS = ['engine', 'api', 'mirasim'] as const;
@@ -126,3 +140,26 @@ export const IntakeEventsResponseSchema = z
   })
   .strict();
 export type IntakeEventsResponse = z.infer<typeof IntakeEventsResponseSchema>;
+
+export const LedgerNoteRequestSchema = z
+  .object({
+    kind: z.enum(LEDGER_NOTE_KINDS),
+    repo: z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'owner/name'),
+    /** 挂单：target 记成 issue:<repo>#<号>；不给就记成 progress:<repo>。 */
+    issue: z.number().int().positive().optional(),
+    text: z.string().min(1).max(LEDGER_NOTE_TEXT_MAX),
+    source: IntakeSourceSchema,
+    /** 同一个仓里同一个 key 只记一行；重放回原来那行、created:false。 */
+    idempotencyKey: IdempotencyKeySchema,
+  })
+  .strict();
+export type LedgerNoteRequest = z.infer<typeof LedgerNoteRequestSchema>;
+
+export const LedgerNoteResponseSchema = z
+  .object({
+    /** 账本行的编号（读口 GET /api/nodes/events 的 id）。 */
+    id: z.number().int(),
+    created: z.boolean(),
+  })
+  .strict();
+export type LedgerNoteResponse = z.infer<typeof LedgerNoteResponseSchema>;
