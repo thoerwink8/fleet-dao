@@ -8,24 +8,28 @@ export type DispatchRunner = (
   args: string[],
   options: { env: NodeJS.ProcessEnv },
 ) => Promise<{ code: number; text: string }>;
-const run: DispatchRunner = (file, args, options) =>
-  new Promise((resolve, reject) => {
-    execFile(
-      file,
-      args,
-      { ...options, timeout: 60_000, windowsHide: true, maxBuffer: 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error && typeof error.code !== 'number') {
-          reject(error);
-          return;
-        }
-        resolve({
-          code: error && typeof error.code === 'number' ? error.code : 0,
-          text: `${stdout}${stderr}`.trim().slice(0, 400),
-        });
-      },
-    );
-  });
+/** 起 dispatch-issue 的真跑法；输出留多少字由 maxText 定（看门狗修复 400 够写一行，派单接口要列全每一道没过的原因）。 */
+export const dispatchRunner =
+  (maxText: number): DispatchRunner =>
+  (file, args, options) =>
+    new Promise((resolve, reject) => {
+      execFile(
+        file,
+        args,
+        { ...options, timeout: 60_000, windowsHide: true, maxBuffer: 1024 * 1024 },
+        (error, stdout, stderr) => {
+          if (error && typeof error.code !== 'number') {
+            reject(error);
+            return;
+          }
+          resolve({
+            code: error && typeof error.code === 'number' ? error.code : 0,
+            text: `${stdout}${stderr}`.trim().slice(0, maxText),
+          });
+        },
+      );
+    });
+const run = dispatchRunner(400);
 export function repairDispatcher(runner: DispatchRunner = run) {
   const entry = fileURLToPath(new URL('../../engine/src/bin/dispatch-issue.ts', import.meta.url));
   return async (repo: { owner: string; name: string }, issueNumber: number, operator: string) => {
