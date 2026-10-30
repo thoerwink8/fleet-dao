@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # 影子工人的出网限制（deploy/france/fleet2-shadow.nft，#3775）：拿真模板在一次性的网络命名空间里载入，
 # 建一个临时 cgroup 扮 fleet2-shadow.slice，在它里面和它外面各连一次，看规则：
 #   在 slice 里：发往外面 443 的被重定向到出网关的口；发往外面别的口的被复位；回环照常通。
