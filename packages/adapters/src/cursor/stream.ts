@@ -183,6 +183,7 @@ export class CursorStreamReader {
     this.#s.frames++;
     this.#noteSession(frame, effect);
     const type = str(frame.type) ?? '(无 type)';
+    if (type !== '(无 type)') effect.protocolFrame = true;
     switch (type) {
       case 'system':
         if (frame.subtype === 'init') {

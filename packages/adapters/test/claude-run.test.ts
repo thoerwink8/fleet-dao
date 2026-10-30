@@ -225,6 +225,20 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     expect(judgeClaudeRun(report)).toMatchObject({ outcome: 'failed', reason: 'startup_timeout' });
   });
 
+  it('stdout 只有「Syncing config…」也不算协议帧：超过起动预算判 startup_timeout', async () => {
+    const output = join(tempDir(), 'syncing-config.out');
+    writeFileSync(output, 'Syncing config…\n');
+    const report = await runClaudeCode(
+      spec('cc-haiku-read', { limits: { startupMs: 300, killGraceMs: 300 } }),
+      {
+        command: fakeAgent({ replay: output, after: 'hang' }),
+      },
+    );
+    expect(report.firstLineMs).toBeDefined();
+    expect(report.killed?.reason).toBe('startup_timeout');
+    expect(judgeClaudeRun(report)).toMatchObject({ outcome: 'failed', reason: 'startup_timeout' });
+  });
+
   it('总时长到顶：连同子进程一起杀掉，判超时而不是 0', async () => {
     const pidFile = join(tempDir(), 'child.pid');
     const report = await runClaudeCode(

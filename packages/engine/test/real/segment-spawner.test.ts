@@ -36,6 +36,7 @@ import {
   MIRASIM_MEMORY_UNREAD,
   outcomeOfReport,
   SEGMENT_WALL_MARGIN_MS,
+  WORKER_IDLE_MS,
 } from '../../src/real/segment-spawner.ts';
 import * as handoffFiles from '../../src/real/session-handoff.ts';
 import {
@@ -617,6 +618,7 @@ describe('hostSegmentSpawner · 成功', () => {
     const h = harness();
     await h.run({}, 30);
     expect(h.calls[0]?.spec.limits.wallClockMs).toBe(30 * 60_000 - SEGMENT_WALL_MARGIN_MS);
+    expect(h.calls[0]?.spec.limits.idleMs).toBe(WORKER_IDLE_MS);
   });
 
   it('临时目录：起驱动前交给会话用户，收场后删', async () => {
