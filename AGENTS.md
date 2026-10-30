@@ -24,13 +24,16 @@
 | 封号清痕迹 | `docs/reclaude.md` |
 | 全部命令 | `README.md` |
 
-## 常用
+## 遇到什么就做什么
 
-- `pnpm install`
-- `npx vitest run <文件>`
-- `pnpm check`
-- `pnpm specs:index [--check]`
-- `pnpm test:isolated --resource <本机资源JSON绝对路径> -- <完整测试文件...>`
-- `pnpm test:linux`（Windows 的 Linux 安全归档测试，须显式配置本机 Linux runner）
-- `pnpm pr:open`
-- `pnpm progress read`
+| 时机 | 做什么 |
+|---|---|
+| 创始人提了新要求 | 先分拣（照做／讨论稿／记成规矩），首行回执 |
+| 要动代码 | 先有单：`pnpm issue:new` 或 `pnpm work claim <号>` |
+| 以后要做的 | `pnpm issue:new` 开单进未排期，不在文档另记 |
+| 要拍板、根因不清 | `pnpm discuss:new -- <短名> --issue <单号> --ask "…"` |
+| 长期拍板 | 写进 `docs/decisions/`，跑 `pnpm decisions:index` |
+| 一时变通 | 进 `docs/PROGRESS.md` 的临时调整表 |
+| 开 PR | `pnpm pr:open` |
+| 没有 PR 的收尾 | `pnpm issue:close <号> --note "…"`，再 `pnpm work done <号>` |
+| 推之前 | `npx vitest run <改到的文件>`，再 `pnpm check` |
