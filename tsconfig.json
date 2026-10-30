@@ -20,6 +20,9 @@
       "path": "packages/harness-runner"
     },
     {
+      "path": "packages/harness-workers"
+    },
+    {
       "path": "packages/core"
     },
     {
