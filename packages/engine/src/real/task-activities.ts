@@ -256,6 +256,9 @@ function checksRedWait(checks: MergeWaitChecks): Extract<MergeWait, { state: 'ch
  */
 function isMergeableNow(error: unknown): boolean {
   if (/clean status/i.test(errMessage(error))) return true;
+  // 免费私有仓不开自动合并（"Auto merge is not allowed for this repository"）：挂不上，直接合；
+  // mergePr 仍核头、不落后主线、必过检查，没过的交后面照旧分类。
+  if (/auto merge is not allowed for this repository/i.test(errMessage(error))) return true;
   return isUnstableRefusal((error as { details?: unknown } | null)?.details);
 }
 

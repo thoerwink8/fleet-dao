@@ -1075,6 +1075,18 @@ describe('挂自动合并', () => {
     expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
   });
 
+  it('仓不允许自动合并（免费私有仓）：挂不上就直接合', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        throw new GitHubError('GRAPHQL_ERROR', 'GraphQL 出错：Auto merge is not allowed for this repository');
+      },
+      mergePr: async () => mergedOk('f'.repeat(40), false),
+    });
+    expect(await run(f.gh)).toEqual({ armed: false, merged: true, mergeCommit: 'f'.repeat(40) });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+  });
+
   const cleanButBehind = (over: Partial<Record<string, unknown>> = {}) =>
     fakeGh({
       readPull: async () => pullFacts(),
@@ -2036,11 +2048,8 @@ describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝
       [{ type: 'FORBIDDEN', path: unstable.path, message: 'Resource not accessible by integration' }],
       'FORBIDDEN',
     ],
-    [
-      '策略拒绝',
-      [{ ...unstable, message: 'Auto merge is not allowed for this repository' }],
-      'GRAPHQL_ERROR',
-    ],
+    // 「Auto merge is not allowed for this repository」（仓不开自动合并）不再原样抛：免费私有仓只能直接合，
+    // 见上面「仓不允许自动合并（免费私有仓）：挂不上就直接合」。
   ])('%s：原样抛、不可重试，转成活动失败也是 nonRetryable', async (_name, errors, code) => {
     const a = arm([errors]);
     const err = await a.attempt(1).catch((e: unknown) => e);
