@@ -173,8 +173,15 @@ describe('issue:new 先走法国开单', () => {
   it('409：打印候选、不退回、不开单', async () => {
     const t = setup({
       status: 409,
+      // api 的 errorBody 形状：{ error: { code, message, details } }
       json: {
-        candidates: [{ number: 12, title: '给登录加验证码', score: 0.93, why: '标题几乎一样' }],
+        error: {
+          code: 'duplicate_suspected',
+          message: '和开着的 #12 太像，单没开',
+          details: {
+            candidates: [{ number: 12, title: '给登录加验证码', score: 0.93, why: '标题几乎一样' }],
+          },
+        },
       },
     });
     const err = await t.run().then(
@@ -223,7 +230,21 @@ describe('issue:new 先走法国开单', () => {
   });
 
   it('422：打印正文问题、不退回', async () => {
-    const t = setup({ status: 422, json: { problems: ['「怎么算做完」没写字', '正文太长'] } });
+    const t = setup({
+      status: 422,
+      json: {
+        error: {
+          code: 'body_incomplete',
+          message: '正文有 2 处不合格',
+          details: {
+            problems: [
+              { field: '怎么算做完', why: '「怎么算做完」没写字' },
+              { field: '正文', why: '正文太长' },
+            ],
+          },
+        },
+      },
+    });
     const err = await t.run().then(
       () => undefined,
       (e: Error) => e,

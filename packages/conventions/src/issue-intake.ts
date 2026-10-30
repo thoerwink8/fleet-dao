@@ -93,9 +93,10 @@ function parseJson(text: string): Record<string, unknown> | undefined {
   }
 }
 
-/** 找一个数组：先看顶层，再看 error 里面；键名按约定猜几个，认不出回 undefined。 */
+/** 找一个数组：法国（api 的 errorBody）放在 error.details 下；顶层、error 下也看一眼，认不出回 undefined。 */
 function listOf(body: Record<string, unknown> | undefined, keys: string[]): unknown[] | undefined {
-  for (const holder of [body, asObject(body?.error)]) {
+  const error = asObject(body?.error);
+  for (const holder of [asObject(error?.details), error, body]) {
     for (const k of keys) {
       const v = holder?.[k];
       if (Array.isArray(v) && v.length > 0) return v;
