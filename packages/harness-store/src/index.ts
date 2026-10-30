@@ -7,3 +7,10 @@ export const MIGRATIONS_FOLDER = new URL('../migrations', import.meta.url).pathn
   /^\/([A-Za-z]:)/,
   '$1',
 );
+
+/** 生产（bin/migrate.ts）和测试（testing.ts）跑同一份迁移、同一个记账表。 */
+export const MIGRATION_OPTIONS = {
+  migrationsFolder: MIGRATIONS_FOLDER,
+  migrationsSchema: 'fleet2',
+  migrationsTable: '__migrations',
+} as const;

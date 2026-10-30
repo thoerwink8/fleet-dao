@@ -2,7 +2,7 @@
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
-import { MIGRATIONS_FOLDER } from './index.ts';
+import { MIGRATION_OPTIONS } from './index.ts';
 import * as schema from './schema.ts';
 import type { Db } from './store.ts';
 
@@ -15,10 +15,6 @@ export interface TestDb {
 export async function createTestDb(): Promise<TestDb> {
   const pg = new PGlite();
   const db = drizzle(pg, { schema });
-  await migrate(db, {
-    migrationsFolder: MIGRATIONS_FOLDER,
-    migrationsSchema: 'fleet2',
-    migrationsTable: '__migrations',
-  });
+  await migrate(db, MIGRATION_OPTIONS);
   return { db: db as unknown as Db, pg, close: () => pg.close() };
 }

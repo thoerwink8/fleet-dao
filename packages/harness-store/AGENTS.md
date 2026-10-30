@@ -16,4 +16,4 @@
 
 - 改 `src/schema.ts` 后 `pnpm --filter @fleet-dao/harness-store db:generate`，迁移在 `migrations/`，记账表 `fleet2.__migrations`（不和旧库的混）。第一份迁移的 `CREATE SCHEMA` 手改成了 `IF NOT EXISTS`（迁移器先建记账表）。
 - `npx vitest run packages/harness-store`：每个测试文件一份 PGlite 跑真迁移，见 `src/testing.ts`。
-- 生产部署（独立库用户只授 `fleet2`、发布时跑迁移）在第 3 片接上，见 #3775。
+- 生产迁移：发版时 `deploy/release.sh` 的 `migrate_fleet2` 在旧库迁移之后调 `src/bin/migrate.ts`（生产和测试共用 `MIGRATION_OPTIONS`），跑失败不切版本；只进不退，不拿删 schema 当回退。独立库用户只授 `fleet2` 跟影子工人的系统用户一起接上，见 #3775。
