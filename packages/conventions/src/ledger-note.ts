@@ -11,12 +11,17 @@ const TOKEN_HEADER = 'X-Fleet-Node-Token';
 const POST_TIMEOUT_MS = 15_000;
 
 export interface LedgerNoteBody {
-  kind: 'progress.note' | 'decision.handoff' | 'report.daily' | 'report.guards';
+  kind: 'progress.note' | 'decision.handoff' | 'report.daily' | 'report.guards' | 'directive';
   repo: string;
   issue?: number;
   text: string;
   source: { kind: 'local-session'; ref: string };
   idempotencyKey: string;
+  /** 只有 kind 是 directive 才带（#3764）：不带原话的意思、类别、主人、他说话的时刻 */
+  meaning?: string;
+  category?: string;
+  owner?: string;
+  spokenAt?: string;
 }
 
 export type LedgerNoteResult = { ok: true; id: number; created: boolean } | { ok: false; why: string };

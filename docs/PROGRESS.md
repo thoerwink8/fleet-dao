@@ -1,6 +1,6 @@
 # 进度
 
-> 创始人讲的 AI 做法类引导一条一个文件记在 `docs/directives/`（`pnpm progress directive --kind ai`，先判类、用法见 `docs/directives/README.md`），进度流水记在 GitHub 置顶单 **#1055**（`pnpm progress note`），都不写进这个文件：接手先 `pnpm progress read`。计划和先后看 `pnpm plan`，做成了什么看 PR 和单子评论。
+> 创始人讲的 AI 做法类引导记进驾驶舱库（`pnpm progress directive --kind ai --meaning "…"`，不写仓里文件、不开 PR，先判类、用法见 `docs/directives/README.md`；`docs/directives/` 里是旧档案），进度流水记在 GitHub 置顶单 **#1055**（`pnpm progress note`），都不写进这个文件：接手先 `pnpm progress read`。计划和先后看 `pnpm plan`，做成了什么看 PR 和单子评论。
 > 这个文件只留下面「生效中的临时调整」表（开会话钩子读它、到期问创始人）；旧的进度归档在 `docs/archive/` 下。
 
 ## 生效中的临时调整

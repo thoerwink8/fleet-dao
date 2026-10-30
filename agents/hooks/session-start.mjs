@@ -564,7 +564,8 @@ export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
 }
 
 /**
- * fleet-dao 的创始人引导（只收 AI 做法类，pnpm progress directive --kind ai）记在仓里 docs/directives/，挂的单还开着就是没办完；
+ * fleet-dao 的创始人引导（只收 AI 做法类，pnpm progress directive --kind ai）记进驾驶舱库（法国账本 directive 行，#3764、决定 0123；
+ * docs/directives/ 是旧档案，挂的单还开着的照读），挂的单还开着就是没办完；
  * 驾驶舱答案的收件箱读法国账本（#3741 片 2c，decision.handoff 行；#1055 只剩进度流水）：这里起
  * `progress.ts read --pending` 读没处理的几条（账本读不到它退出 2，这里就说没查成），硬超时 PROGRESS_MS。不是 fleet-dao 不出声（别的仓不记引导：
  * 通用段「我拍的板」那条）；查不成出一行「没查成」，不挡开会话。
@@ -655,7 +656,7 @@ export function progressLines(r, lineage = null, { now = Date.now() } = {}) {
   const full = '全文 pnpm progress read --pending';
   // 办没办完看挂的单（#2727）：办完 = 把单关了（干活的 PR 写 Closes）；没有认领这一步
   const ref = (d) => `${d.id}${d.issue ? `，单 ${d.issue}` : ''}`;
-  const done = '办完把挂的单关掉（PR 写 Closes #单号），不用改引导文件';
+  const done = '办完把挂的单关掉（PR 写 Closes #单号），不用另记';
   if (stale.length > 0)
     lines.push(
       `创始人引导 ${stale.length} 条挂了超过 24 小时、本会话还没接：${stale

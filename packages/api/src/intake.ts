@@ -7,7 +7,7 @@
 // - 幂等：idempotencyKey 原样当 GitHub 那边的幂等键；同一个 key 重放回原来那张、created:false。key 同时写进单子正文的来源行（单键），
 //   查重时靠它认出「就是这次自己开的那张」，重放不会被自己拦成重复。
 // - 查重只看开着的单（conventions 的 rankSimilar，纯字面打分；强命中线 STRONG_THRESHOLD），读候选失败回 503，不当成「没有重复」。
-// - 过程记录（#3741 片 2a）：POST /api/nodes/notes 写 progress.note / decision.handoff / report.daily / report.guards，target = issue:<repo>#<号>（挂单）
+// - 过程记录（#3741 片 2a）：POST /api/nodes/notes 写 progress.note / decision.handoff / report.daily / report.guards / directive（#3764 创始人引导，带 meaning、category，必挂单），target = issue:<repo>#<号>（挂单）
 //   或 progress:<repo>；同一个仓同一个 idempotencyKey 只留一行（库里唯一索引），重放回原来那行、created:false。读口 GET /api/nodes/events 两个前缀一起读。
 // - 账本：不另建表，三种 action（issue.open / issue.merge / issue.duplicate_refused）写进 audit_log，target = issue:<owner>/<name>#<号>，
 //   actor = agent / node:<环境编号>，via = agent（和本机领单同一个写法）。重放也记一条（after.created 是 false），免得「开成了、记账前挂了」后重试时账上缺这一笔。
@@ -331,6 +331,14 @@ export function registerIntakeReceiver(
           repo,
           ...(req.issue === undefined ? {} : { number: req.issue }),
           text: req.text,
+          ...(req.kind === 'directive'
+            ? {
+                meaning: req.meaning,
+                category: req.category,
+                ...(req.owner === undefined ? {} : { owner: req.owner }),
+                ...(req.spokenAt === undefined ? {} : { spokenAt: req.spokenAt }),
+              }
+            : {}),
           source: sourceOf(req),
           idempotencyKey: req.idempotencyKey,
         },

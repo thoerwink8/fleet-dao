@@ -40,7 +40,7 @@ export const KIND_JUDGE = [
   '一、照做＝只管这一次、一件活：once 照做就行、不记；task 要去做的活，pnpm issue:new 开单、原话写进单里。',
   '二、讨论稿＝一次提了好几点、要他拍板、根因不清的：discuss 先出稿、不改代码（fleet-dao 里 pnpm discuss:new -- <短名> --ask "…"，别的仓照 discussion-draft 技能）。',
   '三、记成规矩＝以后都管的，再两问：①讲的是 AI 的做法（规矩、偏好、派活、用哪个模型/CLI），还是东西该长什么样、做成什么样（驾驶舱、引擎这些 fleet-dao 自己的产品也算）；②只管这一次，还是以后都管。',
-  '  ai＝以后都管的 AI 做法：记进 fleet-dao 的 docs/directives/；只关某一个项目的，记本机 AI 记忆。',
+  '  ai＝以后都管的 AI 做法：记进驾驶舱库（pnpm progress directive，不写仓里文件、不开 PR，决定 0123）；只关某一个项目的，记本机 AI 记忆。',
   '  product＝产品该长什么样：记进那个产品的设计文档或决定记录，跟着正在干的 PR；没有在干的活就单开一个只改文档的 PR；对外仓照通用段「对外仓和对外内容怎么写」。',
   '  ops＝因一时情况拍的 AI 运营调整（额度、断电、他不在）：记进 docs/PROGRESS.md「## 生效中的临时调整」，到期问他。',
   '判不准的先后：先判是不是只这一次，判不准就不记（决定 0013 第 4 条）；确定以后都管再分 AI 还是产品，判不准按产品。',
@@ -66,9 +66,10 @@ export function kindDestination(kind: Exclude<DirectiveKind, 'ai'>, external: bo
 }
 
 export const PROGRESS_USAGE =
-  '用法：pnpm progress quotes:flush｜pnpm progress note "<一句话进度>"｜pnpm progress directive --kind <ai|product|task|once|ops|discuss> ["<创始人原话>" --at "<时间>"] [--meaning "<可公开的意思>"] [--stdin] [--owner <会话目录名|无主>] [--issue <单号>]' +
-  '（不给原话就从 prompt-log 取本会话他最近一句；不给 --issue 就顺手开一张单，引导办没办完看这张单开着还是关了）｜' +
-  'pnpm progress directive --kind <类> --from-inbox <账本行编号，见 progress read --pending 第一列> [--issue <单号>]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
+  '用法：pnpm progress quotes:flush｜pnpm progress note "<一句话进度>"｜pnpm progress directive --kind <ai|product|task|once|ops|discuss> ["<创始人原话>" --at "<时间>"] --meaning "<不带原话的意思，必给>" [--stdin] [--owner <会话目录名|无主>] [--issue <单号>]' +
+  '（不给原话就从 prompt-log 取本会话他最近一句；不给 --issue 就顺手开一张单，引导办没办完看这张单开着还是关了；记进驾驶舱库，不写仓里文件、不开 PR）｜' +
+  'pnpm progress directive --kind <类> --from-inbox <账本行编号，见 progress read --pending 第一列> --meaning "<意思>" [--issue <单号>]｜' +
+  'pnpm progress directive-digest [--week 2026-W44] [--write]（按周汇总的意思，不带原话）｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
 
 /** 参数不对、评论不是该办的那种：拒绝。入口退出码 1。 */
 export class ProgressRefused extends Error {

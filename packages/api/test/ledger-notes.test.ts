@@ -30,6 +30,20 @@ function post(
 }
 const get = (h: ReturnType<typeof harness>, query = '') =>
   h.cockpit.request(`/api/nodes/events${query}`, { headers: { [NODE_REPORT_HEADER]: TOKEN } });
+/** 不带引导字段的四种 */
+const PLAIN_KINDS = LEDGER_NOTE_KINDS.filter((k) => k !== 'directive');
+const directive = (over: Record<string, unknown> = {}) =>
+  note({
+    kind: 'directive',
+    issue: 3764,
+    text: '（原话，只进私有库）',
+    meaning: '创始人引导改记进驾驶舱库',
+    category: 'ai',
+    owner: 'dir-a',
+    spokenAt: '2026-10-30 10:00 +0800',
+    idempotencyKey: 'directive:202610301000-aaaa',
+    ...over,
+  });
 const errCode = async (res: Response) => ((await res.json()) as { error: { code: string } }).error.code;
 const ledger = (h: ReturnType<typeof harness>) =>
   h.store.data.audit.filter((a) =>
@@ -71,13 +85,13 @@ describe('POST /api/nodes/notes', () => {
 
   it('不挂单：target = progress:<repo>；四种 kind 都能写，after 里有 text / source / idempotencyKey，actor 是 agent node:<环境>', async () => {
     const h = harness({ config: { nodeKeys: KEYS } });
-    for (const kind of LEDGER_NOTE_KINDS) {
+    for (const kind of PLAIN_KINDS) {
       const res = await post(h, note({ kind, idempotencyKey: `key-${kind}-0001` }));
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ id: expect.any(Number), created: true });
     }
     const rows = ledger(h);
-    expect(rows.map((r) => r.action)).toEqual([...LEDGER_NOTE_KINDS]);
+    expect(rows.map((r) => r.action)).toEqual([...PLAIN_KINDS]);
     expect(rows.every((r) => r.target === `progress:${REPO}`)).toBe(true);
     expect(rows[0]).toMatchObject({
       actor: { kind: 'agent', id: 'node:founder-pc' },
@@ -118,6 +132,44 @@ describe('POST /api/nodes/notes', () => {
     expect(other.created).toBe(true);
     expect(other.id).not.toBe(first.id);
     expect(ledger(h)).toHaveLength(2);
+  });
+
+  it('directive：挂单、带意思和类别，原话在 text，target = issue:<repo>#<号>，读口读得到', async () => {
+    const h = harness({ config: { nodeKeys: KEYS } });
+    const res = await post(h, directive());
+    expect(res.status).toBe(200);
+    expect(ledger(h)[0]).toMatchObject({
+      action: 'directive',
+      target: `issue:${REPO}#3764`,
+      after: {
+        number: 3764,
+        text: '（原话，只进私有库）',
+        meaning: '创始人引导改记进驾驶舱库',
+        category: 'ai',
+        owner: 'dir-a',
+        spokenAt: '2026-10-30 10:00 +0800',
+      },
+    });
+    const body = (await (await get(h)).json()) as { events: { action: string }[] };
+    expect(body.events.map((e) => e.action)).toEqual(['directive']);
+    const again = await post(h, directive());
+    expect(((await again.json()) as { created: boolean }).created).toBe(false);
+    expect(ledger(h)).toHaveLength(1);
+  });
+
+  it('directive 缺单、缺意思、缺类别、类别认不出：400；别的 kind 带引导字段也 400', async () => {
+    const h = harness({ config: { nodeKeys: KEYS } });
+    for (const bad of [
+      directive({ issue: undefined }),
+      directive({ meaning: undefined }),
+      directive({ category: undefined }),
+      directive({ category: 'nope' }),
+      note({ meaning: '不该带' }),
+      note({ kind: 'decision.handoff', category: 'ai' }),
+    ]) {
+      expect((await post(h, bad)).status).toBe(400);
+    }
+    expect(ledger(h)).toEqual([]);
   });
 
   it('库写失败 503，不假装记了', async () => {

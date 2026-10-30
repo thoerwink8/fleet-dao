@@ -1,4 +1,7 @@
-// 创始人引导记在仓里：docs/directives/<YYYY-MM>/<编号>.md，一条引导一个文件，随 PR 走（决定 0097 #2169；只收 AI 做法类，先判类见决定 0111）。
+// 【2026-10-30 起新引导不再进仓，记进驾驶舱库（法国账本 directive 行），见 directive-ledger.ts，决定 0123、#3764。】
+// 这个文件现在只管 docs/directives/ 里已有的旧档案：解析、读 prompt-log 取原话和时间、挂的单现判、旧文件里还待办的列出来。
+//
+// 旧档案当时的做法：创始人引导记在仓里 docs/directives/<YYYY-MM>/<编号>.md，一条引导一个文件，随 PR 走（决定 0097 #2169；只收 AI 做法类，先判类见决定 0111）。
 // 为什么不再记在置顶单 #1055 的评论里：评论分页读（约 11-01 撞 2000 条上限）、开会话钩子每次问 GitHub 常超时、改评论没锁、
 // 单被误关过 22 小时没人发现、办完要另记一笔（16 条挂着没人收）。放进仓：开会话钩子读本地 origin/main（不联网、不限条数），
 // 法国引擎和别家 CLI 照读文件，git 历史就是审计；「办完」那一笔和活在同一个 PR 里合进主线，合了就算办完，核得出来。
@@ -20,17 +23,8 @@
 // 旧文件（#2727 以前记的）还有「- 状态：待处理｜已处理｜作废」和「## 经过」：照读不报错；没有「单」行的旧文件仍按状态行判。
 // 编号：新记的是北京时间 YYYYMMDDHHmmss（14 位，同一秒撞了加 1 秒）；从 #1055 迁来的沿用评论号（10 位）。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Gh, GhResult } from './issue-new.ts';
-import {
-  domainLabel,
-  labelCreateFailure,
-  natureLabel,
-  QUERY_LABEL_SPECS,
-  queryLabelCreateArgs,
-} from './labels.ts';
-import { queryAxisProblems } from './query-axis.ts';
 
 export const DIRECTIVES_DIR = 'docs/directives';
 export const NO_OWNER = '无主';
@@ -376,12 +370,6 @@ export type Git = (
   opts?: { env?: Record<string, string>; input?: string },
 ) => Promise<GhResult>;
 
-export interface StoreDeps {
-  git: Git;
-  gh: Gh;
-  now?: () => Date;
-}
-
 const one = (r: GhResult) =>
   (r.stderr.trim() || r.stdout.trim() || '（没说）').replace(/\s+/g, ' ').slice(0, 300);
 
@@ -466,107 +454,10 @@ export async function listPending(git: Git, gh: Gh, ref: string): Promise<Direct
 }
 
 export const MAIN = 'origin/main';
-const branchOf = (id: string) => `directive/${id}`;
-
-/** 引导记录 PR 的查询轴：一律 engine / process（约定写死），不按原话猜。 */
-export const DIRECTIVE_DOMAIN = 'engine' as const;
-export const DIRECTIVE_NATURE = 'process' as const;
-export const DIRECTIVE_QUERY_AXES = [domainLabel(DIRECTIVE_DOMAIN), natureLabel(DIRECTIVE_NATURE)] as const;
-
-/** 读回 PR 上的标签名；读不到、认不出都报没查成。 */
-async function prLabels(gh: Gh, pr: string): Promise<string[]> {
-  const r = await gh(['pr', 'view', pr, '--json', 'labels']);
-  if (r.code !== 0) throw new DirectiveUnchecked(`开了 ${pr}，gh 读回标签报错：${one(r)}。没挂自动合并。`);
-  let labels: unknown;
-  try {
-    labels = (JSON.parse(r.stdout) as { labels?: unknown }).labels;
-  } catch {
-    throw new DirectiveUnchecked(`开了 ${pr}，读回标签输出不是 JSON（${one(r)}）。没挂自动合并。`);
-  }
-  if (!Array.isArray(labels))
-    throw new DirectiveUnchecked(`开了 ${pr}，读回来的标签不是列表。没挂自动合并。`);
-  return labels.map((l) => String((l as { name?: unknown }).name ?? ''));
-}
-
-/**
- * 把一个文件的新内容开成 PR 合进主线：不碰任何检出（临时索引上拼一个提交，父提交是刚取的 origin/main），推到
- * directive/<编号>，开 PR、挂自动合并。分支已经在（别的会话正改同一条、PR 还没合）就推不上——这就是锁，返回拒绝不硬推。
- * 开 PR 时贴查询轴 engine / process（仓上没有就照标准先建，建不成不开），开完读回两轴都对才挂自动合并。
- */
-export async function proposeFile(
-  deps: StoreDeps,
-  change: { id: string; path: string; content: string; title: string; did: string },
-): Promise<string> {
-  const { git, gh } = deps;
-  await must(git, ['fetch', '-q', 'origin', 'main'], '取主线');
-  const parent = (await must(git, ['rev-parse', MAIN], '读主线')).trim();
-  const index = join(tmpdir(), `fleet-directive-${process.pid}-${Date.now()}.index`);
-  const env = { GIT_INDEX_FILE: index };
-  await must(git, ['read-tree', parent], '读主线的树', { env });
-  const blob = (
-    await must(git, ['hash-object', '-w', '--stdin'], '写文件', { input: change.content })
-  ).trim();
-  await must(git, ['update-index', '--add', '--cacheinfo', `100644,${blob},${change.path}`], '放进索引', {
-    env,
-  });
-  const tree = (await must(git, ['write-tree'], '写树', { env })).trim();
-  const commit = (
-    await must(git, ['commit-tree', tree, '-p', parent, '-m', `${change.title}（决定 0093）`], '写提交')
-  ).trim();
-  const branch = branchOf(change.id);
-  const push = await git([
-    'push',
-    '-q',
-    `--force-with-lease=refs/heads/${branch}:`,
-    'origin',
-    `${commit}:refs/heads/${branch}`,
-  ]);
-  if (push.code !== 0) {
-    if (/stale info|rejected|already exists|fetch first/i.test(push.stderr))
-      throw new DirectiveRefused(
-        `分支 ${branch} 已经在（别的会话正在改这条引导、PR 还没合）：等它合了再来，没改。`,
-      );
-    throw new DirectiveUnchecked(`git 推 ${branch} 报错：${one(push)}。没改成。`);
-  }
-  const body = `**做了什么**：${change.did}\n\n**需求**：无：创始人引导记录（docs/directives，决定 0093）\n\n- 域：${DIRECTIVE_DOMAIN}\n- 性质：${DIRECTIVE_NATURE}\n`;
-  // 仓上没有查询轴标签时，gh pr create --label 会直接拒。先把六个都建上（已有则 --force 只改说明）。
-  for (const spec of QUERY_LABEL_SPECS) {
-    const failed = labelCreateFailure(spec, await gh(queryLabelCreateArgs(spec)));
-    if (failed) throw new DirectiveUnchecked(`推上了 ${branch}，${failed}没开 PR。`);
-  }
-  const pr = await gh([
-    'pr',
-    'create',
-    '--base',
-    'main',
-    '--head',
-    branch,
-    '--title',
-    change.title,
-    '--body',
-    body,
-    ...DIRECTIVE_QUERY_AXES.flatMap((l) => ['--label', l]),
-  ]);
-  if (pr.code !== 0)
-    throw new DirectiveUnchecked(`推上了 ${branch}，gh 开 PR 报错：${one(pr)}。去 GitHub 补开。`);
-  const url = pr.stdout.trim().split('\n').pop()?.trim() ?? '';
-  if (!/\/pull\/\d+$/.test(url))
-    throw new DirectiveUnchecked(
-      `推上了 ${branch}，gh 开 PR 的输出里认不出 PR（${one(pr)}）：去 GitHub 看一眼，没挂自动合并。`,
-    );
-  const back = await prLabels(gh, url);
-  const wrong = [
-    ...queryAxisProblems(back),
-    ...DIRECTIVE_QUERY_AXES.filter((l) => !back.includes(l)).map((l) => `缺 ${l}`),
-  ];
-  if (wrong.length > 0)
-    throw new DirectiveUnchecked(`开了 ${url}，读回查询轴不对：${wrong.join('；')}。没挂自动合并。`);
-  const arm = await gh(['pr', 'merge', url, '--auto', '--squash']);
-  if (arm.code !== 0) throw new DirectiveUnchecked(`开了 ${url}，挂自动合并报错：${one(arm)}。手挂一下。`);
-  return url;
-}
 
 // —— 记 ——
+// 创始人引导不再进仓、不再开 PR（决定 0123，#3764）：pnpm progress directive 经 POST /api/nodes/notes 写账本（directive-ledger.ts），
+// 原话只在驾驶舱库里；上面的文件读写只为读 docs/directives/ 里的旧档案。
 
 /** 挂的单：开着的才能挂；关了、不存在、读不到都明确报 */
 export async function checkIssueOpen(gh: Gh, issue: number): Promise<void> {
@@ -580,22 +471,25 @@ export async function checkIssueOpen(gh: Gh, issue: number): Promise<void> {
     );
 }
 
-/** 没给 --issue 时顺手开的单：标题取原话前几个字，正文四节照 issue-new 的要求写 */
-export function directiveIssueDraft(r: { text: string; at: string; source: string }): {
+/**
+ * 没给 --issue 时顺手开的单：标题和正文只用意思（单在公开仓，原话只进驾驶舱库，决定 0123），四节照 issue-new 的要求写。
+ * 「## 原话」一节 issue-new 要求非空：写明原话在哪。
+ */
+export function directiveIssueDraft(r: { meaning: string; at: string; source: string }): {
   title: string;
   body: string;
 } {
-  const flat = r.text.replace(/\s+/g, ' ').trim();
+  const flat = r.meaning.replace(/\s+/g, ' ').trim();
   const chars = [...flat];
   const title = `创始人引导：${chars.slice(0, 30).join('')}${chars.length > 30 ? '…' : ''}`;
   const body = [
     '## 场景',
     '',
-    `创始人 ${r.at} 的引导（来源：${r.source}），随 pnpm progress directive 记进 docs/directives/，这张单就是它办没办完的凭据：单开着引导就算没办完，单关了就算办完。`,
+    `创始人 ${r.at} 的引导（来源：${r.source}），随 pnpm progress directive 记进驾驶舱库（法国账本），这张单就是它办没办完的凭据：单开着引导就算没办完，单关了就算办完。意思：${flat}`,
     '',
     '## 原话',
     '',
-    r.text.replace(/\r\n?/g, '\n').trim(),
+    '原话只在驾驶舱库里（账本 directive 行），不抄进公开仓和公开单（决定 0123）；上面的意思就是它的转述。',
     '',
     '## 已知的模块',
     '',
@@ -609,60 +503,7 @@ export function directiveIssueDraft(r: { text: string; at: string; source: strin
   return { title, body };
 }
 
-export interface RecordDeps extends StoreDeps {
-  /** 没给 --issue 时开一张单，返回单号（入口用 issueNew 实现；测试给假的） */
-  newIssue?: (draft: { title: string; body: string }) => Promise<number>;
-}
-
-/**
- * 记一条新引导（开 PR）。返回编号、路径、挂的单、PR。
- * 要挂单：给了 issue 就先查它开着；没给就开一张（没有 newIssue 就拒绝，不留空）。文件写进去以后不再改。
- */
-export async function recordDirective(
-  r: {
-    text: string;
-    at: string;
-    atDate: Date;
-    owner: string;
-    source: string;
-    privateQuoteId?: string | undefined;
-  },
-  deps: RecordDeps,
-  issue?: number,
-): Promise<{ id: string; path: string; issue: number; url: string }> {
-  await must(deps.git, ['fetch', '-q', 'origin', 'main'], '取主线');
-  const taken = new Set(
-    (await listPaths(deps.git, MAIN)).map((p) => p.replace(/^.*\//, '').replace(/\.md$/, '')),
-  );
-  let n = issue;
-  if (n !== undefined) await checkIssueOpen(deps.gh, n);
-  else {
-    if (!deps.newIssue) throw new DirectiveRefused('没给 --issue，也没法开单：没记。');
-    n = await deps.newIssue(directiveIssueDraft(r));
-  }
-  const id = newId(r.atDate, taken);
-  const path = directivePath(id, r.atDate);
-  const content = formatDirective({
-    id,
-    issue: n,
-    at: r.at,
-    owner: r.owner,
-    source: r.source,
-    text: r.text,
-    privateQuoteId: r.privateQuoteId,
-    log: [],
-  });
-  const url = await proposeFile(deps, {
-    id,
-    path,
-    content,
-    title: `记创始人引导 ${id}`,
-    did: `记下创始人 ${r.at} 的引导（主：${r.owner}，来源：${r.source}，挂单 #${n}）`,
-  });
-  return { id, path, issue: n, url };
-}
-
-// —— #1055 收件箱里的一条搬进仓 ——
+// —— 收件箱里的一条 → 引导的时间 ——
 
 /** 评论 → 引导（编号沿用评论号，挂 issue 这张单）。时间取第一行标记后面写的，认不出（只有日期、没写）用评论贴上的时刻。 */
 export function directiveFromComment(

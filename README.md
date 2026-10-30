@@ -51,7 +51,7 @@
 
 - 装机：ops 第四节（怎么跑装机脚本）。
 - 发版：`deploy/release.sh`，见 ops 第九节（发布应用）。
-- 仓根命令（仓合同 `entry`）：`pnpm dev` 在本机起驾驶舱前端的 mock 开发服务（`packages/web` 的 `dev:mock`，前台跑、Ctrl+C 停，不需要后端）；`pnpm start` / `pnpm stop` 起停本机要常驻的东西，目前只有嵌入式 Postgres（`pnpm pg:local start` / `stop`，脱离会话起，要真库的 e2e 先 start）；`pnpm check` 见下。本机不起引擎和驾驶舱后端，它们跑在法国。进度单用 `pnpm progress <note|directive|claim|done|read>`，对外仓引导带 `--meaning`、原文走私有处，补传用 `pnpm progress quotes:flush`（见 [创始人引导](docs/directives/README.md)）；本机会话上报用 `pnpm local-sessions <install|uninstall|status>`。
+- 仓根命令（仓合同 `entry`）：`pnpm dev` 在本机起驾驶舱前端的 mock 开发服务（`packages/web` 的 `dev:mock`，前台跑、Ctrl+C 停，不需要后端）；`pnpm start` / `pnpm stop` 起停本机要常驻的东西，目前只有嵌入式 Postgres（`pnpm pg:local start` / `stop`，脱离会话起，要真库的 e2e 先 start）；`pnpm check` 见下。本机不起引擎和驾驶舱后端，它们跑在法国。进度单用 `pnpm progress <note|directive|directive-digest|claim|done|read>`：创始人引导 `pnpm progress directive --kind ai --meaning "<不带原话的意思>"` 记进驾驶舱库（法国账本，不写仓里文件、不开 PR），`pnpm progress directive-digest [--week 2026-W44] [--write]` 生成按周汇总的意思（不带原话，写 `docs/directive-digest/`）；对外仓引导原文走私有处，补传用 `pnpm progress quotes:flush`（见 [创始人引导](docs/directives/README.md)）；本机会话上报用 `pnpm local-sessions <install|uninstall|status>`。
 - 加一台机器：`pnpm machine join <编号> [--name 显示名] --url <法国看板地址> (--ssh <主机别名> | --token-stdin)` 一条命令发通行证、装本机会话上报、试推并试读租约（Windows、macOS 相同）；`pnpm machine issue|list|revoke` 发/列/作废，见 ops 第十三节「加一台机器」。
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
 - 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，整个 `agents/test/` 只在它受影响时带、CI 每个 PR 照旧全跑，引擎的会话交活只认它；它判出要全跑时本机不跑、退出码 3，写明全量交给 CI，真要在本机全跑带 `--all`，只跑受影响的包带 `--affected`）和格式、类型；`pnpm check` 默认 = 格式 + 类型 + 改到的测试（同 `pnpm test:changed`，相对 origin/main）+ 卫生检查，四样都跑完再判红，每样报耗时，任何一样没跑成都算红；`pnpm check --all` 才全量 vitest run（本机要 8 分钟以上，和 CI 重复，一般不跑）。只改一个包的入口脚本、包内模块、测试（不在它 `exports`、`bin` 走得到的面上）时只测这个包自己，不连带依赖它的包（`packages/conventions/src/package-surface.ts`）。本机要真 Postgres 的（驾驶舱 e2e）先 `pnpm pg:local start`（Windows 嵌入式库，脱离会话起，见 `packages/web/e2e/README.md`）。CI 一律全套、并行跑，PR 和 main 都一样（`.github/workflows/ci.yml`，见 design 第五节「CI 一律全套」，决定 0101）；本机按改动选只是推前的快反馈。
@@ -123,7 +123,7 @@
 | [docs/ops.md](docs/ops.md) | 两台机器怎么装、怎么发版、怎么看、怎么退 | 跟着 `deploy/` 一起改 |
 | [docs/outage-france.md](docs/outage-france.md) | 法国失联速查：关机还是断网、Contabo 重启、重启后核对 | 失联的判断或重启步骤变了 |
 | [docs/decisions/](docs/decisions/README.md) | 拍板记录：一个决定一个文件，只增不改；每份头部写状态（生效、被哪份替代、失效），索引在 `docs/decisions/README.md` | 创始人拍板的那一轮，同时改索引 |
-| [docs/PROGRESS.md](docs/PROGRESS.md) | 生效中的临时调整（创始人引导在 docs/directives/、进度流水在置顶单 #1055，`pnpm progress read`） | 有新的临时调整时 |
+| [docs/PROGRESS.md](docs/PROGRESS.md) | 生效中的临时调整（创始人引导在驾驶舱库、仓里只有 docs/directive-digest/ 的周汇总和 docs/directives/ 的旧档案，进度流水在置顶单 #1055，`pnpm progress read`） | 有新的临时调整时 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
 | [docs/reclaude.md](docs/reclaude.md) | reclaude 的门口：文档、清理脚本、以及「〈编号〉账号被封了，根据文档清理痕迹」这句提示词 | 入口或提示词变了 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 里怎么用 reclaude（启动命令填 reclaude 绝对路径）、自有/平台怎么分、别填错的后果，以及 Linux 与 Fleet 的分工。从 [docs/reclaude.md](docs/reclaude.md) 进 | 装法或 Mirasim 的启动方式变了 |

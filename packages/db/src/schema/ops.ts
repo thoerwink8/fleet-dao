@@ -191,11 +191,13 @@ export const auditLog = pgTable(
     index('audit_log_ledger_events_idx')
       .on(t.id)
       .where(sql`${t.target} like 'issue:%' or ${t.target} like 'progress:%'`),
-    // 过程记录的幂等（POST /api/nodes/notes，#3741 片 2a）：同一个仓里同一个 idempotencyKey 只留一行。只管这四种 action，
+    // 过程记录的幂等（POST /api/nodes/notes，#3741 片 2a；directive 是 #3764 加的）：同一个仓里同一个 idempotencyKey 只留一行。只管这五种 action，
     // 开单账本的 issue.* 行重放时会重复记，不受它约束。
     uniqueIndex('audit_log_ledger_note_key_idx')
       .on(sql`(${t.after} ->> 'repo')`, sql`(${t.after} ->> 'idempotencyKey')`)
-      .where(sql`${t.action} in ('progress.note', 'decision.handoff', 'report.daily', 'report.guards')`),
+      .where(
+        sql`${t.action} in ('progress.note', 'decision.handoff', 'report.daily', 'report.guards', 'directive')`,
+      ),
   ],
 );
 

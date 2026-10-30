@@ -107,6 +107,29 @@ describe('listIssueEvents', () => {
     expect(new Set(racing.map((r) => r.id)).size).toBe(1);
   });
 
+  it('appendLedgerNote 对 directive（#3764）同样幂等：同一个 repo + key 只留一行，回原来那行', async () => {
+    const mk = () => ({
+      at: new Date(),
+      actorKind: 'agent' as const,
+      actorId: 'node:test',
+      action: 'directive',
+      target: 'issue:n/d#3764',
+      after: { repo: 'n/d', idempotencyKey: 'directive:202610301000-aaaa', text: 't', meaning: 'm' },
+    });
+    const first = await appendLedgerNote(t.db, mk());
+    expect(first.created).toBe(true);
+    expect(await appendLedgerNote(t.db, mk())).toEqual({ id: first.id, created: false });
+    const racing = await Promise.all(
+      [1, 2, 3].map(() =>
+        appendLedgerNote(t.db, {
+          ...mk(),
+          after: { repo: 'n/d', idempotencyKey: 'directive:202610301001-race' },
+        }),
+      ),
+    );
+    expect(racing.filter((r) => r.created)).toHaveLength(1);
+  });
+
   it('两个前缀的读都走部分索引，读的行数和 limit 成正比（limit 3 读 3 行、limit 6 读 6 行）', async () => {
     await t.db.execute(sql`
       insert into audit_log (actor_kind, actor_id, action, target, via)
