@@ -26,6 +26,7 @@ import { Hono, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Deps } from './deps.ts';
 import { ApiError, errorBody, readJson, reply } from './http.ts';
+import { registerIntakeReceiver } from './intake.ts';
 import { registerLocalClaimsReceiver } from './local-claims.ts';
 import { registerLocalSessionsReceiver } from './local-sessions.ts';
 import { registerNodeDispatchReceiver } from './node-dispatch.ts';
@@ -99,6 +100,8 @@ export function nodeReportRoutes(deps: Deps): Hono<{ Variables: { nodeId: string
   registerLocalSessionsReceiver(app, deps, authenticate);
   // 本机领单（决定 0096）：同一个头、同一套钥匙，写 tasks 那一行
   registerLocalClaimsReceiver(app, deps, authenticate);
+  // 开单服务（决定 0122）：POST /api/nodes/issues 开单、GET /api/nodes/events 读账本，同一个头、同一套钥匙
+  registerIntakeReceiver(app, deps, authenticate);
   // 本机交单给法国（#3739）：同一个头、同一套钥匙，复用看门狗修复的派单（和 fleet-api dispatch-issue 不带 --force 同一套准入）
   registerNodeDispatchReceiver(app, deps, authenticate);
 

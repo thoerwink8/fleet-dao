@@ -416,6 +416,40 @@ export async function listClosedIssues(
   return out;
 }
 
+export interface OpenIssueRow {
+  number: number;
+  title: string;
+  body: string;
+}
+
+/** 此刻开着的 issue（不含 PR），翻完页；读不到、认不出、翻不完抛错，不拿「一张都没有」顶。开单服务查重用（#3739）。 */
+export async function listOpenIssues(
+  deps: Pick<Deps, 'client'>,
+  input: { repo: RepoRef; signal?: AbortSignal | undefined },
+): Promise<OpenIssueRow[]> {
+  const { repo, signal } = input;
+  const rows = await deps.client.all(
+    {
+      method: 'GET',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues`,
+      auth: { as: 'engine', repo },
+      query: { state: 'open', sort: 'created', direction: 'desc', per_page: 100 },
+      signal,
+    },
+    (d) => d,
+  );
+  const out: OpenIssueRow[] = [];
+  for (const raw of rows) {
+    const p = ClosedIssueSchema.pick({ number: true, title: true, body: true, pull_request: true }).safeParse(
+      raw,
+    );
+    if (!p.success) throw unexpected(`读 ${repoSlug(repo)} 开着的单`, raw);
+    if (p.data.pull_request !== undefined && p.data.pull_request !== null) continue;
+    out.push({ number: p.data.number, title: p.data.title, body: p.data.body ?? '' });
+  }
+  return out;
+}
+
 // —— 关单 ——
 
 export interface CloseIssueInput {

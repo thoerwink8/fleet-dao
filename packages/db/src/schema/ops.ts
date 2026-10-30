@@ -186,6 +186,9 @@ export const auditLog = pgTable(
     check('audit_log_failure_has_error', sql`${t.ok} or ${t.error} is not null`),
     index('audit_log_at_idx').on(t.at),
     index('audit_log_target_idx').on(t.target, t.at),
+    // 开单账本（决定 0122，queries/issue-events.ts）：只收 target 以 issue: 开头的行，读口按 id 往后扫、读的行数只跟返回条数有关。
+    // 查询里的 like 条件要和这里的写法一字不差，规划器才认得出走这个索引。
+    index('audit_log_issue_events_idx').on(t.id).where(sql`${t.target} like 'issue:%'`),
   ],
 );
 

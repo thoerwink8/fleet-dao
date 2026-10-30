@@ -481,6 +481,22 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         await store.listAudit({ cursor: first.nextCursor, limit: 1 });
       });
 
+      it('开单账本（决定 0122）：只给 target 以 issue: 开头的行，按 id 升序，after 之后、最多 limit 条', async () => {
+        const mk = (target: string) => ({ ...audit(), action: 'issue.open', target });
+        await store.appendAudit(mk('issue:a/b#1'));
+        await store.appendAudit({ ...audit(), target: 'task:1' });
+        await store.appendAudit(mk('issue:a/b#2'));
+        await store.appendAudit({ ...audit(), target: 'issuer:3' });
+        await store.appendAudit(mk('issue:a/b#3'));
+        const all = await store.listIssueEvents({ after: 0, limit: 100 });
+        expect(all.map((e) => e.target)).toEqual(['issue:a/b#1', 'issue:a/b#2', 'issue:a/b#3']);
+        expect(all.map((e) => e.id)).toEqual([...all.map((e) => e.id)].sort((x, y) => x - y));
+        const second = await store.listIssueEvents({ after: all[0]?.id ?? 0, limit: 1 });
+        expect(second.map((e) => e.target)).toEqual(['issue:a/b#2']);
+        expect(second[0]).toMatchObject({ action: 'issue.open', ok: true });
+        expect(await store.listIssueEvents({ after: all.at(-1)?.id ?? 0, limit: 10 })).toEqual([]);
+      });
+
       it('刚好翻完一页整数条：最后一页没有下一页游标；少取一条就有（操作记录、通知同一个判法）', async () => {
         for (let i = 0; i < 3; i++) {
           tick();
