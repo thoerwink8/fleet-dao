@@ -520,14 +520,20 @@ export async function targetPrs(
       const pr = isObject(ev.pull_request) ? ev.pull_request.number : undefined;
       return typeof pr === 'number' ? [pr] : '事件里没有 pull_request.number';
     }
-    case 'status':
-      // 全量入口只计划开着的PR；matrix逐PR进入与退回事务相同的串行写通道。
-      if (ev.context !== COLD_VERIFY_CONTEXT && policySourceNumber(ev.context) === null) {
+    case 'status': {
+      // 只算这条状态挂着的那个 PR：每个状态事件各起一次计划（plan 不进排队组），不会被后来的事件吞掉。
+      // 曾经每条状态都把开着的 PR 全重算，十几个 PR 各写一条，老 PR 的头攒满 GitHub 每个 context 1000 条的上限后再写回 422（#3765）。
+      const source = policySourceNumber(ev.context);
+      if (source !== null) return [source];
+      if (ev.context !== COLD_VERIFY_CONTEXT) {
         if (typeof ev.context === 'string' && ev.context.startsWith(CI_POLICY_SOURCE_PREFIX))
           return 'source status 的 PR 号不是规范正安全整数';
         return [];
       }
-      return numbersOf(await gh.openPrs(), () => true);
+      const sha = ev.sha;
+      if (typeof sha !== 'string' || sha === '') return '状态事件里没有 sha';
+      return numbersOf(await gh.openPrs(), (p) => isObject(p.head) && p.head.sha === sha);
+    }
     case 'push':
       // 工作流的 paths 只放行了闸认的那几个文件（merge-gate.yml），到这里就是「判定输入变了」：开着的 PR 全重算，每个都现读自己此刻的状态。
       return numbersOf(await gh.openPrs(), () => true);
