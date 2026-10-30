@@ -23,6 +23,9 @@
       "path": "packages/harness-workers"
     },
     {
+      "path": "packages/harness-dispatch"
+    },
+    {
       "path": "packages/core"
     },
     {
