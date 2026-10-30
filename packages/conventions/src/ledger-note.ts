@@ -96,7 +96,11 @@ export async function progressNoteWithLedger(
   if (t) {
     if (ledger.repo) {
       await writeLedgerNote(
-        { repo: ledger.repo, ...(ledger.post ? { post: ledger.post } : {}), ...(ledger.warn ? { warn: ledger.warn } : {}) },
+        {
+          repo: ledger.repo,
+          ...(ledger.post ? { post: ledger.post } : {}),
+          ...(ledger.warn ? { warn: ledger.warn } : {}),
+        },
         { kind: ledger.kind, text: t, idempotencyKey: ledger.idempotencyKey },
       );
     } else {

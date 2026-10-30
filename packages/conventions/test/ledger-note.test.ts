@@ -139,13 +139,13 @@ describe('postLedgerNote / 幂等键 / 真发', () => {
 
   it('真发带通行证头、不把通行证写进错误', async () => {
     let header = '';
-    const post = liveLedgerNotePost(
-      () => ({ url: 'https://fr.example/', token: 'sekret' }),
-      (async (_u: unknown, init: RequestInit) => {
-        header = (init.headers as Record<string, string>)['X-Fleet-Node-Token'] ?? '';
-        throw new Error('boom sekret');
-      }) as unknown as typeof fetch,
-    );
+    const post = liveLedgerNotePost(() => ({ url: 'https://fr.example/', token: 'sekret' }), (async (
+      _u: unknown,
+      init: RequestInit,
+    ) => {
+      header = (init.headers as Record<string, string>)['X-Fleet-Node-Token'] ?? '';
+      throw new Error('boom sekret');
+    }) as unknown as typeof fetch);
     const r = await postLedgerNote(post, body);
     expect(header).toBe('sekret');
     expect(r).toEqual({ ok: false, why: 'boom ***' });
