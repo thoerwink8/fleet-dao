@@ -160,6 +160,8 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet2-shadow-firewall.service | 法国 | fleet-dao 新内核影子工人的出网限制（nft 表 inet fleet2_shadow） |
+| fleet2-shadow.slice | 法国 | fleet-dao 新内核影子工人的 slice（出网按它限） |
 | fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
 | fleet-backup-copy.timer | 香港 | 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天 |
 | fleet-backup-freshness.service | 香港 | fleet-dao 香港检查备份最新快照是否超过 26 小时 |

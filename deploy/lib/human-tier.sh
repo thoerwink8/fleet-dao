@@ -189,6 +189,55 @@ setup_firewall() {
   session_ports_cut "${SESSION_USERS[0]}"
 }
 
+# 新内核影子工人的出网限制（人工档，#3775）：常驻的 fleet2-shadow.slice、单独一张 nft 表 inet fleet2_shadow 和它的单元。
+# 单独成表：载不进去也不碰 inet fleet_dao（Temporal、库、后端的保护照旧）。为什么是人工档：和 setup_firewall 一样改的是出网规则。
+# 先起 slice 再载表（nft 把 cgroup 路径解析成 inode，slice 不在载不进）。出网关服务跟 packages/harness-egress 发上来后另装。
+setup_fleet2_shadow() {
+  step "新内核影子工人的出网限制（$FLEET2_SHADOW_SLICE 发往 443 的重定向到 127.0.0.1:$FLEET2_EGRESS_PORT，其余出网拒）"
+  local tmp err file_changed units_changed=0
+  put_file "/etc/systemd/system/$FLEET2_SHADOW_SLICE" root:root 644 "$(<"$DEPLOY_DIR/france/fleet2-shadow.slice")"
+  ((WROTE)) && units_changed=1
+  put_file /etc/systemd/system/fleet2-shadow-firewall.service root:root 644 "$(<"$DEPLOY_DIR/france/fleet2-shadow-firewall.service")"
+  ((WROTE)) && units_changed=1
+  if ((units_changed)); then systemctl daemon-reload; fi
+  ensure_unit_running "$FLEET2_SHADOW_SLICE" 0
+  render "$DEPLOY_DIR/france/fleet2-shadow.nft" SLICE="$FLEET2_SHADOW_SLICE" EGRESS_PORT="$FLEET2_EGRESS_PORT" || return 1
+  tmp=$(mktemp)
+  printf '%s\n' "$RENDERED" >"$tmp"
+  if ! err=$(nft -c -f "$tmp" 2>&1); then
+    rm -f -- "$tmp"
+    red "deploy/france/fleet2-shadow.nft 渲染后过不了 nft -c：$(head -3 <<<"$err" | tr '\n' ' ')"
+    return 1
+  fi
+  rm -f -- "$tmp"
+  put_file "$FLEET2_SHADOW_NFT_FILE" root:fleet 640 "$RENDERED"
+  file_changed=$WROTE
+  if [[ "$(systemctl is-active fleet2-shadow-firewall.service 2>/dev/null)" == active ]] && ((file_changed || units_changed)); then
+    systemctl reload fleet2-shadow-firewall.service
+    changed "重载 fleet2-shadow-firewall（nft 表 inet fleet2_shadow 换成新规则）"
+  fi
+  ensure_unit_running fleet2-shadow-firewall.service 0
+}
+
+readback_fleet2_shadow() {
+  local same=0
+  step "读回：影子工人的出网限制"
+  if [[ "$(systemctl is-active "$FLEET2_SHADOW_SLICE" 2>/dev/null)" != active ]]; then
+    red "$FLEET2_SHADOW_SLICE 没在：影子工人的出网规则载不进，影子自检会拒起"
+    return 0
+  fi
+  if [[ "$(systemctl is-active fleet2-shadow-firewall.service 2>/dev/null)" != active ]] || ! nft list table inet fleet2_shadow >/dev/null 2>&1; then
+    red "nft 表 inet fleet2_shadow 不在：影子工人出网不受限，影子自检会拒起"
+    return 0
+  fi
+  nft_table_same_as_file inet fleet2_shadow "$FLEET2_SHADOW_NFT_FILE" || same=$?
+  case $same in
+  0) ok "内核里的 nft 表 inet fleet2_shadow 就是 $FLEET2_SHADOW_NFT_FILE 那一份" ;;
+  1) red "内核里的 nft 表 inet fleet2_shadow 和 $FLEET2_SHADOW_NFT_FILE 不一样：systemctl reload fleet2-shadow-firewall" ;;
+  *) pending "内核里的 nft 表 inet fleet2_shadow 和文件一不一样没查成：$NFT_SAME_WHY" ;;
+  esac
+}
+
 # sshd 抗扫描（人工档，#1348）：法国 sshd 的 drop-in。为什么是人工档：它改的是登录入口，配错了连 root 都登不上来（和 sudoers、防火墙一个性质），
 # 要人以 root 整套跑一次、看着结论；装法跟 deploy/backup/install.sh 的 setup_hk_sshd 一样：放文件 → sshd -t → 过了才 reload，
 # 不过就把这份撤掉、不重载、判红。reload 不断已登录的连接。内容和为什么这么配见 deploy/france/sshd-hardening.conf。

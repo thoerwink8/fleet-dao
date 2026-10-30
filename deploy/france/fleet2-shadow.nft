@@ -1,0 +1,26 @@
+#!/usr/sbin/nft -f
+# 新内核影子工人的出网限制（决定 0124，#3775）：影子工人和引擎会话同一个会话用户（法国只占 reclaude 一台设备），
+# 按 cgroup 认——影子工人的进程都在 @@SLICE@@ 下面。单独一张表、单独一个单元（fleet2-shadow-firewall.service）：
+# 这张表载不进去也不碰 inet fleet_dao 那张（Temporal、库、后端的保护照旧）。
+# nft 载入时把 cgroup 路径解析成 inode：slice 不在就载不进，所以单元排在 slice 起来之后。
+#
+# 一、发往 443 的重定向到本机出网关（@@EGRESS_PORT@@，packages/harness-egress）：它读 TLS 的 SNI，只放行名单里的主机。
+#     reclaude 连上游不认 HTTPS_PROXY（本机实测），所以只能透明重定向。
+#     只重定向 IPv4：出网关只听 127.0.0.1。IPv6 出网（除了 ::1）落到第二条被复位，客户端退回 IPv4 再走出网关。
+# 二、其余出网一律拒：只许回环（MCP、本机解析器、出网关本身）。按目的地址认回环，不按网卡认（重定向之后的包
+#     在 filter 链里看到的网卡不可靠）。
+table inet fleet2_shadow
+delete table inet fleet2_shadow
+table inet fleet2_shadow {
+	chain nat_out {
+		type nat hook output priority -100; policy accept;
+		socket cgroupv2 level 1 "@@SLICE@@" ip daddr != 127.0.0.0/8 tcp dport 443 redirect to :@@EGRESS_PORT@@
+	}
+	chain filter_out {
+		type filter hook output priority filter; policy accept;
+		socket cgroupv2 level 1 "@@SLICE@@" ip daddr 127.0.0.0/8 accept
+		socket cgroupv2 level 1 "@@SLICE@@" ip6 daddr ::1 accept
+		socket cgroupv2 level 1 "@@SLICE@@" meta l4proto tcp reject with tcp reset
+		socket cgroupv2 level 1 "@@SLICE@@" reject
+	}
+}
