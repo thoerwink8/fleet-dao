@@ -51,6 +51,16 @@ check "不带 .slice 的拒" "$?" 1
 slice_cgroup_path a--b.slice >/dev/null 2>&1
 check "连着两个横杠的拒" "$?" 1
 
+echo "== 0b. 读回等端口：进程晚 2 秒才 listen 也等得到，没人听的有界等完判失败"
+ip link set lo up
+"$NODE" -e 'setTimeout(()=>require("net").createServer().listen(7399,"127.0.0.1",()=>setTimeout(()=>process.exit(0),3000)),2000)' &
+LATE=$!
+wait_listen 7399 10
+check "晚起的口等得到" "$?" 0
+wait "$LATE" 2>/dev/null
+wait_listen 7398 1
+check "没人听的口等完判失败" "$?" 1
+
 T=$(mktemp -d)
 # 和真的 fleet2-shadow.slice 一样套两层，规则按真路径和层数认
 TOP=f2test$$

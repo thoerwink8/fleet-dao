@@ -1089,6 +1089,7 @@ readback_fleet2_kernel() {
   if [[ "$(systemctl show -p Slice --value "$FLEET2_KERNEL_UNIT" 2>/dev/null)" == "$FLEET2_SHADOW_SLICE" ]]; then
     red "$FLEET2_KERNEL_UNIT 跑在 $FLEET2_SHADOW_SLICE 里：它读 GitHub、拉镜像会被重定向到出网关"
   fi
+  wait_listen "$FLEET2_KERNEL_PORT" 30 || true
   listen=$(ss -Hltn "sport = :$FLEET2_KERNEL_PORT" 2>/dev/null | awk '{ print $4 }' | sort -u | tr '\n' ' ')
   if [[ "$listen" != "127.0.0.1:$FLEET2_KERNEL_PORT " ]]; then
     red "$FLEET2_KERNEL_UNIT 的接口层听的是「$listen」，应只听 127.0.0.1:$FLEET2_KERNEL_PORT"
@@ -1124,6 +1125,7 @@ readback_fleet2_cockpit() {
     red "$FLEET2_COCKPIT_UNIT 没在跑：journalctl -u $FLEET2_COCKPIT_UNIT -n 50"
     return 0
   fi
+  wait_listen "$FLEET2_COCKPIT_PORT" 30 || true
   listen=$(ss -Hltn "sport = :$FLEET2_COCKPIT_PORT" 2>/dev/null | awk '{ print $4 }' | sort -u | tr '\n' ' ')
   if [[ "$listen" != "${WG_ADDR%/*}:$FLEET2_COCKPIT_PORT " ]]; then
     red "$FLEET2_COCKPIT_UNIT 听的是「$listen」，应只听 ${WG_ADDR%/*}:$FLEET2_COCKPIT_PORT"
