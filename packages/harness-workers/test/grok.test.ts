@@ -40,6 +40,9 @@ describe('参数和配置', () => {
     expect(args).toContain('--no-plan');
     expect(args.slice(-2)).toEqual(['-s', SID]);
     expect(args[args.indexOf('-m') + 1]).toBe('grok-4.7');
+    // 联网搜索、取网页走 grok 服务端、出网关拦不住，影子工人会搜到已合并的答案：必须关
+    const off = args[args.indexOf('--disallowed-tools') + 1]?.split(',') ?? [];
+    expect(off).toEqual(expect.arrayContaining(['web_search', 'web_fetch']));
     expect(buildGrokArgs({ ...base, permissionMode: 'acceptEdits' })).not.toContain('--always-approve');
     expect(
       buildGrokArgs({ ...base, session: { mode: 'resume', id: SID }, permissionMode: 'plan' }),
@@ -56,6 +59,8 @@ describe('参数和配置', () => {
     expect(toml).toContain('[mcp_servers.fleet]');
     expect(toml).toContain('url = "http://127.0.0.1:7345/mcp"');
     expect(toml).toContain(`"X-Fleet-Session-Token" = "${TOKEN}"`);
+    expect(toml).toMatch(/\[features\]\ntelemetry = false/);
+    expect(toml).toContain('mixpanel_enabled = false');
     expect(() => grokConfigToml({ url: 'http://h/mcp?token=1', token: TOKEN })).toThrow();
   });
   it('环境：关自动升级、目录信任和反问，GROK_HOME 指到这一轮，登录态要绝对路径', () => {
@@ -63,6 +68,10 @@ describe('参数和配置', () => {
       GROK_DISABLE_AUTOUPDATER: '1',
       GROK_FOLDER_TRUST: '0',
       GROK_ASK_USER_QUESTION: '0',
+      GROK_TELEMETRY_ENABLED: 'false',
+      GROK_TELEMETRY_TRACE_UPLOAD: 'false',
+      DISABLE_TELEMETRY: '1',
+      DISABLE_ERROR_REPORTING: '1',
       GROK_HOME: '/t/grok-home',
       GROK_AUTH_PATH: '/home/u/.grok/auth.json',
     });
