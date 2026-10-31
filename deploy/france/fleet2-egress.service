@@ -1,6 +1,6 @@
 # 新内核影子工人的出网关（#3803，包 packages/harness-egress）：fleet2-shadow 的 nft 表把影子 slice 发往外面 443 的连接重定向到
 # 本机 7344，这里只读首条 TLS 记录里的 SNI，在名单里才按主机名原样转发，不解密。名单 /etc/fleet-dao/fleet2-egress.allow 由
-# deploy/france.sh 从仓里装（自动档），别在机器上手改。先 learn（只记不拦）收真实主机名定名单，再切 enforce。
+# deploy/france.sh 从仓里装（自动档），别在机器上手改。enforce：名单外的一律断开；要放新主机名改名单文件发版。
 # 它自己要连外面 443，所以不能进 fleet2-shadow.slice（进了会被重定向回自己）：留在默认的 system.slice。规矩见 docs/ops.md。
 [Unit]
 Description=fleet-dao 新内核影子工人的出网关（SNI 透明代理，只听 127.0.0.1:7344）
@@ -13,7 +13,7 @@ ConditionPathExists=/etc/fleet-dao/fleet2-egress.allow
 Type=simple
 User=fleet
 WorkingDirectory=/srv/fleet-dao-releases/current
-ExecStart=/usr/bin/node /srv/fleet-dao-releases/current/packages/harness-egress/src/bin/egress-proxy.ts --port 7344 --allowlist /etc/fleet-dao/fleet2-egress.allow --mode learn
+ExecStart=/usr/bin/node /srv/fleet-dao-releases/current/packages/harness-egress/src/bin/egress-proxy.ts --port 7344 --allowlist /etc/fleet-dao/fleet2-egress.allow --mode enforce
 Restart=on-failure
 RestartSec=5
 MemoryMax=256M
