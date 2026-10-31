@@ -16,7 +16,7 @@ const mk = (id: string, lastEventId: number, tail: NonNullable<SessionSummary['t
   tail,
 });
 
-const delivered = [{ type: 'handback.recorded', final: true, outcome: 'delivered' }];
+const completed = [{ type: 'handback.recorded', final: true, outcome: 'completed' }];
 const stuckTail = [{ type: 'worker.settled', exitCode: 1 }];
 
 let sessions: SessionSummary[];
@@ -46,9 +46,9 @@ const renderList = () =>
 beforeEach(() => {
   localStorage.clear();
   sessions = [
-    mk('done-a', 10, delivered),
-    mk('done-b', 9, delivered),
-    mk('done-c', 8, delivered),
+    mk('done-a', 10, completed),
+    mk('done-b', 9, completed),
+    mk('done-c', 8, completed),
     mk('bad-1', 7, stuckTail),
   ];
   stuckCount = 41; // 服务端数的全库个数，和页面上已加载的（1 个）不一样，页面要显示服务端的

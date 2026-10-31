@@ -9,6 +9,7 @@ export type WorkerState = 'stuck' | 'running' | 'waiting' | 'done';
 export interface TailEvent {
   type: string;
   outcome?: string | null;
+  verdict?: string | null;
   final?: boolean | null;
   status?: string | null;
   exitCode?: number | null;
@@ -38,7 +39,8 @@ function deadlineBefore(tail: readonly TailEvent[], i: number): number | undefin
 
 /**
  * 从最新一条往回找第一条能说明状态的事件：
- * - handback.recorded：final 且 outcome=delivered → 做完；final 但没交付 → 卡住；不是 final → 还会重试，算等待
+ * - handback.recorded：final 且 outcome=completed（派工器的 OutcomeKind）、核验没判 failed → 做完；
+ *   其他 final（被杀、起不来、核验判失败、结果不确定）→ 卡住；不是 final → 还会重试，算等待
  * - worker.settled：退出码非 0、被杀、起不来 → 卡住；正常退出 → 等交回（等待）
  * - worker.result.submitted：failed 或 blocked → 卡住；其他 → 等核验（等待）
  * - worker.spawned / progress.reported / stop.requested：在跑；过了截止时间又超出宽限 → 卡住
@@ -53,7 +55,7 @@ export function deriveWorkerState(tail: readonly TailEvent[], now: number = Date
     switch (e.type) {
       case 'handback.recorded':
         if (e.final !== true) return 'waiting';
-        return e.outcome === 'delivered' ? 'done' : 'stuck';
+        return e.outcome === 'completed' && e.verdict !== 'failed' ? 'done' : 'stuck';
       case 'worker.settled': {
         const bad =
           (typeof e.exitCode === 'number' && e.exitCode !== 0) || present(e.killed) || present(e.spawnError);

@@ -28,9 +28,8 @@ export const RESULT_STATUS_LABEL: Record<string, string> = {
   blocked: '被卡住',
 };
 
-/** 交回的结局（派工器的 OutcomeKind；delivered 是驾驶舱判「做完」认的值）。 */
+/** 交回的结局（派工器的 OutcomeKind，`packages/harness-dispatch/src/dispatcher.ts`）。 */
 export const OUTCOME_LABEL: Record<string, string> = {
-  delivered: '已交付',
   completed: '已完成',
   killed: '被叫停',
   'failed-to-start': '起不来',
