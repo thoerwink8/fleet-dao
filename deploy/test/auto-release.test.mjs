@@ -1108,7 +1108,7 @@ test('新内核单元（#3811）：不进影子 slice、口和令牌文件跟 fr
   // 执行体要是前缀脚本放行的两个之一，壳要和执行体对得上（#3842）
   const worker = readFileSync(new URL('../france/fleet2-worker.sh', import.meta.url), 'utf8');
   assert.ok(worker.includes(bin), `前缀脚本要放行执行体 ${bin}`);
-  const shell = /FLEET2_SHELL=(\S+)/.exec(unit)?.[1] ?? 'claude-code';
+  const shell = /^Environment=.*\bFLEET2_SHELL=(\S+)/m.exec(unit)?.[1] ?? 'claude-code';
   assert.equal(bin.endsWith('/grok'), shell === 'grok', '壳和执行体对不上');
   if (shell === 'grok')
     assert.match(unit, /FLEET2_GROK_AUTH=\/home\/fleet-agent-carpool\/\.grok\/auth\.json(\s|$)/m);
