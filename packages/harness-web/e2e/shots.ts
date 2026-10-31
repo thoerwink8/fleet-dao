@@ -57,7 +57,12 @@ for (const s of sizes) {
   const shot = (name: string) => page.screenshot({ path: `${out}/${name}-${s.tag}.png` });
 
   await page.goto(`${stack.url}/next/`);
-  await page.getByRole('link', { name: /cmd-demo-login-fix/ }).waitFor();
+  // 改后「做完」组默认折叠（改前没有这个开关，会话行直接在）
+  const toggle = page.getByTestId('toggle-done');
+  await toggle
+    .or(page.getByRole('link', { name: /cmd-demo-login-fix/ }))
+    .first()
+    .waitFor();
   await settle(page);
   await shot('list');
   // 「加载更多」：样例之外灌了够多的会话，列表第一页之后还有
@@ -65,6 +70,11 @@ for (const s of sizes) {
   await settle(page);
   await shot('list-load-more');
   await page.getByRole('button', { name: '加载更多' }).click();
+  if ((await toggle.count()) > 0) {
+    await toggle.click();
+    await settle(page);
+    await shot('list-done-expanded');
+  }
   await page.getByRole('link', { name: /bulk-00/ }).waitFor();
   await settle(page);
   await shot('list-loaded');

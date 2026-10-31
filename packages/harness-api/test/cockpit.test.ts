@@ -296,9 +296,45 @@ interface ListBody {
     tail: Record<string, unknown>[];
   }[];
   nextBefore: number | null;
+  stuckCount: number;
 }
 
 describe('会话列表', () => {
+  it('stuckCount 由服务端按全库数：翻页、页大小都不影响；规则和前端同一份（deriveWorkerState）', async () => {
+    const { base } = await start();
+    // 4 个卡住（异常退出、被杀、失败交结果、终局没交付）+ 2 个不卡（正常退出等交回、做完）+ 1 个在跑
+    await appendToSession(t.db, 'k1', 'worker.settled', { exitCode: 1 });
+    await appendToSession(t.db, 'k2', 'worker.settled', { exitCode: 0, killed: 'stop-requested' });
+    await appendToSession(t.db, 'k3', 'worker.result.submitted', { status: 'failed' });
+    await appendToSession(t.db, 'k4', 'handback.recorded', { final: true, outcome: 'dead' });
+    await appendToSession(t.db, 'ok1', 'worker.settled', { exitCode: 0 });
+    await appendToSession(t.db, 'ok2', 'handback.recorded', { final: true, outcome: 'delivered' });
+    await appendToSession(t.db, 'run1', 'worker.spawned', {});
+    const all = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as ListBody;
+    expect(all.stuckCount).toBe(4);
+    // 一页只给 2 个：这一页里可能一个卡住的都没有，服务端的数不变
+    const small = (await (
+      await fetch(`${base}/next/api/sessions?limit=2`, { headers: auth() })
+    ).json()) as ListBody;
+    expect(small.sessions.map((s) => s.id)).toEqual(['run1', 'ok2']);
+    expect(small.stuckCount).toBe(4);
+    const older = (await (
+      await fetch(`${base}/next/api/sessions?limit=2&before=${small.nextBefore}`, { headers: auth() })
+    ).json()) as ListBody;
+    expect(older.stuckCount).toBe(4);
+    // 又一个卡住的进来，下次读就是 5
+    await appendToSession(t.db, 'k5', 'worker.settled', { spawnError: 'ENOENT' });
+    const again = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as ListBody;
+    expect(again.stuckCount).toBe(5);
+  });
+
+  it('没有卡住的会话，stuckCount 是 0（不是缺省）', async () => {
+    const { base } = await start();
+    await seed('quiet', 2);
+    const body = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as ListBody;
+    expect(body.stuckCount).toBe(0);
+  });
+
   it('按最后事件倒序；新事件把会话顶到最前', async () => {
     const { base } = await start();
     await seed('a', 2);

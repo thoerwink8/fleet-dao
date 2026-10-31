@@ -1,10 +1,12 @@
-import { TriangleAlert } from 'lucide-react';
+import { ChevronDown, ChevronRight, TriangleAlert } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { NavLink } from 'react-router';
 import { cn } from '../lib/cn';
-import { summaryOf, TYPE_LABEL } from '../lib/describe';
+import { readDoneCollapsed, writeDoneCollapsed } from '../lib/collapse';
+import { summaryOf } from '../lib/describe';
 import { formatRelative, shortId } from '../lib/format';
 import { useSessions } from '../lib/hooks';
+import { typeLabel } from '../lib/labels';
 import { deriveWorkerState, groupByState, STATE_LABEL, type WorkerState } from '../lib/session-state';
 import type { SessionSummary } from '../lib/types';
 import { Chip } from './chip';
@@ -48,7 +50,9 @@ function SessionRow({ s, state, now }: { s: SessionSummary; state: WorkerState; 
         </div>
         <div className="mt-1 flex items-center gap-2 pl-3.5">
           <span className="min-w-0 flex-1 truncate text-2xs text-ink-2">
-            <span className="text-muted">{TYPE_LABEL[s.lastType] ?? s.lastType} · </span>
+            <span className="text-muted" title={s.lastType}>
+              {typeLabel(s.lastType).text} ·{' '}
+            </span>
             {summaryOf(s.lastType, s.lastPayload)}
           </span>
           <Chip className="num">{s.eventCount}</Chip>
@@ -59,14 +63,20 @@ function SessionRow({ s, state, now }: { s: SessionSummary; state: WorkerState; 
 }
 
 export function SessionList({ className }: { className?: string }) {
-  const { sessions, error, failures, unauthorized, hasMore, loadingMore, loadMore } = useSessions();
+  const { sessions, stuckCount, error, failures, unauthorized, hasMore, loadingMore, loadMore } =
+    useSessions();
   const now = useNow();
+  // 「做完」组默认折叠；点开的状态记在 localStorage（读写都包了 try/catch）
+  const [doneCollapsed, setDoneCollapsed] = useState(() => readDoneCollapsed());
+  const toggleDone = () => {
+    writeDoneCollapsed(!doneCollapsed);
+    setDoneCollapsed(!doneCollapsed);
+  };
   // 状态从近期事件推：同一份事件和同一个 now 推出同一个状态，组内按最后事件号倒序
   const groups = useMemo(
     () => (sessions ? groupByState(sessions, (s) => deriveWorkerState(s.tail ?? [], now)) : []),
     [sessions, now],
   );
-  const stuckCount = groups.find((g) => g.state === 'stuck')?.items.length ?? 0;
   if (unauthorized) {
     return (
       <section aria-label="会话列表" className={cn('flex min-h-0 flex-col bg-surface', className)}>
@@ -79,8 +89,8 @@ export function SessionList({ className }: { className?: string }) {
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-line px-4 max-md:hidden">
         <span className="text-xs font-medium text-ink-2">会话</span>
         <span className="flex items-center gap-2">
-          {stuckCount > 0 ? (
-            <Chip tone="danger" className="num" title="卡住或失败的会话数（已加载的）">
+          {stuckCount !== null && stuckCount > 0 ? (
+            <Chip tone="danger" className="num" title="卡住或失败的会话数（服务端按全部会话数的）">
               卡住 {stuckCount}
             </Chip>
           ) : null}
@@ -116,26 +126,55 @@ export function SessionList({ className }: { className?: string }) {
             </p>
           </div>
         ) : (
-          groups.map((g) => (
-            <section key={g.state} aria-label={STATE_LABEL[g.state]} data-group={g.state}>
-              <h3
-                className={cn(
-                  'sticky top-0 z-10 flex h-8 items-center gap-2 border-b border-line px-4 text-2xs font-medium',
-                  g.state === 'stuck' ? 'bg-danger-soft text-danger' : 'bg-subtle text-muted',
-                )}
-              >
+          groups.map((g) => {
+            const foldable = g.state === 'done';
+            const folded = foldable && doneCollapsed;
+            const headCls = cn(
+              'sticky top-0 z-10 flex h-8 w-full items-center gap-2 border-b border-line px-4 text-2xs font-medium',
+              g.state === 'stuck' ? 'bg-danger-soft text-danger' : 'bg-subtle text-muted',
+            );
+            const head = (
+              <>
+                {foldable ? (
+                  folded ? (
+                    <ChevronRight className="size-3.5 shrink-0" aria-hidden />
+                  ) : (
+                    <ChevronDown className="size-3.5 shrink-0" aria-hidden />
+                  )
+                ) : null}
                 {STATE_LABEL[g.state]}
                 <span className="num" data-testid={`group-count-${g.state}`}>
                   {g.items.length}
                 </span>
-              </h3>
-              <ul>
-                {g.items.map((s) => (
-                  <SessionRow key={s.id} s={s} state={g.state} now={now} />
-                ))}
-              </ul>
-            </section>
-          ))
+              </>
+            );
+            return (
+              <section key={g.state} aria-label={STATE_LABEL[g.state]} data-group={g.state}>
+                <h3>
+                  {foldable ? (
+                    <button
+                      type="button"
+                      aria-expanded={!folded}
+                      data-testid="toggle-done"
+                      onClick={toggleDone}
+                      className={cn(headCls, 'cursor-pointer text-left hover:text-ink')}
+                    >
+                      {head}
+                    </button>
+                  ) : (
+                    <span className={headCls}>{head}</span>
+                  )}
+                </h3>
+                {folded ? null : (
+                  <ul>
+                    {g.items.map((s) => (
+                      <SessionRow key={s.id} s={s} state={g.state} now={now} />
+                    ))}
+                  </ul>
+                )}
+              </section>
+            );
+          })
         )}
         {sessions && sessions.length > 0 && hasMore ? (
           <div className="p-3">

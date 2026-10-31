@@ -1,4 +1,5 @@
 // 事件的分类和一句话标题：展示层（卡片）和筛选条共用。读不懂的类型归「其他」，照样显示，不丢。
+import { outcomeLabel, TYPE_LABEL, verdictLabel } from './labels';
 import type { FeedEvent } from './types';
 
 export type Category = 'turn' | 'dispatch' | 'worker' | 'process' | 'handback' | 'other';
@@ -21,17 +22,8 @@ export function categoryOf(type: string): Category {
   return 'other';
 }
 
-export const TYPE_LABEL: Record<string, string> = {
-  'session.turn.started': '轮次开始',
-  'session.turn.settled': '轮次结束',
-  'worker.spawn.requested': '派工请求',
-  'worker.stop.requested': '叫停请求',
-  'worker.spawned': '工人启动',
-  'worker.settled': '工人结束',
-  'worker.progress.reported': '进度',
-  'worker.result.submitted': '交结果',
-  'handback.recorded': '交回核验',
-};
+// 事件类型的中文名在 labels.ts（枚举的中文映射只有那一处）；这里转出去，老的导入不用改。
+export { TYPE_LABEL };
 
 export function str(v: unknown): string | undefined {
   return typeof v === 'string' && v !== '' ? v : undefined;
@@ -61,7 +53,10 @@ export function summaryOf(type: string, p: Record<string, unknown>): string {
       return str(p.summary) ?? '交结果';
     case 'handback.recorded': {
       const first = strList(p.reasons)[0];
-      return first ?? `${str(p.outcome) ?? '交回'} / ${str(p.verdict) ?? '—'}`;
+      return (
+        first ??
+        `${outcomeLabel(str(p.outcome))?.text ?? '交回'} / ${verdictLabel(str(p.verdict))?.text ?? '—'}`
+      );
     }
     case 'worker.spawned':
       return `工人启动 ${str(p.model) ?? ''}`.trim();

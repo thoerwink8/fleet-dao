@@ -14,8 +14,9 @@ import {
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { cn } from '../lib/cn';
-import { type Category, categoryOf, num, str, strList, TYPE_LABEL } from '../lib/describe';
+import { type Category, categoryOf, num, str, strList } from '../lib/describe';
 import { formatClock, formatDuration, shortId } from '../lib/format';
+import { outcomeLabel, resultStatusLabel, sessionModeLabel, typeLabel, verdictLabel } from '../lib/labels';
 import type { FeedEvent } from '../lib/types';
 import { Chip, type Tone } from './chip';
 import { ClampedText, OutputBlock } from './clamped';
@@ -115,7 +116,11 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
         detail: (
           <dl className="mt-1.5 flex flex-col gap-1.5">
             {str(p.deadline) ? <Field label="截止">{formatClock(str(p.deadline) as string)}</Field> : null}
-            {str(p.sessionMode) ? <Field label="会话">{str(p.sessionMode)}</Field> : null}
+            {str(p.sessionMode) ? (
+              <Field label="会话">
+                <span title={str(p.sessionMode)}>{sessionModeLabel(str(p.sessionMode))?.text}</span>
+              </Field>
+            ) : null}
           </dl>
         ),
       };
@@ -174,17 +179,14 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
     case 'worker.result.submitted': {
       const status = str(p.status);
       const tone: Tone = status === 'failed' ? 'danger' : status === 'blocked' ? 'warning' : 'neutral';
-      const label =
-        status === 'done'
-          ? '已完成'
-          : status === 'failed'
-            ? '失败'
-            : status === 'blocked'
-              ? '被卡住'
-              : (status ?? '—');
+      const label = resultStatusLabel(status);
       return {
         title: clamp(str(p.summary), '交结果'),
-        chips: <Chip tone={tone}>{label}</Chip>,
+        chips: (
+          <Chip tone={tone} {...(label ? { title: label.raw } : {})}>
+            {label?.text ?? '—'}
+          </Chip>
+        ),
         detail: str(p.evidence) ? <OutputBlock label="证据" text={str(p.evidence) as string} /> : undefined,
       };
     }
@@ -197,8 +199,16 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
         title: p.final === true ? '终局交回' : '中间交回，还会重试',
         chips: (
           <>
-            {outcome ? <Chip tone={verdictTone(outcome)}>{outcome}</Chip> : null}
-            {verdict ? <Chip tone={verdictTone(verdict)}>核验 {verdict}</Chip> : null}
+            {outcome ? (
+              <Chip tone={verdictTone(outcome)} title={outcome}>
+                {outcomeLabel(outcome)?.text}
+              </Chip>
+            ) : null}
+            {verdict ? (
+              <Chip tone={verdictTone(verdict)} title={verdict}>
+                核验 {verdictLabel(verdict)?.text}
+              </Chip>
+            ) : null}
             {attempt !== undefined ? <Chip>第 {attempt} 次</Chip> : null}
           </>
         ),
@@ -224,7 +234,7 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
       return { title: clamp(text, ev.type === 'session.turn.started' ? '会话轮次开始' : '会话轮次结束') };
     }
     default:
-      return { title: TYPE_LABEL[ev.type] ?? ev.type, detail: <Raw value={p} /> };
+      return { title: <span title={ev.type}>{typeLabel(ev.type).text}</span>, detail: <Raw value={p} /> };
   }
 }
 
@@ -254,7 +264,9 @@ export function EventCard({
       </span>
       <div className="min-w-0 flex-1 rounded-lg border border-line bg-surface px-3 py-2.5 shadow-xs">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-2xs font-medium text-muted">{TYPE_LABEL[ev.type] ?? ev.type}</span>
+          <span className="text-2xs font-medium text-muted" title={ev.type}>
+            {typeLabel(ev.type).text}
+          </span>
           {taskLabel ? (
             <Chip mono title={`任务 ${taskLabel}`}>
               {shortId(taskLabel)}

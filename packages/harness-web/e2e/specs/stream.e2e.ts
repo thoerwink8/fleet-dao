@@ -5,7 +5,16 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { seed } from '../../dev/seed.ts';
-import { dbIds, emitProgress, expect, feedStatus, login, pageIds, test } from '../support/fixtures.ts';
+import {
+  dbIds,
+  emitProgress,
+  expandDone,
+  expect,
+  feedStatus,
+  login,
+  pageIds,
+  test,
+} from '../support/fixtures.ts';
 
 const S = 'e2e-live';
 
@@ -34,6 +43,7 @@ test.describe('会话工作台', () => {
   test('G3：刚打开就点会话，照样进去（不被后来的数据冲掉）', async ({ page, stack }) => {
     await seed(stack);
     await page.goto(`${stack.url}/next/`);
+    await expandDone(page);
     const item = page.getByRole('link', { name: /cmd-demo-login-fix/ });
     await item.click();
     await expect(page).toHaveURL(/\/next\/s\/cmd-demo-login-fix$/);
@@ -210,6 +220,7 @@ test.describe('E5：读页后端挂掉时列表轮询退避', () => {
     // 恢复：下一次成功后列表出来，间隔回到 10 秒
     broken = false;
     await page.clock.runFor(60_000);
+    await expandDone(page);
     await expect(page.getByRole('link', { name: /cmd-demo-login-fix/ })).toBeVisible();
     const afterOk = calls;
     for (let i = 0; i < 3; i++) {
@@ -364,6 +375,10 @@ test.describe('#3781 第二轮：工具调用折叠、长输出预览、列表�
     await expect(page.getByTestId('group-count-stuck')).toHaveText('1');
     await expect(page.locator('[data-group="stuck"] [data-session-id]')).toHaveText(/cmd-demo-flaky-ci/);
     await expect(page.locator('[data-group="running"] [data-session-id]')).toHaveText(/cmd-demo-migration/);
+    // 「做完」组默认折叠：有条数、没有会话行；点开才出来（折叠状态的专项用例在下面）
+    await expect(page.getByTestId('group-count-done')).toHaveText('1');
+    await expect(page.locator('[data-group="done"] [data-session-id]')).toHaveCount(0);
+    await expandDone(page);
     await expect(page.locator('[data-group="done"] [data-session-id]')).toHaveText(/cmd-demo-login-fix/);
     // 组内按最后事件倒序：等待组里 test-run（更新）在 docs-sweep 前面；工人会话 worker-d12-a1（#3781 样例，
     // 交了结果等核验）最早灌的，排在最后
@@ -378,6 +393,57 @@ test.describe('#3781 第二轮：工具调用折叠、长输出预览、列表�
     await expect(page.locator('[data-group="stuck"] [data-session-id]').first()).toHaveText(
       /cmd-demo-test-run/,
     );
+  });
+
+  test('#3781 收尾：做完组默认折叠带条数，点开展开，刷新后记住；枚举值显示中文、原值在 title', async ({
+    page,
+    stack,
+  }) => {
+    await seed(stack);
+    await page.goto(`${stack.url}/next/`);
+    const toggle = page.getByTestId('toggle-done');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByTestId('group-count-done')).toHaveText('1');
+    await expect(page.locator('[data-group="done"] [data-session-id]')).toHaveCount(0);
+    // 列表一句话里的事件类型是中文，原值在 title 里
+    const row = page.locator('[data-session-id="cmd-demo-flaky-ci"]');
+    await expect(row).not.toContainText('handback.recorded');
+    await expect(row).not.toContainText('worker.');
+    await expect(row.locator('[title^="handback."], [title^="worker."], [title^="session."]')).toHaveCount(1);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('[data-group="done"] [data-session-id]')).toHaveCount(1);
+    // 刷新后仍是展开（localStorage）
+    await page.reload();
+    await expect(page.getByTestId('toggle-done')).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('[data-group="done"] [data-session-id]')).toHaveCount(1);
+    // 再折叠，刷新后仍是折叠
+    await page.getByTestId('toggle-done').click();
+    await page.reload();
+    await expect(page.getByTestId('toggle-done')).toHaveAttribute('aria-expanded', 'false');
+    // 事件卡：交回的结局、核验结论是中文，原值在 title
+    await page.getByTestId('toggle-done').click();
+    await page.getByRole('link', { name: /cmd-demo-login-fix/ }).click();
+    const handback = page.locator('[data-event-type="handback.recorded"]');
+    await expect(handback).toBeVisible();
+    await expect(handback.getByText('已交付')).toHaveAttribute('title', 'delivered');
+    // 折叠的「原始内容」里本来就是原值，不在这里查
+    await expect(handback.locator('span[title="handback.recorded"]')).toHaveText('交回核验');
+  });
+
+  test('#3781 收尾：卡住个数由服务端数——页面只加载了一页，数的是全部', async ({ page, stack }) => {
+    for (let i = 0; i < 33; i++) {
+      await stack.emit(`stuck-${String(i).padStart(2, '0')}`, 'worker.settled', { exitCode: 1 });
+    }
+    await page.goto(`${stack.url}/next/`);
+    // 第一页只有 30 个会话（全是卡住的），徽标仍是服务端数的 33。窄屏下这条顶栏本来就收起（max-md:hidden），
+    // 所以只查它在不在页面里，不查可见
+    const badge = page.getByText('卡住 33', { exact: true });
+    await expect(badge).toHaveCount(1);
+    await expect(page.getByTestId('group-count-stuck')).toHaveText('30');
+    await page.getByRole('button', { name: '加载更多' }).click();
+    await expect(page.getByTestId('group-count-stuck')).toHaveText('33');
+    await expect(badge).toHaveCount(1);
   });
 
   test('连续工具调用默认折叠成一行摘要，可展开；折叠时事件号对账不变', async ({ page, stack }) => {
