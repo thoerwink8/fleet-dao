@@ -24,6 +24,7 @@ import { buildWorkerEnv } from './env.ts';
 import { type McpEndpoint, writeMcpConfig } from './mcp-config.ts';
 import type { AdoptedDir, WorkerSandbox } from './sandbox.ts';
 import { type ShadowProbes, ShadowSelfCheckError, shadowSelfCheck } from './shadow.ts';
+import { type TranscriptSummary, TranscriptWriter } from './transcript.ts';
 
 export interface WorkerTurn {
   db: Db;
@@ -102,18 +103,29 @@ export async function runClaudeWorker(turn: WorkerTurn): Promise<WorkerTurnResul
       },
     ]);
     written = 1;
-    const result = await runProcess({
-      command: [...turn.command, ...args],
-      cwd: turn.cwd,
-      env,
-      stdin: turn.prompt,
-      runId: turn.runId,
-      budget,
-      deadline,
-      expectSessionId: session.id,
-      redact,
-      ...(turn.signal ? { signal: turn.signal } : {}),
-    });
+    // 过程落库（#3781）：stdout 每一行拆成事件，攒一批写一次；子进程被杀、超时也走到下面的 close，把攒着的写掉
+    const transcript = new TranscriptWriter({ db: turn.db, runId: turn.runId, redact });
+    let result: RunResult;
+    let transcriptSummary: TranscriptSummary;
+    try {
+      result = await runProcess(
+        {
+          command: [...turn.command, ...args],
+          cwd: turn.cwd,
+          env,
+          stdin: turn.prompt,
+          runId: turn.runId,
+          budget,
+          deadline,
+          expectSessionId: session.id,
+          redact,
+          ...(turn.signal ? { signal: turn.signal } : {}),
+        },
+        { onFrame: (_frame, line) => transcript.pushLine(line) },
+      );
+    } finally {
+      transcriptSummary = await transcript.close();
+    }
     await appendEvents(turn.db, stream, 1, [
       {
         schemaVersion: SCHEMA_VERSION,
@@ -130,6 +142,7 @@ export async function runClaudeWorker(turn: WorkerTurn): Promise<WorkerTurnResul
           stragglers: result.stragglers,
           leftovers: result.leftovers ?? null,
           stderrTail: result.stderrTail.slice(-4096),
+          transcript: transcriptSummary,
           ...(result.spawnError ? { spawnError: result.spawnError } : {}),
         },
       },

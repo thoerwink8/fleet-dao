@@ -15,6 +15,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import {
   appendToSession,
+  appendToStream,
   type CockpitApi,
   createCockpitApi,
   type SessionClaims,
@@ -52,6 +53,8 @@ export interface Stack {
   apiUrl(): string;
   /** 往会话追加一条事件（和真工人走同一个 appendToSession）。 */
   emit(sessionId: string, type: string, payload: Record<string, unknown>): Promise<number>;
+  /** 往任意一条流追加一条（工人过程流 transcript:<runId> 的样例用）。 */
+  emitStream(streamId: string, type: string, payload: Record<string, unknown>): Promise<number>;
   /** 签一个创始人的登录 Cookie（e2e 塞进浏览器）；overrides 造过期、版本不对等。 */
   cookie(overrides?: Partial<SessionClaims>): { name: string; value: string };
   /** 退出：把创始人的 session_version 加 1（已签发的 Cookie 作废）。 */
@@ -225,6 +228,10 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     apiUrl: () => `http://127.0.0.1:${apiPort}`,
     async emit(sessionId, type, payload) {
       const ev = await appendToSession(db, sessionId, type as never, payload);
+      return ev.id;
+    },
+    async emitStream(streamId, type, payload) {
+      const ev = await appendToStream(db, streamId, type as never, payload);
       return ev.id;
     },
     cookie,

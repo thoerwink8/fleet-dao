@@ -3,14 +3,35 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { cn } from '../lib/cn';
 import { CATEGORY_LABEL, type Category, categoryOf, taskIdOf } from '../lib/describe';
 import { dayKey, formatDay } from '../lib/format';
-import { useSessionFeed } from '../lib/hooks';
-import { groupToolRuns } from '../lib/tool-runs';
-import type { FeedState } from '../lib/types';
+import { useSessionFeed, useTranscriptFeed } from '../lib/hooks';
+import {
+  buildSteps,
+  buildTimeline,
+  runIdOfSession,
+  type TimelineItem,
+  workerSessionOf,
+} from '../lib/transcript';
+import type { FeedEvent, FeedState } from '../lib/types';
 import { Chip } from './chip';
 import { EventCard } from './event-card';
 import { LoginPrompt } from './login-prompt';
+import { DroppedRow, EndRow, SayRow, ToolRow, ToolRunRow } from './transcript-steps';
 
-const CATS: Category[] = ['turn', 'dispatch', 'worker', 'handback', 'other'];
+const CATS: Category[] = ['turn', 'dispatch', 'worker', 'process', 'handback', 'other'];
+
+/** 一项的第一个时间（日期分隔线用）。 */
+function itemStart(item: TimelineItem): string | undefined {
+  switch (item.kind) {
+    case 'event':
+      return item.ev.createdAt;
+    case 'mcp':
+      return item.events[0]?.createdAt;
+    case 'toolrun':
+      return item.steps[0]?.at;
+    default:
+      return item.step.at;
+  }
+}
 
 /** 连接状态条：正常时一个小点，断了说清楚「断了、已显示的还在、几秒后第几次重试」。 */
 export function StatusPill({ state }: { state: FeedState }) {
@@ -68,22 +89,36 @@ function ReconnectBanner({ state }: { state: FeedState }) {
 
 export function SessionStream({ sessionId }: { sessionId: string }) {
   const { feed, state } = useSessionFeed(sessionId);
+  // 工人会话（worker-<runId>）：把这次运行 stream-json 的每一步（transcript:<runId> 流）和会话里的进度、交结果按事件号串在一起
+  const runId = runIdOfSession(sessionId);
+  const { feed: tFeed, state: tState } = useTranscriptFeed(runId);
   const [off, setOff] = useState<Set<Category>>(new Set());
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const [unseen, setUnseen] = useState(0);
   const lastCount = useRef(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const total = state.events.length + tState.events.length;
 
   const counts = useMemo(() => {
-    const c: Record<Category, number> = { turn: 0, dispatch: 0, worker: 0, handback: 0, other: 0 };
+    const c: Record<Category, number> = {
+      turn: 0,
+      dispatch: 0,
+      worker: 0,
+      process: 0,
+      handback: 0,
+      other: 0,
+    };
     for (const e of state.events) c[categoryOf(e.type)]++;
+    for (const e of tState.events) c[categoryOf(e.type)]++;
     return c;
-  }, [state.events]);
+  }, [state.events, tState.events]);
 
   const shown = useMemo(() => state.events.filter((e) => !off.has(categoryOf(e.type))), [state.events, off]);
+  const steps = useMemo(() => buildSteps(tState.events), [tState.events]);
+  const shownSteps = useMemo(() => (off.has('process') ? [] : steps), [steps, off]);
 
-  const items = useMemo(() => groupToolRuns(shown), [shown]);
+  const items = useMemo(() => buildTimeline(shown, shownSteps), [shown, shownSteps]);
   const [openRuns, setOpenRuns] = useState<ReadonlySet<number>>(new Set());
   const toggleRun = (key: number) =>
     setOpenRuns((prev) => {
@@ -110,13 +145,12 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
 
   // 新事件来了：贴底就跟到底，不贴底只提示条数，不抢用户正在看的位置
   useLayoutEffect(() => {
-    const n = state.events.length;
-    const added = n - lastCount.current;
-    lastCount.current = n;
+    const added = total - lastCount.current;
+    lastCount.current = total;
     if (added <= 0) return;
     if (stick.current) scrollToEnd();
     else if (lastCount.current > 0) setUnseen((u) => u + added);
-  }, [state.events.length, scrollToEnd]);
+  }, [total, scrollToEnd]);
 
   const onScroll = () => {
     const el = scroller.current;
@@ -132,7 +166,7 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
     setLoadingOlder(true);
     stick.current = false;
     try {
-      await feed.loadOlder();
+      await Promise.all([feed.loadOlder(), tFeed?.loadOlder()]);
     } finally {
       setLoadingOlder(false);
       requestAnimationFrame(() => {
@@ -183,7 +217,7 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
             </button>
           );
         })}
-        <span className="num ml-auto shrink-0 pl-2 text-2xs text-muted">共 {state.events.length} 条</span>
+        <span className="num ml-auto shrink-0 pl-2 text-2xs text-muted">共 {total} 条</span>
       </div>
       <div className="relative min-h-0 flex-1">
         <div
@@ -192,7 +226,7 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
           className="h-full overflow-y-auto px-4 py-4 md:px-6"
           data-testid="stream"
         >
-          {state.hasOlder ? (
+          {state.hasOlder || tState.hasOlder ? (
             <div className="mb-3 flex justify-center">
               <button
                 type="button"
@@ -209,27 +243,27 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
               </button>
             </div>
           ) : null}
-          {state.status === 'loading' && state.events.length === 0 ? (
+          {state.status === 'loading' && total === 0 ? (
             <p className="py-10 text-center text-sm text-muted">正在加载这个会话的事件…</p>
-          ) : state.events.length === 0 && state.status !== 'failed' ? (
+          ) : total === 0 && state.status !== 'failed' ? (
             <div className="py-12 text-center">
               <p className="text-sm font-medium text-ink-2">这个会话还没有事件</p>
               <p className="mt-1 text-2xs text-muted">有新事件时会直接出现在这里，不用刷新。</p>
             </div>
-          ) : shown.length === 0 && state.events.length > 0 ? (
+          ) : items.length === 0 && total > 0 ? (
             <p className="py-10 text-center text-sm text-muted">筛选把事件全藏起来了，点上面的类别条恢复。</p>
           ) : (
             <ol className="mx-auto max-w-3xl" data-testid="events">
               {items.map((item) => {
-                const first = item.kind === 'event' ? item.ev : item.events[0];
-                if (!first) return null;
-                const day = dayKey(first.createdAt);
+                const startedAt = itemStart(item);
+                if (!startedAt) return null;
+                const day = dayKey(startedAt);
                 const showDay = day !== lastDay;
                 lastDay = day;
                 const dayRow = showDay ? (
                   <li className="mb-3 flex items-center gap-3 text-2xs text-muted" aria-hidden>
                     <span className="h-px flex-1 bg-line" />
-                    {formatDay(first.createdAt)}
+                    {formatDay(startedAt)}
                     <span className="h-px flex-1 bg-line" />
                   </li>
                 ) : null;
@@ -237,11 +271,53 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
                   return (
                     <Fragment key={item.ev.id}>
                       {dayRow}
-                      <EventCard ev={item.ev} taskLabel={taskIdOf(item.ev)} />
+                      <EventCard
+                        ev={item.ev}
+                        taskLabel={taskIdOf(item.ev)}
+                        workerSession={workerSessionOf(item.ev)}
+                      />
+                    </Fragment>
+                  );
+                }
+                if (
+                  item.kind === 'say' ||
+                  item.kind === 'tool' ||
+                  item.kind === 'end' ||
+                  item.kind === 'dropped'
+                ) {
+                  const st = item.step;
+                  return (
+                    <Fragment key={`step-${st.id}`}>
+                      {dayRow}
+                      {item.kind === 'say' ? (
+                        <SayRow step={item.step} />
+                      ) : item.kind === 'tool' ? (
+                        <ToolRow step={item.step} />
+                      ) : item.kind === 'end' ? (
+                        <EndRow step={item.step} />
+                      ) : (
+                        <DroppedRow step={item.step} />
+                      )}
                     </Fragment>
                   );
                 }
                 const open = openRuns.has(item.key);
+                if (item.kind === 'toolrun') {
+                  return (
+                    <Fragment key={`steprun-${item.key}`}>
+                      {dayRow}
+                      <ToolRunRow
+                        steps={item.steps}
+                        summary={item.summary}
+                        failed={item.failed}
+                        open={open}
+                        onToggle={() => toggleRun(item.key)}
+                      />
+                    </Fragment>
+                  );
+                }
+                const first: FeedEvent | undefined = item.events[0];
+                if (!first) return null;
                 return (
                   <Fragment key={`run-${item.key}`}>
                     {dayRow}

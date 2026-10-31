@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import type { Db } from '@fleet-dao/harness-store';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { sessionStream } from './events.ts';
 import { reply, serveHistory, serveSse } from './session-http.ts';
 import { readTokenFromRequest, type TokenClaims, verifyToken } from './tokens.ts';
 import { toolsFor } from './tools.ts';
@@ -111,7 +112,7 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
           if (claims.sessionId !== decodeURIComponent(history[1] ?? '')) {
             return reply(res, 403, '令牌不属于这个会话');
           }
-          return await serveHistory(db, url, res, claims.sessionId);
+          return await serveHistory(db, url, res, sessionStream(claims.sessionId));
         }
         if (sse) {
           if (req.method !== 'GET') return reply(res, 405, '只收 GET');
@@ -122,7 +123,7 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
             sseOptions,
             req,
             res,
-            claims.sessionId,
+            sessionStream(claims.sessionId),
             async () => (await verifyToken(db, token)) !== null,
           );
         }

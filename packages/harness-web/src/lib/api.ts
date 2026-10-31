@@ -39,21 +39,25 @@ export async function getJson<T>(
   return (await res.json()) as T;
 }
 
+/** 读哪一类流：会话流（sessions/<号>）或工人过程流（transcripts/<runId>，#3781）。 */
+export type FeedKind = 'sessions' | 'transcripts';
+
 export function historyUrl(
   base: string,
   sessionId: string,
   q: { before?: number; after?: number; limit?: number },
+  kind: FeedKind = 'sessions',
 ): string {
   const p = new URLSearchParams();
   if (q.before !== undefined) p.set('before', String(q.before));
   if (q.after !== undefined) p.set('after', String(q.after));
   if (q.limit !== undefined) p.set('limit', String(q.limit));
   const qs = p.toString();
-  return `${base}/sessions/${encodeURIComponent(sessionId)}/history${qs ? `?${qs}` : ''}`;
+  return `${base}/${kind}/${encodeURIComponent(sessionId)}/history${qs ? `?${qs}` : ''}`;
 }
 
-export function eventsUrl(base: string, sessionId: string): string {
-  return `${base}/sessions/${encodeURIComponent(sessionId)}/events`;
+export function eventsUrl(base: string, sessionId: string, kind: FeedKind = 'sessions'): string {
+  return `${base}/${kind}/${encodeURIComponent(sessionId)}/events`;
 }
 
 export function sessionsUrl(base: string, q: { before?: number; limit?: number } = {}): string {

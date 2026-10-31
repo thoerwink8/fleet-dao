@@ -85,6 +85,7 @@ const SESSIONS: Record<string, Step[]> = {
       payload: {
         jobKey: 'd12',
         taskId: 'a3f9c2d1-7b5e-4c0a-9e21-5d8f40b6a111',
+        runId: 'd12-a1',
         attempt: 1,
         final: true,
         outcome: 'delivered',
@@ -291,9 +292,225 @@ const SESSIONS: Record<string, Step[]> = {
   ],
 };
 
+// ---- 工人会话 worker-d12-a1（#3781）：登录页那件活的工人，二十多次工具调用、几句话、一次出错、一份 40 行的长输出 ----
+// 会话流里是它经 MCP 报的进度和交结果，过程流 transcript:d12-a1 是 stream-json 每一步落的事件；两条流按写入顺序交错（事件号全库单调）。
+export const DEMO_RUN_ID = 'd12-a1';
+const DEMO_WORKER_SESSION = `worker-${DEMO_RUN_ID}`;
+
+type Beat =
+  | { to: 'session'; type: string; payload: Record<string, unknown> }
+  | { to: 'transcript'; type: string; payload: Record<string, unknown> };
+
+function demoWorkerBeats(): Beat[] {
+  const out: Beat[] = [];
+  let n = 0;
+  const say = (text: string) =>
+    out.push({
+      to: 'transcript',
+      type: 'transcript.assistant',
+      payload: { runId: DEMO_RUN_ID, text, truncated: false, chars: text.length },
+    });
+  const tool = (
+    name: string,
+    input: Record<string, unknown>,
+    summary: string,
+    result: string,
+    isError = false,
+  ) => {
+    const toolUseId = `toolu_demo_${String(++n).padStart(2, '0')}`;
+    out.push({
+      to: 'transcript',
+      type: 'transcript.tool_use',
+      payload: {
+        runId: DEMO_RUN_ID,
+        toolUseId,
+        name,
+        summary,
+        input: JSON.stringify(input),
+        inputTruncated: false,
+      },
+    });
+    out.push({
+      to: 'transcript',
+      type: 'transcript.tool_result',
+      payload: {
+        runId: DEMO_RUN_ID,
+        toolUseId,
+        isError,
+        text: result,
+        truncated: false,
+        chars: result.length,
+      },
+    });
+  };
+  const progress = (summary: string, percent: number) =>
+    out.push({ to: 'session', type: 'worker.progress.reported', payload: { summary, percent } });
+  const login = 'packages/web/src/routes/login.tsx';
+  const longTest = Array.from(
+    { length: 40 },
+    (_, i) => ` ✓ packages/web/src/routes/case-${String(i + 1).padStart(2, '0')}.test.tsx (${i + 3} tests)`,
+  ).join('\n');
+
+  say('先看登录页的组件和现有测试，再决定怎么改。');
+  tool(
+    'Read',
+    { file_path: login },
+    login,
+    'export function Login() {\n  return <form style={{ width: 420 }} />;\n}',
+  );
+  tool(
+    'Read',
+    { file_path: 'packages/web/src/routes/login.test.tsx' },
+    'packages/web/src/routes/login.test.tsx',
+    'describe("login", () => { /* 4 个用例 */ });',
+  );
+  tool(
+    'Grep',
+    { pattern: 'width: 420', path: 'packages/web/src' },
+    'width: 420  packages/web/src',
+    `${login}:3:  return <form style={{ width: 420 }} />;`,
+  );
+  say('找到了：表单写死了 420px，窄屏放不下。先跑一遍现有测试确认基线。');
+  tool(
+    'Bash',
+    { command: 'npx vitest run packages/web/src/routes' },
+    'npx vitest run packages/web/src/routes',
+    longTest,
+  );
+  progress('已复现：390 宽下表单溢出 38px，定位到固定宽度的容器。', 25);
+  say('改成自适应宽度，再补一条窄屏回归测试。');
+  tool(
+    'Edit',
+    { file_path: login, old_string: 'width: 420', new_string: 'maxWidth: 420, width: "100%"' },
+    login,
+    'The file has been updated.',
+  );
+  tool(
+    'Edit',
+    { file_path: login, old_string: 'width: 400', new_string: 'width: "100%"' },
+    login,
+    'Error: old_string not found in file',
+    true,
+  );
+  tool(
+    'Edit',
+    { file_path: login, old_string: '<form style', new_string: '<form data-testid="login-form" style' },
+    login,
+    'The file has been updated.',
+  );
+  tool(
+    'Read',
+    { file_path: login },
+    login,
+    'export function Login() {\n  return <form data-testid="login-form" style={{ maxWidth: 420, width: "100%" }} />;\n}',
+  );
+  tool(
+    'Bash',
+    { command: 'npx vitest run packages/web/src/routes/login.test.tsx' },
+    'npx vitest run packages/web/src/routes/login.test.tsx',
+    ' 1 file, 4 tests passed',
+  );
+  say('基线没坏。现在查一下别的页面有没有同样的写死宽度。');
+  tool(
+    'Grep',
+    { pattern: 'width: [0-9]{3}', path: 'packages/web/src/routes' },
+    'width: [0-9]{3}  packages/web/src/routes',
+    'packages/web/src/routes/signup.tsx:12:  width: 380',
+  );
+  say('注册页同样写死了，但不在这件活的范围里，只记一笔不动它。');
+  tool(
+    'Bash',
+    { command: 'npx playwright test login-narrow --project=390' },
+    'npx playwright test login-narrow --project=390',
+    'Running 1 test using 1 worker\n  1 passed (2.1s)',
+  );
+  tool('Bash', { command: 'pnpm lint:design' }, 'pnpm lint:design', 'lint-design: 0 violations');
+  tool('Bash', { command: 'pnpm typecheck' }, 'pnpm typecheck', 'tsc -b: ok');
+  tool(
+    'Bash',
+    { command: 'pnpm exec biome check packages/web/src/routes' },
+    'pnpm exec biome check packages/web/src/routes',
+    'Checked 14 files. No fixes applied.',
+  );
+  progress('改成自适应宽度，补了窄屏回归测试，界面检查通过，正在做最后一轮核对。', 70);
+  say('逐个再看一遍改动的文件，确认没有多余改动。');
+  tool(
+    'Bash',
+    { command: 'git diff --stat' },
+    'git diff --stat',
+    ' packages/web/src/routes/login.tsx | 2 +-\n packages/web/src/routes/login.test.tsx | 18 ++++++\n 2 files changed',
+  );
+  tool(
+    'Bash',
+    { command: 'git status --short' },
+    'git status --short',
+    ' M packages/web/src/routes/login.test.tsx\n M packages/web/src/routes/login.tsx',
+  );
+  tool(
+    'Read',
+    { file_path: 'packages/web/src/routes/login.test.tsx' },
+    'packages/web/src/routes/login.test.tsx',
+    'test("390 宽下登录按钮完整可见", async () => { /* … */ });',
+  );
+  tool('Read', { file_path: 'docs/design/驾驶舱界面.md' }, 'docs/design/驾驶舱界面.md', '# 驾驶舱界面\n……');
+  say('改动只在登录页和它的测试，交结果。');
+  out.push({
+    to: 'session',
+    type: 'worker.result.submitted',
+    payload: {
+      status: 'done',
+      summary: '登录页窄屏修好，回归测试和界面检查通过。',
+      evidence:
+        'npx vitest run packages/web/src/routes/login.test.tsx\n 1 file, 4 tests passed\nlint-design: 0 violations',
+    },
+  });
+  out.push({
+    to: 'transcript',
+    type: 'transcript.result',
+    payload: {
+      runId: DEMO_RUN_ID,
+      subtype: 'success',
+      isError: false,
+      text: '登录页窄屏修好，回归测试和界面检查通过。',
+      truncated: false,
+      chars: 20,
+      durationMs: 1260000,
+      numTurns: 31,
+    },
+  });
+  return out;
+}
+
+async function seedWorkerRun(stack: Stack): Promise<boolean> {
+  const existing = await stack.db
+    .select({ id: events.id })
+    .from(events)
+    .where(eq(events.streamId, `session:${DEMO_WORKER_SESSION}`))
+    .limit(1);
+  if (existing.length > 0) return false;
+  const beats = demoWorkerBeats();
+  // 二十分钟的运行，按顺序均匀摊开
+  const span = 21 * 60_000;
+  const start = Date.now() - 38 * 60_000;
+  let i = 0;
+  for (const b of beats) {
+    const id =
+      b.to === 'session'
+        ? await stack.emit(DEMO_WORKER_SESSION, b.type, b.payload)
+        : await stack.emitStream(`transcript:${DEMO_RUN_ID}`, b.type, b.payload);
+    await stack.db
+      .update(events)
+      .set({ createdAt: new Date(start + (span * i++) / beats.length) })
+      .where(eq(events.id, id));
+  }
+  return true;
+}
+
 /** 灌样例；已经有同名会话的跳过（持久化目录里重复启动不重复灌）。 */
 export async function seed(stack: Stack): Promise<string[]> {
   const made: string[] = [];
+  // 工人会话先灌：事件号小，列表里排在其它样例之后，不挤掉原有样例的位置
+  if (await seedWorkerRun(stack)) made.push(DEMO_WORKER_SESSION);
   for (const [sessionId, steps] of Object.entries(SESSIONS)) {
     const existing = await stack.db
       .select({ id: events.id })

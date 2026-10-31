@@ -104,6 +104,31 @@ for (const s of sizes) {
   await settle(page);
   await shot('output-expanded');
 
+  // 工人会话详情（#3781）：指挥会话里的交回卡片带「看工人的完整过程」，点进去看 26 步的完整过程
+  await page.goto(`${stack.url}/next/s/cmd-demo-login-fix`);
+  await page.getByTestId('open-worker').first().waitFor();
+  await page.getByTestId('open-worker').last().scrollIntoViewIfNeeded();
+  await settle(page);
+  await shot('link-to-worker');
+  await page.getByTestId('open-worker').last().click();
+  await page.locator('[data-step-run]').first().waitFor();
+  await page.getByTestId('stream').evaluate((el) => el.scrollTo({ top: 0 }));
+  await settle(page);
+  await shot('worker-folded');
+  // 展开第二串（5 次调用、1 次出错）和 12 行预览的长输出
+  await page.locator('[data-step-run]').nth(1).getByRole('button').first().click();
+  await page.locator('[data-step-run]').nth(1).scrollIntoViewIfNeeded();
+  await settle(page);
+  await shot('worker-run-expanded');
+  const bash = page.locator('[data-testid="events"] > li[data-step-kind="tool"]').first();
+  await bash.getByRole('button').first().click();
+  await bash.scrollIntoViewIfNeeded();
+  await settle(page);
+  await shot('worker-tool-detail');
+  await page.getByTestId('stream').evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
+  await settle(page);
+  await shot('worker-end');
+
   // 断后端：停接口层，页面应显示「已断开」条
   await stack.stopApi();
   await page.getByRole('status').waitFor();

@@ -6,9 +6,11 @@
 // Cookie 格式从旧驾驶舱 packages/api 的 tokens.ts / session.ts 拷来（决定 0124：新包不依赖旧包），固定向量见 AGENTS.md 和测试。
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { transcriptStream } from '@fleet-dao/harness-contract';
 import { advanceStreamHeads, type Db, events, streamHeads } from '@fleet-dao/harness-store';
 import { and, desc, eq, lt, type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { sessionStream } from './events.ts';
 import { type HarnessApi, hasTokenInQuery, wrapServer } from './server.ts';
 import { reply, serveHistory, serveSse } from './session-http.ts';
 import { TOKEN_COOKIE, TOKEN_HEADER } from './tokens.ts';
@@ -18,6 +20,8 @@ export const COCKPIT_COOKIE = '__Host-fleet_session';
 const SESSION_PURPOSE = 'fleet-session/v1';
 /** 比香港 nginx 的 5 分钟长，免得代理复用刚被这边关掉的连接（旧后端踩过，packages/api/src/keep-alive.ts）。 */
 export const COCKPIT_KEEP_ALIVE_MS = 6 * 60_000;
+/** 工人过程历史页的载荷字节上限：每条最多约 4KB，行数上限之外再加一道，一页最多读 limit+1 行、给回不超过这么多字节。 */
+export const TRANSCRIPT_PAGE_BYTES = 256 * 1024;
 const LIST_DEFAULT = 30;
 const LIST_MAX = 100;
 
@@ -283,9 +287,16 @@ export function createCockpitApi(options: CockpitOptions): CockpitApi {
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (hasTokenInQuery(url)) return reply(res, 400, '令牌只能放请求头或 cookie，不能放网址');
-    const m = /^\/next\/api\/sessions(?:\/([^/]+)\/(history|events))?$/.exec(url.pathname);
+    // /sessions/<号>/(history|events) 读会话流；/transcripts/<runId>/(history|events) 读工人过程流 transcript:<runId>（#3781）
+    const m =
+      /^\/next\/api\/(?:sessions(?:\/([^/]+)\/(history|events))?|transcripts\/([^/]+)\/(history|events))$/.exec(
+        url.pathname,
+      );
     if (!m) return reply(res, 404, '没有这个路径');
-    const sessionId = m[1] === undefined ? undefined : decodeURIComponent(m[1]);
+    const isTranscript = m[3] !== undefined;
+    const rawId = isTranscript ? m[3] : m[1];
+    const sessionId = rawId === undefined ? undefined : decodeURIComponent(rawId);
+    const action = isTranscript ? m[4] : m[2];
     if (sessionId !== undefined && !isValidSessionId(sessionId)) return reply(res, 404, '没有这个路径');
     if (req.method !== 'GET') return reply(res, 405, '只收 GET');
     const verdict = await authorize(req);
@@ -300,9 +311,12 @@ export function createCockpitApi(options: CockpitOptions): CockpitApi {
         .end(JSON.stringify(body));
       return;
     }
-    if (m[2] === 'history') return await serveHistory(db, url, res, sessionId);
+    const streamId = isTranscript ? transcriptStream(sessionId) : sessionStream(sessionId);
+    if (action === 'history') {
+      return await serveHistory(db, url, res, streamId, isTranscript ? TRANSCRIPT_PAGE_BYTES : undefined);
+    }
     // 每个周期把同一个 Cookie 重核一遍：退出（session_version 加 1）或 active=false 之后最晚一个周期断开
-    return await serveSse(sseOptions, req, res, sessionId, async () => (await authorize(req)).ok);
+    return await serveSse(sseOptions, req, res, streamId, async () => (await authorize(req)).ok);
   }
 
   const server: Server = createServer((req, res) => {

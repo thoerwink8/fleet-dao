@@ -23,6 +23,44 @@ export function useSessionFeed(sessionId: string): { feed: SessionFeed; state: F
   return { feed, state };
 }
 
+const NO_FEED_STATE: FeedState = {
+  status: 'live',
+  events: [],
+  hasOlder: false,
+  attempt: 0,
+  retryInMs: null,
+  resyncs: 0,
+  error: null,
+  errorStatus: null,
+};
+const noSubscribe = () => () => undefined;
+const noSnapshot = () => NO_FEED_STATE;
+
+/**
+ * 一次工人运行的过程流（transcript:<runId>，#3781）；runId 为 null 时什么都不连（普通会话页没有过程）。
+ * 连接策略和会话流一样：先取最新一页、再开 SSE 续上，标签页隐藏满 10 秒放掉连接。
+ */
+export function useTranscriptFeed(runId: string | null): { feed: SessionFeed | null; state: FeedState } {
+  const feed = useMemo(
+    () => (runId ? new SessionFeed(runId, { base: API_BASE, kind: 'transcripts' }) : null),
+    [runId],
+  );
+  useEffect(() => {
+    if (!feed) return;
+    feed.start();
+    const release = releaseWhenHidden(feed, document);
+    return () => {
+      release();
+      feed.stop();
+    };
+  }, [feed]);
+  const state = useSyncExternalStore(
+    feed ? feed.subscribe : noSubscribe,
+    feed ? feed.getSnapshot : noSnapshot,
+  );
+  return { feed, state };
+}
+
 export const SESSIONS_POLL_MS = 10_000;
 
 export interface SessionsState {
