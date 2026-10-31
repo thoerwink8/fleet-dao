@@ -32,6 +32,7 @@ describe('参数和配置', () => {
     session: { mode: 'new' as const, id: SID },
     cwd: '/w',
     promptFile: '/t/prompt.md',
+    shadow: true,
   };
   it('提示词走文件、会话号用 -s、放开权限才带 --always-approve、总带 --no-plan', () => {
     const args = buildGrokArgs({ ...base, permissionMode: 'bypassPermissions' });
@@ -40,9 +41,13 @@ describe('参数和配置', () => {
     expect(args).toContain('--no-plan');
     expect(args.slice(-2)).toEqual(['-s', SID]);
     expect(args[args.indexOf('-m') + 1]).toBe('grok-4.7');
-    // 联网搜索、取网页走 grok 服务端、出网关拦不住，影子工人会搜到已合并的答案：必须关
-    const off = args[args.indexOf('--disallowed-tools') + 1]?.split(',') ?? [];
-    expect(off).toEqual(expect.arrayContaining(['web_search', 'web_fetch']));
+    // 联网搜索、取网页走 grok 服务端、出网关拦不住，影子工人会搜到已合并的答案：影子模式关，真干活不关
+    const off = (a: string[]) => a[a.indexOf('--disallowed-tools') + 1]?.split(',') ?? [];
+    expect(off(args)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']));
+    const real = off(buildGrokArgs({ ...base, shadow: false, permissionMode: 'bypassPermissions' }));
+    expect(real).not.toContain('web_search');
+    expect(real).not.toContain('web_fetch');
+    expect(real).toContain('image_gen');
     expect(buildGrokArgs({ ...base, permissionMode: 'acceptEdits' })).not.toContain('--always-approve');
     expect(
       buildGrokArgs({ ...base, session: { mode: 'resume', id: SID }, permissionMode: 'plan' }),

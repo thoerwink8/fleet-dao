@@ -11,12 +11,13 @@ import type { ClaudePermissionMode, ClaudeSession } from './claude-code.ts';
 import { MCP_SERVER_NAME, type McpEndpoint, SESSION_TOKEN_HEADER } from './mcp-config.ts';
 
 /**
- * 关掉的内置工具。web_search / web_fetch 走 grok 自家服务端，出网关拦不住，影子工人搜得到已经合并的答案（#3776 同一类口子），
- * 一律关；其余是写码用不上的（工具定义每次调用都重带一遍，关掉省 token，同旧引擎 GROK_DISALLOWED_TOOLS）。
+ * 影子模式另关的：web_search / web_fetch 走 grok 自家服务端，出网关拦不住，影子单是重做已合并的旧单，搜得到当时的答案
+ * （#3776 同一类口子）。真干活要查文档、版本说明，不关。
  */
+export const GROK_SHADOW_DISALLOWED_TOOLS: readonly string[] = ['web_search', 'web_fetch'];
+
+/** 一直关的内置工具：写码用不上（工具定义每次调用都重带一遍，关掉省 token，同旧引擎 GROK_DISALLOWED_TOOLS）。 */
 export const GROK_DISALLOWED_TOOLS: readonly string[] = [
-  'web_search',
-  'web_fetch',
   'image_gen',
   'image_edit',
   'image_to_video',
@@ -51,6 +52,8 @@ export interface GrokArgsSpec {
   permissionMode: ClaudePermissionMode;
   cwd: string;
   promptFile: string;
+  /** 影子模式：另关联网搜索和取网页（GROK_SHADOW_DISALLOWED_TOOLS）。 */
+  shadow: boolean;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -68,7 +71,7 @@ export function buildGrokArgs(spec: GrokArgsSpec): string[] {
     ...(spec.permissionMode === 'bypassPermissions' ? ['--always-approve'] : []),
     '--no-plan',
     '--disallowed-tools',
-    GROK_DISALLOWED_TOOLS.join(','),
+    [...(spec.shadow ? GROK_SHADOW_DISALLOWED_TOOLS : []), ...GROK_DISALLOWED_TOOLS].join(','),
     '-m',
     spec.model,
     '--cwd',

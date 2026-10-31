@@ -100,6 +100,7 @@ export async function runClaudeWorker(turn: WorkerTurn): Promise<WorkerTurnResul
         permissionMode: turn.permissionMode,
         cwd: turn.cwd,
         promptFile: g.promptFile,
+        shadow: Boolean(turn.shadow),
       });
       stdin = '';
     } else {
