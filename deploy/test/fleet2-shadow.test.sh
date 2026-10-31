@@ -39,22 +39,38 @@ if [[ "${1-}" != --inner ]]; then
   exec unshare --net bash "${BASH_SOURCE[0]}" --inner
 fi
 
+echo "== 0. slice 名换成 cgroup 树里的路径和层数"
+slice_cgroup_path fleet2-shadow.slice
+check "fleet2-shadow.slice" "$SLICE_LEVEL $SLICE_PATH" "2 fleet2.slice/fleet2-shadow.slice"
+slice_cgroup_path fleet.slice
+check "fleet.slice" "$SLICE_LEVEL $SLICE_PATH" "1 fleet.slice"
+slice_cgroup_path a-b-c.slice
+check "a-b-c.slice" "$SLICE_LEVEL $SLICE_PATH" "3 a.slice/a-b.slice/a-b-c.slice"
+slice_cgroup_path fleet2-shadow >/dev/null 2>&1
+check "不带 .slice 的拒" "$?" 1
+slice_cgroup_path a--b.slice >/dev/null 2>&1
+check "连着两个横杠的拒" "$?" 1
+
 T=$(mktemp -d)
-CG=fleet2-shadow-test-$$
+# 和真的 fleet2-shadow.slice 一样套两层，规则按真路径和层数认
+TOP=f2test$$
+slice_cgroup_path "$TOP-shadow.slice" || skip "算不出临时 slice 的路径"
+CG=$SLICE_PATH CG_LEVEL=$SLICE_LEVEL
 LISTEN_PIDS=()
 cleanup() {
   for p in "${LISTEN_PIDS[@]}"; do kill "$p" 2>/dev/null; done
-  rmdir "/sys/fs/cgroup/$CG" 2>/dev/null
+  rmdir "/sys/fs/cgroup/$CG" "/sys/fs/cgroup/$TOP.slice" 2>/dev/null
   rm -rf -- "$T"
 }
 trap cleanup EXIT
-mkdir "/sys/fs/cgroup/$CG" || skip "建不了临时 cgroup /sys/fs/cgroup/$CG"
+mkdir -p "/sys/fs/cgroup/$CG" || skip "建不了临时 cgroup /sys/fs/cgroup/$CG"
 ip link set lo up || skip "起不了新命名空间里的回环"
 if ! { ip link add d0 type dummy && ip addr add 192.0.2.1/24 dev d0 && ip link set d0 up; }; then
   skip "建不了 dummy 网卡"
 fi
 
-render "$DEPLOY/france/fleet2-shadow.nft" SLICE="$CG" EGRESS_PORT="$EGRESS_PORT" >/dev/null || skip "模板渲染不了"
+render "$DEPLOY/france/fleet2-shadow.nft" SLICE="$TOP-shadow.slice" SLICE_PATH="$CG" SLICE_LEVEL="$CG_LEVEL" \
+  EGRESS_PORT="$EGRESS_PORT" >/dev/null || skip "模板渲染不了"
 printf '%s\n' "$RENDERED" >"$T/fleet2-shadow.nft"
 
 # 在本机回环上听一个口，每接一个连接往日志写一行
@@ -84,25 +100,26 @@ conn() { "$NODE" -e "$CONNECT" "$@"; }
 conn_shadow() { bash -c 'echo $$ >"/sys/fs/cgroup/$1/cgroup.procs" && shift && exec "$@"' _ "$CG" "$NODE" -e "$CONNECT" "$@"; }
 count() { grep -c got "$1" 2>/dev/null || echo 0; }
 
-echo "== 0. 真模板载得进去（slice 在的时候）"
+echo "== 1. 真模板载得进去（slice 在的时候）"
 nft -f "$T/fleet2-shadow.nft"
 check "nft -f 渲染好的 fleet2-shadow.nft" "$?" 0
 listen "$EGRESS_PORT" "$T/egress.log" || skip "起不了扮出网关的监听"
 listen "$LOCAL_PORT" "$T/local.log" || skip "起不了扮 MCP 的监听"
 
-echo "== 1. 在影子 slice 里"
+echo "== 2. 在影子 slice 里"
 check "连外面的 443：被重定向到出网关" "$(conn_shadow "$FAR" 443)" ok
 check "出网关接到了这一个连接" "$(count "$T/egress.log")" 1
 check "连外面的 80：被复位" "$(conn_shadow "$FAR" 80)" ECONNREFUSED
 check "连外面的 22：被复位" "$(conn_shadow "$FAR" 22)" ECONNREFUSED
 check "回环上的 MCP 口照常通" "$(conn_shadow 127.0.0.1 "$LOCAL_PORT")" ok
 
-echo "== 2. 不在影子 slice 里（引擎会话、别的进程）"
+echo "== 3. 不在影子 slice 里（引擎会话、别的进程）"
 check "连外面的 443：不重定向（外面没人应答，等满时限）" "$(conn "$FAR" 443)" timeout
 check "出网关没多接连接" "$(count "$T/egress.log")" 1
 
-echo "== 3. slice 不在时载不进（所以单元排在 slice 之后）"
-render "$DEPLOY/france/fleet2-shadow.nft" SLICE="fleet2-shadow-missing-$$" EGRESS_PORT="$EGRESS_PORT" >/dev/null
+echo "== 4. slice 不在时载不进（所以单元排在 slice 之后）"
+render "$DEPLOY/france/fleet2-shadow.nft" SLICE="$TOP-missing.slice" SLICE_PATH="$TOP.slice/$TOP-missing.slice" \
+  SLICE_LEVEL=2 EGRESS_PORT="$EGRESS_PORT" >/dev/null
 printf '%s\n' "$RENDERED" >"$T/missing.nft"
 nft -f "$T/missing.nft" 2>/dev/null
 check "cgroup 路径不在：nft -f 失败" "$(($? != 0))" 1

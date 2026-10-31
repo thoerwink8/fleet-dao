@@ -1,6 +1,6 @@
 #!/usr/sbin/nft -f
 # 新内核影子工人的出网限制（决定 0124，#3775）：影子工人和引擎会话同一个会话用户（法国只占 reclaude 一台设备），
-# 按 cgroup 认——影子工人的进程都在 @@SLICE@@ 下面。单独一张表、单独一个单元（fleet2-shadow-firewall.service）：
+# 按 cgroup 认——影子工人的进程都在 @@SLICE@@ 下面（cgroup 树里是 /@@SLICE_PATH@@，slice 名按横杠分层）。单独一张表、单独一个单元（fleet2-shadow-firewall.service）：
 # 这张表载不进去也不碰 inet fleet_dao 那张（Temporal、库、后端的保护照旧）。
 # nft 载入时把 cgroup 路径解析成 inode：slice 不在就载不进，所以单元排在 slice 起来之后。
 #
@@ -14,13 +14,13 @@ delete table inet fleet2_shadow
 table inet fleet2_shadow {
 	chain nat_out {
 		type nat hook output priority -100; policy accept;
-		socket cgroupv2 level 1 "@@SLICE@@" ip daddr != 127.0.0.0/8 tcp dport 443 redirect to :@@EGRESS_PORT@@
+		socket cgroupv2 level @@SLICE_LEVEL@@ "@@SLICE_PATH@@" ip daddr != 127.0.0.0/8 tcp dport 443 redirect to :@@EGRESS_PORT@@
 	}
 	chain filter_out {
 		type filter hook output priority filter; policy accept;
-		socket cgroupv2 level 1 "@@SLICE@@" ip daddr 127.0.0.0/8 accept
-		socket cgroupv2 level 1 "@@SLICE@@" ip6 daddr ::1 accept
-		socket cgroupv2 level 1 "@@SLICE@@" meta l4proto tcp reject with tcp reset
-		socket cgroupv2 level 1 "@@SLICE@@" reject
+		socket cgroupv2 level @@SLICE_LEVEL@@ "@@SLICE_PATH@@" ip daddr 127.0.0.0/8 accept
+		socket cgroupv2 level @@SLICE_LEVEL@@ "@@SLICE_PATH@@" ip6 daddr ::1 accept
+		socket cgroupv2 level @@SLICE_LEVEL@@ "@@SLICE_PATH@@" meta l4proto tcp reject with tcp reset
+		socket cgroupv2 level @@SLICE_LEVEL@@ "@@SLICE_PATH@@" reject
 	}
 }

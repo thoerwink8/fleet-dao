@@ -201,7 +201,9 @@ setup_fleet2_shadow() {
   ((WROTE)) && units_changed=1
   if ((units_changed)); then systemctl daemon-reload; fi
   ensure_unit_running "$FLEET2_SHADOW_SLICE" 0
-  render "$DEPLOY_DIR/france/fleet2-shadow.nft" SLICE="$FLEET2_SHADOW_SLICE" EGRESS_PORT="$FLEET2_EGRESS_PORT" || return 1
+  slice_cgroup_path "$FLEET2_SHADOW_SLICE" || return 1
+  render "$DEPLOY_DIR/france/fleet2-shadow.nft" SLICE="$FLEET2_SHADOW_SLICE" SLICE_PATH="$SLICE_PATH" SLICE_LEVEL="$SLICE_LEVEL" \
+    EGRESS_PORT="$FLEET2_EGRESS_PORT" || return 1
   tmp=$(mktemp)
   printf '%s\n' "$RENDERED" >"$tmp"
   if ! err=$(nft -c -f "$tmp" 2>&1); then
