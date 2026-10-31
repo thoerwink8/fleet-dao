@@ -6,7 +6,7 @@
 
 ## 入口
 
-- `src/main.tsx`：路由表。五块一级信息架构（会话、任务、决策、法国运维、设置，`specs/3752-cockpit-rewrite` 第五节）都在导航里，这一片只有会话块有内容，其余四块是写明「哪一片做」的占位页。
+- `src/main.tsx`：路由表。五块一级信息架构（会话、任务、决策、法国运维、设置，见 `specs/3752-cockpit-rewrite/讨论稿.md`）都在导航里，这一片只有会话块有内容，其余四块是写明「哪一片做」的占位页。
 - `src/components/shell.tsx`：外壳。侧栏 208px（收起 64px，记在 localStorage），768px 以下换底部四格标签栏，顶栏 `PageBar` 56px，间距 4px。
 - `src/pages/workbench.tsx`：会话工作台。桌面左列会话列表、右边事件流；手机两个画面（`/` 列表，`/s/<号>` 事件流，左上角返回）。
 - `src/components/session-stream.tsx`、`event-card.tsx`：事件流和每种事件的展示（会话轮次、派工请求、叫停、工人起止、进度、交结果、交回核验，不认识的类型落到折叠的原始内容，不丢）。
