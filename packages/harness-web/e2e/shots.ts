@@ -7,7 +7,10 @@ import { seed } from '../dev/seed.ts';
 import { startStack } from '../dev/stack.ts';
 
 const label = process.argv[2] ?? 'after';
-const out = resolve(import.meta.dirname, '../../../_tmp/shots', label);
+// SHOTS_OUT 给了就存到那个目录（相对仓根），不给存 _tmp/shots/<标签>/
+const out = process.env.SHOTS_OUT
+  ? resolve(import.meta.dirname, '../../..', process.env.SHOTS_OUT)
+  : resolve(import.meta.dirname, '../../../_tmp/shots', label);
 mkdirSync(out, { recursive: true });
 
 const stack = await startStack({
@@ -19,6 +22,13 @@ const stack = await startStack({
 for (let i = 0; i < 32; i++) {
   await stack.emit(`bulk-${String(i).padStart(2, '0')}`, 'worker.progress.reported', {
     summary: `批量样例 ${i}`,
+  });
+  // 批量的都当做完，列表里「做完」组在最下面，上面几组一屏看得全
+  await stack.emit(`bulk-${String(i).padStart(2, '0')}`, 'handback.recorded', {
+    final: true,
+    outcome: 'delivered',
+    verdict: 'pass',
+    reasons: [],
   });
 }
 await seed(stack);
@@ -75,6 +85,24 @@ for (const s of sizes) {
   await page.getByTestId('stream').evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
   await settle(page);
   await shot('session-abnormal');
+
+  // 工具调用折叠：在跑的会话里连着 5 次进度，默认一行摘要，点开看每一条
+  await page.goto(`${stack.url}/next/s/cmd-demo-migration`);
+  await page.locator('[data-tool-run]').waitFor();
+  await settle(page);
+  await shot('tools-collapsed');
+  await page.locator('[data-tool-run]').getByRole('button').first().click();
+  await settle(page);
+  await shot('tools-expanded');
+
+  // 长输出：证据 40 行，默认前 12 行，点开看全部
+  await page.goto(`${stack.url}/next/s/cmd-demo-test-run`);
+  await page.getByTestId('tool-output').waitFor();
+  await settle(page);
+  await shot('output-clamped');
+  await page.getByTestId('tool-output').getByRole('button').click();
+  await settle(page);
+  await shot('output-expanded');
 
   // 断后端：停接口层，页面应显示「已断开」条
   await stack.stopApi();

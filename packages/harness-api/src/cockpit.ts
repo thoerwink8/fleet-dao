@@ -128,6 +128,18 @@ function parseLimitAndBefore(url: URL): { limit: number; before?: number } | nul
   return { limit, before: Number(beforeRaw) };
 }
 
+/** 近期事件的瘦身版：只带驾驶舱判工人状态用得上的几个字段（不带大文本）。 */
+export interface TailEvent {
+  type: string;
+  outcome?: unknown;
+  final?: unknown;
+  status?: unknown;
+  exitCode?: unknown;
+  killed?: unknown;
+  spawnError?: unknown;
+  deadline?: unknown;
+}
+
 export interface SessionListItem {
   id: string;
   eventCount: number;
@@ -135,6 +147,59 @@ export interface SessionListItem {
   lastAt: string;
   lastType: string;
   lastPayload: unknown;
+  /** 这个会话最近 TAIL_EVENTS 条事件的瘦身版，最旧在前。 */
+  tail: TailEvent[];
+}
+
+/** 每个会话带多少条近期事件：页大小 × 这个数 = 状态判读最多多读的行数。 */
+export const TAIL_EVENTS = 24;
+
+interface TailRow {
+  stream_id: string;
+  type: string;
+  slim: Record<string, unknown> | string;
+}
+
+/**
+ * 一页会话的近期事件：对页里每个会话走 (stream_id, id) 索引倒着取 TAIL_EVENTS 条，所以读的行数 ≤ 页大小 × TAIL_EVENTS，
+ * 和流多长无关。只摘判状态要的字段，大文本（证据、错误输出）留在库里。
+ */
+async function loadTails(db: Db, streamIds: string[]): Promise<Map<string, TailEvent[]>> {
+  const out = new Map<string, TailEvent[]>();
+  if (streamIds.length === 0) return out;
+  const ids = sql.join(
+    streamIds.map((s) => sql`${s}`),
+    sql`, `,
+  );
+  const result = (await db.execute(sql`
+    select s.stream_id, t.type, t.slim
+    from unnest(array[${ids}]::text[]) as s(stream_id)
+    cross join lateral (
+      select e.id, e.type, jsonb_build_object(
+        'outcome', e.payload->'outcome',
+        'final', e.payload->'final',
+        'status', e.payload->'status',
+        'exitCode', e.payload->'exitCode',
+        'killed', e.payload->'killed',
+        'spawnError', e.payload->'spawnError',
+        'deadline', e.payload->'deadline'
+      ) as slim
+      from ${events} e
+      where e.stream_id = s.stream_id
+      order by e.id desc
+      limit ${TAIL_EVENTS}
+    ) t
+    order by s.stream_id, t.id asc
+  `)) as unknown as TailRow[] | { rows: TailRow[] };
+  for (const r of Array.isArray(result) ? result : result.rows) {
+    const slim = (typeof r.slim === 'string' ? JSON.parse(r.slim) : r.slim) as Record<string, unknown>;
+    const ev: Record<string, unknown> = { type: r.type };
+    for (const [k, v] of Object.entries(slim)) if (v !== null) ev[k] = v;
+    const list = out.get(r.stream_id);
+    if (list) list.push(ev as unknown as TailEvent);
+    else out.set(r.stream_id, [ev as unknown as TailEvent]);
+  }
+  return out;
 }
 
 /** 会话列表：先把投影推到最新，再按最后事件号倒序取一页；读的行数和页大小成正比。 */
@@ -160,6 +225,10 @@ export async function listSessions(
     .orderBy(desc(streamHeads.lastEventId))
     .limit(opts.limit + 1);
   const page = rows.slice(0, opts.limit);
+  const tails = await loadTails(
+    db,
+    page.map((r) => r.streamId),
+  );
   return {
     sessions: page.map((r) => ({
       id: r.streamId.slice('session:'.length),
@@ -168,6 +237,7 @@ export async function listSessions(
       lastAt: r.lastAt.toISOString(),
       lastType: r.lastType,
       lastPayload: r.lastPayload,
+      tail: tails.get(r.streamId) ?? [],
     })),
     nextBefore: rows.length > opts.limit ? (page.at(-1)?.lastEventId ?? null) : null,
   };

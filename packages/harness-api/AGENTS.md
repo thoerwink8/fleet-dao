@@ -18,6 +18,7 @@
 - 固定向量（`test/cockpit.test.ts` 第一条守着）：密钥 `test-secret-0123456789abcdef-test`，声明 `{"uid":"00000000-0000-4000-8000-000000000001","sid":"sid-fixed-0001","iat":1700000000,"exp":1700001000,"m":"password","v":3}`（键按这个顺序），签出 `eyJ1aWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJzaWQiOiJzaWQtZml4ZWQtMDAwMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAxMDAwLCJtIjoicGFzc3dvcmQiLCJ2IjozfQ.SYQh9-AG4-IRnvv19uvj3TUD8TLOVeO1acgwfqwrI58`。这条是拿旧包的 `signPayload` 生成的。
 - 每个请求：签名对、没过期、uid 是 uuid，再按主键查 `public.users`：active 且 role=founder（否则 403），`v`（缺省 0）等于 `session_version`（否则 401）。开着的 SSE 每个周期重核一次。
 - 只有三条 GET：`/next/api/sessions?limit&before`（投影 `stream_heads`，读时顺手 `advanceStreamHeads`）、`/next/api/sessions/<号>/history`、`/next/api/sessions/<号>/events`。会话令牌（请求头、cookie）和 Authorization 一概不认，带了就 401；没有 `/mcp`；网址带 token 400；会话号不合格 404；不回 CORS 头；`keepAliveTimeout` 6 分钟（比香港 nginx 的 5 分钟长）。
+- 会话列表每项带 `tail`（#3781 第二轮）：该会话最近 `TAIL_EVENTS`（24）条事件的瘦身版，最旧在前，只摘 `outcome`、`final`、`status`、`exitCode`、`killed`、`spawnError`、`deadline`，不带大文本；驾驶舱据此判工人状态。读法是对本页每个会话走 `events_stream_id_idx` 倒着取 24 条（`cross join lateral`），行数 ≤ 页大小 × 24，和流多长无关。判读规则在 `packages/harness-web/src/lib/session-state.ts`；要加判状态用的新字段，改 `loadTails` 的 `jsonb_build_object` 和那份规则。
 - 环境变量：`FLEET2_DATABASE_URL`、`FLEET_SESSION_SECRET`、`FLEET2_COCKPIT_HOST`（默认 127.0.0.1）、`FLEET2_COCKPIT_PORT`（默认 7346）、`FLEET2_COCKPIT_COOKIE_NAME`（只有本机 http 的 e2e 才改）。这个库用户要能读 `public.users` 的 `id, role, active, session_version`。
 
 ## 测试

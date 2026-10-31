@@ -1,9 +1,10 @@
-import { ArrowDown, LoaderCircle, RefreshCw, WifiOff } from 'lucide-react';
+import { ArrowDown, ChevronDown, ChevronRight, LoaderCircle, RefreshCw, WifiOff, Wrench } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '../lib/cn';
 import { CATEGORY_LABEL, type Category, categoryOf, taskIdOf } from '../lib/describe';
 import { dayKey, formatDay } from '../lib/format';
 import { useSessionFeed } from '../lib/hooks';
+import { groupToolRuns } from '../lib/tool-runs';
 import type { FeedState } from '../lib/types';
 import { Chip } from './chip';
 import { EventCard } from './event-card';
@@ -82,6 +83,16 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
 
   const shown = useMemo(() => state.events.filter((e) => !off.has(categoryOf(e.type))), [state.events, off]);
 
+  const items = useMemo(() => groupToolRuns(shown), [shown]);
+  const [openRuns, setOpenRuns] = useState<ReadonlySet<number>>(new Set());
+  const toggleRun = (key: number) =>
+    setOpenRuns((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
   const scrollToEnd = useCallback((smooth = false) => {
     const el = scroller.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
@@ -94,6 +105,7 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
     lastCount.current = 0;
     setUnseen(0);
     setOff(new Set());
+    setOpenRuns(new Set());
   }, [sessionId]);
 
   // 新事件来了：贴底就跟到底，不贴底只提示条数，不抢用户正在看的位置
@@ -208,20 +220,56 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
             <p className="py-10 text-center text-sm text-muted">筛选把事件全藏起来了，点上面的类别条恢复。</p>
           ) : (
             <ol className="mx-auto max-w-3xl" data-testid="events">
-              {shown.map((ev) => {
-                const day = dayKey(ev.createdAt);
+              {items.map((item) => {
+                const first = item.kind === 'event' ? item.ev : item.events[0];
+                if (!first) return null;
+                const day = dayKey(first.createdAt);
                 const showDay = day !== lastDay;
                 lastDay = day;
+                const dayRow = showDay ? (
+                  <li className="mb-3 flex items-center gap-3 text-2xs text-muted" aria-hidden>
+                    <span className="h-px flex-1 bg-line" />
+                    {formatDay(first.createdAt)}
+                    <span className="h-px flex-1 bg-line" />
+                  </li>
+                ) : null;
+                if (item.kind === 'event') {
+                  return (
+                    <Fragment key={item.ev.id}>
+                      {dayRow}
+                      <EventCard ev={item.ev} taskLabel={taskIdOf(item.ev)} />
+                    </Fragment>
+                  );
+                }
+                const open = openRuns.has(item.key);
                 return (
-                  <Fragment key={ev.id}>
-                    {showDay ? (
-                      <li className="mb-3 flex items-center gap-3 text-2xs text-muted" aria-hidden>
-                        <span className="h-px flex-1 bg-line" />
-                        {formatDay(ev.createdAt)}
-                        <span className="h-px flex-1 bg-line" />
-                      </li>
-                    ) : null}
-                    <EventCard ev={ev} taskLabel={taskIdOf(ev)} />
+                  <Fragment key={`run-${item.key}`}>
+                    {dayRow}
+                    <li data-tool-run={item.key} data-open={open} className="pb-3">
+                      <button
+                        type="button"
+                        aria-expanded={open}
+                        onClick={() => toggleRun(item.key)}
+                        className="flex min-h-9 w-full cursor-pointer items-center gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-left text-xs text-ink-2 hover:bg-subtle"
+                      >
+                        {open ? (
+                          <ChevronDown className="size-3.5 shrink-0" />
+                        ) : (
+                          <ChevronRight className="size-3.5 shrink-0" />
+                        )}
+                        <Wrench className="size-3.5 shrink-0 text-muted" />
+                        <span className="min-w-0 flex-1 break-words">{item.summary}</span>
+                        <span className="num shrink-0 text-2xs text-muted">
+                          #{first.id}–{item.events.at(-1)?.id}
+                        </span>
+                      </button>
+                      {/* 收起时卡片仍在页面里（hidden），事件号对账和展开都不用重新取 */}
+                      <ol hidden={!open} className="mt-3">
+                        {item.events.map((ev) => (
+                          <EventCard key={ev.id} ev={ev} taskLabel={taskIdOf(ev)} />
+                        ))}
+                      </ol>
+                    </li>
                   </Fragment>
                 );
               })}
