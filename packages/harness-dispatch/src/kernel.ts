@@ -120,6 +120,7 @@ export function createKernel(o: KernelOptions) {
           o.probes ??
           realShadowProbes({
             home: o.workerHome,
+            ...(o.dispatcher.sandbox ? { sandbox: o.dispatcher.sandbox } : {}),
             egressPort: o.egressPort,
             realHandlers: () => [],
             redact: o.redact,

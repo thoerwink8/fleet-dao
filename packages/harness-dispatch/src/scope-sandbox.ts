@@ -1,6 +1,7 @@
 // 工人以会话用户跑的真实现（#3814，接口 WorkerSandbox 在 harness-workers）：经 `sudo -n fleet-agent-scope` 调以 root 装好的帮手。
 // 帮手协议从旧 adapters/src/tree-cleanup.ts、procs.ts 复制改写（决定 0124：不依赖旧包）：每次先问能力，删时带 adopt 回执的身份，
 // 回执对不上就拒；真正的边界在帮手里。起子进程只走 runCommand（runProcess，A5），所以放在这一层。
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { makeRedactor, type Redactor } from '@fleet-dao/harness-runner';
 import type { WorkerSandbox } from '@fleet-dao/harness-workers';
@@ -42,9 +43,13 @@ export class SandboxError extends Error {
   }
 }
 
+function helperCommand(o: ScopeSandboxOptions, args: readonly string[]): string[] {
+  return [...(o.sudo ?? ['/usr/bin/sudo', '-n']), o.helper ?? SCOPE_HELPER, ...args];
+}
+
 async function exec(o: ScopeSandboxOptions, args: string[]): Promise<string> {
   const r: CommandResult = await runCommand({
-    command: [...(o.sudo ?? ['/usr/bin/sudo', '-n']), o.helper ?? SCOPE_HELPER, ...args],
+    command: helperCommand(o, args),
     cwd: tmpdir(),
     timeoutMs: o.timeoutMs ?? 115_000,
     redact: o.redact ?? makeRedactor([]),
@@ -127,6 +132,33 @@ export function scopeSandbox(o: ScopeSandboxOptions = {}): WorkerSandbox {
       const id = `${SHADOW_SCOPE_PREFIX}${runId}`;
       if (!SCOPE_ID.test(id)) throw new SandboxError(`scope 编号不合法：${id}`);
       await exec(o, ['stop', id]);
+    },
+    async runAsWorker(command, timeoutMs) {
+      if (command.some((c) => CONTROL_CHAR.test(c))) throw new SandboxError('命令里不许带控制字符');
+      const id = `${SHADOW_SCOPE_PREFIX}probe-${randomUUID().slice(0, 8)}`;
+      // run 是同步的：systemd-run --scope 跑完就退，标准输出和退出码原样回来；进 fleet2-shadow slice，和真工人受同一套出网规则
+      const r = await runCommand({
+        command: helperCommand(o, [
+          'run',
+          id,
+          '--slice',
+          'fleet2-shadow',
+          '--user',
+          SESSION_USER,
+          '--cwd',
+          '/tmp',
+          '--',
+          ...command,
+        ]),
+        cwd: tmpdir(),
+        timeoutMs,
+        redact: o.redact ?? makeRedactor([]),
+        maxOutputChars: 16 * 1024,
+        ...(o.hostEnv ? { hostEnv: o.hostEnv } : {}),
+      });
+      // 没跑完（超时、被杀）时 scope 可能还挂着，按编号收掉；收不掉也只是这次没查成
+      if (!r.ran) await exec(o, ['stop', id]).catch(() => undefined);
+      return { ran: r.ran && !r.truncated, exitCode: r.exitCode, stdout: r.stdout };
     },
   };
 }

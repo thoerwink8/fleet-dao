@@ -44,6 +44,9 @@ function memory(fail: { stop?: boolean; adopt?: boolean } = {}) {
       steps.push(`stop:${runId}`);
       if (fail.stop) throw new Error(`收不掉 ${TOKEN}`);
     },
+    async runAsWorker() {
+      throw new Error('这个文件不以工人身份跑命令');
+    },
   };
   return { sandbox, steps };
 }
