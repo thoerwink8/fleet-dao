@@ -191,6 +191,32 @@ EOF
   : >"$TMP/old.build.log"
   build_web "$stage" "$TMP/old.build.log" >/dev/null 2>&1
   check "这一版代码里没有探针文件：什么额外环境变量都不带" "$SEEN_EXTRA" ""
+
+  # 新驾驶舱前端（#3818）：产物进同一个 stage 的 web/next；旧前端自己带了 /next/ 就判红
+  reset
+  stage=$(new_stage nextok)
+  mkdir -p "$stage/packages/harness-web/dist/assets"
+  printf '{"scripts":{"build":"vite build"}}\n' >"$stage/packages/harness-web/package.json"
+  printf 'next-shell' >"$stage/packages/harness-web/dist/index.html"
+  NEXT_RC=0
+  NEXT_LOG=ok_log
+  : >"$TMP/nextok.build.log"
+  build_web "$stage" "$TMP/nextok.build.log" >/dev/null 2>&1
+  check "新前端：build_web 返回 0" "$?" 0
+  check "新前端产物进了 web/next" "$(cat "$stage/web/next/index.html" 2>/dev/null)" "next-shell"
+  check "旧前端产物还在 web/" "$([[ -f "$stage/web/index.html" ]] && echo yes)" "yes"
+
+  reset
+  stage=$(new_stage nextclash)
+  mkdir -p "$stage/packages/harness-web/dist" "$stage/packages/web/dist/client/next"
+  printf '{"scripts":{"build":"vite build"}}\n' >"$stage/packages/harness-web/package.json"
+  : >"$stage/packages/harness-web/dist/index.html"
+  NEXT_RC=0
+  NEXT_LOG=ok_log
+  : >"$TMP/nextclash.build.log"
+  build_web "$stage" "$TMP/nextclash.build.log" >/dev/null 2>&1
+  check "旧前端自带 web/next：build_web 返回 1" "$?" 1
+  has "红字点明撞了 /next/" "${REDS[0]:-}" "和新驾驶舱前端"
 fi
 
 echo "== 探针文件自己：真装在 node 上能起（语法、导入都对）"

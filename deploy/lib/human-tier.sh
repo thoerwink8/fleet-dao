@@ -150,15 +150,20 @@ render_firewall() {
 setup_firewall() {
   step "防火墙（隧道上放行香港访问驾驶舱后端；本机上 Temporal、库、后端只许 root 和 fleet 连；会话用户在本机开的口只许它自己连）"
   # 驾驶舱后端的端口只对隧道那头的香港开：规则挂在隧道网卡上，公网照旧一个入站端口都不开
-  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp" tmp err file_changed unit_changed
+  local rule tmp err file_changed unit_changed port comment
   if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null | head -1)" == "Status: active" ]]; then
-    if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
-      ok "ufw 已有：$rule"
-    else
-      # shellcheck disable=SC2086 # 规则按词拆开传给 ufw
-      ufw $rule comment 'fleet-dao cockpit api over wireguard' >/dev/null
-      changed "ufw $rule"
-    fi
+    # 旧驾驶舱后端（8787）和新驾驶舱只读口（7346，#3818）：都只在隧道网卡上给香港开
+    for port in "$API_PORT" "$FLEET2_COCKPIT_PORT"; do
+      rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $port proto tcp"
+      if [[ "$port" == "$API_PORT" ]]; then comment='fleet-dao cockpit api over wireguard'; else comment='fleet-dao next cockpit over wireguard'; fi
+      if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
+        ok "ufw 已有：$rule"
+      else
+        # shellcheck disable=SC2086 # 规则按词拆开传给 ufw
+        ufw $rule comment "$comment" >/dev/null
+        changed "ufw $rule"
+      fi
+    done
   else
     ok "这台没开 ufw，隧道上不用另外放行"
   fi

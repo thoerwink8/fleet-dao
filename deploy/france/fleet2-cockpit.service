@@ -1,0 +1,43 @@
+# 新驾驶舱的只读口（#3818，包 packages/harness-api，入口 src/bin/cockpit.ts）：只听隧道地址 10.99.0.2:7346，香港 nginx 的
+# /next/api/ 经隧道转到这里。自己验旧驾驶舱签发的登录 Cookie（HMAC 校验加查 public.users），合格就能读全部会话；
+# 只读：不发、不存、不转任何会话令牌，会话令牌的口留在 fleet2-kernel 的 127.0.0.1:7345。
+# 以 fleet 跑；密钥读旧后端同一个 session-secret.env（提供 FLEET_SESSION_SECRET，不新造密钥）；库走本机 socket 的 peer 认证，同 fleet2-kernel.service。
+# 隧道（wg-fleet）可能还没起，那时 bind 会失败：Restart=always 且不限重启次数，隧道一起来就自己接上（不像旧后端那样另有 socket 单元攥端口）。
+# 其余配置都写在这里、跟着发版走，别在机器上手改。规矩见 docs/ops.md。
+[Unit]
+Description=fleet-dao 新驾驶舱只读口（只听隧道地址 10.99.0.2:7346）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+After=network-online.target wg-quick@wg-fleet.service postgresql@16-main.service
+Wants=network-online.target wg-quick@wg-fleet.service
+StartLimitIntervalSec=0
+ConditionPathExists=/etc/fleet-dao/session-secret.env
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+WorkingDirectory=/srv/fleet-dao-releases/current
+EnvironmentFile=/etc/fleet-dao/session-secret.env
+Environment=PGHOST=/var/run/postgresql PGUSER=fleet
+Environment=FLEET2_DATABASE_URL=postgres:///fleet
+Environment=FLEET2_COCKPIT_HOST=10.99.0.2 FLEET2_COCKPIT_PORT=7346
+ExecStart=/usr/bin/node /srv/fleet-dao-releases/current/packages/harness-api/src/bin/cockpit.ts
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

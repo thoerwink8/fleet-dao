@@ -12,7 +12,7 @@
 |---|---|---|
 | 系统 | Ubuntu 24.04，6 核 12G | Ubuntu 22.04，2 核 2G |
 | 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端、经隧道探法国 healthz |
-| 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
+| 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787、7346 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
 | 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停）；`daihuo.service`（程序 `/opt/daihuo`、数据 `/var/lib/daihuo`）；两个 systemd 定时任务：`reclaude-refill-collector.timer`（每分钟，程序 `/opt/reclaude-refill`、数据 `/var/lib/reclaude-refill`）、`mirasim-radar-collector.timer`（每 5 分钟，程序 `/opt/mirasim-radar`、数据 `/var/lib/mirasim-radar`） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
@@ -49,6 +49,7 @@
 | 7245、6945 | 127.0.0.1 | Temporal matching | |
 | 7249、6949 | 127.0.0.1 | Temporal worker | |
 | 8787/tcp | 10.99.0.2 | 驾驶舱后端（`FLEET_COCKPIT_LISTEN`），`fleet-api.socket` 攥着 | ufw 只在隧道网卡 `wg-fleet` 上给 10.99.0.1 放行；socket 单元在听，重启后端那几秒也不断 |
+| 7346/tcp | 10.99.0.2 | 新驾驶舱只读口（`fleet2-cockpit.service`，#3818，香港 nginx 的 `/next/api/` 经隧道转来） | 自己验旧驾驶舱签发的登录 Cookie 再读 `fleet2.*` 和 `public.users`，只读、没有会话令牌；ufw 只在隧道网卡 `wg-fleet` 上给 10.99.0.1 放行；没有 socket 单元攥着，隧道没起时 bind 失败，靠 `Restart=always` 重试 |
 | 8790/tcp、udp | 10.99.0.2 | self-proxy（不归本仓管，README「两台机器」） | `self-proxy-exit.service`：「法国-中转」的出口，香港经隧道转来；ufw 只在 `wg-fleet` 上给 10.99.0.1 放行（注释 `self-proxy exit`）。别动 |
 | 443/tcp | 0.0.0.0、:: | self-proxy（不归本仓管） | `self-proxy-direct.service`：「法国-直连」入口，对公网开，ufw 注释 `self-proxy direct`。别动 |
 | 4318/tcp | 127.0.0.1 | 会话用户自己的 Mirasim 服务，本地模式常驻（`fleet-mirasim-session.service`，第五节「会话用户的 Mirasim」，#424） | 避开旧系统仍留着共用的 4316 和另外两个还可能没清干净的 4315/4317（§1.2）；引擎认端口靠现读 `local-<端口>.token` 的文件名，不认这张表 |
@@ -161,6 +162,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet2-cockpit.service | 法国 | fleet-dao 新驾驶舱只读口（只听隧道地址 10.99.0.2:7346） |
 | fleet2-egress.service | 法国 | fleet-dao 新内核影子工人的出网关（SNI 透明代理，只听 127.0.0.1:7344） |
 | fleet2-kernel.service | 法国 | fleet-dao 新内核（影子模式，接口层只听 127.0.0.1:7345） |
 | fleet2-shadow-firewall.service | 法国 | fleet-dao 新内核影子工人的出网限制（nft 表 inet fleet2_shadow） |
@@ -322,7 +324,7 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | 应用 | 单元 | 目录、库 |
 |---|---|---|
 | 驾驶舱 | `fleet-api.service`、`fleet-footprint.service` | `/var/lib/fleet-dao/release-request`（代码在发布版本目录里；静态页在香港 `/srv/fleet-dao-web`，不在这台） |
-| 引擎 | `fleet-engine.service`、`fleet2-egress.service`、`fleet2-kernel.service` | `/var/lib/fleet-dao/engine`、`/var/lib/fleet-dao/github`、`/var/log/fleet-dao`、`/var/lib/fleet2`（新内核的镜像） |
+| 引擎 | `fleet-engine.service`、`fleet2-egress.service`、`fleet2-kernel.service`、`fleet2-cockpit.service` | `/var/lib/fleet-dao/engine`、`/var/lib/fleet-dao/github`、`/var/log/fleet-dao`、`/var/lib/fleet2`（新内核的镜像） |
 | Temporal | `fleet-temporal.service` | `/opt/fleet-dao/temporal`（数据在库里，算在「数据库」） |
 | 数据库 | `postgresql@16-main.service` | 所有非模板库（`pg_database_size`，不读数据目录） |
 | AI 会话 | `fleet-agents.slice` | `/var/lib/fleet-work`、`/var/lib/fleet-sessions`、`/home/fleet-agent-carpool` |
@@ -964,6 +966,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 | `fleet-engine` | fleet | `node packages/engine/src/main.ts`（Temporal worker，任务队列 fleet） | `engine.env`（`FLEET_ENGINE_PORTS=real` 真端口 / `fake` 假端口，必须写；真端口另要机器名、工作树的根、reclaude 的路径，见期望 `deploy/france/desired-config.json`）、`github/`（两个 GitHub 机器人） |
 | `fleet-api` | fleet | `node packages/api/src/main.ts`：一个进程一个监听，驾驶舱接口 `10.99.0.2:8787`。端口由 `fleet-api.socket` 攥着，进程从 systemd 接手 fd | `api.env`、`session-secret.env`、`github/`（两个机器人的 json） |
 | `fleet-api.socket` | root | 不跑进程：`ListenStream` 攥着上面那个地址（`FreeBind=yes`，隧道没起也能先听上）。重启 `fleet-api` 时新连接排在内核队列里，等新进程起来接着 accept：后端停机时立刻收掉 SSE、不等满排空上限，排队的只有在途请求做完加新进程启动那几秒（#2186） | 不读配置。改监听地址要 `api.env`、`deploy/release.sh` 的 `COCKPIT` 常量、这个 socket 单元三处一起改 |
+| `fleet2-cockpit` | fleet | `node packages/harness-api/src/bin/cockpit.ts`（#3818）：新驾驶舱的只读口，只听隧道地址 `10.99.0.2:7346`；验旧驾驶舱的登录 Cookie 再读 `fleet2.*` 和 `public.users`，不发不存会话令牌。自动档装，跟着发版换，单元变了才重启 | `session-secret.env`（`FLEET_SESSION_SECRET`，和旧后端同一份）；库走本机 socket 的 peer 认证，其余配置写在单元里 |
 | `fleet-cli-upgrade.path` | root | 不跑进程：看见 `/var/lib/fleet-dao/cli-upgrade/request.json` 就起下面那个单元。跟着版本走，`release.sh` 切版本时装上 | 不读环境文件。升什么看这一版的 `deploy/france/desired-config.json` 里 `cliTools` |
 | `fleet-cli-upgrade.service` | root | `node packages/engine/src/cli-upgrade-main.ts`：空闲时升命令行工具，核对版本、跑一次 `--help`，不过就装回上一版 | 同上。超时 40 分钟，到点杀掉，免得会话起来之后还在换二进制 |
 

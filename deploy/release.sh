@@ -738,6 +738,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
 RELEASE_PNPM_ENV=(pnpm_config_enable_global_virtual_store=false)
 RELEASE_PNPM_INSTALL=(install --frozen-lockfile --package-import-method=copy --reporter=append-only)
 RELEASE_PNPM_WEB_BUILD=(--filter ./packages/web run build)
+RELEASE_PNPM_NEXT_BUILD=(--filter ./packages/harness-web run build)
 # 前端构建时预载的只读探针（#3491、#3494）：给预渲染发往本机的 GET / 打时间点和进程资源读数（只打固定文字和数字），见 deploy/lib/prerender-trace.mjs。
 # release.sh（build_web）和 CI 的 release-smoke.sh 都从这里读；老提交里没有这个文件就不带（预载一个不存在的文件会让每个 node 进程起不来）。
 RELEASE_WEB_TRACE=deploy/lib/prerender-trace.mjs
@@ -948,6 +949,32 @@ web_build_trace_lines() { # 日志
   fi
 }
 
+# 新驾驶舱前端（#3818，packages/harness-web，base 是 /next/）：产物放进同一个 stage 的 web/next，跟着 sync_web 的
+# rsync --delete-after 一起发（不在同一个 stage 里，每次发版都会被删掉）。老提交没有这个包就不构建。
+# stage 里已经有 web/next（旧前端自己带了 /next/）就判红，不覆盖也不合并。
+build_next_web() { # 临时目录 日志
+  local stage=$1 log=$2 started rc=0
+  [[ -f "$stage/packages/harness-web/package.json" ]] || return 0
+  if [[ -e "$stage/web/next" ]]; then
+    red "旧驾驶舱前端自己带了 /next/，和新驾驶舱前端（packages/harness-web）撞了"
+    return 1
+  fi
+  echo "  构建新驾驶舱前端（packages/harness-web）"
+  started=$SECONDS
+  as_build_in "$stage" pnpm "${RELEASE_PNPM_NEXT_BUILD[@]}" >>"$log" 2>&1 || rc=$?
+  echo "  新驾驶舱前端构建用了 $((SECONDS - started)) 秒，退出码 $rc"
+  if ((rc != 0)); then
+    log_tail "$log" 60
+    red "新驾驶舱前端（packages/harness-web）构建失败（没切版本）"
+    return 1
+  fi
+  if [[ ! -f "$stage/packages/harness-web/dist/index.html" ]]; then
+    red "新驾驶舱前端构建完没有 packages/harness-web/dist/index.html"
+    return 1
+  fi
+  as_build_in "$stage" cp -R packages/harness-web/dist web/next
+}
+
 # 静态文件 web/：正式驾驶舱（有 packages/web 就构建它，没有就用占位页）加健康页 /health/、版本标记
 # release.json（由 root 写；香港只给经隧道来的读）。发到哪见 sync_web
 build_web() { # 临时目录 日志
@@ -988,6 +1015,7 @@ build_web() { # 临时目录 日志
     as_build_in "$stage" cp deploy/hk/placeholder.html web/index.html
     WEB_KIND="占位页（这一版还没有驾驶舱前端）+ 健康页"
   fi
+  build_next_web "$stage" "$log" || return 1
   if [[ -e "$stage/web/health" ]]; then
     red "驾驶舱前端自己带了 /health/，和健康页撞了"
     return 1
