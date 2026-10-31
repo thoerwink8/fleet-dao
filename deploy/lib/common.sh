@@ -431,6 +431,17 @@ port_in_use() { # 协议 端口
   [[ -n "$(ss -H "$flag" "sport = :$2" 2>/dev/null)" ]]
 }
 
+# 等 tcp 端口有人听：按次数有界地等，等不到返回 1，由调用方照实判。Type=simple 的单元 systemctl start 一返回就读回，
+# 进程还没 listen（2026-10-31 fleet2-kernel 刚起就判「听的是空」）
+wait_listen() { # 端口 次数
+  local port=$1 tries=$2 i
+  for ((i = 0; i < tries; i++)); do
+    if port_in_use tcp "$port"; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
 # ── 两台共用的读回与自检（要先 source snapshot.sh 与 root-exec-check.sh）──
 
 # /etc/fleet-dao 放密钥：只有 root 和 fleet 读得到；会话用户、旧系统的用户和别的能登录的用户都读不到。
