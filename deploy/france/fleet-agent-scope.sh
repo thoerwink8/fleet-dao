@@ -5,7 +5,7 @@
 # 它以 root 跑，所以只做这一件事：身份只能是下面的会话用户、slice 写死、单元名写死 fleet-agent-<编号>.scope，
 # 参数逐个按白名单验。环境变量不走命令行（sudo 会把命令行记进日志，/proc 里谁都看得到），只收 sudoers 的 env_keep 放过来的那几类。
 #
-#   sudo -n fleet-agent-scope run <编号> --user <会话用户> [--memory-high 大小] [--memory-max 大小] [--memory-swap-max 大小]
+#   sudo -n fleet-agent-scope run <编号> --user <会话用户> [--slice fleet2-shadow] [--memory-high 大小] [--memory-max 大小] [--memory-swap-max 大小]
 #                                 [--tasks-max 数] [--cpu-weight 数] [--cwd 目录] -- /绝对路径/命令 参数…
 #   sudo -n fleet-agent-scope stop <编号>     没有这个会话也算收好，返回 0
 #   sudo -n fleet-agent-scope list            在册的会话：编号 状态，一行一个
@@ -58,6 +58,8 @@ PROBE_NPM_TOOLS=(kimi-code dsh pi)
 PROBE_TIMEOUT=20
 PROBE_KILL_AFTER=5
 SLICE=fleet-agents.slice
+# 新内核的影子工人（#3811）：run --slice fleet2-shadow 放进这个 slice，nft 表 inet fleet2_shadow 按它把出网收紧。只认这一个值。
+SHADOW_SLICE=fleet2-shadow.slice
 PREFIX=fleet-agent-
 ENV_RE='^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$'
 # AI 会话工作树的根（docs/design.md 第十四节「安全」）。测试专用开关，故意不叫 FLEET_*：sudoers 的 env_keep
@@ -120,11 +122,16 @@ as_session_user() { # 用户 命令…：降成会话用户，附加组只留它
 }
 
 run() {
-  local id=${1:-} user="" cwd=/ props=() keep=() home path k u ok=0
+  local id=${1:-} user="" cwd=/ props=() keep=() home path k u ok=0 slice=$SLICE
   check_id "$id"
   shift
   while (($#)); do
     case $1 in
+    --slice)
+      [[ "${2:-}" == fleet2-shadow ]] || die "--slice 只认 fleet2-shadow，给的是「${2:-}」"
+      slice=$SHADOW_SLICE
+      shift 2
+      ;;
     --user)
       (($# >= 2)) || die "$1 后面要给一个值"
       user=$2
@@ -181,7 +188,7 @@ run() {
   done
   export HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash PATH="$path"
   if [[ -z "${LANG:-}" ]]; then export LANG=C.UTF-8; fi
-  exec /usr/bin/systemd-run --quiet --scope --collect --slice="$SLICE" --unit="$PREFIX$id" -p TimeoutStopSec=15s \
+  exec /usr/bin/systemd-run --quiet --scope --collect --slice="$slice" --unit="$PREFIX$id" -p TimeoutStopSec=15s \
     "${props[@]}" -- /usr/bin/setpriv --reuid="$user" --regid="$user" --init-groups --no-new-privs -- "$@"
 }
 
