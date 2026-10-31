@@ -131,6 +131,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /var/lib/fleet-hk-france-probe | root:root | 755 | deploy/hk.sh |
 | /var/lib/fleet-sessions | fleet:fleet | 711 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-work | root:root | 755 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-work/_fleet2 | fleet:fleet | 755 | deploy/france.sh |
 | /var/lib/fleet-work/_tmp | fleet:fleet | 755 | deploy/lib/human-tier.sh |
 | /var/log/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/www/fleet-dao-acme | root:root | 755 | deploy/hk.sh |
