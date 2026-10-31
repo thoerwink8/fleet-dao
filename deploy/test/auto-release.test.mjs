@@ -1084,8 +1084,9 @@ test('新内核单元（#3811）：不进影子 slice、口和令牌文件跟 fr
   assert.doesNotMatch(unit, /^NoNewPrivileges=yes/m, '影子工人经 sudo 起，不能禁提权');
   assert.match(unit, new RegExp(`FLEET2_API_PORT=${v('FLEET2_KERNEL_PORT')}(\\s|$)`, 'm'));
   assert.match(unit, new RegExp(`FLEET2_EGRESS_PORT=${v('FLEET2_EGRESS_PORT')}(\\s|$)`, 'm'));
-  assert.match(unit, new RegExp(`^EnvironmentFile=${v('FLEET2_KERNEL_ENV')}$`, 'm'));
-  assert.match(unit, new RegExp(`^ConditionPathExists=${v('FLEET2_KERNEL_ENV')}$`, 'm'));
+  assert.doesNotMatch(unit, /^EnvironmentFile=/m, '不再有令牌文件，凭据来自 App json');
+  assert.match(unit, new RegExp(`^Environment=FLEET2_GITHUB_APP_FILE=${v('ENGINE_APP_JSON')}$`, 'm'));
+  assert.match(unit, new RegExp(`^ConditionPathExists=${v('ENGINE_APP_JSON')}$`, 'm'));
   assert.match(unit, /^Environment=FLEET2_SANDBOX=scope$/m);
   const cmd = /FLEET2_WORKER_COMMAND=(\[.*?\])'/.exec(unit)?.[1] ?? '';
   const [wrapper] = JSON.parse(cmd);

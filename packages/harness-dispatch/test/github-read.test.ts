@@ -27,7 +27,7 @@ describe('读单', () => {
     const { f, calls } = stub({
       '/repos/o/r/issues/7': json({ title: '修一个错', body: 'x'.repeat(30_000) }),
     });
-    const six = await githubReader({ token: 't', fetch: f }).taskFor(item);
+    const six = await githubReader({ tokenFor: async () => 't', fetch: f }).taskFor(item);
     expect(six.task).toBe('做 o/r#7：修一个错');
     expect(six.context.length).toBe(20_000);
     expect(six.must_not).toContain('不推送');
@@ -36,11 +36,17 @@ describe('读单', () => {
 
   it('是 PR、没标题、HTTP 错都抛', async () => {
     const pr = stub({ '/repos/o/r/issues/7': json({ title: 'x', pull_request: {} }) });
-    await expect(githubReader({ token: 't', fetch: pr.f }).taskFor(item)).rejects.toThrow('是 PR');
+    await expect(githubReader({ tokenFor: async () => 't', fetch: pr.f }).taskFor(item)).rejects.toThrow(
+      '是 PR',
+    );
     const blank = stub({ '/repos/o/r/issues/7': json({ title: ' ' }) });
-    await expect(githubReader({ token: 't', fetch: blank.f }).taskFor(item)).rejects.toThrow('没有标题');
+    await expect(githubReader({ tokenFor: async () => 't', fetch: blank.f }).taskFor(item)).rejects.toThrow(
+      '没有标题',
+    );
     const down = stub({ '/repos/o/r/issues/7': () => new Response('', { status: 503 }) });
-    await expect(githubReader({ token: 't', fetch: down.f }).taskFor(item)).rejects.toThrow('HTTP 503');
+    await expect(githubReader({ tokenFor: async () => 't', fetch: down.f }).taskFor(item)).rejects.toThrow(
+      'HTTP 503',
+    );
   });
 });
 
@@ -56,7 +62,7 @@ describe('读合并结果', () => {
       ]),
       '/repos/o/r/pulls/10': () => new Response('diff --git a/x b/x\n', { status: 200 }),
     });
-    expect(await githubReader({ token: 't', fetch: f }).readMerged('o/r', 7)).toEqual({
+    expect(await githubReader({ tokenFor: async () => 't', fetch: f }).readMerged('o/r', 7)).toEqual({
       pr: 10,
       sha: 'b'.repeat(40),
       diff: 'diff --git a/x b/x\n',
@@ -68,12 +74,16 @@ describe('读合并结果', () => {
 
   it('还没合：回 undefined；GraphQL 报错、形状认不出：抛', async () => {
     const open = stub({ '/graphql': graph([{ number: 9, merged: false, mergeCommit: null }]) });
-    expect(await githubReader({ token: 't', fetch: open.f }).readMerged('o/r', 7)).toBeUndefined();
+    expect(
+      await githubReader({ tokenFor: async () => 't', fetch: open.f }).readMerged('o/r', 7),
+    ).toBeUndefined();
     const err = stub({ '/graphql': json({ errors: [{ message: 'rate limited' }] }) });
-    await expect(githubReader({ token: 't', fetch: err.f }).readMerged('o/r', 7)).rejects.toThrow(
-      'rate limited',
-    );
+    await expect(
+      githubReader({ tokenFor: async () => 't', fetch: err.f }).readMerged('o/r', 7),
+    ).rejects.toThrow('rate limited');
     const odd = stub({ '/graphql': json({ data: {} }) });
-    await expect(githubReader({ token: 't', fetch: odd.f }).readMerged('o/r', 7)).rejects.toThrow('认不出');
+    await expect(
+      githubReader({ tokenFor: async () => 't', fetch: odd.f }).readMerged('o/r', 7),
+    ).rejects.toThrow('认不出');
   });
 });
