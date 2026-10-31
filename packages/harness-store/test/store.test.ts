@@ -1,8 +1,8 @@
 // 新内核存储（#3773）对照 specs/3770-harness-rewrite/旧坑验收用例.md 第九节：S1–S5、O1，外加 F1（按游标读、有页上限）。
 import { type NewEvent, opKey } from '@fleet-dao/harness-contract';
-import { asc, eq, sql } from 'drizzle-orm';
+import { asc, desc, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { outbox, streamHeads } from '../src/schema.ts';
+import { events, outbox, streamHeads } from '../src/schema.ts';
 import {
   advanceStreamHeads,
   appendEvents,
@@ -86,11 +86,72 @@ describe('S3 投影删了重建、中途断了接着走', () => {
     // 每页 1 条推进，等于中途断了好几次再接着走
     expect(await advanceStreamHeads(t.db, 1)).toBe(5);
     expect(await t.db.select().from(streamHeads).orderBy(asc(streamHeads.streamId))).toEqual(before);
+    // 新列 last_event_id / last_at 对着事件表逐行核
+    const lastOf = async (streamId: string) =>
+      (
+        await t.db
+          .select()
+          .from(events)
+          .where(eq(events.streamId, streamId))
+          .orderBy(desc(events.id))
+          .limit(1)
+      )[0];
+    const a = await lastOf('session:a');
+    const w = await lastOf('worker:w1');
     expect(before).toEqual([
-      { streamId: 'session:a', headSeq: 2, lastType: 'session.turn.settled', events: 2 },
-      { streamId: 'worker:w1', headSeq: 3, lastType: 'handback.recorded', events: 3 },
+      {
+        streamId: 'session:a',
+        headSeq: 2,
+        lastType: 'session.turn.settled',
+        events: 2,
+        lastEventId: a?.id,
+        lastAt: a?.createdAt,
+      },
+      {
+        streamId: 'worker:w1',
+        headSeq: 3,
+        lastType: 'handback.recorded',
+        events: 3,
+        lastEventId: w?.id,
+        lastAt: w?.createdAt,
+      },
     ]);
     expect(await advanceStreamHeads(t.db)).toBe(0);
+  });
+});
+
+describe('#3818 索引', () => {
+  const plan = async (q: string) =>
+    (await t.pg.query<{ 'QUERY PLAN': string }>(`explain ${q}`)).rows.map((r) => r['QUERY PLAN']).join('\n');
+
+  it('按流取新事件走 events (stream_id, id) 索引', async () => {
+    await appendEvents(t.db, 'session:a', 0, [ev('session.turn.started')]);
+    await t.pg.exec('set enable_seqscan = off; analyze fleet2.events');
+    const p = await plan(
+      `select * from fleet2.events where stream_id = 'session:a' and id > 0 order by id limit 10`,
+    );
+    expect(p).toContain('events_stream_id_idx');
+  });
+
+  it('会话列表按 last_event_id 倒序走部分索引', async () => {
+    await appendEvents(t.db, 'session:a', 0, [ev('session.turn.started')]);
+    await advanceStreamHeads(t.db);
+    await t.pg.exec('set enable_seqscan = off; analyze fleet2.stream_heads');
+    const p = await plan(
+      `select * from fleet2.stream_heads where stream_id like 'session:%' and last_event_id < 1000000 order by last_event_id desc limit 30`,
+    );
+    expect(p).toContain('stream_heads_session_last_idx');
+  });
+
+  it('新事件把会话顶到最前，last_event_id 只增不减', async () => {
+    await appendEvents(t.db, 'session:a', 0, [ev('session.turn.started')]);
+    await appendEvents(t.db, 'session:b', 0, [ev('session.turn.started')]);
+    await advanceStreamHeads(t.db);
+    await appendEvents(t.db, 'session:a', 1, [ev('session.turn.settled')]);
+    await advanceStreamHeads(t.db);
+    const rows = await t.db.select().from(streamHeads).orderBy(desc(streamHeads.lastEventId));
+    expect(rows.map((r) => r.streamId)).toEqual(['session:a', 'session:b']);
+    expect(rows[0]?.lastType).toBe('session.turn.settled');
   });
 });
 
