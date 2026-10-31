@@ -59,7 +59,8 @@ export const VPS_APPS: readonly VpsApp[] = [
     id: 'engine',
     name: '引擎',
     place: '/var/lib/fleet-dao/engine',
-    units: [service('fleet-engine.service')],
+    // 新内核影子工人的出网关（#3803）跟引擎算一处：跑发布版本里的代码，不占自己的目录
+    units: [service('fleet-engine.service'), service('fleet2-egress.service')],
     dirs: ['/var/lib/fleet-dao/engine', '/var/lib/fleet-dao/github', '/var/log/fleet-dao'],
   },
   {

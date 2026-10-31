@@ -1,0 +1,3 @@
+# 新内核影子工人出网关的名单（#3803，deploy/france/fleet2-egress.service）：一行一个主机名，# 开头是注释；
+# 以点开头（.example.com）匹配它的子域、不含它自己。现在是 learn 模式，名单空着只记不拦：
+# 先在法国跑一批影子单，从 journal 收齐真实主机名，定下名单再切 enforce。
