@@ -81,7 +81,15 @@ async function runOne(name: ScenarioName): Promise<boolean> {
   for (;;) {
     const js = await jobsOf(db, sub.eventIds);
     state = js.map((j) => j.state).join(',');
-    if (js.length > 0 && js.every((j) => ['done', 'dead', 'cancelled'].includes(j.state))) break;
+    // 活收尾了、终局交回也记下了才算完：被叫停的活一取消就是 cancelled，可工人还要等下次心跳才停，
+    // 这时清理会把活删掉，工人下次心跳变成 lease-lost，交回也就没了（真机第一次跑被杀就是这样）
+    if (
+      js.length > 0 &&
+      js.every((j) => ['done', 'dead', 'cancelled'].includes(j.state)) &&
+      (await readChain(db, id)).some((r) => r.type === 'handback.recorded' && r.final.startsWith('true'))
+    ) {
+      break;
+    }
     if (spec.stopWhenSpawned && !stopped) {
       const chain = await readChain(db, id);
       if (chain.some((r) => r.type === 'worker.spawned')) {
