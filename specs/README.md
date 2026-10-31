@@ -25,6 +25,7 @@
 | [3749-ci-slim](<3749-ci-slim/讨论稿.md>) | 从开单到合并为什么慢：CI 不是主因，慢在引擎返工、空等和卡死（讨论稿） | 讨论中 | — |
 | [3760-github-volume](<3760-github-volume/讨论稿.md>) | GitHub 单和 PR 太多：多的是历史，现在该砍的是两类不挂单的 PR（讨论稿） | 已定 | — |
 | [3770-harness-rewrite](<3770-harness-rewrite/讨论稿.md>) | harness 内核和网页驾驶舱整套重写（2026-10-31，讨论稿） | 已定 | — |
+| [3842-fleet2-session-split](<3842-fleet2-session-split/讨论稿.md>) | 新内核环节都用 Grok：会话怎么拆、核验怎么保持独立（2026-10-31，讨论稿） | 讨论中 | — |
 
 ## 历史
 
