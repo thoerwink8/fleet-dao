@@ -2,7 +2,7 @@
 // 这里不认任何凭据，「现在还准不准看」由调用方传一个函数进来，SSE 每个周期问一次。
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { type Db, PAGE_MAX } from '@fleet-dao/harness-store';
-import { gapExceeds, latestSessionEventId, readSessionAfter, readSessionHistory } from './events.ts';
+import { latestStreamEventId, readStreamAfterId, readStreamHistory, streamGapExceeds } from './events.ts';
 
 export function reply(res: ServerResponse, status: number, message: string): void {
   if (res.headersSent) return;
@@ -25,7 +25,7 @@ export async function serveSse(
   o: SseOptions,
   req: IncomingMessage,
   res: ServerResponse,
-  sessionId: string,
+  streamId: string,
   stillAllowed: StillAllowed,
 ): Promise<void> {
   const { db, replayCap, pollMs, heartbeatMs, open } = o;
@@ -34,15 +34,15 @@ export async function serveSse(
   let cursor = 0;
   let resync = false;
   if (lastRaw === undefined || lastRaw === '') {
-    cursor = await latestSessionEventId(db, sessionId);
+    cursor = await latestStreamEventId(db, streamId);
   } else if (!/^\d{1,15}$/.test(lastRaw)) {
     resync = true;
-    cursor = await latestSessionEventId(db, sessionId);
+    cursor = await latestStreamEventId(db, streamId);
   } else {
     cursor = Number(lastRaw);
-    if (await gapExceeds(db, sessionId, cursor, replayCap)) {
+    if (await streamGapExceeds(db, streamId, cursor, replayCap)) {
       resync = true;
-      cursor = await latestSessionEventId(db, sessionId);
+      cursor = await latestStreamEventId(db, streamId);
     }
   }
   res.writeHead(200, {
@@ -77,7 +77,7 @@ export async function serveSse(
       // 凭据撤销后最晚下一次 tick 就断。
       if (!(await stillAllowed())) return finish();
       for (;;) {
-        const page = await readSessionAfter(db, sessionId, cursor, PAGE_MAX);
+        const page = await readStreamAfterId(db, streamId, cursor, PAGE_MAX);
         for (const ev of page) {
           if (closed) return;
           res.write(
@@ -101,7 +101,14 @@ export async function serveSse(
 }
 
 /** GET /sessions/<号>/history?before=&after=&limit=：只读历史页，驾驶舱首屏和 resync 后整页重取用。 */
-export async function serveHistory(db: Db, url: URL, res: ServerResponse, sessionId: string): Promise<void> {
+export async function serveHistory(
+  db: Db,
+  url: URL,
+  res: ServerResponse,
+  streamId: string,
+  /** 一页载荷字节的上限（工人过程每条最大 4KB，一页 200 条会有几百 KB，所以过程流要给）。 */
+  maxBytes?: number,
+): Promise<void> {
   const num = (name: string): number | undefined | null => {
     const raw = url.searchParams.get(name);
     if (raw === null) return undefined;
@@ -113,7 +120,8 @@ export async function serveHistory(db: Db, url: URL, res: ServerResponse, sessio
   if (before === null || after === null || limit === null)
     return reply(res, 400, '游标和 limit 要是非负整数');
   if (before !== undefined && after !== undefined) return reply(res, 400, 'before 和 after 不能同时给');
-  const page = await readSessionHistory(db, sessionId, {
+  const page = await readStreamHistory(db, streamId, {
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
     ...(before !== undefined ? { before } : {}),
     ...(after !== undefined ? { after } : {}),
     ...(limit !== undefined ? { limit } : {}),

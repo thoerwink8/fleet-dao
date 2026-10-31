@@ -1,4 +1,5 @@
 import {
+  ArrowRight,
   Bot,
   CircleStop,
   Flag,
@@ -11,6 +12,7 @@ import {
   Square,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { Link } from 'react-router';
 import { cn } from '../lib/cn';
 import { type Category, categoryOf, num, str, strList, TYPE_LABEL } from '../lib/describe';
 import { formatClock, formatDuration, shortId } from '../lib/format';
@@ -37,6 +39,7 @@ const RAIL: Record<Category, string> = {
   turn: 'bg-neutral-soft text-ink-2',
   dispatch: 'bg-brand-soft text-brand-strong',
   worker: 'bg-neutral-soft text-ink-2',
+  process: 'bg-neutral-soft text-ink-2',
   handback: 'bg-brand-soft text-brand-strong',
   other: 'bg-neutral-soft text-muted',
 };
@@ -226,7 +229,16 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
 }
 
 /** 一条事件：左边一根时间线（图标圆点），右边一张白卡片。id 写在 data-event-id 上，e2e 靠它数「不漏不重」。 */
-export function EventCard({ ev, taskLabel }: { ev: FeedEvent; taskLabel?: string | undefined }) {
+export function EventCard({
+  ev,
+  taskLabel,
+  workerSession,
+}: {
+  ev: FeedEvent;
+  taskLabel?: string | undefined;
+  /** 这条事件对应的工人会话号（派工请求、交回核验）：给了就带一个「看工人的完整过程」链接。 */
+  workerSession?: string | null | undefined;
+}) {
   const cat = categoryOf(ev.type);
   const { title, chips, detail } = body(ev);
   return (
@@ -255,6 +267,17 @@ export function EventCard({ ev, taskLabel }: { ev: FeedEvent; taskLabel?: string
         </div>
         <div className="mt-1 whitespace-pre-wrap break-words text-sm font-medium text-ink">{title}</div>
         {detail}
+        {workerSession ? (
+          <Link
+            to={`/s/${encodeURIComponent(workerSession)}`}
+            data-testid="open-worker"
+            data-worker-session={workerSession}
+            className="mt-2 inline-flex h-7 items-center gap-1 rounded-sm text-2xs text-brand-strong hover:underline"
+          >
+            看工人的完整过程
+            <ArrowRight className="size-3" />
+          </Link>
+        ) : null}
       </div>
     </li>
   );

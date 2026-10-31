@@ -1,17 +1,19 @@
 // 事件的分类和一句话标题：展示层（卡片）和筛选条共用。读不懂的类型归「其他」，照样显示，不丢。
 import type { FeedEvent } from './types';
 
-export type Category = 'turn' | 'dispatch' | 'worker' | 'handback' | 'other';
+export type Category = 'turn' | 'dispatch' | 'worker' | 'process' | 'handback' | 'other';
 
 export const CATEGORY_LABEL: Record<Category, string> = {
   turn: '会话轮次',
   dispatch: '派工',
   worker: '工人',
+  process: '工人过程',
   handback: '交回核验',
   other: '其他',
 };
 
 export function categoryOf(type: string): Category {
+  if (type.startsWith('transcript.')) return 'process';
   if (type.startsWith('session.turn.')) return 'turn';
   if (type === 'worker.spawn.requested' || type === 'worker.stop.requested') return 'dispatch';
   if (type === 'worker.spawned' || type === 'worker.settled' || type.startsWith('worker.')) return 'worker';

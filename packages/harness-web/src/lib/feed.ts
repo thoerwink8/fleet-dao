@@ -5,7 +5,15 @@
 // 不漏：重连带 Last-Event-ID，服务端补发其后的全部；补不全它发 resync，我们整页重取。
 // 不重：所有进来的事件都经 mergeEvents 按事件号去重。
 // 不风暴：重连等待 = 抖动退避（backoff.ts）；resync 后的重取也先等一段随机时间；连得上但很快被断的不重置失败计数。
-import { eventsUrl, explainStatus, FatalApiError, getJson, historyUrl, isFatalStatus } from './api';
+import {
+  eventsUrl,
+  explainStatus,
+  FatalApiError,
+  type FeedKind,
+  getJson,
+  historyUrl,
+  isFatalStatus,
+} from './api';
 import { reconnectDelay } from './backoff';
 import { mergeEvents } from './merge';
 import { SseParser } from './sse-parse';
@@ -25,6 +33,8 @@ export interface FeedOptions {
   pageSize?: number;
   /** resync 后重取前最多随机等多久（打散多个标签页同时重取）。默认 1500ms。 */
   resyncJitterMs?: number;
+  /** 读哪一类流，默认会话流；工人过程流传 'transcripts'（这时 sessionId 参数填 runId）。 */
+  kind?: FeedKind;
 }
 
 export function realSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -73,6 +83,7 @@ export class SessionFeed {
       stableMs: options.stableMs ?? 5_000,
       pageSize: options.pageSize ?? 200,
       resyncJitterMs: options.resyncJitterMs ?? 1_500,
+      kind: options.kind ?? 'sessions',
     };
   }
 
@@ -105,7 +116,7 @@ export class SessionFeed {
     const oldest = this.#state.events[0];
     if (!oldest || !this.#state.hasOlder) return;
     const page = await getJson<HistoryPage>(
-      historyUrl(this.#o.base, this.sessionId, { before: oldest.id, limit: this.#o.pageSize }),
+      historyUrl(this.#o.base, this.sessionId, { before: oldest.id, limit: this.#o.pageSize }, this.#o.kind),
       undefined,
       this.#o.fetchImpl,
     );
@@ -114,7 +125,7 @@ export class SessionFeed {
 
   async #loadTail(signal: AbortSignal): Promise<void> {
     const page = await getJson<HistoryPage>(
-      historyUrl(this.#o.base, this.sessionId, { limit: this.#o.pageSize }),
+      historyUrl(this.#o.base, this.sessionId, { limit: this.#o.pageSize }, this.#o.kind),
       signal,
       this.#o.fetchImpl,
     );
@@ -181,7 +192,7 @@ export class SessionFeed {
     };
     try {
       kick();
-      const res = await this.#o.fetchImpl(eventsUrl(this.#o.base, this.sessionId), {
+      const res = await this.#o.fetchImpl(eventsUrl(this.#o.base, this.sessionId, this.#o.kind), {
         headers: { accept: 'text/event-stream', 'Last-Event-ID': String(this.#cursor) },
         signal: inner.signal,
       });

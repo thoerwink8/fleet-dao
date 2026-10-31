@@ -5,10 +5,13 @@ import { z } from 'zod';
 /** 现在认的事件版本。加字段不升版本；改含义、删字段才升，升了旧读者必须拒。 */
 export const SCHEMA_VERSION = 1;
 
-/** 事件流的名字：一个会话、一张单、一个工人各一条流。 */
+/** 事件流的名字：一个会话、一张单、一个工人各一条流；工人每一步的过程另有 transcript:<runId>（#3781）。 */
 export const StreamId = z
   .string()
-  .regex(/^(session|issue|worker):[^\s]+$/, '流名形如 session:<号>、issue:<owner>/<仓>#<单号>、worker:<号>');
+  .regex(
+    /^(session|issue|worker|transcript):[^\s]+$/,
+    '流名形如 session:<号>、issue:<owner>/<仓>#<单号>、worker:<号>、transcript:<号>',
+  );
 
 /** 现在认的事件类型。新加类型往这里加；读到不认识的类型照样入库，但投影只处理认识的。 */
 export const EVENT_TYPES = [
@@ -24,6 +27,12 @@ export const EVENT_TYPES = [
   'worker.stop.requested',
   'worker.progress.reported',
   'worker.result.submitted',
+  // 工人运行时 stream-json 的每一步（#3781），写在 transcript:<runId> 流上。载荷形状见文件末尾的 Transcript*。
+  'transcript.assistant',
+  'transcript.tool_use',
+  'transcript.tool_result',
+  'transcript.result',
+  'transcript.dropped',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -88,3 +97,49 @@ export function opKey(kind: OutboxKind, ref: TaskRef, fencing: number, discrimin
   if (discriminator.trim() === '') throw new Error('操作键的区分词不能空');
   return `${kind}:${ref.repo}#${ref.issue}@${fencing}:${discriminator}`;
 }
+
+/**
+ * 工人过程（transcript:<runId> 流，#3781）每条事件的载荷形状。信封里的 schemaVersion 就是 SCHEMA_VERSION，
+ * 改含义才升；读者只认这里的字段，认不出的字段忽略。
+ * 文字写入前先过脱敏器、再按字节截断：助手的话和工具结果各 TRANSCRIPT_TEXT_MAX_BYTES，工具参数 TRANSCRIPT_INPUT_MAX_BYTES。
+ */
+export const TRANSCRIPT_TEXT_MAX_BYTES = 4096;
+export const TRANSCRIPT_INPUT_MAX_BYTES = 1024;
+export const TRANSCRIPT_SUMMARY_MAX_CHARS = 160;
+/** 一次运行最多落多少条、多少字节；超了的丢掉，末尾记一条 transcript.dropped（数字照实）。 */
+export const TRANSCRIPT_MAX_ROWS = 2000;
+export const TRANSCRIPT_MAX_BYTES = 6 * 1024 * 1024;
+
+export const transcriptStream = (runId: string): string => `transcript:${runId}`;
+
+/** 被截了没有；chars 是截之前的字符数。 */
+const Clip = { truncated: z.boolean(), chars: z.number().int().nonnegative() };
+
+export const TranscriptAssistant = z.object({ runId: z.string(), text: z.string(), ...Clip });
+export const TranscriptToolUse = z.object({
+  runId: z.string(),
+  toolUseId: z.string(),
+  name: z.string(),
+  /** 参数的一句话摘要（命令第一行、文件路径、搜索词……）。 */
+  summary: z.string(),
+  /** 参数的 JSON 文本，截断后的。 */
+  input: z.string(),
+  inputTruncated: z.boolean(),
+});
+export const TranscriptToolResult = z.object({
+  runId: z.string(),
+  toolUseId: z.string(),
+  isError: z.boolean(),
+  text: z.string(),
+  ...Clip,
+});
+export const TranscriptResult = z.object({
+  runId: z.string(),
+  subtype: z.string(),
+  isError: z.boolean(),
+  text: z.string(),
+  ...Clip,
+  durationMs: z.number().nullable(),
+  numTurns: z.number().nullable(),
+});
+export const TranscriptDropped = z.object({ runId: z.string(), count: z.number().int().positive() });

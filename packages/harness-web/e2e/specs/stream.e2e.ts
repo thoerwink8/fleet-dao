@@ -365,12 +365,13 @@ test.describe('#3781 第二轮：工具调用折叠、长输出预览、列表�
     await expect(page.locator('[data-group="stuck"] [data-session-id]')).toHaveText(/cmd-demo-flaky-ci/);
     await expect(page.locator('[data-group="running"] [data-session-id]')).toHaveText(/cmd-demo-migration/);
     await expect(page.locator('[data-group="done"] [data-session-id]')).toHaveText(/cmd-demo-login-fix/);
-    // 组内按最后事件倒序：等待组里 test-run（更新）在 docs-sweep 前面
+    // 组内按最后事件倒序：等待组里 test-run（更新）在 docs-sweep 前面；工人会话 worker-d12-a1（#3781 样例，
+    // 交了结果等核验）最早灌的，排在最后
     expect(
       await page
         .locator('[data-group="waiting"] [data-session-id]')
         .evaluateAll((els) => els.map((e) => e.getAttribute('data-session-id'))),
-    ).toEqual(['cmd-demo-test-run', 'cmd-demo-docs-sweep']);
+    ).toEqual(['cmd-demo-test-run', 'cmd-demo-docs-sweep', 'worker-d12-a1']);
     // 新的终局交回（没交付）进来：下一次轮询后 test-run 挪进卡住组，卡住数变 2
     await stack.emit('cmd-demo-test-run', 'handback.recorded', { final: true, outcome: 'dead' });
     await expect(page.getByTestId('group-count-stuck')).toHaveText('2', { timeout: 25_000 });

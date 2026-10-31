@@ -14,6 +14,12 @@
   - 契约里没有单独的“工具调用”事件，这里的“工具调用”＝接口层 MCP 工具落成的四种事件（`worker.spawn.requested`、`worker.stop.requested`、`worker.progress.reported`、`worker.result.submitted`，对应 `spawn_worker`、`stop_worker`、`report_progress`、`submit_result`）。连续 3 条起折叠成一行「调了 N 次工具：report_progress×5…」（`src/lib/tool-runs.ts`），收起时卡片仍在页面里（`hidden`），事件号对账和展开都不重新取。
   - 长输出（证据、错误输出末尾，还有轮次文字、任务和进度摘要）默认只显示前 200 字或 12 行，先到为准，可展开（`src/lib/clamp.ts`、`src/components/clamped.tsx`）。
   - 列表按工人状态分四组：卡住或失败 > 在跑 > 空闲或等待 > 做完，组内按最后事件号倒序，卡住的置顶并带数量（`src/lib/session-state.ts` 的 `deriveWorkerState`，纯函数，规则写在它的注释里，单测 `src/lib/round2.test.ts`）。状态读的是列表接口给的 `tail`（最近 24 条事件的瘦身版）。分组只对已加载的会话排，没点「加载更多」时更老的卡住会话不在里面（数量带「+」不会骗人，已加载多少数多少）。
+- 第三轮（#3781）：工人会话详情。工人会话号是 `worker-<runId>`（派工器给工人令牌绑的会话号），页面据此再开一条过程流（`useTranscriptFeed` → `SessionFeed` 的 `kind: 'transcripts'`，读 `/next/api/transcripts/<runId>/…`），和会话流里的进度、交结果按事件号（全库单调，不同流直接比）串成一条时间线（`src/lib/transcript.ts` 的 `buildSteps`、`buildTimeline`，纯函数，单测在 `transcript.test.ts`）。
+  - 助手的话是正文（`SayRow`，不套卡片）；一次工具调用一行（`ToolRow`：图标、工具名、参数摘要、出错或运行中标记），点开看参数和结果，结果和参数沿用 200 字或 12 行预览（`OutputBlock`）；调用和结果按 `toolUseId` 配对，结果没来的显示「运行中」。
+  - 连续 3 次起的工具调用折叠成一行摘要「调了 N 个工具：Read×3、Bash×5 · 1 个出错」（`ToolRunRow`，出错的边框变红、收起时每一步仍在页面里 `hidden`）；和上面 MCP 事件的折叠互不混。
+  - 指挥会话里的派工请求和交回核验带「看工人的完整过程」链接（`workerSessionOf`）：交回取载荷里的 `runId`；派工请求按派工器的编号规则 `d<派工请求事件号>-a1` 推（`packages/harness-dispatch/src/dispatcher.ts`，改了编号规则这里要跟着改）。
+  - 过程可能很长：首屏最新一页，「加载更早的事件」同时往前翻会话流和过程流。
+  - 样例：`dev/seed.ts` 的 `worker-d12-a1`（26 步，穿插进度和交结果），`cmd-demo-login-fix` 的交回带 `runId: d12-a1` 链过去。
 - `src/lib/feed.ts`：`SessionFeed`，实时流的全部逻辑，见下面「实时流怎么保证」。
 - `src/app.css`：设计令牌（页底 `#f0f3fa`、品牌色 `#2962ff`、1px 发丝线、白卡片、正常态不上绿）。
 - `dev/`：本机开发和 e2e 用的整套后端。`dev/stack.ts` = PGlite 跑 fleet2 真迁移（外加最小的 `public.users`，放一位创始人）+ **真的驾驶舱口**（`harness-api` 的 `createCockpitApi`，部署用的就是这份代码）+ 一个只转发 `/next/api/*`、放 `dist/` 的前门（相当于香港 nginx）；`dev/seed.ts` 灌样例事件；`dev/serve.ts` 是一条命令的入口。前门不带任何凭据、不认识会话令牌。
@@ -46,6 +52,7 @@ pnpm --filter @fleet-dao/harness-web dev:web    # Vite 5180，/next/api 代理�
 
 - 单测：`npx vitest run packages/harness-web`（`src/lib/*.test.ts`：去重合并、退避、SSE 解析、`SessionFeed` 的断线续传 / resync / 致命错 / 往上翻，用假 fetch 和假 sleep）。接口层的历史页在 `packages/harness-api/test/api.test.ts`。
 - e2e：`pnpm --filter @fleet-dao/harness-web e2e`（先打包一次，不需要真 Postgres，用 PGlite；要本机装了 Chrome，或设 `E2E_BROWSER_CHANNEL`）。1440×900 和 390×844 两个项目各走一遍；每个用例自己一套后端，断后端＝停掉 harness-api，库里的事件号是真相，页面渲染出来的 `data-event-id` 必须和它一模一样。覆盖 G1（窄屏不横滚、关键控件在屏内）、G3（刚打开就点）、G4（断后端、续传、resync、多标签页同时断线再连不漏不重不风暴）、E5（列表轮询退避），以及 #3818：8 个标签页隐藏 7 个、10 秒后开着的 SSE 不超过 1 条，隐藏的回到前台续上不漏不重（桌面跑；无头浏览器里各页都算可见，用改 `visibilityState` 加发 `visibilitychange` 模拟后台）、401 登录入口、退出后流断开、列表「加载更多」、`dist/` 里没有令牌头名。文件名 `*.e2e.ts`，不在仓库 vitest 的收录范围里。
+- 工人会话详情 e2e：`e2e/specs/transcript.e2e.ts`（26 步的样例：折叠和展开、长输出预览、跳转、实时、翻页、窄屏不横滚；页面事件号和库一致）。
 - 截图：`pnpm --filter @fleet-dao/harness-web build && node packages/harness-web/e2e/shots.ts <标签>`，1440 和 390 各几个画面（列表、会话、异常、断开、占位页）存到仓根 `_tmp/shots/<标签>/`；挂进 PR 的做法见 `docs/design/驾驶舱界面.md` 第七部分（图不进代码分支）。
 
 ## 常见坑

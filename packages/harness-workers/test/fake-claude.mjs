@@ -18,6 +18,19 @@ process.stdin.on('data', (c) => {
 await new Promise((r) => process.stdin.on('end', r));
 
 const mode = process.env.FAKE_MODE ?? 'work';
+// replay / replay-hang：把 FAKE_REPLAY 指的 stream-json 样例逐行吐出（__SID__ 换成会话号、__TOKEN__ 换成 FAKE_PLANT）；
+// replay-hang 吐完不退，等测试叫停（验证被杀时攒着的过程也写进库）。
+if (mode === 'replay' || mode === 'replay-hang') {
+  const text = readFileSync(process.env.FAKE_REPLAY, 'utf8')
+    .split('__SID__')
+    .join(sid)
+    .split('__TOKEN__')
+    .join(process.env.FAKE_PLANT ?? '');
+  for (const l of text.split('\n')) if (l !== '') process.stdout.write(`${l}\n`);
+  if (mode === 'replay') process.exit(0);
+  setInterval(() => {}, 1 << 30);
+  await new Promise(() => {});
+}
 out({
   type: 'system',
   subtype: 'init',

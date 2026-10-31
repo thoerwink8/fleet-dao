@@ -1,6 +1,6 @@
 // 驾驶舱口（#3818）：浏览器带旧驾驶舱的登录 Cookie 只读会话。安全条目对应 #3818 设计第四节：
 // 网址带令牌、无 Cookie / 签名错 / 过期 / 别的用途、非创始人、版本号对不上、撤销即断、会话令牌不认、非法会话号、无 CORS、字节里无令牌头名。
-import { events } from '@fleet-dao/harness-store';
+import { appendEvents, events } from '@fleet-dao/harness-store';
 import { createTestDb, type TestDb } from '@fleet-dao/harness-store/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -10,6 +10,7 @@ import {
   createCockpitApi,
   signSessionCookie,
   TAIL_EVENTS,
+  TRANSCRIPT_PAGE_BYTES,
 } from '../src/cockpit.ts';
 import { appendToSession } from '../src/events.ts';
 import { issueToken } from '../src/tokens.ts';
@@ -446,5 +447,123 @@ describe('cockpit 不改 stream_heads 以外的东西', () => {
     await fetch(`${base}/next/api/sessions`, { headers: auth() }).then((r) => r.text());
     const after = (await t.pg.query<{ n: number }>('select count(*)::int n from fleet2.events')).rows[0]?.n;
     expect(after).toBe(before);
+  });
+});
+
+describe('工人过程流 transcript:<runId>（#3781）', () => {
+  const stream = (runId: string) => `transcript:${runId}`;
+  async function putRows(runId: string, n: number, textBytes = 100, from = 0): Promise<number[]> {
+    const got = await appendEvents(
+      t.db,
+      stream(runId),
+      from,
+      Array.from({ length: n }, (_, i) => ({
+        schemaVersion: 1 as const,
+        type: 'transcript.tool_result' as const,
+        payload: {
+          runId,
+          toolUseId: `u${from + i}`,
+          isError: false,
+          text: 'x'.repeat(textBytes),
+          truncated: false,
+          chars: textBytes,
+        },
+      })),
+    );
+    return got.map((e) => e.id);
+  }
+  type Page = { events: { id: number; payload: { text: string } }[]; head: number; hasMore: boolean };
+  const page = async (base: string, runId: string, q: string): Promise<Page> =>
+    (await (
+      await fetch(`${base}/next/api/transcripts/${runId}/history${q}`, { headers: auth() })
+    ).json()) as Page;
+
+  it('同样要登录；非法编号 404；不认会话令牌', async () => {
+    const { base } = await start();
+    expect((await fetch(`${base}/next/api/transcripts/d1-a1/history`)).status).toBe(401);
+    expect(
+      (await fetch(`${base}/next/api/transcripts/${'a'.repeat(200)}/history`, { headers: auth() })).status,
+    ).toBe(404);
+    expect((await fetch(`${base}/next/api/transcripts/d1-a1/other`, { headers: auth() })).status).toBe(404);
+    expect(
+      (
+        await fetch(`${base}/next/api/transcripts/d1-a1/history`, {
+          headers: { cookie: 'fleet_session_token=x' },
+        })
+      ).status,
+    ).toBe(401);
+  });
+
+  it('分页：limit 管一页多少条，before 往前翻，不重不漏、升序；没有这个运行就是空页', async () => {
+    const { base } = await start();
+    const ids = await putRows('p1', 30);
+    const first = await page(base, 'p1', '?limit=10');
+    expect(first.events.map((e) => e.id)).toEqual(ids.slice(20));
+    expect(first).toMatchObject({ head: ids[29], hasMore: true });
+    const seen: number[] = [];
+    let q = '?limit=10';
+    for (let i = 0; i < 5; i++) {
+      const p = await page(base, 'p1', q);
+      seen.unshift(...p.events.map((e) => e.id));
+      if (!p.hasMore) break;
+      q = `?limit=10&before=${p.events[0]?.id}`;
+    }
+    expect(seen).toEqual(ids);
+    const after = await page(base, 'p1', `?after=${ids[24]}&limit=3`);
+    expect(after.events.map((e) => e.id)).toEqual(ids.slice(25, 28));
+    expect(after.hasMore).toBe(true);
+    expect(await page(base, 'nobody', '')).toEqual({ events: [], head: 0, hasMore: false });
+  });
+
+  it('一页还有字节上限：每条 4KB 的 100 条，一页给不满 limit，hasMore 为真，翻页接得上', async () => {
+    const { base } = await start();
+    const ids = await putRows('p2', 100, 4000);
+    const first = await page(base, 'p2', '?limit=100');
+    expect(first.events.length).toBeGreaterThan(0);
+    expect(first.events.length).toBeLessThan(100);
+    const bytes = first.events.reduce((s, e) => s + Buffer.byteLength(JSON.stringify(e.payload)), 0);
+    expect(bytes).toBeLessThanOrEqual(TRANSCRIPT_PAGE_BYTES + 4200);
+    expect(first.hasMore).toBe(true);
+    // 留的是最新的：最后一条是流里最后一条
+    expect(first.events.at(-1)?.id).toBe(ids[99]);
+    const seen = first.events.map((e) => e.id);
+    for (let guard = 0; guard < 10; guard++) {
+      const p = await page(base, 'p2', `?limit=100&before=${seen[0]}`);
+      seen.unshift(...p.events.map((e) => e.id));
+      if (!p.hasMore) break;
+    }
+    expect(seen).toEqual(ids);
+  });
+
+  it('SSE：过程流的新事件实时推，带 Last-Event-ID 续传；会话流的历史和列表里没有它们', async () => {
+    const { base } = await start();
+    const sess = await seed('with-run', 2);
+    const ids = await putRows('live1', 2);
+    const live = await fetch(`${base}/next/api/transcripts/live1/events`, {
+      headers: { ...auth(), 'last-event-id': String(ids[0]) },
+    });
+    expect(live.status).toBe(200);
+    setTimeout(() => void putRows('live1', 1, 10, 2), 100);
+    const reader = live.body?.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !buf.includes('u2')) {
+      const { done, value } = (await reader?.read()) ?? { done: true, value: undefined };
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+    }
+    await reader?.cancel();
+    expect(buf).toContain('event: transcript.tool_result');
+    expect(buf).toContain(`id: ${ids[1]}`);
+    expect(buf).not.toContain(`id: ${ids[0]}\n`);
+    const hist = (await (
+      await fetch(`${base}/next/api/sessions/with-run/history`, { headers: auth() })
+    ).json()) as Page;
+    expect(hist.events.map((e) => e.id)).toEqual(sess);
+    const list = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as {
+      sessions: { id: string }[];
+    };
+    expect(list.sessions.map((s) => s.id)).toEqual(['with-run']);
   });
 });
