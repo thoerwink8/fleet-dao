@@ -1,7 +1,7 @@
 // 影子派工端到端（#3808）：冻结一批 → 驱动派活（重跑不重派）→ 派工器起假工人改文件 → 补丁进 shadow_runs、工作目录删掉 →
 // sweepCompare 拿参照 diff 评分。镜像是本机建的裸仓，git 用真的。
 import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,7 +107,7 @@ describe('影子工作目录', () => {
       expect(r.patch).toContain('+changed');
     }
     expect(readdirSync(tmpRoot).filter((f) => f.startsWith('fleet2-shadow-'))).toEqual([]);
-    // clone --shared：镜像里不挂工作区
+    // 镜像里不挂工作区
     expect(
       git(join(mirrorRoot, 'o', 'r.git'), 'worktree', 'list')
         .trim()
@@ -256,6 +256,36 @@ describe('影子工作目录', () => {
     await expect(
       prepare({ taskId: 't7', ...six, shadow: shadow('0'.repeat(40)) }, { runId: 'r7' }),
     ).rejects.toThrow('还是没有基线提交');
+  }, 60_000);
+
+  it('影子工作目录看不到基线之后的提交，也没有 origin（#3776）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet2-shadow-iso-'));
+    const mir = join(root, 'o', 'r.git');
+    const iso = makeRepo();
+    await mkdir(join(root, 'o'), { recursive: true });
+    git(root, 'init', '-q', '--bare', '-b', 'main', mir);
+    git(iso, 'push', '-q', mir, 'main');
+    const base = git(iso, 'rev-parse', 'HEAD').trim();
+    writeFileSync(join(iso, 'src', 'a.txt'), 'answer\n');
+    git(iso, 'commit', '-q', '-am', 'answer');
+    const answer = git(iso, 'rev-parse', 'HEAD').trim();
+    git(iso, 'push', '-q', mir, 'main');
+    // 镜像里有基线之后的提交，且 main 就指着它
+    expect(git(mir, 'rev-parse', 'main').trim()).toBe(answer);
+
+    const tmpRoot = await mkdtemp(join(tmpdir(), 'fleet2-shadow-ws-'));
+    const prepare = shadowWorkspaces({ db: t.db, mirrorRoot: root, tmpRoot, redact });
+    const ws = await prepare(
+      { taskId: 't8', ...six, shadow: { batchId: 'b8', repo: 'o/r', issue: 8, baseSha: base } },
+      { runId: 'r8' },
+    );
+    expect(git(ws.cwd, 'rev-parse', 'HEAD').trim()).toBe(base);
+    expect(git(ws.cwd, 'remote').trim()).toBe('');
+    expect(git(ws.cwd, 'log', '--all', '--format=%H').trim().split('\n')).toEqual([base]);
+    expect(() => git(ws.cwd, 'cat-file', '-e', `${answer}^{commit}`)).toThrow();
+    expect(() => git(ws.cwd, 'rev-parse', '--verify', 'origin/main')).toThrow();
+    expect(existsSync(join(ws.cwd, '.git', 'objects', 'info', 'alternates'))).toBe(false);
+    await ws.cleanup?.();
   }, 60_000);
 
   it('没带影子目标的请求不建目录', async () => {

@@ -1,4 +1,5 @@
-// 影子工作目录（#3808）：从本机的裸镜像 `<镜像根>/<仓>.git` 以 `clone --shared` 建一个自带 .git 的检出，停在批次的基线，跑完删掉。
+// 影子工作目录（#3808）：从本机的裸镜像 `<镜像根>/<仓>.git` 只 fetch 基线提交到一个空仓（#3776），再检出，停在批次的基线，跑完删掉。
+// 工作目录里只有基线及以前的历史：没有 origin、没有 alternates，读不到基线之后的任何对象，免得工人把后来合并的答案搬过来。
 // 镜像不在就从 GitHub 匿名建、缺基线提交就拉（#3811）：只读、不带令牌，所以只认公开仓；私有仓建不成就按「工作环境没建成」退避重试。
 // 不用 `worktree add`：那样工作区的管理目录（索引、HEAD）在镜像里，法国上工人以会话用户跑、写不了镜像（#3814）。
 // 给了 sandbox 就把建好的目录交给会话用户，跑完按回执删；内核以 fleet 读它要 safe.directory，抓补丁用内核自己的临时索引，不写那边。
@@ -128,11 +129,27 @@ export function shadowWorkspaces(o: ShadowWorkspaceOptions) {
       else await rm(dir, { recursive: true, force: true });
     };
     try {
+      // 空仓里只取基线这一个提交及它的祖先：没有 origin、没有任何引用指向基线之后，也没有 alternates，
+      // 基线之后的对象根本不在这个 .git 里（#3776 法国现场：工人 git log HEAD..origin/main -S 找到后来合并的答案）。
+      // 镜像是本机路径，upload-pack 带 allowAnySHA1InWant 才许按提交号取；不写任何远端配置。
+      await must('建影子工作目录', git(o.tmpRoot, ['init', '--quiet', dir]));
       await must(
-        '建影子工作目录',
-        git(o.tmpRoot, ['clone', '--quiet', '--shared', '--no-checkout', mirror, dir]),
+        '取基线',
+        git(
+          dir,
+          [
+            'fetch',
+            '--quiet',
+            '--no-tags',
+            '--upload-pack=git -c uploadpack.allowAnySHA1InWant=true upload-pack',
+            mirror,
+            target.baseSha,
+          ],
+          undefined,
+          fetchMs,
+        ),
       );
-      await must('检出基线', git(dir, ['checkout', '--quiet', '--detach', target.baseSha]));
+      await must('检出基线', git(dir, ['checkout', '--quiet', '--detach', 'FETCH_HEAD']));
       if (o.sandbox) adopted = await o.sandbox.adopt(dir);
     } catch (err) {
       await drop().catch(() => {});
@@ -144,7 +161,7 @@ export function shadowWorkspaces(o: ShadowWorkspaceOptions) {
       async collect({ verdict, wallMs }) {
         // 新文件先记成「打算加」，diff 才看得见。工人的 .git 一个字节都不写（法国上归会话用户、写不了）：
         // 索引用拷到内核临时目录的一份；add 也会写对象（-N 写空 blob，本机实测），对象库换成临时目录的，
-        // 工人的对象库（连同它 alternates 指的镜像）只读着当备用库
+        // 工人的对象库只读着当备用库（影子目录自带完整 .git，没有 alternates，也不连镜像）
         const scratch = await mkdtemp(join(tmpdir(), 'fleet2-patch-'));
         try {
           const index = join(scratch, 'index');
