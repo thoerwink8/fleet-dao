@@ -1,11 +1,12 @@
 // HTTP 入口（node http）：POST /mcp 是 Streamable HTTP MCP，GET /sessions/<号>/events 是 SSE。
 // 令牌只认请求头 X-Fleet-Session-Token 或 cookie，网址里带令牌一律 400，不往下走。
+// 历史页和 SSE 的实现在 session-http.ts，驾驶舱口（cockpit.ts）共用。
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { type Db, PAGE_MAX } from '@fleet-dao/harness-store';
+import type { Db } from '@fleet-dao/harness-store';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { gapExceeds, latestSessionEventId, readSessionAfter, readSessionHistory } from './events.ts';
+import { reply, serveHistory, serveSse } from './session-http.ts';
 import { readTokenFromRequest, type TokenClaims, verifyToken } from './tokens.ts';
 import { toolsFor } from './tools.ts';
 
@@ -29,12 +30,7 @@ export interface HarnessApi {
 
 const MAX_BODY = 1_000_000;
 
-function reply(res: ServerResponse, status: number, message: string): void {
-  if (res.headersSent) return;
-  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }).end(message);
-}
-
-function hasTokenInQuery(url: URL): boolean {
+export function hasTokenInQuery(url: URL): boolean {
   for (const key of url.searchParams.keys()) if (/token/i.test(key)) return true;
   return false;
 }
@@ -50,6 +46,22 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
 }
 
+/** 把 node 服务包成 listen / close：close 先收开着的 SSE。 */
+export function wrapServer(server: Server, open: Set<() => void>): Pick<HarnessApi, 'listen' | 'close'> {
+  return {
+    listen: (port = 0, host = '127.0.0.1') =>
+      new Promise((resolve) => {
+        server.listen(port, host, () => resolve((server.address() as AddressInfo).port));
+      }),
+    close: () =>
+      new Promise((resolve) => {
+        for (const end of [...open]) end();
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  };
+}
+
 export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
   const { db } = options;
   const shadow = options.shadow ?? false;
@@ -57,6 +69,7 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
   const pollMs = options.pollMs ?? 1000;
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const open = new Set<() => void>();
+  const sseOptions = { db, replayCap, pollMs, heartbeatMs, open };
 
   async function handleMcp(req: IncomingMessage, res: ServerResponse, claims: TokenClaims): Promise<void> {
     if (req.method !== 'POST') return reply(res, 405, '只收 POST');
@@ -82,109 +95,6 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
     await transport.handleRequest(req, res, body);
   }
 
-  async function handleSse(
-    req: IncomingMessage,
-    res: ServerResponse,
-    claims: TokenClaims,
-    token: string,
-    sessionId: string,
-  ): Promise<void> {
-    if (claims.sessionId !== sessionId) return reply(res, 403, '令牌不属于这个会话');
-    const header = req.headers['last-event-id'];
-    const lastRaw = Array.isArray(header) ? header[0] : header;
-    let cursor = 0;
-    let resync = false;
-    if (lastRaw === undefined || lastRaw === '') {
-      cursor = await latestSessionEventId(db, sessionId);
-    } else if (!/^\d{1,15}$/.test(lastRaw)) {
-      resync = true;
-      cursor = await latestSessionEventId(db, sessionId);
-    } else {
-      cursor = Number(lastRaw);
-      if (await gapExceeds(db, sessionId, cursor, replayCap)) {
-        resync = true;
-        cursor = await latestSessionEventId(db, sessionId);
-      }
-    }
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache, no-transform',
-      connection: 'keep-alive',
-      'x-accel-buffering': 'no',
-    });
-    // 带 Last-Event-ID 续传时没有新事件就不会有第一个字节：先写一行注释，响应头才会真的送出去（经代理也一样），
-    // 客户端才知道连上了。注释行不是事件，客户端忽略。
-    res.write(': connected\n\n');
-    let closed = false;
-    let timer: NodeJS.Timeout | undefined;
-    const finish = () => {
-      if (closed) return;
-      closed = true;
-      if (timer) clearTimeout(timer);
-      open.delete(finish);
-      res.end();
-    };
-    open.add(finish);
-    res.on('close', () => {
-      closed = true;
-      if (timer) clearTimeout(timer);
-      open.delete(finish);
-    });
-    if (resync) res.write(`id: ${cursor}\nevent: resync\ndata: {}\n\n`);
-    else if (lastRaw === undefined || lastRaw === '') res.write(`id: ${cursor}\nevent: ready\ndata: {}\n\n`);
-    let lastWrite = Date.now();
-    const tick = async (): Promise<void> => {
-      try {
-        // 令牌撤销后最晚下一次 tick 就断。
-        if ((await verifyToken(db, token)) === null) return finish();
-        for (;;) {
-          const page = await readSessionAfter(db, sessionId, cursor, PAGE_MAX);
-          for (const ev of page) {
-            if (closed) return;
-            res.write(
-              `id: ${ev.id}\nevent: ${ev.type}\ndata: ${JSON.stringify({ seq: ev.seq, payload: ev.payload, createdAt: ev.createdAt })}\n\n`,
-            );
-            cursor = ev.id;
-            lastWrite = Date.now();
-          }
-          if (page.length < PAGE_MAX) break;
-        }
-        if (!closed && Date.now() - lastWrite >= heartbeatMs) {
-          res.write(': ping\n\n');
-          lastWrite = Date.now();
-        }
-      } catch {
-        return finish();
-      }
-      if (!closed) timer = setTimeout(() => void tick(), pollMs);
-    };
-    void tick();
-  }
-
-  /** GET /sessions/<号>/history?before=&after=&limit=：只读历史页，驾驶舱首屏和 resync 后整页重取用。 */
-  async function handleHistory(url: URL, res: ServerResponse, claims: TokenClaims, sessionId: string) {
-    if (claims.sessionId !== sessionId) return reply(res, 403, '令牌不属于这个会话');
-    const num = (name: string): number | undefined | null => {
-      const raw = url.searchParams.get(name);
-      if (raw === null) return undefined;
-      return /^\d{1,15}$/.test(raw) ? Number(raw) : null;
-    };
-    const before = num('before');
-    const after = num('after');
-    const limit = num('limit');
-    if (before === null || after === null || limit === null)
-      return reply(res, 400, '游标和 limit 要是非负整数');
-    if (before !== undefined && after !== undefined) return reply(res, 400, 'before 和 after 不能同时给');
-    const page = await readSessionHistory(db, sessionId, {
-      ...(before !== undefined ? { before } : {}),
-      ...(after !== undefined ? { after } : {}),
-      ...(limit !== undefined ? { limit } : {}),
-    });
-    res
-      .writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      .end(JSON.stringify(page));
-  }
-
   const server = createServer((req, res) => {
     void (async () => {
       try {
@@ -198,11 +108,23 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
         if (!claims || token === undefined) return reply(res, 401, '令牌无效');
         if (history) {
           if (req.method !== 'GET') return reply(res, 405, '只收 GET');
-          return await handleHistory(url, res, claims, decodeURIComponent(history[1] ?? ''));
+          if (claims.sessionId !== decodeURIComponent(history[1] ?? '')) {
+            return reply(res, 403, '令牌不属于这个会话');
+          }
+          return await serveHistory(db, url, res, claims.sessionId);
         }
         if (sse) {
           if (req.method !== 'GET') return reply(res, 405, '只收 GET');
-          return await handleSse(req, res, claims, token, decodeURIComponent(sse[1] ?? ''));
+          if (claims.sessionId !== decodeURIComponent(sse[1] ?? '')) {
+            return reply(res, 403, '令牌不属于这个会话');
+          }
+          return await serveSse(
+            sseOptions,
+            req,
+            res,
+            claims.sessionId,
+            async () => (await verifyToken(db, token)) !== null,
+          );
         }
         return await handleMcp(req, res, claims);
       } catch {
@@ -211,17 +133,5 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
     })();
   });
 
-  return {
-    server,
-    listen: (port = 0, host = '127.0.0.1') =>
-      new Promise((resolve) => {
-        server.listen(port, host, () => resolve((server.address() as AddressInfo).port));
-      }),
-    close: () =>
-      new Promise((resolve) => {
-        for (const end of [...open]) end();
-        server.close(() => resolve());
-        server.closeAllConnections();
-      }),
-  };
+  return { server, ...wrapServer(server, open) };
 }
