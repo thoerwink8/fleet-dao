@@ -1,15 +1,23 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { API_BASE, fetchSessions } from './api';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { API_BASE, fetchSessions, isUnauthorized } from './api';
 import { pollInterval } from './backoff';
 import { SessionFeed } from './feed';
 import type { FeedState, SessionSummary } from './types';
+import { releaseWhenHidden } from './visibility';
 
-/** 一个会话的实时事件流；会话号变了就换一条（旧的关掉）。 */
+/**
+ * 一个会话的实时事件流；会话号变了就换一条（旧的关掉）。
+ * 标签页隐藏满 10 秒放掉连接，回到前台带 Last-Event-ID 续上（visibility.ts）。
+ */
 export function useSessionFeed(sessionId: string): { feed: SessionFeed; state: FeedState } {
   const feed = useMemo(() => new SessionFeed(sessionId, { base: API_BASE }), [sessionId]);
   useEffect(() => {
     feed.start();
-    return () => feed.stop();
+    const release = releaseWhenHidden(feed, document);
+    return () => {
+      release();
+      feed.stop();
+    };
   }, [feed]);
   const state = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
   return { feed, state };
@@ -22,16 +30,39 @@ export interface SessionsState {
   /** 最近一次读失败的原因；成功一次就清空。 */
   error: string | null;
   failures: number;
+  /** 没登录或登录过期（401）：不再轮询，页面给登录入口。 */
+  unauthorized: boolean;
+  /** 还有更老的会话没加载。 */
+  hasMore: boolean;
+  loadingMore: boolean;
+  loadMore: () => void;
 }
 
 /**
- * 会话列表：每 10 秒读一次；后端挂了间隔翻倍、封顶 60 秒（旧坑 E5），读成功一次立刻恢复 10 秒。
- * 页面不可见时不读（切回来立刻读一次）。
+ * 会话列表：每 10 秒读一次最新一页；后端挂了间隔翻倍、封顶 60 秒（旧坑 E5），读成功一次立刻恢复 10 秒。
+ * 页面不可见时不读（切回来立刻读一次）。「加载更多」用 nextBefore 往更老翻，翻出来的接在后面，
+ * 轮询刷新的是最新一页（同一个会话以最新一页里的为准，不重复）。
  */
 export function useSessions(): SessionsState {
-  const [state, setState] = useState<SessionsState>({ sessions: null, error: null, failures: 0 });
+  const [head, setHead] = useState<{ sessions: SessionSummary[]; nextBefore: number | null } | null>(null);
+  // 见过的全部会话（按号去重，同一个会话以最新读到的为准）：最新一页被新会话顶下去的，不会从列表里消失
+  const [known, setKnown] = useState<ReadonlyMap<string, SessionSummary>>(new Map());
+  const remember = useCallback((list: SessionSummary[]) => {
+    setKnown((prev) => {
+      const next = new Map(prev);
+      for (const s of list) next.set(s.id, s);
+      return next;
+    });
+  }, []);
+  const [olderNext, setOlderNext] = useState<number | null | undefined>(undefined); // undefined = 还没翻过
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [meta, setMeta] = useState({ error: null as string | null, failures: 0, unauthorized: false });
+  const cursor = useRef<number | null>(null);
+  const stoppedRef = useRef(false);
+
   useEffect(() => {
     let stopped = false;
+    stoppedRef.current = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
     const ac = new AbortController();
@@ -42,17 +73,26 @@ export function useSessions(): SessionsState {
         return;
       }
       try {
-        const { sessions } = await fetchSessions(ac.signal);
+        const page = await fetchSessions(ac.signal);
         failures = 0;
-        if (!stopped) setState({ sessions, error: null, failures: 0 });
+        if (!stopped) {
+          setHead(page);
+          remember(page.sessions);
+          setMeta({ error: null, failures: 0, unauthorized: false });
+        }
       } catch (err) {
         if (stopped) return;
+        if (isUnauthorized(err)) {
+          // 没登录：重试没用，停下来等人登录后刷新页面
+          setMeta({ error: err instanceof Error ? err.message : '没登录', failures, unauthorized: true });
+          return;
+        }
         failures += 1;
-        setState((s) => ({
-          sessions: s.sessions,
+        setMeta({
           error: err instanceof Error ? err.message : '读不到会话列表',
           failures,
-        }));
+          unauthorized: false,
+        });
       }
       if (!stopped) timer = setTimeout(() => void tick(), pollInterval(SESSIONS_POLL_MS, failures));
     };
@@ -66,10 +106,40 @@ export function useSessions(): SessionsState {
     void tick();
     return () => {
       stopped = true;
+      stoppedRef.current = true;
       ac.abort();
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, []);
-  return state;
+  }, [remember]);
+
+  const nextBefore = olderNext !== undefined ? olderNext : (head?.nextBefore ?? null);
+  cursor.current = nextBefore;
+  const loadMore = useCallback(() => {
+    const before = cursor.current;
+    if (before === null || loadingMore) return;
+    setLoadingMore(true);
+    fetchSessions(undefined, before)
+      .then((page) => {
+        if (stoppedRef.current) return;
+        remember(page.sessions);
+        setOlderNext(page.nextBefore);
+      })
+      .catch((err) => {
+        if (stoppedRef.current) return;
+        setMeta((m) => ({
+          ...m,
+          error: err instanceof Error ? err.message : '读不到更多会话',
+          unauthorized: isUnauthorized(err),
+        }));
+      })
+      .finally(() => setLoadingMore(false));
+  }, [loadingMore, remember]);
+
+  const sessions = useMemo(
+    () => (head ? [...known.values()].sort((a, b) => b.lastEventId - a.lastEventId) : null),
+    [head, known],
+  );
+
+  return { sessions, ...meta, hasMore: nextBefore !== null, loadingMore, loadMore };
 }

@@ -48,6 +48,7 @@ const INITIAL: FeedState = {
   retryInMs: null,
   resyncs: 0,
   error: null,
+  errorStatus: null,
 };
 
 type Outcome = 'resync' | 'ended';
@@ -156,7 +157,7 @@ export class SessionFeed {
       } catch (err) {
         if (signal.aborted) return;
         if (err instanceof FatalApiError) {
-          this.#set({ status: 'failed', error: err.message, retryInMs: null });
+          this.#set({ status: 'failed', error: err.message, errorStatus: err.status, retryInMs: null });
           return;
         }
       }

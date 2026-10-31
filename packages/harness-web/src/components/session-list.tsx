@@ -6,6 +6,7 @@ import { summaryOf, TYPE_LABEL } from '../lib/describe';
 import { formatRelative, shortId } from '../lib/format';
 import { useSessions } from '../lib/hooks';
 import { Chip } from './chip';
+import { LoginPrompt } from './login-prompt';
 
 /** 每 15 秒让「N 分钟前」自己走字，不依赖数据刷新。 */
 function useNow(stepMs = 15_000): number {
@@ -18,13 +19,25 @@ function useNow(stepMs = 15_000): number {
 }
 
 export function SessionList({ className }: { className?: string }) {
-  const { sessions, error, failures } = useSessions();
+  const { sessions, error, failures, unauthorized, hasMore, loadingMore, loadMore } = useSessions();
   const now = useNow();
+  if (unauthorized) {
+    return (
+      <section aria-label="会话列表" className={cn('flex min-h-0 flex-col bg-surface', className)}>
+        <LoginPrompt />
+      </section>
+    );
+  }
   return (
     <section aria-label="会话列表" className={cn('flex min-h-0 flex-col bg-surface', className)}>
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-line px-4 max-md:hidden">
         <span className="text-xs font-medium text-ink-2">会话</span>
-        {sessions ? <span className="num text-2xs text-muted">{sessions.length}</span> : null}
+        {sessions ? (
+          <span className="num text-2xs text-muted">
+            {sessions.length}
+            {hasMore ? '+' : ''}
+          </span>
+        ) : null}
       </div>
       {error ? (
         <div
@@ -92,6 +105,18 @@ export function SessionList({ className }: { className?: string }) {
             })}
           </ul>
         )}
+        {sessions && sessions.length > 0 && hasMore ? (
+          <div className="p-3">
+            <button
+              type="button"
+              onClick={loadMore}
+              disabled={loadingMore}
+              className="h-9 w-full rounded-md border border-line text-xs font-medium text-ink-2 hover:bg-subtle disabled:opacity-60"
+            >
+              {loadingMore ? '加载中…' : '加载更多'}
+            </button>
+          </div>
+        ) : null}
       </div>
     </section>
   );

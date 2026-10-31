@@ -14,7 +14,9 @@ const stack = await startStack({
 const made = await seed(stack);
 console.log(`开发后端已起：${stack.url}（接口层 ${stack.apiUrl()}，库：${dataDir ?? '内存，退出即没'}）`);
 console.log(made.length > 0 ? `灌了样例会话：${made.join('、')}` : '库里已有样例会话，没重灌');
-console.log('前端：另开终端跑 dev:web，然后打开 http://localhost:5180/next/');
+console.log(
+  '前端：另开终端跑 dev:web，先打开 http://localhost:5180/next/dev-login 拿登录 Cookie（跳回 /next/）',
+);
 console.log('实时演示：在这里输入 `emit <会话号> <类型> <JSON载荷>`，例如');
 console.log('  emit cmd-demo-login-fix worker.progress.reported {"summary":"又一条进度","percent":90}');
 console.log('断后端演示：输入 `api stop` / `api start`（只停接口层，开发后端还在）。');

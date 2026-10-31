@@ -26,6 +26,12 @@ export interface SessionSummary {
   lastPayload: Record<string, unknown>;
 }
 
+export interface SessionsPage {
+  sessions: SessionSummary[];
+  /** 非空 = 还有更老的会话，下一页把它当 before 传。 */
+  nextBefore: number | null;
+}
+
 export type FeedStatus = 'loading' | 'live' | 'reconnecting' | 'failed';
 
 export interface FeedState {
@@ -41,4 +47,6 @@ export interface FeedState {
   resyncs: number;
   /** failed 时的原因，人话。 */
   error: string | null;
+  /** failed 时服务返回的状态码（401 = 没登录，页面给登录入口）。 */
+  errorStatus: number | null;
 }

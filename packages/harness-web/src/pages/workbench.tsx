@@ -28,7 +28,7 @@ export function Workbench() {
           ) : null
         }
       />
-      <div className="grid min-h-0 flex-1 md:h-[calc(100dvh-var(--bar-h))] md:grid-cols-[320px_minmax(0,1fr)]">
+      <div className="grid min-h-0 flex-1 md:flex-none md:h-[calc(100dvh-var(--bar-h))] md:grid-cols-[320px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
         <SessionList
           className={cn(
             'border-line md:border-r',

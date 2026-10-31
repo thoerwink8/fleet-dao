@@ -15,6 +15,12 @@ const stack = await startStack({
   pollMs: 100,
   heartbeatMs: 2000,
 });
+// 先灌 32 个批量会话，再灌样例：样例的事件号更新，排在列表最前，批量的排在后面、要「加载更多」才出来
+for (let i = 0; i < 32; i++) {
+  await stack.emit(`bulk-${String(i).padStart(2, '0')}`, 'worker.progress.reported', {
+    summary: `批量样例 ${i}`,
+  });
+}
 await seed(stack);
 const browser = await chromium.launch({ channel: process.env.E2E_BROWSER_CHANNEL?.trim() || 'chrome' });
 
@@ -36,6 +42,7 @@ for (const s of sizes) {
     locale: 'zh-CN',
     timezoneId: 'Asia/Shanghai',
   });
+  await ctx.addCookies([{ ...stack.cookie(), url: stack.url }]);
   const page = await ctx.newPage();
   const shot = (name: string) => page.screenshot({ path: `${out}/${name}-${s.tag}.png` });
 
@@ -43,6 +50,14 @@ for (const s of sizes) {
   await page.getByRole('link', { name: /cmd-demo-login-fix/ }).waitFor();
   await settle(page);
   await shot('list');
+  // 「加载更多」：样例之外灌了够多的会话，列表第一页之后还有
+  await page.getByRole('button', { name: '加载更多' }).scrollIntoViewIfNeeded();
+  await settle(page);
+  await shot('list-load-more');
+  await page.getByRole('button', { name: '加载更多' }).click();
+  await page.getByRole('link', { name: /bulk-00/ }).waitFor();
+  await settle(page);
+  await shot('list-loaded');
 
   await page.goto(`${stack.url}/next/s/cmd-demo-login-fix`);
   await page.locator('[data-event-id]').first().waitFor();
@@ -76,6 +91,13 @@ for (const s of sizes) {
   await page.goto(`${stack.url}/next/work`);
   await settle(page);
   await shot('placeholder-work');
+
+  // 没登录：清掉 Cookie，列表给登录入口
+  await ctx.clearCookies();
+  await page.goto(`${stack.url}/next/`);
+  await page.getByRole('link', { name: '用飞书登录' }).waitFor();
+  await settle(page);
+  await shot('login-required');
   await ctx.close();
 }
 
