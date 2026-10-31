@@ -72,8 +72,9 @@ export interface VerifyReport {
 
 const PATH_LIST_CAP = 200;
 const SAFE_REF = /^[0-9A-Za-z][0-9A-Za-z._/@^~{}-]*$/;
-// 工人的工作目录里的 git 配置是工人写的：关掉会执行外部程序的几项，只读统计
-const GIT_SAFE = ['-c', 'core.fsmonitor=false', '-c', 'core.quotepath=off'];
+// 工人的工作目录里的 git 配置是工人写的：关掉会执行外部程序的几项，只读统计。
+// 法国上目录归会话用户、核验以 fleet 跑（#3814），要 safe.directory 才肯读；只读，不写那边的索引
+const GIT_SAFE = ['-c', 'safe.directory=*', '-c', 'core.fsmonitor=false', '-c', 'core.quotepath=off'];
 
 /** 路径匹配：以 / 结尾或没有通配符＝目录前缀（含自身）；带 * ? 的按通配，** 跨目录、* 不跨。 */
 export function matchPath(pattern: string, path: string): boolean {

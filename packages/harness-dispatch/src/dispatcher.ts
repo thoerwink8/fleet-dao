@@ -35,6 +35,7 @@ import {
   runClaudeWorker,
   type ShadowProbes,
   ShadowSelfCheckError,
+  type WorkerSandbox,
   type WorkerTurnResult,
 } from '@fleet-dao/harness-workers';
 import { z } from 'zod';
@@ -76,6 +77,8 @@ export interface DispatcherOptions {
   hostEnv?: Readonly<Record<string, string | undefined>>;
   extraEnv?: Readonly<Record<string, string>>;
   tmpRoot?: string;
+  /** 工人以会话用户跑（法国，#3814）；kernel 也拿它交影子工作目录。 */
+  sandbox?: WorkerSandbox;
   workerBudget?: Budget;
   /** 同时在跑的工人数，默认 1（影子期的规矩）。 */
   maxInflight?: number;
@@ -392,6 +395,7 @@ export class Dispatcher {
           ...(o.shadow ? { shadow: o.shadow } : {}),
           ...(o.extraEnv ? { extraEnv: o.extraEnv } : {}),
           ...(o.tmpRoot ? { tmpRoot: o.tmpRoot } : {}),
+          ...(o.sandbox ? { sandbox: o.sandbox } : {}),
         });
       } catch (e) {
         error = e instanceof Error ? e : new Error(String(e));

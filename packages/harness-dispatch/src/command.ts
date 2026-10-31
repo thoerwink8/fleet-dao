@@ -24,6 +24,8 @@ export interface CommandSpec {
   signal?: AbortSignal;
   /** stdout 最多留多少字符，超了截断并标 truncated。 */
   maxOutputChars?: number;
+  /** 额外的环境变量（例如 GIT_INDEX_FILE）；同样过工人环境的禁表。 */
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface CommandResult {
@@ -51,7 +53,7 @@ export async function runCommand(spec: CommandSpec): Promise<CommandResult> {
       env: buildWorkerEnv({
         base: spec.hostEnv ?? process.env,
         tmpDir: tmpdir(),
-        extra: { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
+        extra: { ...spec.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
       }),
       stdin: '',
       runId,

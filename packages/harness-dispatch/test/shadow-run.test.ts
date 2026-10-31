@@ -1,7 +1,7 @@
 // 影子派工端到端（#3808）：冻结一批 → 驱动派活（重跑不重派）→ 派工器起假工人改文件 → 补丁进 shadow_runs、工作目录删掉 →
 // sweepCompare 拿参照 diff 评分。镜像是本机建的裸仓，git 用真的。
-import { readdirSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
+import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,6 +106,7 @@ describe('影子工作目录', () => {
       expect(r.patch).toContain('+changed');
     }
     expect(readdirSync(tmpRoot).filter((f) => f.startsWith('fleet2-shadow-'))).toEqual([]);
+    // clone --shared：镜像里不挂工作区
     expect(
       git(join(mirrorRoot, 'o', 'r.git'), 'worktree', 'list')
         .trim()
@@ -126,6 +127,53 @@ describe('影子工作目录', () => {
       [2, [], ['src/new.txt']],
     ]);
   }, 60_000);
+
+  it('给了 sandbox：建好就交出去、跑完按回执删；抓补丁不往工人的 .git 里写（法国上那边归会话用户）', async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), 'fleet2-shadow-sb-'));
+    const steps: string[] = [];
+    const prepare = shadowWorkspaces({
+      db: t.db,
+      mirrorRoot,
+      tmpRoot,
+      redact,
+      sandbox: {
+        async adopt(dir) {
+          steps.push(`adopt:${existsSync(join(dir, 'src', 'a.txt')) ? 'checked-out' : 'empty'}`);
+          return {
+            async release() {
+              steps.push('release');
+              await rm(dir, { recursive: true, force: true });
+            },
+          };
+        },
+        async stop() {},
+      },
+    });
+    await freezeBatch(t.db, 'b3', [item(3)]);
+    const ws = await prepare(
+      { taskId: 't3', ...six, shadow: { batchId: 'b3', repo: 'o/r', issue: 3, baseSha } },
+      { runId: 'r3' },
+    );
+    writeFileSync(join(ws.cwd, 'src', 'a.txt'), 'changed\n');
+    writeFileSync(join(ws.cwd, 'src', 'new.txt'), 'hello\n');
+    const gitDir = join(ws.cwd, '.git');
+    const snapshot = () =>
+      readdirSync(gitDir, { recursive: true })
+        .map(String)
+        .filter((p) => !statSync(join(gitDir, p)).isDirectory())
+        .map((p) => `${p}:${statSync(join(gitDir, p)).mtimeMs}`)
+        .sort();
+    const before = snapshot();
+    await ws.collect?.({ verdict: 'passed', wallMs: 1 });
+    expect(snapshot()).toEqual(before);
+    const patch = (await t.pg.query<{ patch: string }>('select patch from fleet2.shadow_runs')).rows[0]
+      ?.patch;
+    expect(patch).toContain('src/new.txt');
+    expect(patch).toContain('+changed');
+    await ws.cleanup?.();
+    expect(steps).toEqual(['adopt:checked-out', 'release']);
+    expect(readdirSync(tmpRoot)).toEqual([]);
+  });
 
   it('没带影子目标的请求不建目录', async () => {
     const prepare = shadowWorkspaces({ db: t.db, mirrorRoot, tmpRoot: tmpdir(), redact });

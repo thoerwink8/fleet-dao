@@ -9,6 +9,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { githubReader } from '../github-read.ts';
 import { createKernel } from '../kernel.ts';
+import { scopeSandbox } from '../scope-sandbox.ts';
 
 const env = process.env;
 const need = (k: string): string => {
@@ -35,6 +36,12 @@ if (!Array.isArray(command) || command.length === 0 || command.some((c) => typeo
   console.error('FLEET2_WORKER_COMMAND 要是非空的字符串数组（JSON），例如 ["reclaude"]');
   process.exit(2);
 }
+// FLEET2_SANDBOX=scope：工人以会话用户跑（法国，执行体前缀是 deploy/france/fleet2-worker.sh），目录经 fleet-agent-scope 交接
+const sandboxKind = env.FLEET2_SANDBOX ?? '';
+if (sandboxKind !== '' && sandboxKind !== 'scope') {
+  console.error(`FLEET2_SANDBOX 只认 scope（或不给）：${sandboxKind}`);
+  process.exit(2);
+}
 const permissionMode = (env.FLEET2_PERMISSION_MODE ?? 'bypassPermissions') as ClaudePermissionMode;
 if (!CLAUDE_PERMISSION_MODES.includes(permissionMode)) {
   console.error(`FLEET2_PERMISSION_MODE 只认 ${CLAUDE_PERMISSION_MODES.join('、')}`);
@@ -57,6 +64,7 @@ const kernel = createKernel({
     // 工人环境由 buildWorkerEnv 按白名单现场构造，宿主的凭据一个都不抄
     hostEnv: env,
     tmpRoot: need('FLEET2_WORK_ROOT'),
+    ...(sandboxKind === 'scope' ? { sandbox: scopeSandbox() } : {}),
   },
   mirrorRoot: need('FLEET2_MIRROR_ROOT'),
   workRoot: need('FLEET2_WORK_ROOT'),
