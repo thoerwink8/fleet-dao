@@ -98,7 +98,7 @@ export async function intakeSpawnRequests(db: Db, opts: IntakeOptions = {}): Pro
           continue;
         }
         const payload: DispatchPayload = { sessionId, eventId: e.id, taskId: request.taskId, request };
-        const { result } = await onceByReceipt(
+        const { result, replayed } = await onceByReceipt(
           tx,
           `dispatch:${e.streamId}:${request.taskId}`,
           'schedule-worker',
@@ -113,7 +113,8 @@ export async function intakeSpawnRequests(db: Db, opts: IntakeOptions = {}): Pro
             return { kind: r.kind };
           },
         );
-        if (result.kind === 'created') total.scheduled++;
+        // 命令回执重放时回的是第一次存下的结果（kind 还是 created），所以要先看 replayed，不然重复提交会被算成又排了一件
+        if (!replayed && result.kind === 'created') total.scheduled++;
         else total.duplicate++;
       }
       const last = page.at(-1)?.id;
