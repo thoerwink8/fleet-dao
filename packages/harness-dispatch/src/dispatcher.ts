@@ -57,6 +57,8 @@ export interface Workspace {
   forbiddenPaths?: readonly string[];
   /** 检查命令（argv）。 */
   checkCommand?: readonly string[];
+  /** 终局交回记完、收尾之前调（影子拿它抓补丁）；失败进 onError，不改交回、不挡收尾。 */
+  collect?(handback: { verdict: VerifyReport['verdict']; wallMs: number }): Promise<void>;
   /** 记完交回后调；失败不影响结果。 */
   cleanup?(): Promise<void>;
 }
@@ -507,6 +509,13 @@ export class Dispatcher {
           if (!(err instanceof LostClaimError)) throw err;
         }
         return { ...ids, outcome: 'retry', verdict, final: false };
+      }
+      if (ws?.collect) {
+        try {
+          await ws.collect({ verdict, wallMs: result?.wallMs ?? 0 });
+        } catch (err) {
+          o.onError?.(err, job);
+        }
       }
       await this.#finish(job);
       return { ...ids, outcome, verdict, final: true };

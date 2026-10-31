@@ -120,6 +120,33 @@ export async function freezeBatch(db: Db, batchId: string, items: readonly Batch
   });
 }
 
+/** 一批的清单，按（仓、单号）往后翻页。 */
+export async function listBatchItems(
+  db: Db,
+  batchId: string,
+  after?: { repo: string; issue: number },
+  limit = 50,
+): Promise<BatchItem[]> {
+  return db
+    .select({
+      repo: shadowBatchItems.repo,
+      issue: shadowBatchItems.issue,
+      baseSha: shadowBatchItems.baseSha,
+      snapshotAt: shadowBatchItems.snapshotAt,
+    })
+    .from(shadowBatchItems)
+    .where(
+      and(
+        eq(shadowBatchItems.batchId, batchId),
+        after
+          ? sql`(${shadowBatchItems.repo}, ${shadowBatchItems.issue}) > (${after.repo}, ${after.issue})`
+          : undefined,
+      ),
+    )
+    .orderBy(asc(shadowBatchItems.repo), asc(shadowBatchItems.issue))
+    .limit(Math.min(limit, PAGE_MAX));
+}
+
 export interface ShadowRunInput {
   runId: string;
   batchId: string;
