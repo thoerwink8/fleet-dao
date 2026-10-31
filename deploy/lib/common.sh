@@ -424,6 +424,18 @@ port_pids() { # 协议 端口
   ss -H "$flag" "sport = :$2" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | tr '\n' ' ' || true
 }
 
+# 单元的主进程是不是从别的发布目录起的：WorkingDirectory 写的是 current 链接，进程起来时内核把它解析成当时那一版的目录。
+# 发版只换 current、不碰 france.sh 装的单元，不比这个，进程会一直跑旧代码（2026-10-31 fleet2-kernel 发版后仍跑旧自检）。
+# 主进程不在、读不到当成不旧（交给 ensure_unit_running 去起）。
+runs_stale_release() { # 单元 current 链接
+  local pid cwd want
+  pid=$(systemctl show -p MainPID --value "$1" 2>/dev/null) || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  cwd=$(readlink -- "/proc/$pid/cwd" 2>/dev/null) || return 1
+  want=$(readlink -f -- "$2" 2>/dev/null) || return 1
+  [[ -n "$cwd" && -n "$want" && "$cwd" != "$want" ]]
+}
+
 # 这个端口有没有任何套接字在听（内核里的 WireGuard 套接字没有进程号，也要算上）
 port_in_use() { # 协议 端口
   local flag=-ltn

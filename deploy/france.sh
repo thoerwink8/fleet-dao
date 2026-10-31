@@ -1029,7 +1029,8 @@ setup_fleet2_egress() {
     unit_changed=1
     systemctl daemon-reload
   fi
-  # 名单只在起进程时读：名单变了也要重启；代码跟着发版换，发版时这里重启一次接上新代码
+  # 名单只在起进程时读：名单变了也要重启；代码跟着发版换，主进程还在上一版目录就重启接上新代码
+  if runs_stale_release "$FLEET2_EGRESS_UNIT" "$RELEASES_DIR/current"; then unit_changed=1; fi
   ensure_unit_running "$FLEET2_EGRESS_UNIT" "$((unit_changed || allow_changed))"
 }
 readback_fleet2_egress() {
@@ -1065,6 +1066,7 @@ setup_fleet2_kernel() {
   fi
   fix_meta "$ENGINE_APP_JSON" root:fleet 640
   # 代码跟着发版换：单元变了重启；跑着的工人由内核收到 SIGTERM 后收尾
+  if runs_stale_release "$FLEET2_KERNEL_UNIT" "$RELEASES_DIR/current"; then unit_changed=1; fi
   ensure_unit_running "$FLEET2_KERNEL_UNIT" "$unit_changed"
 }
 readback_fleet2_kernel() {
@@ -1110,6 +1112,7 @@ setup_fleet2_cockpit() {
     return 0
   fi
   # 代码跟着发版换：单元变了重启；无状态，重启只断开着的 SSE，页面自己重连
+  if runs_stale_release "$FLEET2_COCKPIT_UNIT" "$RELEASES_DIR/current"; then unit_changed=1; fi
   ensure_unit_running "$FLEET2_COCKPIT_UNIT" "$unit_changed"
 }
 readback_fleet2_cockpit() {
