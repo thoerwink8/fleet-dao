@@ -1,6 +1,7 @@
 // 派工器：把指挥官的 spawn_worker 请求变成跑着的工人，交回先机械核验再记进指挥官的收件箱。
 // 一条线：收请求（intake.ts）→ 领活 → 发工人令牌 → 起工人（心跳续租，被取消或丢租约就叫停）→ 撤令牌 →
 // 核验（verify.ts）→ 记 handback.recorded → 完成或退避重试。
+// 发版重启叫停的活（release-pause）退回队列：不算尝试次数、交回非终局、不抓补丁（#3776）。
 // 重试只给“确定没有副作用”的失败（进程没起来、起步无进展、影子自检没过）；做到一半死了的结局不知道，记 unknown 就停，不盲重派。
 import {
   appendToSession,
@@ -26,6 +27,7 @@ import {
   type Job,
   LostClaimError,
   readStream,
+  releaseJob,
   retryJob,
 } from '@fleet-dao/harness-store';
 import {
@@ -103,6 +105,8 @@ export type OutcomeKind =
   | 'cancelled'
   | 'uncertain'
   | 'retry'
+  /** 发版重启（release-pause）叫停，退回队列，不算尝试次数。 */
+  | 'released'
   | 'lost'
   | 'already-recorded'
   | 'error';
@@ -405,8 +409,52 @@ export class Dispatcher {
 
       if (lease.state === 'lost') return { ...ids, outcome: 'lost', final: false };
 
-      // 4. 归类：确定没副作用的失败可以重试，其余记下来就停
+      // 3b. 我们自己计划内的停机（发版重启，#3776 法国现场）叫停的：这不是这件活的终局。退回队列、不核验、不抓补丁
+      // （不写 shadow_runs）、交回标非终局，新进程起来按原样再派。工人在叫停之前自己干净退出的照常往下走。
       const result = turn?.result;
+      const stopReason = ac.signal.reason;
+      if (
+        ac.signal.aborted &&
+        stopReason instanceof StopReason &&
+        stopReason.kind === 'release-pause' &&
+        !(result && !result.killed && !result.spawnError)
+      ) {
+        const why = `派工器停机（${stopReason.detail}），退回队列，新进程再派`;
+        await this.#record(
+          sessionId,
+          {
+            taskId,
+            runId,
+            attempt: job.attempts,
+            final: false,
+            willRetry: true,
+            outcome: 'released',
+            verdict: 'unknown',
+            reasons: [why],
+            workerSessionId: turn?.sessionId ?? null,
+            evidence: {
+              worker: result
+                ? {
+                    exitCode: result.exitCode,
+                    signal: result.signal,
+                    killed: result.killed ?? null,
+                    lastStep: result.lastStep,
+                    wallMs: result.wallMs,
+                  }
+                : null,
+            },
+          },
+          redact,
+        );
+        try {
+          await releaseJob(db, job, why);
+        } catch (err) {
+          if (!(err instanceof LostClaimError)) throw err;
+        }
+        return { ...ids, outcome: 'released', final: false };
+      }
+
+      // 4. 归类：确定没副作用的失败可以重试，其余记下来就停
       const noEffect =
         error instanceof ShadowSelfCheckError ||
         (error !== undefined && phase === 'prepare') ||

@@ -10,7 +10,7 @@
 - 对外副作用只经 outbox，至少一次投递：领取用 `FOR UPDATE SKIP LOCKED` 加租约和领取令牌，收尾要令牌对得上（`LostClaimError`）；结果不知道记 `unknown`、到点领出来先查证，不盲重试；令牌（所有权）对不上进 `dead`；重试到上限进 `dead`。
 - 读都有页上限 `PAGE_MAX`，按游标往后读，读的行数和页大小成正比。
 - 时刻按数据库 `now()` 判，不用应用时钟。
-- 调度器（`src/scheduler.ts`，#3774，不用 Temporal）：一行 `jobs` 一件到点要做的事，`key` 唯一即幂等。领取同 outbox（SKIP LOCKED、租约、令牌），续租靠 `heartbeat`，回 `lost` 或 `cancelled` 的要立刻停手。没在 `queue_limits` 登记的队列不让领（`NoQueueLimitError`）：停机后积压一起到期，靠它的同时在领上限和每分钟上限限住追赶速度。子活截止不晚于父活，过截止不领、进 `dead`；取消顺着 `parent_key` 一路传下去。领的次数到 `max_attempts` 还没做完（毒活）进 `dead`。`claimJobs` 的 `onDead` 在同一个事务里拿到这次收成 `dead` 的活（给派活的一方记交回），它抛错整次领取回滚。故障矩阵里库断线、只读、重启这几类在 CI 的 pg 台和法国真机测，不在 PGlite。
+- 调度器（`src/scheduler.ts`，#3774，不用 Temporal）：一行 `jobs` 一件到点要做的事，`key` 唯一即幂等。领取同 outbox（SKIP LOCKED、租约、令牌），续租靠 `heartbeat`，回 `lost` 或 `cancelled` 的要立刻停手。没在 `queue_limits` 登记的队列不让领（`NoQueueLimitError`）：停机后积压一起到期，靠它的同时在领上限和每分钟上限限住追赶速度。子活截止不晚于父活，过截止不领、进 `dead`；取消顺着 `parent_key` 一路传下去。领的次数到 `max_attempts` 还没做完（毒活）进 `dead`。`releaseJob` 是计划内停机（发版）把领着的活退回队列：马上可领，`max_attempts` 加一抵掉这次领取，不算失败、不进 `dead`（#3776）。`claimJobs` 的 `onDead` 在同一个事务里拿到这次收成 `dead` 的活（给派活的一方记交回），它抛错整次领取回滚。故障矩阵里库断线、只读、重启这几类在 CI 的 pg 台和法国真机测，不在 PGlite。
 
 - 影子比对（`src/shadow.ts`，#3776）：批次清单 `shadow_batch_items` 一冻结就不改（同批号再冻结抛 `BatchFrozenError`）；影子产物 `shadow_runs` 必须是清单里的单、基线和清单一样，同一个 `runId` 重放回原行；旧 PR 合并后 `recordCompare` 拿合并 diff 评一次分写 `shadow_compare`，评过的不重算不覆盖。两边 diff 先按文件规范化（去掉所有空白、空行不算）再比文件和改动行的重合。补丁只存这里，不推、任何自动流程不消费。`sweepCompare` 按产物号一页一轮给没评分的产物评分：读旧 PR 合并结果的函数由部署传进来（只读 GitHub），没合并、读失败的留到下一轮，不当成评过。防「影子静默不跑」：`shadowSilence` 看一批里还有没产物的单、最近一条产物（没有按冻结时刻）离数据库 `now()` 超过 24 小时就回 `silent`。
 
