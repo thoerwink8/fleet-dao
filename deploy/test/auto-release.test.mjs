@@ -1081,6 +1081,12 @@ test('出网关单元（#3803）：不进影子 slice，听的口和名单路径
     .filter((l) => l && !l.startsWith('#'));
   assert.ok(hosts.length > 0, 'enforce 下名单空着等于全断');
   for (const h of hosts) assert.doesNotMatch(h, /github|githubusercontent/i);
+  // 读回：机器上的名单和仓里的逐字节比，不一样判红（enforce 下名单就是放行范围，手改过要看得出来）
+  const readback = /^readback_fleet2_egress\(\) \{\n([\s\S]*?)\n\}/m.exec(france)?.[1] ?? '';
+  assert.match(
+    readback,
+    /if ! cmp -s -- "\$FLEET2_EGRESS_ALLOW" "\$DEPLOY_DIR\/france\/fleet2-egress\.allow"; then\n\s+red /,
+  );
 });
 
 test('新内核单元（#3811）：不进影子 slice、口和令牌文件跟 france.sh 的变量一样、以会话用户起工人', () => {
