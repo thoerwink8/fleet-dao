@@ -1021,7 +1021,8 @@ setup_fleet2_egress() {
   step "新内核影子工人的出网关（$FLEET2_EGRESS_UNIT，只听 127.0.0.1:$FLEET2_EGRESS_PORT，名单 $FLEET2_EGRESS_ALLOW）"
   local unit_changed=0 allow_changed=0
   # /etc/fleet-dao 由人工档建（root:fleet 750），这里不再动它的权限
-  put_file "$FLEET2_EGRESS_ALLOW" root:root 644 "$(<"$DEPLOY_DIR/france/fleet2-egress.allow")"
+  # 单元以 fleet 读它；/etc/fleet-dao 下的文件读回一律要求其他人无权限，所以 root:fleet 640
+  put_file "$FLEET2_EGRESS_ALLOW" root:fleet 640 "$(<"$DEPLOY_DIR/france/fleet2-egress.allow")"
   if ((WROTE)); then allow_changed=1; fi
   put_file "/etc/systemd/system/$FLEET2_EGRESS_UNIT" root:root 644 "$(<"$DEPLOY_DIR/france/$FLEET2_EGRESS_UNIT")"
   if ((WROTE)); then
