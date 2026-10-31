@@ -263,6 +263,8 @@ importers:
         specifier: ^0.5.8
         version: 0.5.8
 
+  packages/harness-egress: {}
+
   packages/harness-runner: {}
 
   packages/harness-store:

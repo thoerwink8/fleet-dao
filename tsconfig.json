@@ -26,6 +26,9 @@
       "path": "packages/harness-dispatch"
     },
     {
+      "path": "packages/harness-egress"
+    },
+    {
       "path": "packages/core"
     },
     {
