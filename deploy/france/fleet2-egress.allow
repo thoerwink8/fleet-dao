@@ -3,3 +3,5 @@
 # 来源：2026-10-31 learn 模式跑了两批影子单（20 件），工人只连过模型服务的区域入口（asia.route.reclaude.ai）和一次 api2.cursor.sh；
 # 后者影子工人用不上，不放。GitHub 不放：影子工人只读本机的工作目录，看得到 GitHub 就能翻到已合并的答案（#3776）。
 .route.reclaude.ai
+# Grok 命令行连的模型服务入口（#3842）：2026-10-31 在影子 slice 里真起 grok 1.0.70，出网关日志里被拒的只有这一个
+cli-chat-proxy.grok.com

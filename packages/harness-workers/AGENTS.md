@@ -1,6 +1,8 @@
 # packages/harness-workers：新内核的工人槽位
 
-决定 0124 的新内核（母单 #3770，第 3 片 #3775）里起工人的那一层。第一个槽位是 Claude Code（经 reclaude）；进程起停交给 `harness-runner`，事件写进 `harness-store` 的 `fleet2.events`。不依赖旧包，从旧 `adapters/src/{env,claude-code/args}.ts` 复制改写。
+决定 0124 的新内核（母单 #3770，第 3 片 #3775）里起工人的那一层。两个壳：Claude Code（经 reclaude）和 Grok 命令行（#3842，`src/grok.ts`），槽位按 `shell` 选；进程起停交给 `harness-runner`，事件写进 `harness-store` 的 `fleet2.events`。不依赖旧包，从旧 `adapters/src/{env,claude-code/args,grok/args}.ts` 复制改写。
+
+- Grok 壳：grok 没有 `--mcp-config`，MCP 只认 `config.toml`。每轮把 `GROK_HOME` 指到临时目录下的 `grok-home`，里面一份 0600 的 `config.toml` 只挂内核的 MCP（令牌只在这个文件里），登录态用 `GROK_AUTH_PATH` 指回会话用户家里的 `~/.grok/auth.json`；提示词写成临时目录里的文件走 `--prompt-file`（Node 给的 stdin 是 socketpair，grok 读 `/dev/stdin` 报 ENXIO）。无人值守那几个环境变量见 `GROK_UNATTENDED_ENV`。输出是 `streaming-json`：判帧用 `harness-runner` 的 `classifyGrokLine`，过程用 `GrokTranscriptParser` 拆成和 Claude 同一套 `transcript.*`（话一字一帧，攒到下一个非话帧成一条；进程没走到 end 被杀时 `close()` 把攒着的吐出来）。
 
 ## 不变量
 

@@ -1102,9 +1102,16 @@ test('新内核单元（#3811）：不进影子 slice、口和令牌文件跟 fr
   assert.match(unit, new RegExp(`^ConditionPathExists=${v('ENGINE_APP_JSON')}$`, 'm'));
   assert.match(unit, /^Environment=FLEET2_SANDBOX=scope$/m);
   const cmd = /FLEET2_WORKER_COMMAND=(\[.*?\])'/.exec(unit)?.[1] ?? '';
-  const [wrapper] = JSON.parse(cmd);
+  const [wrapper, bin] = JSON.parse(cmd);
   assert.equal(wrapper, '/srv/fleet-dao-releases/current/deploy/france/fleet2-worker.sh');
   assert.ok(existsSync(new URL('../france/fleet2-worker.sh', import.meta.url)), '执行体前缀脚本要在仓里');
+  // 执行体要是前缀脚本放行的两个之一，壳要和执行体对得上（#3842）
+  const worker = readFileSync(new URL('../france/fleet2-worker.sh', import.meta.url), 'utf8');
+  assert.ok(worker.includes(bin), `前缀脚本要放行执行体 ${bin}`);
+  const shell = /^Environment=.*\bFLEET2_SHELL=(\S+)/m.exec(unit)?.[1] ?? 'claude-code';
+  assert.equal(bin.endsWith('/grok'), shell === 'grok', '壳和执行体对不上');
+  if (shell === 'grok')
+    assert.match(unit, /FLEET2_GROK_AUTH=\/home\/fleet-agent-carpool\/\.grok\/auth\.json(\s|$)/m);
 });
 
 test('新驾驶舱只读口单元（#3818）：地址口和 france.sh 的变量一样、读旧后端的密钥文件、以 fleet 跑、不限重启次数', () => {

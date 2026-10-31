@@ -1,0 +1,13 @@
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep"]}
+{"type":"thought","data":"先看看文件"}
+{"type":"text","data":"我先"}
+{"type":"text","data":"读一下 notes.md。"}
+{"type":"tool_call","toolCallId":"call-1","title":"read_file","kind":"read","status":"pending","toolName":"read_file","rawInput":{"target_file":"/w/notes.md"},"content":[],"locations":[]}
+{"type":"tool_call_update","toolCallId":"call-1","status":"in_progress","content":[],"locations":[]}
+{"type":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"1→# notes\n"}}],"rawOutput":{"type":"ReadFile","FileContent":{"content":"1→# notes\n"}},"locations":[]}
+{"type":"usage","usage":{"input_tokens":100,"output_tokens":10}}
+{"type":"tool_call","toolCallId":"call-2","title":"run_terminal_command","kind":"execute","status":"pending","toolName":"run_terminal_command","rawInput":{"command":"echo __TOKEN__ && ls missing-dir","description":"列目录"},"content":[],"locations":[]}
+{"type":"tool_call_update","toolCallId":"call-2","status":"completed","content":[{"type":"content","content":{"type":"text","text":"__TOKEN__\nls: cannot access 'missing-dir'\n"}}],"rawOutput":{"type":"Bash","exit_code":2,"output_for_prompt":"exit: 2"},"locations":[]}
+{"type":"text","data":"目录不在，"}
+{"type":"text","data":"我改好了。"}
+{"type":"end","stopReason":"end_turn","sessionId":"__SID__","usage":{"input_tokens":200,"output_tokens":20},"num_turns":2,"modelUsage":{"grok-4.7-build":{"inputTokens":200,"outputTokens":20}}}

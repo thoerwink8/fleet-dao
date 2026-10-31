@@ -38,6 +38,7 @@ import {
   type ShadowProbes,
   ShadowSelfCheckError,
   type WorkerSandbox,
+  type WorkerShell,
   type WorkerTurnResult,
 } from '@fleet-dao/harness-workers';
 import { z } from 'zod';
@@ -70,8 +71,12 @@ export interface DispatcherOptions {
   db: Db;
   /** 工人连回来的 MCP 地址（不带令牌）；令牌每个工人现发。 */
   mcpUrl: string;
-  /** 执行体命令前缀：生产是 reclaude；测试换假执行体。 */
+  /** 执行体命令前缀：生产是执行体前缀加 reclaude 或 grok；测试换假执行体。 */
   command: readonly string[];
+  /** 工人的壳（#3842），不给是 claude-code。 */
+  shell?: WorkerShell;
+  /** shell=grok 时 grok 登录态文件的绝对路径。 */
+  grokAuthPath?: string;
   model: string;
   permissionMode: ClaudePermissionMode;
   prepareWorkspace(req: SpawnRequest, ctx: { runId: string; sessionId: string }): Promise<Workspace>;
@@ -387,6 +392,8 @@ export class Dispatcher {
           db,
           runId,
           command: o.command,
+          ...(o.shell ? { shell: o.shell } : {}),
+          ...(o.grokAuthPath ? { grokAuthPath: o.grokAuthPath } : {}),
           model: o.model,
           permissionMode: o.permissionMode,
           prompt: buildWorkerPrompt(request),

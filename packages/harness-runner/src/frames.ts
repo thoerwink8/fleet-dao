@@ -69,3 +69,40 @@ export function classifyClaudeLine(line: string): Frame {
   if (msg.type === 'result') return { ...OTHER, kind: 'result', ...sid, step: '收尾（result）' };
   return { ...OTHER, ...sid, step: `认不出的事件 ${String(msg.type ?? '')}` };
 }
+
+/**
+ * Grok 命令行 `--output-format streaming-json` 的一行（#3842，形状照旧 adapters/test/fixtures/grok 的法国真跑记录）：
+ * text / thought 是一字一帧的增量，都算在干活；tool_call 开一个工具，tool_call_update 到 completed / failed 才算收；
+ * end 是最后一帧，带会话号（-s 给的那个）。usage、available_commands、plan 不算实质事件。
+ */
+export function classifyGrokLine(line: string): Frame {
+  let msg: { type?: unknown; status?: unknown; toolName?: unknown; title?: unknown; sessionId?: unknown };
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return { ...OTHER, step: `非事件输出：${line.slice(0, 60)}` };
+  }
+  if (!msg || typeof msg !== 'object') return OTHER;
+  switch (msg.type) {
+    case 'text':
+      return { kind: 'assistant', substantive: true, toolsOpened: 0, toolsClosed: 0, step: '助手回话' };
+    case 'thought':
+      return { kind: 'assistant', substantive: true, toolsOpened: 0, toolsClosed: 0, step: '思考' };
+    case 'tool_call': {
+      const name = String(msg.toolName ?? msg.title ?? '?');
+      return { kind: 'tool_use', substantive: true, toolsOpened: 1, toolsClosed: 0, step: `调工具 ${name}` };
+    }
+    case 'tool_call_update':
+      return msg.status === 'completed' || msg.status === 'failed'
+        ? { kind: 'tool_result', substantive: true, toolsOpened: 0, toolsClosed: 1, step: '工具结果' }
+        : { ...OTHER, step: '工具进行中' };
+    case 'end': {
+      const sid = typeof msg.sessionId === 'string' ? { sessionId: msg.sessionId } : {};
+      return { ...OTHER, kind: 'result', ...sid, step: '收尾（end）' };
+    }
+    case 'error':
+      return { ...OTHER, step: '报错（error）' };
+    default:
+      return { ...OTHER, step: `认不出的事件 ${String(msg.type ?? '')}` };
+  }
+}
