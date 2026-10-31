@@ -120,6 +120,31 @@ export async function freezeBatch(db: Db, batchId: string, items: readonly Batch
   });
 }
 
+/** 还没收完的批次（内核每轮只看这些）：有单没跑出产物，或有产物还没评分。都收完就不再读它。 */
+export async function activeBatches(db: Db, limit = 20): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ batchId: shadowBatchItems.batchId })
+    .from(shadowBatchItems)
+    .where(
+      sql`not exists (
+        select 1 from fleet2.shadow_runs r
+        where r.batch_id = fleet2.shadow_batch_items.batch_id
+          and r.repo = fleet2.shadow_batch_items.repo
+          and r.issue = fleet2.shadow_batch_items.issue
+      ) or exists (
+        select 1 from fleet2.shadow_runs r
+        left join fleet2.shadow_compare c on c.shadow_run_id = r.id
+        where r.batch_id = fleet2.shadow_batch_items.batch_id
+          and r.repo = fleet2.shadow_batch_items.repo
+          and r.issue = fleet2.shadow_batch_items.issue
+          and c.shadow_run_id is null
+      )`,
+    )
+    .orderBy(asc(shadowBatchItems.batchId))
+    .limit(Math.min(limit, PAGE_MAX));
+  return rows.map((r) => r.batchId);
+}
+
 /** 一批的清单，按（仓、单号）往后翻页。 */
 export async function listBatchItems(
   db: Db,
