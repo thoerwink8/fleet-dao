@@ -1064,7 +1064,7 @@ test('装机分档没漏没重：france.sh 和 human-tier.sh 引用的每个仓�
   assert.ok(humanSet.has('deploy/lib/human-tier.sh'));
 });
 
-test('出网关单元（#3803）：不进影子 slice，听的口和名单路径跟 france.sh 的变量一样，先 learn', () => {
+test('出网关单元（#3803）：不进影子 slice，听的口和名单路径跟 france.sh 的变量一样，enforce；名单不放 GitHub', () => {
   const france = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
   const unit = readFileSync(new URL('../france/fleet2-egress.service', import.meta.url), 'utf8');
   const v = (name) => new RegExp(`^${name}=(\\S+)`, 'm').exec(france)?.[1];
@@ -1072,8 +1072,15 @@ test('出网关单元（#3803）：不进影子 slice，听的口和名单路径
   const exec = /^ExecStart=(.+)$/m.exec(unit)?.[1] ?? '';
   assert.match(exec, new RegExp(`--port ${v('FLEET2_EGRESS_PORT')}(\\s|$)`));
   assert.match(exec, new RegExp(`--allowlist ${v('FLEET2_EGRESS_ALLOW')}(\\s|$)`));
-  assert.match(exec, /--mode learn(\s|$)/);
+  assert.match(exec, /--mode enforce(\s|$)/);
   assert.match(unit, new RegExp(`^ConditionPathExists=${v('FLEET2_EGRESS_ALLOW')}$`, 'm'));
+  // 影子工人看得到 GitHub 就能翻到已合并的答案（#3776）
+  const hosts = readFileSync(new URL('../france/fleet2-egress.allow', import.meta.url), 'utf8')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+  assert.ok(hosts.length > 0, 'enforce 下名单空着等于全断');
+  for (const h of hosts) assert.doesNotMatch(h, /github|githubusercontent/i);
 });
 
 test('新内核单元（#3811）：不进影子 slice、口和令牌文件跟 france.sh 的变量一样、以会话用户起工人', () => {

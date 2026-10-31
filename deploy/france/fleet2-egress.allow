@@ -1,3 +1,5 @@
-# 新内核影子工人出网关的名单（#3803，deploy/france/fleet2-egress.service）：一行一个主机名，# 开头是注释；
-# 以点开头（.example.com）匹配它的子域、不含它自己。现在是 learn 模式，名单空着只记不拦：
-# 先在法国跑一批影子单，从 journal 收齐真实主机名，定下名单再切 enforce。
+# 新内核影子工人出网关的名单（#3803，deploy/france/fleet2-egress.service，enforce 模式）：一行一个主机名，# 开头是注释；
+# 以点开头（.example.com）匹配它的子域、不含它自己。名单外的连接一律断开（判定一行 JSON 进 journal）。
+# 来源：2026-10-31 learn 模式跑了两批影子单（20 件），工人只连过模型服务的区域入口（asia.route.reclaude.ai）和一次 api2.cursor.sh；
+# 后者影子工人用不上，不放。GitHub 不放：影子工人只读本机的工作目录，看得到 GitHub 就能翻到已合并的答案（#3776）。
+.route.reclaude.ai
