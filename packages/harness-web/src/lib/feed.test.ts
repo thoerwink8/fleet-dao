@@ -160,7 +160,8 @@ describe('SessionFeed', () => {
     feed.start();
     const s = await until(feed, (x) => x.status === 'failed');
     feed.stop();
-    expect(s.error).toContain('没有权限');
+    expect(s.error).toContain('登录');
+    expect(s.errorStatus).toBe(401);
     expect(calls.length).toBe(1);
     expect(sleeps.length).toBe(0);
   });

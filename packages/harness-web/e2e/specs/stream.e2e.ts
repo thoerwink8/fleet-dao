@@ -2,8 +2,10 @@
 // 每个用例自己一套后端（support/fixtures.ts 的 stack）：断后端 = 停掉 harness-api，开发后端还在、对 /events 回 502；
 // 恢复 = 在原端口把 harness-api 拉起来。库里的事件号是真相，页面渲染出来的事件号必须和它一模一样（不漏、不重、有序）。
 
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { seed } from '../../dev/seed.ts';
-import { dbIds, emitProgress, expect, feedStatus, pageIds, test } from '../support/fixtures.ts';
+import { dbIds, emitProgress, expect, feedStatus, login, pageIds, test } from '../support/fixtures.ts';
 
 const S = 'e2e-live';
 
@@ -139,6 +141,7 @@ test.describe('G4：断后端、续传、resync', () => {
     const TABS = 6;
     await emitProgress(stack, S, 1, 5);
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await login(ctx, stack);
     const pages = await Promise.all(Array.from({ length: TABS }, () => ctx.newPage()));
     await Promise.all(pages.map((p) => openSession(p, stack)));
 
@@ -211,5 +214,149 @@ test.describe('E5：读页后端挂掉时列表轮询退避', () => {
       await page.waitForTimeout(100);
     }
     expect(calls - afterOk).toBe(3); // 每 10 秒一次，30 秒三次
+  });
+});
+
+/** 把一个标签页伪装成「在后台」或「回到前台」：改 visibilityState 并发 visibilitychange（无头浏览器里各页都算可见）。 */
+async function setVisibility(page: import('@playwright/test').Page, v: 'hidden' | 'visible'): Promise<void> {
+  await page.evaluate((state) => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, v);
+}
+
+test.describe('#3818：多标签页只占可见的那几条连接', () => {
+  test('8 个标签页隐藏 7 个，10 秒后还开着的 SSE 不超过 1 条，可见的那个照常实时', async ({
+    browser,
+    stack,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop-1440', '多标签页只在桌面跑一遍');
+    test.setTimeout(120_000);
+    await emitProgress(stack, S, 1, 3);
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await login(ctx, stack);
+    // 浏览器对同一域名最多 6 条 HTTP/1.1 连接：8 个标签页同时开，后面的要排队——这正是后台释放要解决的
+    const pages: import('@playwright/test').Page[] = [];
+    for (let i = 0; i < 8; i++) {
+      const p = await ctx.newPage();
+      void p.goto(`${stack.url}/next/s/${S}`).catch(() => undefined);
+      pages.push(p);
+    }
+    await expect.poll(() => stack.stats.openSse, { timeout: 30_000 }).toBeGreaterThanOrEqual(1);
+    const visible = pages[7];
+    if (!visible) throw new Error('没有可见页');
+    for (const p of pages.slice(0, 7)) await setVisibility(p, 'hidden');
+    await expect.poll(() => stack.stats.openSse, { timeout: 30_000 }).toBeLessThanOrEqual(1);
+    // 释放后可见页（如果刚才在排队）连上，且开着的始终不超过 1 条
+    await expect(feedStatus(visible)).toHaveAttribute('data-feed-status', 'live', { timeout: 30_000 });
+    await expect.poll(() => pageIds(visible)).toEqual(await dbIds(stack, S));
+    await emitProgress(stack, S, 4, 1);
+    await expect.poll(() => pageIds(visible)).toEqual(await dbIds(stack, S));
+    expect(stack.stats.openSse).toBeLessThanOrEqual(1);
+    await ctx.close();
+  });
+
+  test('隐藏的标签页回到前台：带 Last-Event-ID 续上，隐藏期间写的事件不漏不重', async ({
+    browser,
+    stack,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop-1440', '多标签页只在桌面跑一遍');
+    test.setTimeout(120_000);
+    await emitProgress(stack, S, 1, 4);
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await login(ctx, stack);
+    const page = await ctx.newPage();
+    await openSession(page, stack);
+    await expect.poll(() => pageIds(page)).toEqual(await dbIds(stack, S));
+    expect(stack.stats.openSse).toBe(1);
+
+    await setVisibility(page, 'hidden');
+    await expect.poll(() => stack.stats.openSse, { timeout: 30_000 }).toBe(0); // 10 秒后放掉
+    await emitProgress(stack, S, 5, 7); // 后台期间写进库
+    const before = await pageIds(page);
+    expect(before.length).toBeLessThan((await dbIds(stack, S)).length); // 后台没在收
+
+    await setVisibility(page, 'visible');
+    await expect(feedStatus(page)).toHaveAttribute('data-feed-status', 'live', { timeout: 30_000 });
+    const truth = await dbIds(stack, S);
+    await expect.poll(() => pageIds(page)).toEqual(truth);
+    expect(new Set(await pageIds(page)).size).toBe(truth.length);
+    await expect(feedStatus(page)).toHaveAttribute('data-resyncs', '0'); // 补得全，不用整页重取
+    expect(stack.stats.openSse).toBe(1);
+    await ctx.close();
+  });
+});
+
+test.describe('#3818：登录和翻页', () => {
+  test.describe('没带登录 Cookie', () => {
+    test.use({ loggedIn: false });
+    test('401：会话列表和会话页都给登录入口（指向旧驾驶舱的登录），不反复重试', async ({ page, stack }) => {
+      await seed(stack);
+      let listCalls = 0;
+      await page.route('**/next/api/sessions', async (route) => {
+        listCalls++;
+        await route.continue();
+      });
+      await page.goto(`${stack.url}/next/`);
+      const feishu = page.getByRole('link', { name: '用飞书登录' });
+      await expect(feishu).toBeVisible();
+      await expect(feishu).toHaveAttribute('href', '/auth/feishu/login?next=%2Fnext%2F');
+      await expect(page.getByRole('link', { name: '账密登录' })).toHaveAttribute('href', '/login');
+      await page.waitForTimeout(1500);
+      expect(listCalls).toBe(1);
+      await page.goto(`${stack.url}/next/s/cmd-demo-login-fix`);
+      await expect(page.getByRole('link', { name: '用飞书登录' }).first()).toBeVisible();
+      expect(stack.stats.sseAttempts.length).toBeLessThanOrEqual(1);
+    });
+  });
+
+  test('退出（session_version 加 1）后，开着的流在一个周期内断开，页面给登录入口', async ({
+    page,
+    stack,
+  }) => {
+    await emitProgress(stack, S, 1, 2);
+    await openSession(page, stack);
+    await stack.logoutAll();
+    await expect(feedStatus(page)).toHaveAttribute('data-feed-status', 'failed', { timeout: 30_000 });
+    await expect(page.getByRole('link', { name: '用飞书登录' }).first()).toBeVisible();
+  });
+
+  test('会话列表「加载更多」：翻出更老的，不重不漏', async ({ page, stack }) => {
+    for (let i = 0; i < 35; i++) {
+      await stack.emit(`page-${String(i).padStart(2, '0')}`, 'worker.progress.reported', {
+        summary: `s${i}`,
+      });
+    }
+    await page.goto(`${stack.url}/next/`);
+    await expect(page.getByRole('link', { name: /page-34/ })).toBeVisible();
+    const items = page.locator('section[aria-label="会话列表"] li');
+    await expect(items).toHaveCount(30);
+    await page.getByRole('button', { name: '加载更多' }).click();
+    await expect(items).toHaveCount(35);
+    await expect(page.getByRole('button', { name: '加载更多' })).toBeHidden();
+    const ids = await items.evaluateAll((els) => els.map((e) => e.querySelector('a')?.getAttribute('href')));
+    expect(new Set(ids).size).toBe(35);
+    // 轮询刷新最新一页后，翻出来的还在
+    await stack.emit('page-00', 'worker.progress.reported', { summary: 'bump' });
+    await expect(items.first()).toContainText('page-00');
+    await expect(items).toHaveCount(35);
+  });
+});
+
+test.describe('#3818：打包产物里没有会话令牌头名', () => {
+  test('dist/ 里搜不到会话令牌的头名和 cookie 名', () => {
+    const dist = resolve(import.meta.dirname, '../../dist');
+    const walk = (dir: string): string[] =>
+      readdirSync(dir).flatMap((n) => {
+        const p = join(dir, n);
+        return statSync(p).isDirectory() ? walk(p) : [p];
+      });
+    const files = walk(dist).filter((f) => /\.(js|css|html|json|map)$/.test(f));
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const text = readFileSync(f, 'utf8').toLowerCase();
+      expect(text, f).not.toContain('x-fleet-session-token');
+      expect(text, f).not.toContain('fleet_session_token');
+    }
   });
 });

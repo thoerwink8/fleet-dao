@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { events } from '@fleet-dao/harness-store';
-import { test as base, expect, type Page } from '@playwright/test';
+import { type BrowserContext, test as base, expect, type Page } from '@playwright/test';
 import { asc, eq } from 'drizzle-orm';
 import { type Stack, startStack } from '../../dev/stack.ts';
 
@@ -14,10 +14,22 @@ interface Fixtures {
 interface Options {
   /** SSE 断线补发的上限；调小用来逼出 resync。 */
   replayCap: number | undefined;
+  /** false = 不带登录 Cookie（测 401 的登录入口）。 */
+  loggedIn: boolean;
+}
+
+/** 给浏览器上下文塞一个签好的创始人登录 Cookie（部署形态里这个 Cookie 是旧驾驶舱登录时发的）。 */
+export async function login(ctx: BrowserContext, stack: Stack): Promise<void> {
+  await ctx.addCookies([{ ...stack.cookie(), url: stack.url }]);
 }
 
 export const test = base.extend<Fixtures & Options>({
   replayCap: [undefined, { option: true }],
+  loggedIn: [true, { option: true }],
+  context: async ({ context, stack, loggedIn }, use) => {
+    if (loggedIn) await login(context, stack);
+    await use(context);
+  },
   stack: async ({ replayCap }, use) => {
     const stack = await startStack({
       distDir: resolve(import.meta.dirname, '../../dist'),

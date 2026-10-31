@@ -1,6 +1,6 @@
-// 本机开发和 e2e 用的整套后端：PGlite（跑 fleet2 的真迁移）+ harness-api（真接口层）+ 一个很薄的前端后端（BFF）。
-// BFF 做三件事：列会话（接口层按令牌只认一个会话，没有“列全部”）、按会话代带令牌（浏览器里没有令牌）、
-// 在 dist/ 存在时顺带把打包好的前端放在 /next/ 下。它只在开发和 e2e 里用，不是部署形态——部署怎么接见 PR 里的后续单。
+// 本机开发和 e2e 用的整套后端：PGlite（跑 fleet2 的真迁移，外加一张最小的 public.users）+ 真的驾驶舱口（harness-api 的 createCockpitApi，
+// 部署用的就是这份代码）+ 一个只做两件事的前门（相当于香港 nginx）：/next/api/* 原样转给驾驶舱口，dist/ 存在时把打包好的前端放在 /next/ 下。
+// 前门不带任何凭据、不认识会话令牌：浏览器带的是登录 Cookie，由驾驶舱口自己验。e2e 用测试密钥签一个 Cookie 塞进浏览器。
 // 生产代码不要 import 这里。
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import {
@@ -13,19 +13,30 @@ import {
 import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
-import { appendToSession, createHarnessApi, type HarnessApi, issueToken } from '@fleet-dao/harness-api';
+import {
+  appendToSession,
+  type CockpitApi,
+  createCockpitApi,
+  type SessionClaims,
+  signSessionCookie,
+} from '@fleet-dao/harness-api';
 import { type Db, MIGRATION_OPTIONS } from '@fleet-dao/harness-store';
 import * as schema from '@fleet-dao/harness-store/schema';
-import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
+
+/** 测试密钥和测试用户：只在开发和 e2e 的临时库里存在。 */
+export const DEV_SESSION_SECRET = 'dev-only-session-secret-0123456789abcdef';
+export const DEV_FOUNDER_ID = '00000000-0000-4000-8000-0000000000f1';
+/** 本机 http 下没法用 __Host- 前缀（要 Secure），所以开发和 e2e 用不带前缀的名字；线上默认的名字由驾驶舱口的默认值管。 */
+export const DEV_COOKIE_NAME = 'fleet_session';
 
 export interface StackOptions {
   /** 持久化目录；不给就是内存库，进程退出即没。 */
   dataDir?: string;
-  /** BFF 端口；0 = 随机。 */
+  /** 前门端口；0 = 随机。 */
   port?: number;
-  /** 接口层端口；0 = 随机（重启时沿用上一次的端口）。 */
+  /** 驾驶舱口端口；0 = 随机（重启时沿用上一次的端口）。 */
   apiPort?: number;
   /** 打包好的前端目录；存在就在 /next/ 下放出来。 */
   distDir?: string;
@@ -41,13 +52,19 @@ export interface Stack {
   apiUrl(): string;
   /** 往会话追加一条事件（和真工人走同一个 appendToSession）。 */
   emit(sessionId: string, type: string, payload: Record<string, unknown>): Promise<number>;
-  /** 停掉接口层（模拟后端挂了）；BFF 还在，对 /events 和 /history 回 502。 */
+  /** 签一个创始人的登录 Cookie（e2e 塞进浏览器）；overrides 造过期、版本不对等。 */
+  cookie(overrides?: Partial<SessionClaims>): { name: string; value: string };
+  /** 退出：把创始人的 session_version 加 1（已签发的 Cookie 作废）。 */
+  logoutAll(): Promise<void>;
+  /** 停掉驾驶舱口（模拟后端挂了）；前门还在，对 /next/api 回 502。 */
   stopApi(): Promise<void>;
-  /** 在原端口重新拉起接口层。 */
+  /** 在原端口重新拉起驾驶舱口。 */
   startApi(): Promise<void>;
   stats: {
-    /** BFF 收到的 SSE 连接请求（含失败的）。每个元素是到达时刻（ms）。 */
+    /** 前门收到的 SSE 连接请求（含失败的）。每个元素是到达时刻（ms）。 */
     sseAttempts: number[];
+    /** 现在开着的 SSE 连接数。 */
+    openSse: number;
     historyFetches: number;
   };
   close(): Promise<void>;
@@ -63,35 +80,37 @@ const MIME: Record<string, string> = {
   '.json': 'application/json',
 };
 
-type Row = Record<string, unknown>;
-function rowsOf(r: unknown): Row[] {
-  return Array.isArray(r) ? (r as Row[]) : ((r as { rows?: Row[] }).rows ?? []);
-}
-
 export async function createDb(dataDir?: string): Promise<{ db: Db; pg: PGlite }> {
   const pg = dataDir ? new PGlite(dataDir) : new PGlite();
   const db = drizzle(pg, { schema });
   await migrate(db, MIGRATION_OPTIONS);
+  // 旧库的 public.users：驾驶舱口只读 id、role、active、session_version，这里建最小的一张，放一位创始人
+  await pg.exec(`
+    create table if not exists public.users (
+      id uuid primary key, role text not null, active boolean not null default true,
+      session_version integer not null default 0
+    );
+    insert into public.users (id, role) values ('${DEV_FOUNDER_ID}', 'founder') on conflict do nothing;
+  `);
   return { db: db as unknown as Db, pg };
 }
 
 export async function startStack(options: StackOptions = {}): Promise<Stack> {
   const { db, pg } = await createDb(options.dataDir);
-  const stats: Stack['stats'] = { sseAttempts: [], historyFetches: 0 };
-  const tokens = new Map<string, string>();
-  let api: HarnessApi | null = null;
+  const stats: Stack['stats'] = { sseAttempts: [], openSse: 0, historyFetches: 0 };
+  let api: CockpitApi | null = null;
   let apiPort = options.apiPort ?? 0;
 
-  const makeApi = () =>
-    createHarnessApi({
+  const startApi = async (): Promise<void> => {
+    if (api) return;
+    api = createCockpitApi({
       db,
+      sessionSecret: DEV_SESSION_SECRET,
+      cookieName: DEV_COOKIE_NAME,
       pollMs: options.pollMs ?? 500,
       heartbeatMs: options.heartbeatMs ?? 15_000,
       ...(options.replayCap !== undefined ? { replayCap: options.replayCap } : {}),
     });
-  const startApi = async (): Promise<void> => {
-    if (api) return;
-    api = makeApi();
     apiPort = await api.listen(apiPort);
   };
   const stopApi = async (): Promise<void> => {
@@ -101,48 +120,35 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
   };
   await startApi();
 
-  async function tokenFor(sessionId: string): Promise<string> {
-    let t = tokens.get(sessionId);
-    if (!t) {
-      t = (await issueToken(db, sessionId, 'commander')).token;
-      tokens.set(sessionId, t);
-    }
-    return t;
-  }
-
-  async function listSessions(): Promise<unknown> {
-    const rows = rowsOf(
-      await db.execute(sql`
-        select s.stream_id, s.n, s.last_id, s.last_at, e.type as last_type, e.payload as last_payload
-        from (
-          select stream_id, count(*)::int as n, max(id) as last_id, max(created_at) as last_at
-          from fleet2.events where stream_id like 'session:%' group by stream_id
-        ) s join fleet2.events e on e.id = s.last_id
-        order by s.last_at desc, s.last_id desc limit 100`),
-    );
+  function cookie(overrides: Partial<SessionClaims> = {}): { name: string; value: string } {
+    const iat = Math.floor(Date.now() / 1000);
     return {
-      sessions: rows.map((r) => ({
-        id: String(r.stream_id).slice('session:'.length),
-        eventCount: Number(r.n),
-        lastEventId: Number(r.last_id),
-        lastAt: new Date(r.last_at as string | Date).toISOString(),
-        lastType: String(r.last_type),
-        lastPayload: (r.last_payload ?? {}) as Record<string, unknown>,
-      })),
+      name: DEV_COOKIE_NAME,
+      value: signSessionCookie(DEV_SESSION_SECRET, {
+        uid: DEV_FOUNDER_ID,
+        sid: 'dev-sid',
+        iat,
+        exp: iat + 3600,
+        m: 'dev-login',
+        v: 0,
+        ...overrides,
+      }),
     };
   }
 
-  function proxy(req: IncomingMessage, res: ServerResponse, path: string, token: string): void {
+  /** 原样转给驾驶舱口，只带 cookie / accept / last-event-id 三个头。 */
+  function proxy(req: IncomingMessage, res: ServerResponse, path: string): void {
+    const h = req.headers;
     const up = httpRequest(
       {
         host: '127.0.0.1',
         port: apiPort,
         path,
-        method: 'GET',
+        method: req.method ?? 'GET',
         headers: {
-          'x-fleet-session-token': token,
-          accept: String(req.headers.accept ?? '*/*'),
-          ...(req.headers['last-event-id'] ? { 'last-event-id': String(req.headers['last-event-id']) } : {}),
+          ...(h.cookie ? { cookie: String(h.cookie) } : {}),
+          accept: String(h.accept ?? '*/*'),
+          ...(h['last-event-id'] ? { 'last-event-id': String(h['last-event-id']) } : {}),
         },
       },
       (ur) => {
@@ -161,28 +167,32 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     up.end();
   }
 
-  const SESSION_ID = /^[A-Za-z0-9._:-]{1,80}$/;
-
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const p = url.pathname;
-    if (p === '/next/api/sessions' && req.method === 'GET') {
+    // 本机开发免登录入口：打开它就拿到创始人的登录 Cookie（线上的登录在旧驾驶舱）
+    if (p === '/next/dev-login') {
+      const c = cookie();
       return void res
-        .writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        .end(JSON.stringify(await listSessions()));
+        .writeHead(302, {
+          'set-cookie': `${c.name}=${c.value}; Path=/; HttpOnly; SameSite=Lax`,
+          location: '/next/',
+        })
+        .end();
     }
-    const m = /^\/next\/api\/sessions\/([^/]+)\/(events|history)$/.exec(p);
-    if (m) {
-      const id = decodeURIComponent(m[1] ?? '');
-      if (!SESSION_ID.test(id)) return void res.writeHead(404).end('没有这个会话');
-      const kind = m[2];
-      if (kind === 'events') stats.sseAttempts.push(Date.now());
-      else stats.historyFetches++;
+    if (p.startsWith('/next/api/')) {
+      const events = /^\/next\/api\/sessions\/[^/]+\/events$/.test(p);
+      if (events) {
+        stats.sseAttempts.push(Date.now());
+        stats.openSse++;
+        res.on('close', () => {
+          stats.openSse--;
+        });
+      } else if (/\/history$/.test(p)) stats.historyFetches++;
       if (!api)
         return void res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' }).end('后端暂时连不上');
-      return proxy(req, res, `/sessions/${encodeURIComponent(id)}/${kind}${url.search}`, await tokenFor(id));
+      return proxy(req, res, `${p}${url.search}`);
     }
-    if (p.startsWith('/next/api/')) return void res.writeHead(404).end('没有这个路径');
     // 静态文件（打包好的前端）
     if (options.distDir && p.startsWith('/next/')) {
       const rel = normalize(decodeURIComponent(p.slice('/next/'.length))).replace(/^(\.\.[\\/])+/, '');
@@ -216,6 +226,12 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     async emit(sessionId, type, payload) {
       const ev = await appendToSession(db, sessionId, type as never, payload);
       return ev.id;
+    },
+    cookie,
+    async logoutAll() {
+      await pg.exec(
+        `update public.users set session_version = session_version + 1 where id = '${DEV_FOUNDER_ID}'`,
+      );
     },
     stopApi,
     startApi,

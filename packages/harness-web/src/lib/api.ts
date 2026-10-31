@@ -1,9 +1,9 @@
 // 接口层的前端口：同源，开发时 Vite 代理、部署时由门面转到接口服务。浏览器里没有令牌——令牌由服务端按会话代带。
-import type { HistoryPage, SessionSummary } from './types';
+import type { HistoryPage, SessionsPage } from './types';
 
 export const API_BASE: string = import.meta.env.VITE_API_BASE ?? `${import.meta.env.BASE_URL}api`;
 
-/** 这类错重试没用（令牌无效、会话不存在、请求本身不对）：页面直接说原因，不退避重连。 */
+/** 这类错重试没用（没登录、不在白名单、会话不存在、请求本身不对）：页面直接说原因，不退避重连。 */
 export class FatalApiError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -14,8 +14,8 @@ export class FatalApiError extends Error {
 }
 
 export function explainStatus(status: number): string {
-  if (status === 401) return '没有权限看这个会话（令牌无效或已撤销）。';
-  if (status === 403) return '令牌不属于这个会话。';
+  if (status === 401) return '还没登录，或登录已过期。';
+  if (status === 403) return '这个账号没有查看权限。';
   if (status === 404) return '没有这个会话。';
   if (status === 400) return '请求不合规矩，请刷新页面再试。';
   return `服务返回了 ${status}。`;
@@ -56,8 +56,28 @@ export function eventsUrl(base: string, sessionId: string): string {
   return `${base}/sessions/${encodeURIComponent(sessionId)}/events`;
 }
 
-export function fetchSessions(signal?: AbortSignal): Promise<{ sessions: SessionSummary[] }> {
-  return getJson(`${API_BASE}/sessions`, signal);
+export function sessionsUrl(base: string, q: { before?: number; limit?: number } = {}): string {
+  const p = new URLSearchParams();
+  if (q.limit !== undefined) p.set('limit', String(q.limit));
+  if (q.before !== undefined) p.set('before', String(q.before));
+  const qs = p.toString();
+  return `${base}/sessions${qs ? `?${qs}` : ''}`;
 }
+
+/** 会话列表一页：不给 before 是最新一页；nextBefore 非空就是还有更老的，下一页把它当 before 传。 */
+export function fetchSessions(signal?: AbortSignal, before?: number): Promise<SessionsPage> {
+  return getJson(sessionsUrl(API_BASE, before === undefined ? {} : { before }), signal);
+}
+
+/** 没登录（或登录过期）：页面给登录入口，不再重试。 */
+export function isUnauthorized(err: unknown): boolean {
+  return err instanceof FatalApiError && err.status === 401;
+}
+
+/** 登录在旧驾驶舱：飞书走服务端 302 回到新驾驶舱，账密登录页在旧驾驶舱根路径。 */
+export const LOGIN_LINKS = {
+  feishu: '/auth/feishu/login?next=%2Fnext%2F',
+  password: '/login',
+} as const;
 
 export type { HistoryPage };

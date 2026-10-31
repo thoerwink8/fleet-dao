@@ -7,6 +7,7 @@ import { useSessionFeed } from '../lib/hooks';
 import type { FeedState } from '../lib/types';
 import { Chip } from './chip';
 import { EventCard } from './event-card';
+import { LoginPrompt } from './login-prompt';
 
 const CATS: Category[] = ['turn', 'dispatch', 'worker', 'handback', 'other'];
 
@@ -41,6 +42,7 @@ export function StatusPill({ state }: { state: FeedState }) {
 
 function ReconnectBanner({ state }: { state: FeedState }) {
   if (state.status === 'failed') {
+    if (state.errorStatus === 401) return <LoginPrompt className="border-b border-line bg-danger-soft" />;
     return (
       <div role="alert" className="border-b border-line bg-danger-soft px-4 py-2 text-xs text-danger md:px-6">
         {state.error ?? '读不到这个会话。'}
