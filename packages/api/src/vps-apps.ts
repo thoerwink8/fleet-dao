@@ -65,6 +65,7 @@ export const VPS_APPS: readonly VpsApp[] = [
       service('fleet-engine.service'),
       service('fleet2-egress.service'),
       service('fleet2-kernel.service'),
+      service('fleet2-cockpit.service'),
     ],
     dirs: ['/var/lib/fleet-dao/engine', '/var/lib/fleet-dao/github', '/var/log/fleet-dao', '/var/lib/fleet2'],
   },
