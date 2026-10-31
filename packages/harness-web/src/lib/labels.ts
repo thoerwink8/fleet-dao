@@ -71,6 +71,25 @@ export const TASK_STATUS_LABEL: Record<string, string> = {
   cancelled: '已取消',
 };
 
+/** 任务波次图节点的状态（harness-contract 的 work-graph，#3784）。 */
+export const WORK_STATE_LABEL: Record<string, string> = {
+  pending: '排队中',
+  scheduled: '等重试',
+  running: '在跑',
+  paused: '已暂停',
+  blocked: '被卡住',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+  skipped: '已跳过',
+};
+
+/** 节点的类别（影子批次里的单是 shadow）。 */
+export const WORK_CATEGORY_LABEL: Record<string, string> = {
+  shadow: '影子',
+  worker: '工人',
+};
+
 function labeled(table: Record<string, string>, raw: string | undefined): Labeled | undefined {
   if (raw === undefined || raw === '') return undefined;
   return { text: Object.hasOwn(table, raw) ? (table[raw] as string) : raw, raw };
@@ -82,3 +101,5 @@ export const outcomeLabel = (raw: string | undefined) => labeled(OUTCOME_LABEL, 
 export const verdictLabel = (raw: string | undefined) => labeled(VERDICT_LABEL, raw);
 export const sessionModeLabel = (raw: string | undefined) => labeled(SESSION_MODE_LABEL, raw);
 export const taskStatusLabel = (raw: string | undefined) => labeled(TASK_STATUS_LABEL, raw);
+export const workStateLabel = (raw: string | undefined) => labeled(WORK_STATE_LABEL, raw);
+export const workCategoryLabel = (raw: string | undefined) => labeled(WORK_CATEGORY_LABEL, raw);

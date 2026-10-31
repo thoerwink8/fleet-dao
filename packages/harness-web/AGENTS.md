@@ -25,6 +25,12 @@
   - 指挥会话里的派工请求和交回核验带「看工人的完整过程」链接（`workerSessionOf`）：交回取载荷里的 `runId`；派工请求按派工器的编号规则 `d<派工请求事件号>-a1` 推（`packages/harness-dispatch/src/dispatcher.ts`，改了编号规则这里要跟着改）。
   - 过程可能很长：首屏最新一页，「加载更早的事件」同时往前翻会话流和过程流。
   - 样例：`dev/seed.ts` 的 `worker-d12-a1`（26 步，穿插进度和交结果），`cmd-demo-login-fix` 的交回带 `runId: d12-a1` 链过去。
+- 任务页 `/work`（#3784 第 2 部分）：影子批次画成波次图。`@xyflow/react` 管平移缩放，`elkjs`（`src/lib/work-layout.ts`，画布页才动态加载）管布局：波＝列，波号当 elk 的分区号。
+  - 数据：`GET /next/api/work/batches`（批次列表）和 `/work/batches/<批次号>`（一批整份快照），形状在 `harness-contract` 的 `work-graph`（子路径 `@fleet-dao/harness-contract/work-graph`）：`nodes`（每单一个，带状态、尝试次数、`runIds`、一句话说明、打分）、`waves`、`edges`。影子批次没有依赖：全在第 0 波、边是空的；编排做出来后同一个形状喂多波依赖图，画布不改。取数在 `src/lib/work-hooks.ts`：10 秒轮询、失败翻倍退避封顶 60 秒、整份快照整体替换，批次列表 60 秒一次。
+  - 视角：打开对准「当前活跃波」（第一个还有没结束节点的波）；用户拖过、缩放过（视角真的变了）就不再自动重适应，点「适应」恢复；工具条「上一波 / 下一波」；缩放 0.6–1.6，滚轮平移、Ctrl/⌘+滚轮或捏合缩放。波以服务端给的为准，缺节点或有后向边就自己推算并在顶栏提示（`resolveWaves`）。
+  - 一波超过 13 个只画前 12 个、后面接「+N 更多」格（点开展开、再点收回），一波 ≥16 个用紧凑卡；悬停或键盘聚焦一张卡，上下游亮着，其余压到 20%（没边时只亮自己）。纯函数都在 `src/lib/work-model.ts`，单测 `src/lib/work.test.ts`。
+  - 点卡片：电脑在右侧开面板标签页（一次运行一个标签，里面就是工人会话详情 `SessionStream`，会话号 `worker-<runId>`；重试过的在面板头切第几次），手机整页跳 `/s/worker-<runId>`。窄屏（768 以下）默认列表（`work-list.tsx`），图/列表的选择存 localStorage（键 `fleet.next.work.view`，读写包 try/catch）。
+  - 样例：`dev/seed.ts` 的 `seedWork`（两批：`demo-batch-2` 10 单，排队、在跑、做完、失败、重试、暂停、放弃、卡住都有；`demo-batch-1` 3 单），`seedWorkBatch` 可灌任意形状的批次。e2e：`e2e/specs/work.e2e.ts`；截图：`node e2e/shots-work.ts <标签>`。
 - `src/lib/feed.ts`：`SessionFeed`，实时流的全部逻辑，见下面「实时流怎么保证」。
 - `src/app.css`：设计令牌（页底 `#f0f3fa`、品牌色 `#2962ff`、1px 发丝线、白卡片、正常态不上绿）。
 - `dev/`：本机开发和 e2e 用的整套后端。`dev/stack.ts` = PGlite 跑 fleet2 真迁移（外加最小的 `public.users`，放一位创始人）+ **真的驾驶舱口**（`harness-api` 的 `createCockpitApi`，部署用的就是这份代码）+ 一个只转发 `/next/api/*`、放 `dist/` 的前门（相当于香港 nginx）；`dev/seed.ts` 灌样例事件；`dev/serve.ts` 是一条命令的入口。前门不带任何凭据、不认识会话令牌。

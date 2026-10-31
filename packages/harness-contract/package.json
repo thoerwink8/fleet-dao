@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./worker-state": "./src/worker-state.ts"
+    "./worker-state": "./src/worker-state.ts",
+    "./work-graph": "./src/work-graph.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"
