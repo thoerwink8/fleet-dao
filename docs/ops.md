@@ -164,7 +164,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
 | fleet2-cockpit.service | 法国 | fleet-dao 新驾驶舱只读口（只听隧道地址 10.99.0.2:7346） |
 | fleet2-egress.service | 法国 | fleet-dao 新内核影子工人的出网关（SNI 透明代理，只听 127.0.0.1:7344） |
-| fleet2-kernel.service | 法国 | fleet-dao 新内核（影子模式，接口层只听 127.0.0.1:7345） |
+| fleet2-kernel.service | 法国 | fleet-dao 新内核（影子模式，接口层只听 127.0.0.1:7345；GitHub 只读用旧引擎同一个 App 的凭据文件 `/etc/fleet-dao/github/gh-app-fleet-dao-engine.json` 按仓现换短期令牌，文件不在就不起，没有别的令牌文件） |
 | fleet2-shadow-firewall.service | 法国 | fleet-dao 新内核影子工人的出网限制（nft 表 inet fleet2_shadow） |
 | fleet2-shadow.slice | 法国 | fleet-dao 新内核影子工人的 slice（出网按它限） |
 | fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |

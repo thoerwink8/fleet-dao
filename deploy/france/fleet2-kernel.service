@@ -2,21 +2,21 @@
 # 按节拍对冻结的影子批次派工、评分、静默报警；对外零写（outbox 一个真实处理器都不装）。
 # 以 fleet 跑、不进 fleet2-shadow.slice（它要连 GitHub 只读、拉镜像）；影子工人经 deploy/france/fleet2-worker.sh
 # 以会话用户进影子 slice（要 sudo，所以这里不能 NoNewPrivileges）。库走本机 socket 的 peer 认证（同引擎，只碰 fleet2 这一套表）。
-# GitHub 只读令牌由人放进 /etc/fleet-dao/fleet2-kernel.env（root:fleet 640，一行 FLEET2_GITHUB_READ_TOKEN=…）；没放就不起。
+# GitHub 只读靠旧引擎同一个 GitHub App 的凭据文件（root:fleet 640，手放）：内核用它按仓现换只读短期令牌；文件不在就不起。
 # 其余配置都写在这里、跟着发版走，别在机器上手改。规矩见 docs/ops.md。
 [Unit]
 Description=fleet-dao 新内核（影子模式，接口层只听 127.0.0.1:7345）
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
 After=network-online.target postgresql@16-main.service fleet2-egress.service
 Wants=network-online.target
-ConditionPathExists=/etc/fleet-dao/fleet2-kernel.env
+ConditionPathExists=/etc/fleet-dao/github/gh-app-fleet-dao-engine.json
 
 [Service]
 Type=simple
 User=fleet
 Group=fleet
 WorkingDirectory=/srv/fleet-dao-releases/current
-EnvironmentFile=/etc/fleet-dao/fleet2-kernel.env
+Environment=FLEET2_GITHUB_APP_FILE=/etc/fleet-dao/github/gh-app-fleet-dao-engine.json
 Environment=PGHOST=/var/run/postgresql PGUSER=fleet
 Environment=FLEET2_DATABASE_URL=postgres:///fleet
 Environment=FLEET2_API_PORT=7345 FLEET2_EGRESS_PORT=7344

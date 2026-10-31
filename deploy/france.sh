@@ -150,10 +150,10 @@ FLEET2_SHADOW_NFT_FILE=/etc/fleet-dao/fleet2-shadow.nft
 # 出网关常驻（自动档，#3803）：单元写死听 7344（和上面的 FLEET2_EGRESS_PORT 一样，测试对照），名单从仓里装
 FLEET2_EGRESS_UNIT=fleet2-egress.service
 FLEET2_EGRESS_ALLOW=/etc/fleet-dao/fleet2-egress.allow
-# 新内核进程（自动档，#3811）：单元写死只听 127.0.0.1:7345；GitHub 只读令牌由人放进这个文件（root:fleet 640），没放就不起
+# 新内核进程（自动档，#3811）：单元写死只听 127.0.0.1:7345；GitHub 只读用旧引擎同一个 App 的凭据文件（见 ENGINE_APP_JSON，
+# root:fleet 640，手放）现换短期令牌，文件不在就不起
 FLEET2_KERNEL_UNIT=fleet2-kernel.service
 FLEET2_KERNEL_PORT=7345
-FLEET2_KERNEL_ENV=/etc/fleet-dao/fleet2-kernel.env
 # 新驾驶舱只读口（自动档，#3818）：单元写死只听隧道地址 10.99.0.2:7346（和上面的 WG_ADDR、FLEET2_COCKPIT_PORT 一样，测试对照）；
 # 密钥读旧后端同一个 session-secret.env（整套装机时生成，没有就不起）
 FLEET2_COCKPIT_UNIT=fleet2-cockpit.service
@@ -1059,11 +1059,11 @@ setup_fleet2_kernel() {
     unit_changed=1
     systemctl daemon-reload
   fi
-  if [[ ! -f "$FLEET2_KERNEL_ENV" ]]; then
-    pending "$FLEET2_KERNEL_UNIT 没起：等人把 GitHub 只读令牌放进 $FLEET2_KERNEL_ENV（root:fleet 640，一行 FLEET2_GITHUB_READ_TOKEN=…）"
+  if [[ ! -f "$ENGINE_APP_JSON" ]]; then
+    pending "$FLEET2_KERNEL_UNIT 没起：等人放 GitHub App 凭据 $ENGINE_APP_JSON（root:fleet 640）"
     return 0
   fi
-  fix_meta "$FLEET2_KERNEL_ENV" root:fleet 640
+  fix_meta "$ENGINE_APP_JSON" root:fleet 640
   # 代码跟着发版换：单元变了重启；跑着的工人由内核收到 SIGTERM 后收尾
   ensure_unit_running "$FLEET2_KERNEL_UNIT" "$unit_changed"
 }
@@ -1075,12 +1075,12 @@ readback_fleet2_kernel() {
   if [[ "$(stat -c '%U:%G %a' -- "$WORK_DIR/_fleet2" 2>/dev/null)" != "fleet:fleet 755" ]]; then
     red "$WORK_DIR/_fleet2 不是 fleet:fleet 755：内核建不了影子工作目录"
   fi
-  if [[ ! -f "$FLEET2_KERNEL_ENV" ]]; then
-    pending "$FLEET2_KERNEL_UNIT 没起：等人放 GitHub 只读令牌（$FLEET2_KERNEL_ENV）"
+  if [[ ! -f "$ENGINE_APP_JSON" ]]; then
+    pending "$FLEET2_KERNEL_UNIT 没起：等人放 GitHub App 凭据（$ENGINE_APP_JSON）"
     return 0
   fi
-  if [[ "$(stat -c '%U:%G %a' -- "$FLEET2_KERNEL_ENV" 2>/dev/null)" != "root:fleet 640" ]]; then
-    red "$FLEET2_KERNEL_ENV 不是 root:fleet 640（里面有令牌）"
+  if [[ "$(stat -c '%U:%G %a' -- "$ENGINE_APP_JSON" 2>/dev/null)" != "root:fleet 640" ]]; then
+    red "$ENGINE_APP_JSON 不是 root:fleet 640（里面有私钥）"
   fi
   if [[ "$(systemctl is-active "$FLEET2_KERNEL_UNIT" 2>/dev/null)" != active ]]; then
     red "$FLEET2_KERNEL_UNIT 没在跑：journalctl -u $FLEET2_KERNEL_UNIT -n 50"

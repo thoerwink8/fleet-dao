@@ -1,5 +1,5 @@
 // 起新内核进程（#3811）：node packages/harness-dispatch/src/bin/kernel.ts，配置全从环境变量来（法国上是单元的 EnvironmentFile）。
-// 影子模式：接口层只听回环、对外零写；GitHub 只读令牌只在这个进程里。每行一条 JSON 打到 stdout（进 journal），
+// 影子模式：接口层只听回环、对外零写；GitHub 只读短期令牌（用 App 凭据按仓现换）只在这个进程里。每行一条 JSON 打到 stdout（进 journal），
 // 影子静默打 {"alert":"shadow-silent",…}。收到 SIGTERM 先不领新活、等跑着的工人收尾再退。
 import { makeRedactor, secretsFromEnv } from '@fleet-dao/harness-runner';
 import type { Db } from '@fleet-dao/harness-store';
@@ -7,6 +7,7 @@ import * as schema from '@fleet-dao/harness-store/schema';
 import { CLAUDE_PERMISSION_MODES, type ClaudePermissionMode } from '@fleet-dao/harness-workers';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
+import { appTokenSource } from '../github-app.ts';
 import { githubReader } from '../github-read.ts';
 import { createKernel } from '../kernel.ts';
 import { scopeSandbox } from '../scope-sandbox.ts';
@@ -51,7 +52,7 @@ if (!CLAUDE_PERMISSION_MODES.includes(permissionMode)) {
 const sql = postgres(need('FLEET2_DATABASE_URL'), { max: 4, onnotice: () => {} });
 const db = drizzle(sql, { schema }) as unknown as Db;
 const redact = makeRedactor(secretsFromEnv(env));
-const gh = githubReader({ token: need('FLEET2_GITHUB_READ_TOKEN') });
+const gh = githubReader({ tokenFor: appTokenSource({ file: need('FLEET2_GITHUB_APP_FILE') }) });
 
 const kernel = createKernel({
   db,

@@ -1,9 +1,10 @@
 // 新内核读 GitHub（#3811）：只读。读单的快照变成影子工人的六项指示；读旧 PR 合没合、合并 diff 给影子评分。
-// 令牌只在内核进程里（工人环境不带任何 GitHub 变量）；只发 GET 和 GraphQL 查询，不发任何写。
+// 令牌（按仓现换的只读短期令牌）只在内核进程里（工人环境不带任何 GitHub 变量）；只发 GET 和 GraphQL 查询，不发任何写。
 import type { BatchItem, MergedReader } from '@fleet-dao/harness-store';
 
 export interface GitHubReadOptions {
-  token: string;
+  /** 按仓（owner/name）给只读令牌（见 github-app.ts） */
+  tokenFor: (repo: string) => Promise<string>;
   api?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
@@ -15,8 +16,8 @@ const DIFF_MAX = 2_000_000;
 export function githubReader(o: GitHubReadOptions) {
   const api = (o.api ?? 'https://api.github.com').replace(/\/$/, '');
   const f = o.fetch ?? fetch;
-  const headers = (accept = 'application/vnd.github+json') => ({
-    authorization: `Bearer ${o.token}`,
+  const headers = async (repo: string, accept = 'application/vnd.github+json') => ({
+    authorization: `Bearer ${await o.tokenFor(repo)}`,
     accept,
     'x-github-api-version': '2022-11-28',
   });
@@ -29,7 +30,7 @@ export function githubReader(o: GitHubReadOptions) {
   async function taskFor(item: BatchItem) {
     const res = await call(
       `${api}/repos/${item.repo}/issues/${item.issue}`,
-      { headers: headers() },
+      { headers: await headers(item.repo) },
       `读 ${item.repo}#${item.issue}`,
     );
     const issue = (await res.json()) as { title?: string; body?: string | null; pull_request?: unknown };
@@ -53,7 +54,7 @@ export function githubReader(o: GitHubReadOptions) {
       `${api}/graphql`,
       {
         method: 'POST',
-        headers: headers(),
+        headers: await headers(repo),
         body: JSON.stringify({ query, variables: { owner, name, n: issue } }),
       },
       `查 ${repo}#${issue} 的合并 PR`,
@@ -77,7 +78,7 @@ export function githubReader(o: GitHubReadOptions) {
     if (!pr?.mergeCommit) return undefined;
     const diffRes = await call(
       `${api}/repos/${repo}/pulls/${pr.number}`,
-      { headers: headers('application/vnd.github.diff') },
+      { headers: await headers(repo, 'application/vnd.github.diff') },
       `读 ${repo}#${pr.number} 的 diff`,
     );
     const diff = await diffRes.text();
