@@ -1,0 +1,3 @@
+DROP INDEX "audit_log_issue_events_idx";--> statement-breakpoint
+CREATE INDEX "audit_log_ledger_events_idx" ON "audit_log" USING btree ("id") WHERE "audit_log"."target" like 'issue:%' or "audit_log"."target" like 'progress:%';--> statement-breakpoint
+CREATE UNIQUE INDEX "audit_log_ledger_note_key_idx" ON "audit_log" USING btree (("after" ->> 'repo'),("after" ->> 'idempotencyKey')) WHERE "audit_log"."action" in ('progress.note', 'decision.handoff', 'report.daily', 'report.guards');

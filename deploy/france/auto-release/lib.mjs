@@ -62,6 +62,10 @@ export const HUMAN_TIER_PATHS = [
   'deploy/lib/human-tier.sh',
   'deploy/france/fleet-dao.nft',
   'deploy/france/fleet-firewall.service',
+  // 新内核影子工人的出网限制（setup_fleet2_shadow，#3775）：碰防火墙
+  'deploy/france/fleet2-shadow.nft',
+  'deploy/france/fleet2-shadow.slice',
+  'deploy/france/fleet2-shadow-firewall.service',
   'deploy/france/sudoers-fleet-dao',
   // sudoers 放行的那个 root 脚本
   'deploy/france/fleet-agent-scope.sh',

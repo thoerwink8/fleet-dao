@@ -172,8 +172,19 @@ describe('CI browser preparation', () => {
         'http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://archive.ubuntu.com/ubuntu/ priority:2\nhttps://security.ubuntu.com/ubuntu/ priority:3\n',
       ),
     ).not.toThrow();
+    expect(() =>
+      validateUbuntuSources(s, 'http://us-east-2.ec2.archive.ubuntu.com/ubuntu/\tpriority:1\n'),
+    ).not.toThrow();
+    expect(() =>
+      validateUbuntuSources(s, 'http://evil.ec2.archive.ubuntu.com.example.org/ubuntu/ priority:1'),
+    ).toThrow('Unknown Ubuntu mirror list');
     expect(() => validateUbuntuSources(s, null)).toThrow();
-    expect(() => validateUbuntuSources(s, 'https://example.org/ubuntu priority:1')).toThrow();
+    expect(() => validateUbuntuSources(s, 'https://example.org/ubuntu priority:1')).toThrow(
+      'Unknown Ubuntu mirror list: ["https://example.org/ubuntu priority:1"]',
+    );
+    expect(() => validateUbuntuSources(s, '# only a comment\n')).toThrow(
+      'Unknown Ubuntu mirror list: no entries',
+    );
   });
   it('loads original Parts/Main once before disabling implicit loads and applying final source settings', () => {
     const f = fixture();

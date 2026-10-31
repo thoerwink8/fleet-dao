@@ -1,0 +1,18 @@
+{
+  "name": "@fleet-dao/harness-workers",
+  "version": "0.0.0",
+  "private": true,
+  "description": "新内核的工人槽位（决定 0124）：Claude Code 壳、工人环境、内核托管的 HTTP MCP 配置、影子启动自检",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/harness-contract": "workspace:*",
+    "@fleet-dao/harness-runner": "workspace:*",
+    "@fleet-dao/harness-store": "workspace:*"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
+  }
+}

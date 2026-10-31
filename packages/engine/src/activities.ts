@@ -287,7 +287,7 @@ export interface EngineJobs {
   intake?: (client: Client, taskQueue: string) => IntakeDeps;
   /** 判断题自检（#1365）：最近一次调用失败超过 30 分钟，发一道不占额度的固定题，结果写进判断记录。不拉单。 */
   judgeSelfCheck?: () => JudgeSelfCheckJobDeps;
-  /** 每天刷新 CI 测试耗时表（#921）：读 ci.yml 日志、重写表、开 PR。不拉单。 */
+  /** 每周刷新 CI 测试耗时表（#921）：读 ci.yml 日志、重写表、开 PR。不拉单。 */
   ciTimings?: () => CiTimingsJobDeps;
   /** 每天补齐已收口版本的 CHANGELOG（#3110），不拉单、不起模型会话。 */
   changelog?: () => ChangelogJobDeps;

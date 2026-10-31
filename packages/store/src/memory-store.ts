@@ -9,6 +9,7 @@ import {
   ciPolicyOf,
   type FlowAssignment,
   FlowAssignmentExistsError,
+  LEDGER_NOTE_KINDS,
   type Model,
   type Pool,
   type RealtimeTable,
@@ -1032,6 +1033,44 @@ export function createMemoryStore(
         page,
         isSerial,
       );
+    },
+    async appendLedgerNote({ actorId, action, target, after }) {
+      const old = data.audit.find((a) => {
+        const o = a.after as { repo?: unknown; idempotencyKey?: unknown } | undefined;
+        return (
+          (LEDGER_NOTE_KINDS as readonly string[]).includes(a.action) &&
+          o?.repo === after.repo &&
+          o?.idempotencyKey === after.idempotencyKey
+        );
+      });
+      if (old) return { id: Number(old.id), created: false };
+      const id = audit({
+        actor: { kind: 'agent', id: actorId },
+        action,
+        target,
+        after,
+        via: 'agent',
+        ok: true,
+      });
+      return { id: Number(id), created: true };
+    },
+    async listIssueEvents({ after, limit }) {
+      return data.audit
+        .filter(
+          (a) => (a.target.startsWith('issue:') || a.target.startsWith('progress:')) && Number(a.id) > after,
+        )
+        .sort((x, y) => Number(x.id) - Number(y.id))
+        .slice(0, limit)
+        .map((a) => ({
+          id: Number(a.id),
+          at: a.at,
+          actorKind: a.actor.kind,
+          actorId: a.actor.id,
+          action: a.action,
+          target: a.target,
+          after: a.after ?? null,
+          ok: a.ok,
+        }));
     },
     async listSettings() {
       return [...data.settings].sort((a, b) => a.key.localeCompare(b.key));

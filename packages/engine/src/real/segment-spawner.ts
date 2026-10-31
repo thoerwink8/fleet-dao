@@ -77,6 +77,8 @@ import type { WorkTrees } from './worktrees.ts';
 
 /** 总时长比 one-shot 的时限早多久到（毫秒）：驱动先收场，one-shot 的时限信号是兜底。 */
 export const SEGMENT_WALL_MARGIN_MS = 60_000;
+/** 工人没有工具在跑、这么久没有协议活动就判停滞；启动阶段仍只由协议帧解除起动判死。 */
+export const WORKER_IDLE_MS = 90_000;
 
 /** 驱动自己的总时长至少给这么久，免得时限很短（测试）时算出个负数。 */
 const MIN_WALL_MS = 10_000;
@@ -327,7 +329,10 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         prompt: cmd.stdin,
         // 一次性段不用 fleet 命令（只认 stdout / 退出码 / 提交）：不发通行证，命令连不上后端是预期
         env: { base: deps.baseEnv, fleetApi: '', fleetToken: '', pathPrepend: [], tmpDir },
-        limits: { wallClockMs: Math.max(MIN_WALL_MS, cmd.timeoutMs - SEGMENT_WALL_MARGIN_MS) },
+        limits: {
+          wallClockMs: Math.max(MIN_WALL_MS, cmd.timeoutMs - SEGMENT_WALL_MARGIN_MS),
+          idleMs: WORKER_IDLE_MS,
+        },
         testCommands: [],
         // 命令行那几家用这个 id 起 fleet-agent-<runId>.scope。Mirasim 的驱动不用它，也不按它采样。
         cgroup: {

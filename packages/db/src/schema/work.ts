@@ -5,6 +5,7 @@ import type {
   FlowSource,
   RunVerdict,
   TaskExecutor,
+  TaskOwner,
   VerifyRejectClass,
 } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
@@ -107,11 +108,19 @@ export const tasks = pgTable(
     claimedBy: text('claimed_by'),
     /** 这张单走哪种流程（#2823）：three = 三步单，full = 模型全程；老单、还没分过组的是空。分组的来龙去脉在 task_flow_assignments。 */
     flowMode: text('flow_mode').$type<FlowMode>(),
+    /**
+     * 这张单归哪套系统（决定 0124，#3773）：v1 = 旧引擎和本机（再由 executor 分），harness = 新内核。一张单只有这一行，
+     * 新旧并行时的认领就是它；旧引擎和本机领单见到 harness 一律不碰。
+     */
+    owner: text('owner').$type<TaskOwner>().notNull().default('v1'),
+    /** 所有权令牌：owner、executor、claimed_by 任一变了就加一（触发器 tasks_bump_fencing 管，写方不用记得）。外部动作带着它，对不上就丢。 */
+    fencing: bigint('fencing', { mode: 'number' }).notNull().default(0),
   },
   (t) => [
     unique('tasks_repo_issue_unique').on(t.repoId, t.issueNumber),
     check('tasks_issue_number_positive', sql`${t.issueNumber} > 0`),
     check('tasks_executor_known', sql`${t.executor} in ('engine', 'local')`),
+    check('tasks_owner_known', sql`${t.owner} in ('v1', 'harness')`),
     check('tasks_flow_mode_known', sql`${t.flowMode} is null or ${t.flowMode} in ('three', 'full')`),
     index('tasks_local_lease_idx').on(t.leaseUntil).where(sql`${t.executor} = 'local'`),
   ],

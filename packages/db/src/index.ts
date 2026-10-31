@@ -30,6 +30,7 @@ export * from './queries/idempotency.ts';
 export * from './queries/idle-running.ts';
 export * from './queries/intake.ts';
 export * from './queries/intake-history.ts';
+export * from './queries/issue-events.ts';
 export * from './queries/jev.ts';
 export * from './queries/late-review.ts';
 export * from './queries/local-claims.ts';

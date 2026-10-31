@@ -1,0 +1,20 @@
+{
+  "name": "@fleet-dao/harness-api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "新内核的接口层（决定 0124）：会话令牌、指挥官/工人 MCP（Streamable HTTP）、按事件号续传的 SSE",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/harness-contract": "workspace:*",
+    "@fleet-dao/harness-store": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "drizzle-orm": "^0.45.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
+  }
+}

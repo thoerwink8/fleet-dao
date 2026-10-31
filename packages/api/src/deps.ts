@@ -13,10 +13,12 @@ import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { PreflightReaders } from './france-preflight.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { HostResourceSampler } from './host-resources.ts';
+import type { IntakeIssuesPort } from './intake.ts';
 import type { LocalClaimsPort } from './local-claims.ts';
 import type { LocalHoldPort } from './local-hold.ts';
 import type { ManualTracksPort } from './manual-tracks.ts';
 import type { ModelRosterPort } from './model-roster.ts';
+import type { NodeDispatchFn } from './node-dispatch.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
 import type {
@@ -140,6 +142,15 @@ export interface Deps {
    * 本机领单（决定 0096，local-claims.ts）：本机会话经 POST /api/nodes/claims 领单、续租、结束，写 tasks 那一行。没给（开发、内存版）回 503。
    */
   localClaims?: LocalClaimsPort | undefined;
+  /**
+   * 开单服务（决定 0122，intake.ts）：POST /api/nodes/issues 用「引擎」机器人查重、开单、并单。没给（开发环境、机器人凭据没读到）回 503，不假装开了。
+   */
+  intakeIssues?: IntakeIssuesPort | undefined;
+  /**
+   * 本机交单给法国引擎（#3739，node-dispatch.ts）：POST /api/nodes/dispatch 复用看门狗修复的 repairDispatcher，
+   * 和 fleet-api dispatch-issue 不带 --force 同一套准入。没给（开发、内存版）回 503。
+   */
+  nodeDispatch?: NodeDispatchFn | undefined;
   /**
    * 任务详情每一段的「会话内容」（#1640，run-transcript.ts）：读引擎按条记下的 run_transcript。没给（开发、内存版没有那张表）的
    * 接口回 503 写明原因，不拿空列表冒充「没有记录」。

@@ -234,7 +234,7 @@ jobs:
           echo "lint 里每一样都过了：biome=$BIOME tsc=$TSC doc_pointers=$DOC_POINTERS agents_test=$AGENTS_TEST deps=$DEPS release_smoke=$RELEASE_SMOKE"
 
   # 测试分几台：全部测试文件（一律全套）→ test-split.ts 按 test-timings.json 耗时装箱，一台一份明确的文件清单（job 名就是那一台，如「2/5 · pg」）。
-  # 耗时表只读仓里的 test-timings.json（引擎每天开 PR 从最近几轮 PR 的 CI 日志刷新，也可手跑 pnpm ci:timings）。不用 vitest --shard 按文件个数切：那样各台差得太远（#654 时 engine 三台 89/35/137 秒）。
+  # 耗时表只读仓里的 test-timings.json（引擎每周开 PR 从最近几轮 PR 的 CI 日志刷新，也可手跑 pnpm ci:timings）。不用 vitest --shard 按文件个数切：那样各台差得太远（#654 时 engine 三台 89/35/137 秒）。
   # 环境按这一台装进的文件算：要真 Postgres 的（matrix.pg）才起 runner PostgreSQL 16 独立 cluster，和法国同大版本；要 Temporal 命令行的（matrix.temporal）才装它，
   # 版本和校验和从 deploy/france.sh 读，CI 没给变量测试就直接红（test/support.ts）。
   # 每台跑完核对「实际跑的 == 分到的」（ci-box.ts verify）：vitest 的位置参数是子串过滤，多跑少跑都红，没跑成不许当通过。

@@ -5,6 +5,7 @@ import {
   ciPolicyOf,
   parseRepoProfile,
   type TaskExecutor,
+  type TaskOwner,
   type TaskState,
 } from '@fleet-dao/shared';
 import { and, eq, sql } from 'drizzle-orm';
@@ -70,9 +71,15 @@ export async function intakeTaskRow(
   db: Db,
   repoId: string,
   issueNumber: number,
-): Promise<{ id: string; state: TaskState; executor: TaskExecutor; returnedAt: Date | null } | null> {
+): Promise<{
+  id: string;
+  state: TaskState;
+  executor: TaskExecutor;
+  owner: TaskOwner;
+  returnedAt: Date | null;
+} | null> {
   const [row] = await db
-    .select({ id: tasks.id, state: tasks.state, executor: tasks.executor })
+    .select({ id: tasks.id, state: tasks.state, executor: tasks.executor, owner: tasks.owner })
     .from(tasks)
     .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, issueNumber)));
   if (!row) return null;

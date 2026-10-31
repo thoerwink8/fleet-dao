@@ -160,6 +160,9 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet2-egress.service | 法国 | fleet-dao 新内核影子工人的出网关（SNI 透明代理，只听 127.0.0.1:7344） |
+| fleet2-shadow-firewall.service | 法国 | fleet-dao 新内核影子工人的出网限制（nft 表 inet fleet2_shadow） |
+| fleet2-shadow.slice | 法国 | fleet-dao 新内核影子工人的 slice（出网按它限） |
 | fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
 | fleet-backup-copy.timer | 香港 | 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天 |
 | fleet-backup-freshness.service | 香港 | fleet-dao 香港检查备份最新快照是否超过 26 小时 |
@@ -317,7 +320,7 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | 应用 | 单元 | 目录、库 |
 |---|---|---|
 | 驾驶舱 | `fleet-api.service`、`fleet-footprint.service` | `/var/lib/fleet-dao/release-request`（代码在发布版本目录里；静态页在香港 `/srv/fleet-dao-web`，不在这台） |
-| 引擎 | `fleet-engine.service` | `/var/lib/fleet-dao/engine`、`/var/lib/fleet-dao/github`、`/var/log/fleet-dao` |
+| 引擎 | `fleet-engine.service`、`fleet2-egress.service` | `/var/lib/fleet-dao/engine`、`/var/lib/fleet-dao/github`、`/var/log/fleet-dao` |
 | Temporal | `fleet-temporal.service` | `/opt/fleet-dao/temporal`（数据在库里，算在「数据库」） |
 | 数据库 | `postgresql@16-main.service` | 所有非模板库（`pg_database_size`，不读数据目录） |
 | AI 会话 | `fleet-agents.slice` | `/var/lib/fleet-work`、`/var/lib/fleet-sessions`、`/home/fleet-agent-carpool` |
@@ -1405,6 +1408,8 @@ pnpm machine join <编号> [--name 显示名] --url https://<法国看板域名>
 - 结束：有 PR 合并且单已关，拉单下一轮自动记做完（租约没到期也收，PR 镜像晚几分钟到就晚一轮），不用手动。无 PR 的运维成功，凭真实验证先 `pnpm issue:close <单号> --note "验证结果"`，再 `pnpm work done <单号>` 收租约账；只关单不会立即收未过期的无 PR 租约。未完成验收责任仍保留开放，不能用 done 代替验收结清或绕过关单检查。没做成用 `pnpm work done <单号> --failed "原因"`（还是本机的账，法国不自动接）；放手用 `pnpm work done <单号> --release "原因"`，摘「本机做」、退回法国队列（拉单下一轮按重新派或接手接回；法国某一关接不了的，拉单会把「本机做」贴回、留言并在驾驶舱通知，不让单两边都没人做）。租约到期没续上同理：法国接不了的单不摘「本机做」、不退回，只通知本机。
 - 到期没续上：拉单摘「本机做」、在单上留一句话（同一次到期只留一次），行改成 `stopped` + `engine`，下一轮引擎接。总开关关着时拉单不跑，租约也不收。
 - 脱离聊天进程的本机工人（#2761）：`pnpm work run <单号> [--brief <交代文件>] [--worktree <路径>] [--again]` 先过本机容量（`agents/hooks/capacity.mjs`），本机没租约才领单，建或复用 `<主检出>/.claude/worktrees/<单号>-<短名>`，经 `detach.mjs`（WMI）起看护进程 `packages/conventions/src/bin/work-supervisor.ts`；它经 reclaude 起无头 `general-purpose` 工人（`-p --output-format json --session-id`），每 30 秒写心跳、每 20 分钟续租，网关或网络断了按 1、2、4……最多 10 分钟等一会儿用 `--resume` 同一个会话续（最多 12 次），登录坏了不续。记录在 `~/.fleet-dao/work-runs/<owner>__<name>__<单号>/`（`state.json`、`result.json`、每次的 `attempt-*.out.json` / `.err.log`、`supervisor.log`）。收尾钩子 `agents/hooks/work-watch.mjs` 在 `result.json` 写出来、心跳 3 分钟不动、或等待已 park 时各叫醒一次；已 park 的写明不是做完。审查返工用 `pnpm work rework <单号>`，`pnpm work run` 在 waiting 上只复核。`pnpm work runs` 看全部；看护进程没了再跑一次 `pnpm work run <单号>` 接着同一个会话续。
+- 开单服务（决定 0122，母单 #3739 第 1 片）：`POST /api/nodes/issues` 经「引擎」机器人开单 / 并单，`GET /api/nodes/events?after=<id>&limit=<n>` 读开单账本（请求头同样是 `X-Fleet-Node-Token`，只认机器通行证；协议在 `packages/shared/src/intake.ts`）。正文缺节 422、强命中重复 409（带候选，`force` 照开、`mergeInto` 并到已有的单）、机器人凭据没读到 503；同一个 `idempotencyKey` 只开一张。账本是操作记录里 `issue.open` / `issue.merge` / `issue.duplicate_refused`（`target` 为 `issue:<owner>/<name>#<号>`）。发布时先迁移（0103 加一个部分索引）再切版本。
+  - 过程记录（#3741 片 2a）：`POST /api/nodes/notes` 同一个头，写 `progress.note` / `decision.handoff` / `report.daily` / `report.guards`（请求体 `kind`、`repo`、可选 `issue`、`text` 1 到 20000 字、`source`、`idempotencyKey`；回 `{ id, created }`），`target` 挂单是 `issue:<owner>/<name>#<号>`、不挂是 `progress:<owner>/<name>`，仓不归法国管 404 `unknown_repo`，同仓同 key 重放回原来那行、`created:false`。`GET /api/nodes/events` 两个前缀一起读。迁移 0104：删 0103 的索引、建 `audit_log_ledger_events_idx`（覆盖 `issue:` 和 `progress:`）并加唯一索引 `audit_log_ledger_note_key_idx`（过程记录的幂等）。写方、读方改道是片 2b、2c，这一片还没人调。
 - 看别的机器领了哪些单（#3388）：`GET /api/nodes/claims`（请求头 `X-Fleet-Node-Token`，只认机器通行证，和 `POST` 同一个认人，浏览器登录态不认）。返回所有仓里 `executor = local` 且租约没到期的行：`{"claims":[{"repo":"owner/name","issue":123,"claimedBy":"founder-pc","leaseUntil":"…"}]}`，只这四个字段（仓名是库里的原样）；无通行证或通行证不对 401，读库失败 503，不拿空列表冒充。协议和解析函数在 `packages/shared/src/node-claims.ts`。
 - 查本机在做的单：`sudo -u fleet psql fleet -c "select issue_number, state, lease_until, claimed_by from tasks where executor = 'local' and state = 'running' order by lease_until"`；领、续、结束、到期收回都在操作记录里（`audit_log.action like 'task.local.%'`）。
 

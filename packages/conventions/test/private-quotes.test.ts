@@ -14,13 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  directiveIssueDraft,
-  formatDirective,
-  parseDirective,
-  recordDirective,
-  resolveDirective,
-} from '../src/directives.ts';
+import { recordDirectiveToLedger } from '../src/directive-ledger.ts';
+import { directiveIssueDraft, formatDirective, parseDirective, resolveDirective } from '../src/directives.ts';
 import {
   flushPrivateQuotes,
   privatizeDirective,
@@ -105,7 +100,7 @@ describe('私有原话先本机再上传', () => {
     const d = result.directive;
     const publicText = JSON.stringify({
       file: formatDirective({ ...d, id: '20261018180000', issue: 3109, log: [] }),
-      issue: directiveIssueDraft(d),
+      issue: directiveIssueDraft({ meaning: d.text, at: d.at, source: d.source }),
     });
     expect(publicText).toContain('按既定规则执行');
     expect(publicText).toContain('原话：私有处');
@@ -296,7 +291,7 @@ it('私有目录被软链替换时拒绝存取，不向外部目录写原文', a
   await expect(flushPrivateQuotes(h, fail)).rejects.toThrow('不可安全读取');
 });
 
-it('外仓成功上传后真实recordDirective发布链只传意思和私有编号', async () => {
+it('外仓成功上传后记进账本的链只传意思，不含原话', async () => {
   const h = home(),
     quote = q();
   const saved = await privatizeDirective(
@@ -322,27 +317,18 @@ it('外仓成功上传后真实recordDirective发布链只传意思和私有编�
   );
   expect(saved.remaining).toBe(0);
   const publicCalls: unknown[] = [];
-  const made = await recordDirective(
+  const made = await recordDirectiveToLedger(
     saved.directive,
+    { meaning: saved.directive.text, category: 'ai' },
     {
-      git: async (args, opts) => {
-        publicCalls.push({ args, opts });
-        return { code: 0, stdout: args[0] === 'ls-tree' ? '' : 'a'.repeat(40), stderr: '' };
-      },
+      repo: 'fixture/fixture',
       gh: async (args) => {
         publicCalls.push(args);
-        return {
-          code: 0,
-          stdout:
-            args[0] === 'issue'
-              ? 'OPEN'
-              : args[1] === 'create'
-                ? 'https://github.com/fixture/fixture/pull/1'
-                : args[1] === 'view'
-                  ? JSON.stringify({ labels: [{ name: '域:engine' }, { name: '性质:process' }] })
-                  : '',
-          stderr: '',
-        };
+        return { code: 0, stdout: 'OPEN', stderr: '' };
+      },
+      post: async (body) => {
+        publicCalls.push(body);
+        return { status: 200, text: JSON.stringify({ id: 7, created: true }) };
       },
     },
     3109,
@@ -350,7 +336,6 @@ it('外仓成功上传后真实recordDirective发布链只传意思和私有编�
   expect(made.issue).toBe(3109);
   const published = JSON.stringify(publicCalls);
   expect(published).toContain('可公开意思');
-  expect(published).toContain('原话：私有处');
   expect(published).not.toContain(quote.text);
   expect(published).not.toContain('synthetic-password');
 });

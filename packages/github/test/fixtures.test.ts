@@ -9,7 +9,7 @@ import { type AppRole, isBot } from '../src/credentials.ts';
 import { createGitHub } from '../src/github.ts';
 import { CommentSchema, EditsSchema, IssueSchema } from '../src/issues.ts';
 import { memoryLedger } from '../src/ledger.ts';
-import { PullSchema } from '../src/pulls.ts';
+import { PullSchema, requiredChecksFor } from '../src/pulls.ts';
 import { testApps } from './fake-github.ts';
 
 const DIR = join(import.meta.dirname, 'fixtures', 'github');
@@ -120,6 +120,33 @@ describe('真返回回放', () => {
       requiredChecks: ['check'],
       mergeMethods: ['squash'],
     });
+  });
+
+  it('免费私有仓：规则接口回「套餐不支持」的 403 → 空规则，必过检查走 NO_REQUIRED_CHECKS（不当绿）', async () => {
+    const { gh } = replay([
+      [
+        'GET',
+        /\/rules\/branches\/main$/,
+        {
+          message: 'Upgrade to GitHub Pro or make this repository public to enable this feature.',
+          documentation_url: 'https://docs.github.com/rest/repos/rules#get-rules-for-a-branch',
+          status: '403',
+        },
+        403,
+      ],
+      ['GET', /^\/repos\/acme\/widgets$/, fx('repo')],
+    ]);
+    expect(await gh.deps.facts.branchRules(repo, 'main')).toEqual({ requiredChecks: [], mergeMethods: [] });
+    await expect(requiredChecksFor(gh.deps, repo, undefined)).rejects.toMatchObject({
+      code: 'NO_REQUIRED_CHECKS',
+    });
+  });
+
+  it('别的 403（令牌权限不够）照旧抛 FORBIDDEN，不当成没规则', async () => {
+    const { gh } = replay([
+      ['GET', /\/rules\/branches\/main$/, { message: 'Resource not accessible by integration' }, 403],
+    ]);
+    await expect(gh.deps.facts.branchRules(repo, 'main')).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
   it('等 CI：真的 PR、检查、提交状态 → 绿', async () => {

@@ -756,7 +756,7 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     expect(hook.checkTemporary(repo({ 'docs/PROGRESS.md': plan('') }), git, NOW)).toEqual([]);
   });
 
-  it('到了最迟复查日期（含今天）：一行列出来，提醒照读法②问创始人', () => {
+  it('到了最迟复查日期（含今天）：一行列出来，提醒问创始人续还是撤', () => {
     const today = row('停法国池', '机器坏了', '创始人 2026-10-01「先停」', '机器修好', '2026-10-06');
     const later = row('只开一条路由', '额度紧', '创始人 2026-10-01「先这样」', '额度恢复', '2026-10-20');
     const dir = repo({ 'docs/PROGRESS.md': plan(subagent + today + later) });
@@ -764,7 +764,7 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('临时调整到了最迟复查日期 2 条（docs/PROGRESS.md，今天 2026-10-06）');
     expect(lines[0]).toContain('不开子代理（最迟 2026-10-05）；停法国池（最迟 2026-10-06）');
-    expect(lines[0]).toContain('读法②问创始人');
+    expect(lines[0]).toContain('问创始人续还是撤：续就改复查日期，撤就删这一行');
     expect(lines[0]).not.toContain('只开一条路由');
   });
 
@@ -1434,18 +1434,18 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
   it('【故意造出的失败】脚本退出 2（gh 没成）、超时、输出认不出、找不到脚本：说一行没查成，不当成没有待办', () => {
     const dir = fleetRepo();
     expect(check(dir, fakeRun({ status: 2, stderr: 'gh 读 #1055 的评论报错：network down\n' }).run)).toEqual([
-      '创始人引导（进度单 #1055）没查成：gh 读 #1055 的评论报错：network down。',
+      '创始人引导（法国账本收件箱）没查成：gh 读 #1055 的评论报错：network down。',
     ]);
     const slow = fakeRun({
       status: null,
       error: Object.assign(new Error('spawnSync node ETIMEDOUT'), { code: 'ETIMEDOUT' }),
       timeoutMs: 8_000,
     });
-    expect(check(dir, slow.run)).toEqual(['创始人引导（进度单 #1055）没查成：超过 8 秒没完。']);
+    expect(check(dir, slow.run)).toEqual(['创始人引导（法国账本收件箱）没查成：超过 8 秒没完。']);
     expect(check(dir, fakeRun({ stdout: '乱七八糟\n' }).run)[0]).toMatch(/没查成：progress\.ts 的输出认不出/);
     const f = fakeRun({ stdout: row(1, 'h', 't') });
     expect(check(dir, f.run, join(dir, 'nope.ts'))).toEqual([
-      '创始人引导（进度单 #1055）没查成：找不到 packages/conventions/src/bin/progress.ts。',
+      '创始人引导（法国账本收件箱）没查成：找不到 packages/conventions/src/bin/progress.ts。',
     ]);
     expect(f.calls).toEqual([]);
   });
@@ -1457,7 +1457,7 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
     const started = Date.now();
     const lines = check(dir, hook.progressRunner(1_000), sleeper);
     expect(Date.now() - started).toBeLessThan(8_000);
-    expect(lines).toEqual(['创始人引导（进度单 #1055）没查成：超过 1 秒没完。']);
+    expect(lines).toEqual(['创始人引导（法国账本收件箱）没查成：超过 1 秒没完。']);
     expect(hook.PROGRESS_MS).toBe(8_000);
   });
 });

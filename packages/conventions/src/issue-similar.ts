@@ -33,6 +33,16 @@ export interface Candidate {
 }
 
 const THRESHOLD = 0.45;
+/**
+ * 强命中线（开单服务 #3739 用：达到它且没带 force / mergeInto 就拒开，回 409 列候选）。比提示线 THRESHOLD 高：
+ * 提示只是列给人看，错了无所谓；拒开会挡住一次开单，错了要人带 force 重来，所以要有把握。
+ * 分数 = 标题 Dice 系数 + 0.3 × 共同路径数（最多 2 个，即最多加 0.6）。取 0.85：
+ * - 只靠标题：Dice ≥ 0.85，也就是两个标题的关键词几乎一样（同一句话换个标点、改一两个字）；
+ * - 只靠路径：最多 0.6，到不了，同一个文件的两件不同的事不会被当成重复；
+ * - 路径加标题：两个共同路径（0.6）加标题 Dice ≥ 0.25 才够，仅提到同一处而标题毫不相干的不拦。
+ * 提示线 0.45 取到的「像」里，大多是同模块的邻居，不是同一件事。
+ */
+export const STRONG_THRESHOLD = 0.85;
 const SHOWN = 5;
 const PATH_WEIGHT = 0.3;
 const PATH_CAP = 2;
@@ -103,6 +113,11 @@ export function rankSimilar(
     items.push({ number: c.number, title: c.title, kind: c.kind, score, why: reasons.join('；') });
   }
   return items.sort((x, y) => y.score - x.score || x.number - y.number).slice(0, SHOWN);
+}
+
+/** rankSimilar 的结果里达到强命中线的（已按像的程度排好）。纯函数，不碰 gh。 */
+export function strongMatches(items: readonly SimilarItem[]): SimilarItem[] {
+  return items.filter((i) => i.score >= STRONG_THRESHOLD);
 }
 
 /** 读候选：开着的单、最近更新的合并了的 PR。读不到、认不出抛 Error（由 similarIssues 记成没查成）。 */

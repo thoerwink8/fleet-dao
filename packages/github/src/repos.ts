@@ -1,8 +1,17 @@
 // 仓的事实一律从 GitHub 读、短时缓存，不在代码或配置里手写：默认分支（fleet-dao 是 main，旧代码到处写死 master，G1）、
 // 主线的必过检查（从规则集读——手打的常量早晚会被凭印象填错）。
 import { z } from 'zod';
-import { enc, encRef, type GitHubClient, type RepoRef, repoSlug, unexpected } from './client.ts';
+import {
+  enc,
+  encRef,
+  type GhResponse,
+  type GitHubClient,
+  type RepoRef,
+  repoSlug,
+  unexpected,
+} from './client.ts';
 import type { AppRole } from './credentials.ts';
+import { isGitHubError } from './errors.ts';
 
 const RepoSchema = z.object({
   default_branch: z.string().min(1),
@@ -37,6 +46,18 @@ export interface BranchRules {
 }
 
 const TTL_MS = 5 * 60_000;
+
+/**
+ * 免费套餐的私有仓不支持分支规则，GitHub 对规则接口回 403「Upgrade to GitHub Pro or make this repository public
+ * to enable this feature.」。只认这句（别的 403 是令牌权限之类，不能吞）；这样的仓没有规则可读，等于没写规则。
+ */
+const PLAN_UNSUPPORTED_RULES = /upgrade to github pro or make this repository public/i;
+
+function rulesUnsupportedByPlan(error: unknown): boolean {
+  if (!isGitHubError(error, 'FORBIDDEN')) return false;
+  const details = error.details as { githubMessage?: unknown } | undefined;
+  return typeof details?.githubMessage === 'string' && PLAN_UNSUPPORTED_RULES.test(details.githubMessage);
+}
 
 export class RepoFactsCache {
   private readonly facts = new Map<string, { at: number; value: RepoFacts }>();
@@ -79,13 +100,22 @@ export class RepoFactsCache {
     const hit = this.rules.get(key);
     const now = this.client.now().getTime();
     if (hit && now - hit.at < TTL_MS) return hit.value;
-    const res = await this.client.request({
-      method: 'GET',
-      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/rules/branches/${encRef(branch)}`,
-      auth: { as: role, repo, scope: role === 'engine' ? 'rules' : undefined },
-      query: { per_page: 100 },
-      signal,
-    });
+    let res: GhResponse;
+    try {
+      res = await this.client.request({
+        method: 'GET',
+        path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/rules/branches/${encRef(branch)}`,
+        auth: { as: role, repo, scope: role === 'engine' ? 'rules' : undefined },
+        query: { per_page: 100 },
+        signal,
+      });
+    } catch (error) {
+      if (!rulesUnsupportedByPlan(error)) throw error;
+      // 空规则：requiredChecksFor 会因此抛 NO_REQUIRED_CHECKS（零条检查不当绿），由仓档案的 mergeSignals 兜底。
+      const empty: BranchRules = { requiredChecks: [], mergeMethods: [] };
+      this.rules.set(key, { at: now, value: empty });
+      return empty;
+    }
     const parsed = RulesSchema.safeParse(res.data);
     if (!parsed.success) throw unexpected(`读 ${repoSlug(repo)} ${branch} 的规则`, res.data);
     const requiredChecks = new Set<string>();

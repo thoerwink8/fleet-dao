@@ -124,6 +124,7 @@ export function runDetached(
     let lines = 0;
     let seq = -1;
     let firstLineMs: number | undefined;
+    let startupReady = false;
     let lastActivity = t0;
     let killed: AgentProcessResult['killed'];
     let hookError: string | undefined;
@@ -150,6 +151,9 @@ export function runDetached(
     const control: ProcessControl = {
       get seq() {
         return seq;
+      },
+      ready: () => {
+        startupReady = true;
       },
       touch: () => {
         lastActivity = Date.now();
@@ -439,7 +443,7 @@ export function runDetached(
       timers.push(
         setTimeout(
           () => {
-            if (firstLineMs === undefined) control.kill('startup_timeout');
+            if (!startupReady) control.kill('startup_timeout');
           },
           Math.max(0, spec.limits.startupMs - elapsed),
         ),
@@ -451,7 +455,7 @@ export function runDetached(
         const every = Math.max(20, Math.min(1_000, Math.floor(idleMs / 5)));
         timers.push(
           setInterval(() => {
-            if (firstLineMs !== undefined && !hooks.busy?.() && Date.now() - lastActivity > idleMs) {
+            if (startupReady && !hooks.busy?.() && Date.now() - lastActivity > idleMs) {
               control.kill('idle_timeout');
             }
           }, every),

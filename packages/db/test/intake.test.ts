@@ -89,6 +89,7 @@ describe('拉单判「派出过没有」要的任务行（intakeTaskRow，#3461�
       id: done.id,
       state: 'done',
       executor: 'engine',
+      owner: 'v1',
       returnedAt: null,
     });
   });

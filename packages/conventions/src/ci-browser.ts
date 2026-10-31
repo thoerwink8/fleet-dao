@@ -10,7 +10,10 @@ const MIRRORS = '/etc/apt/apt-mirrors.txt';
 const REQUIRED_SUITES = ['noble', 'noble-updates', 'noble-backports', 'noble-security'];
 const COMPONENTS = ['main', 'restricted', 'universe', 'multiverse'];
 const ubuntuUri = (value: string) =>
-  /^https?:\/\/(?:azure\.archive|archive|security)\.ubuntu\.com\/ubuntu\/?$/.test(value);
+  // Canonical's own archive hosts; runners on AWS get the per-region `<region>.ec2.archive` mirror.
+  /^https?:\/\/(?:azure\.archive|[a-z]{2}-[a-z]+-\d\.ec2\.archive|archive|security)\.ubuntu\.com\/ubuntu\/?$/.test(
+    value,
+  );
 
 function regularText(file: string): string {
   const st = lstatSync(file);
@@ -59,13 +62,12 @@ export function validateUbuntuSources(text: string, mirrors: string | null): voi
       if (ubuntuUri(uri)) continue;
       if (uri !== `mirror+file:${MIRRORS}` || !mirrors) throw new Error('Unknown Ubuntu source URI');
       const entries = mirrors.split('\n').filter((x) => x.trim() && !x.trimStart().startsWith('#'));
-      if (
-        !entries.length ||
-        entries.some(
-          (x) => !/^\S+(?:\s+priority:\d+)?\s*$/.test(x) || !ubuntuUri(x.trim().split(/\s+/)[0] ?? ''),
-        )
-      )
-        throw new Error('Unknown Ubuntu mirror list');
+      // Mirror entries are public archive URLs; name the rejected ones so a runner-image change is diagnosable.
+      const bad = entries.filter(
+        (x) => !/^\S+(?:\s+priority:\d+)?\s*$/.test(x) || !ubuntuUri(x.trim().split(/\s+/)[0] ?? ''),
+      );
+      if (!entries.length) throw new Error('Unknown Ubuntu mirror list: no entries');
+      if (bad.length) throw new Error(`Unknown Ubuntu mirror list: ${JSON.stringify(bad.slice(0, 5))}`);
     }
   }
   if (REQUIRED_SUITES.some((x) => !suites.has(x))) throw new Error('Required Ubuntu suite is missing');

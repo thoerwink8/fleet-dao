@@ -983,7 +983,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         capabilities: deps.decisionCapabilities,
         handOff: async () => {
           handoff = await handOffDecision(
-            { store, commenter: deps.decisionCommenter },
+            {
+              store,
+              commenter: deps.decisionCommenter,
+              warn: (msg, fields) => deps.log.warn(msg, fields),
+            },
             notification,
             answered,
           );

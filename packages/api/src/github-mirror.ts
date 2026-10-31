@@ -15,6 +15,7 @@ import { createCiPolicyBridge, withPolicySource } from './ci-policy-bridge.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
 import { githubAppMissing } from './github.ts';
+import type { IntakeIssuesPort } from './intake.ts';
 import type { LocalHoldPort } from './local-hold.ts';
 import type { GitHubEventSink } from './ports.ts';
 import { currentMilestoneOf, type RequestIssuePort } from './request-issue.ts';
@@ -57,6 +58,8 @@ export function githubMirror(
   selfCheck?: (repos: RepoRef[]) => Promise<SelfCheckItem[]>;
   /** 提需求（#2060）开单、写回评论、读单子状态，都用「引擎」机器人；凭据没读到就没有，开单回 503，不假装开了。 */
   requestIssues?: RequestIssuePort;
+  /** 开单服务（决定 0122）查重、开单、并单，也用「引擎」机器人；凭据没读到就没有，开单回 503。 */
+  intakeIssues?: IntakeIssuesPort;
   /** 导入列表：两个机器人的安装令牌。凭据没读到就没有，列表回「没接上」。 */
   installationRepos?: Deps['installationRepos'];
   ciPolicyBridge?: Deps['ciPolicyBridge'];
@@ -118,6 +121,25 @@ export function githubMirror(
         body: input.comment,
       });
       await gh.addIssueLabel({ repo: input.repo, issueNumber: input.issueNumber, label: LOCAL_LABEL });
+    },
+    intakeIssues: {
+      listOpenIssues: (input) => gh.listOpenIssues(input),
+      async openIssue(input) {
+        // 「当前」挂开着的那个 v<N>（没有就不挂）；「未排期」不挂。读不到里程碑照抛，不拿「没读到」当「没有当前版本」
+        const milestone =
+          input.milestone === '当前'
+            ? await currentMilestoneOf(() => gh.readOpenMilestones({ repo: input.repo }))
+            : null;
+        return gh.openIssue({
+          repo: input.repo,
+          key: input.key,
+          title: input.title,
+          body: input.body,
+          labels: input.labels,
+          milestone,
+        });
+      },
+      commentIssue: (input) => gh.commentIssue(input),
     },
     selfCheck: (repos) => gh.selfCheck(repos),
     installationRepos: {

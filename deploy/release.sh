@@ -1080,6 +1080,25 @@ migrate() { # 提交号
   else
     changed "跑了新迁移：库 fleet 已跑过的从 $before 个到 $after 个"
   fi
+  migrate_fleet2 "$1"
+}
+
+# 新内核的 schema fleet2（决定 0124，#3775）：同一个库里独立 schema，自己的记账表 fleet2.__migrations。
+# 旧代码不碰 fleet2，所以退回旧版不用看它（schema_allows 只数旧库的）；只进不退，不拿删 schema 当回退。
+# 跑失败和旧库迁移一样不切版本
+migrate_fleet2() { # 提交号
+  local dir=$RELEASES/$1 out
+  step "新内核迁移（fleet2）"
+  if [[ ! -f "$dir/packages/harness-store/src/bin/migrate.ts" ]]; then
+    ok "这一版没有新内核的迁移"
+    return 0
+  fi
+  if ! out=$(cd -- "$dir" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
+    "$NODE" packages/harness-store/src/bin/migrate.ts 2>&1); then
+    red "fleet2 迁移失败（没切版本，在用的那版不受影响）：$(tail -5 <<<"$out" | tr '\n' ' ')"
+    return 1
+  fi
+  ok "$(tail -1 <<<"$out")"
 }
 
 # ── 目录 ──

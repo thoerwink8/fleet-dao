@@ -8,7 +8,9 @@ import {
   modulePaths,
   rankSimilar,
   renderSimilar,
+  STRONG_THRESHOLD,
   similarIssues,
+  strongMatches,
 } from '../src/issue-similar.ts';
 
 const ok = (data: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(data), stderr: '' });
@@ -198,5 +200,31 @@ describe('renderSimilar：给人看的几行', () => {
 
   it('查过、没有像的：什么也不说', () => {
     expect(renderSimilar({ found: [] }, 900)).toEqual([]);
+  });
+});
+
+describe('strongMatches：强命中线（开单服务拒开重复用，STRONG_THRESHOLD）', () => {
+  const query = { title: '引擎偶发超时要自动重试', body: '- packages/engine/src/jobs/retry.ts' };
+
+  it('标题几乎一样的达到强命中线；只是同模块的邻居不到', () => {
+    const items = rankSimilar(query, [
+      cand(10, '引擎偶发超时要自动重试'),
+      cand(11, '引擎偶发超时先加一条告警'),
+      cand(12, '换个说法', 'packages/engine/src/jobs/retry.ts'),
+    ]);
+    expect(strongMatches(items).map((s) => s.number)).toEqual([10]);
+    expect(STRONG_THRESHOLD).toBeGreaterThan(0.45);
+  });
+
+  it('【故意造出的失败】只靠两个共同路径（最多 0.6）到不了强命中线', () => {
+    const two = rankSimilar(
+      {
+        title: '飞书消息排版',
+        body: '- packages/engine/src/jobs/retry.ts\n- packages/engine/src/jobs/send.ts',
+      },
+      [cand(402, '换个说法', 'packages/engine/src/jobs/retry.ts packages/engine/src/jobs/send.ts')],
+    );
+    expect(two).toHaveLength(1);
+    expect(strongMatches(two)).toEqual([]);
   });
 });

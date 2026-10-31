@@ -8,6 +8,27 @@
       "path": "packages/shared"
     },
     {
+      "path": "packages/harness-contract"
+    },
+    {
+      "path": "packages/harness-store"
+    },
+    {
+      "path": "packages/harness-api"
+    },
+    {
+      "path": "packages/harness-runner"
+    },
+    {
+      "path": "packages/harness-workers"
+    },
+    {
+      "path": "packages/harness-dispatch"
+    },
+    {
+      "path": "packages/harness-egress"
+    },
+    {
       "path": "packages/core"
     },
     {

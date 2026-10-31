@@ -21,6 +21,10 @@ export const LOCAL_CLAIMS_PATH = '/nodes/claims';
 export const TASK_EXECUTORS = ['engine', 'local'] as const;
 export type TaskExecutor = (typeof TASK_EXECUTORS)[number];
 
+/** 这张单归哪套系统（决定 0124）：v1 = 旧引擎和本机，harness = 新内核。旧系统见到 harness 一律不碰。 */
+export const TASK_OWNERS = ['v1', 'harness'] as const;
+export type TaskOwner = (typeof TASK_OWNERS)[number];
+
 // 分支前缀的认法（localBranchPrefix、issueOfBranch）在 conventions 的 issue-branch.ts：pnpm work、pnpm pr:open 在零安装区也要用。
 
 const RepoSlug = z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'owner/name');

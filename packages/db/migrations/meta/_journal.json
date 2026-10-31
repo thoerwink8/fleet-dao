@@ -722,6 +722,41 @@
       "when": 1792624039335,
       "tag": "0102_acceptance_candidate_triggers",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1793381649300,
+      "tag": "0103_grey_penance",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1793385688613,
+      "tag": "0104_confused_carmella_unuscione",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1793391120079,
+      "tag": "0105_clammy_sabretooth",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1793391127529,
+      "tag": "0106_tasks_fencing_trigger",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1793393131810,
+      "tag": "0107_glamorous_kabuki",
+      "breakpoints": true
     }
   ]
 }

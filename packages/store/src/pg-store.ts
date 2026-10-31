@@ -7,6 +7,7 @@
 //   和游标的精度一致，翻页不漏同一毫秒里的几条。
 
 import {
+  appendLedgerNote,
   auditLog,
   bans,
   channels,
@@ -17,6 +18,7 @@ import {
   githubEventVersions,
   idempotencyKeys,
   listFlowAssignments as listFlowAssignmentRows,
+  listIssueEvents,
   listTaskRows,
   models,
   nodeKeys,
@@ -1165,6 +1167,22 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .limit(limit + 1);
       const items = rows.slice(0, limit).map(toAudit);
       return { items, nextCursor: nextCursorOf(items.at(-1), rows.length > limit) };
+    },
+    async appendLedgerNote({ actorId, action, target, after }) {
+      return appendLedgerNote(db, { at: now(), actorKind: 'agent', actorId, action, target, after });
+    },
+    async listIssueEvents({ after, limit }) {
+      const rows = await listIssueEvents(db, { after, limit });
+      return rows.map((r) => ({
+        id: r.id,
+        at: iso(r.at),
+        actorKind: r.actorKind,
+        actorId: r.actorId,
+        action: r.action,
+        target: r.target,
+        after: r.after ?? null,
+        ok: r.ok,
+      }));
     },
     async listSettings() {
       const rows = await db.select().from(settings).orderBy(asc(settings.key));

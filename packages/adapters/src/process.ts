@@ -25,7 +25,7 @@ import { abortCause, type StopCause, stopCauseOf } from './stop-reason.ts';
 import type { KillReason } from './types.ts';
 
 export interface ProcessLimits {
-  /** 起进程后多久还没有第一行 stdout 就判起不来。reclaude 首跑会卡在「Syncing config…」上百秒，默认给足 180 秒。 */
+  /** 起进程后多久还没有执行体协议帧就判起不来。reclaude 首跑会卡在「Syncing config…」上百秒，默认给足 180 秒。 */
   startupMs: number;
   /** 总时长上限。 */
   wallClockMs: number;
@@ -67,6 +67,8 @@ export interface AgentProcessSpec {
 export interface ProcessControl {
   /** 正在处理的这一行的序号（从 0 起）：同一份输出怎么重读都是同一个号，引擎按它去重。 */
   readonly seq: number;
+  /** 解析方确认读到了执行体协议帧，解除启动判死。 */
+  ready(): void;
   /** 解析方认定「在干活」时调用，停滞计时从这里重来。 */
   touch(): void;
   kill(reason: KillReason, cause?: StopCause): void;
@@ -238,6 +240,7 @@ export function runAgentProcess(
     let stderrTail = '';
     let lines = 0;
     let firstLineMs: number | undefined;
+    let startupReady = false;
     let lastActivity = t0;
     let killed: AgentProcessResult['killed'];
     let hookError: string | undefined;
@@ -285,6 +288,9 @@ export function runAgentProcess(
     const control: ProcessControl = {
       get seq() {
         return lines - 1;
+      },
+      ready: () => {
+        startupReady = true;
       },
       touch: () => {
         lastActivity = Date.now();
@@ -432,7 +438,7 @@ export function runAgentProcess(
 
     timers.push(
       setTimeout(() => {
-        if (firstLineMs === undefined) control.kill('startup_timeout');
+        if (!startupReady) control.kill('startup_timeout');
       }, spec.limits.startupMs),
       setTimeout(() => control.kill('wall_clock_timeout'), spec.limits.wallClockMs),
     );
@@ -442,7 +448,7 @@ export function runAgentProcess(
       // clearTimeout 也能停 setInterval，所以和别的定时器放一起收
       timers.push(
         setInterval(() => {
-          if (firstLineMs !== undefined && !hooks.busy?.() && Date.now() - lastActivity > idleMs) {
+          if (startupReady && !hooks.busy?.() && Date.now() - lastActivity > idleMs) {
             control.kill('idle_timeout');
           }
         }, every),

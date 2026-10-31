@@ -261,6 +261,24 @@ load_env() { # 文件 允许的键…
 
 # 模板渲染：把 @@KEY@@ 换成值，结果放进 RENDERED。纯文本替换、不经 sed，值里带 / & 之类也不会走样。
 RENDERED=""
+# systemd 的 slice 名按横杠分层：a-b-c.slice 在 /sys/fs/cgroup/a.slice/a-b.slice/a-b-c.slice 下面（法国实测，
+# fleet-agents.slice 落在 /fleet.slice/fleet-agents.slice）。nft 的 socket cgroupv2 要这个真路径和层数。
+SLICE_PATH="" SLICE_LEVEL=0
+slice_cgroup_path() { # 单元名（xxx.slice）→ 设 SLICE_PATH、SLICE_LEVEL
+  local name=${1%.slice} part="" seg
+  [[ "$1" == *.slice && "$name" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ && "$name" != *--* && "$name" != *- ]] || {
+    red "不是合法的 slice 名：$1"
+    return 1
+  }
+  SLICE_PATH="" SLICE_LEVEL=0
+  local IFS=-
+  for seg in $name; do
+    part=${part:+$part-}$seg
+    SLICE_PATH=${SLICE_PATH:+$SLICE_PATH/}$part.slice
+    SLICE_LEVEL=$((SLICE_LEVEL + 1))
+  done
+}
+
 render() { # 模板 KEY=VALUE…
   local tpl=$1 kv key val
   shift

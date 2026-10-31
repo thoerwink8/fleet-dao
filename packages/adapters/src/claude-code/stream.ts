@@ -136,6 +136,7 @@ export interface ClaudeStreamSummary {
 /** 读一行带来的变化，给起进程的那一层用。 */
 export interface ClaudeLineEffect {
   events: ProgressEvent[];
+  protocolFrame?: boolean;
   /** 这一行带来的会话过程记录（#1640）：助手的话、工具调用和结果、报错、结论。 */
   transcript: TranscriptEntry[];
   /** 这一行说明会话在干活（助手、工具、思考帧）；重试、额度、init 不算。 */
@@ -252,6 +253,7 @@ export class ClaudeStreamReader {
     }
     this.#s.frames++;
     const type = str(frame.type) ?? '(无 type)';
+    if (type !== '(无 type)') effect.protocolFrame = true;
     switch (type) {
       case 'system':
         this.#system(frame, effect);

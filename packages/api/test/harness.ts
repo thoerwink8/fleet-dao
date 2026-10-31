@@ -135,6 +135,10 @@ export interface HarnessOptions {
   taskRoutePins?: Deps['taskRoutePins'];
   /** 本机领单（决定 0096）；不给就是没接上（内存版、开发环境一样，回 503）。 */
   localClaims?: Deps['localClaims'];
+  /** 开单服务（决定 0122）；不给就是没接上（内存版、开发环境一样，POST /api/nodes/issues 回 503）。 */
+  intakeIssues?: Deps['intakeIssues'];
+  /** 本机交单给法国（#3739）；不给就是没接上（回 503）。 */
+  nodeDispatch?: Deps['nodeDispatch'];
   /** 会话内容（#1640）；不给就是没接上（内存版、开发环境一样）。 */
   runTranscript?: Deps['runTranscript'];
   /** 提需求（#2049）；不给就是没接上（内存版、开发环境一样）。 */
@@ -204,6 +208,8 @@ function wire<S extends Store>(
     ...(options.routingOrder ? { routingOrder: options.routingOrder } : {}),
     ...(options.taskRoutePins ? { taskRoutePins: options.taskRoutePins } : {}),
     ...(options.localClaims ? { localClaims: options.localClaims } : {}),
+    ...(options.intakeIssues ? { intakeIssues: options.intakeIssues } : {}),
+    ...(options.nodeDispatch ? { nodeDispatch: options.nodeDispatch } : {}),
     ...(options.runTranscript ? { runTranscript: options.runTranscript } : {}),
     ...(options.requests ? { requests: options.requests } : {}),
     ...(options.taskRedo ? { taskRedo: options.taskRedo } : {}),

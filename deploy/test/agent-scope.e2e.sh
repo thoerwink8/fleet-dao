@@ -206,6 +206,27 @@ for other in root nobody fleet-agent-dedicated; do
   if as_fleet sudo -n "$BIN" run "$TAG-$other" --user "$other" -- /bin/true 2>/dev/null; then flunk "--user $other 被放行了"; else pass "--user 只认会话用户（$other 被拒；fleet-agent-dedicated 已停用）"; fi
 done
 if as_fleet sudo -n "$BIN" run "$TAG-nouser" -- /bin/true 2>/dev/null; then flunk "没给 --user 也放行了"; else pass "没给 --user 被拒"; fi
+for bad in fleet-agents system ../fleet2-shadow ""; do
+  if as_fleet sudo -n "$BIN" run "$TAG-slice" --user "$U" --slice "$bad" -- /bin/true 2>/dev/null; then flunk "--slice「$bad」被放行了"; else pass "--slice 只认 fleet2-shadow（「$bad」被拒）"; fi
+done
+out=$(as_fleet sudo -n "$BIN" run "$TAG-shadow" --user "$U" --slice fleet2-shadow -- /bin/cat /proc/self/cgroup 2>&1)
+if [[ "$out" == "0::/fleet2.slice/fleet2-shadow.slice/fleet-agent-$TAG-shadow.scope" ]]; then
+  pass "--slice fleet2-shadow：落在 /fleet2.slice/fleet2-shadow.slice（影子工人的出网规则按它认）"
+else
+  flunk "--slice fleet2-shadow 落在「$out」"
+fi
+as_fleet sudo -n "$BIN" run "$TAG-shadowlist" --user "$U" --slice fleet2-shadow -- /bin/sleep 300 &
+if wait_scope "$TAG-shadowlist" active; then
+  if as_fleet sudo -n "$BIN" list | grep -q "^$TAG-shadowlist "; then
+    flunk "list 列出了影子 slice 里的会话（旧引擎重启会当残留收掉）"
+  else
+    pass "list 不列影子 slice 里的会话"
+  fi
+else
+  flunk "影子 slice 里的会话没起来"
+fi
+as_fleet sudo -n "$BIN" stop "$TAG-shadowlist" >/dev/null
+wait 2>/dev/null
 if as_fleet sudo -n /bin/true 2>/dev/null; then flunk "fleet 能 sudo 别的命令"; else pass "fleet 不能 sudo 别的命令"; fi
 
 if ((fail)); then
