@@ -148,6 +148,10 @@ FLEET2_SHADOW_NFT_FILE=/etc/fleet-dao/fleet2-shadow.nft
 # 出网关常驻（自动档，#3803）：单元写死听 7344（和上面的 FLEET2_EGRESS_PORT 一样，测试对照），名单从仓里装
 FLEET2_EGRESS_UNIT=fleet2-egress.service
 FLEET2_EGRESS_ALLOW=/etc/fleet-dao/fleet2-egress.allow
+# 新内核进程（自动档，#3811）：单元写死只听 127.0.0.1:7345；GitHub 只读令牌由人放进这个文件（root:fleet 640），没放就不起
+FLEET2_KERNEL_UNIT=fleet2-kernel.service
+FLEET2_KERNEL_PORT=7345
+FLEET2_KERNEL_ENV=/etc/fleet-dao/fleet2-kernel.env
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
 MIRASIM_RETIRED_FILE=$DEPLOY_DIR/france/mirasim-retired
 # 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
@@ -1035,6 +1039,54 @@ readback_fleet2_egress() {
     red "$FLEET2_EGRESS_UNIT 跑在 $FLEET2_SHADOW_SLICE 里：它自己连外面会被重定向回自己"
   fi
 }
+
+# 新内核进程（#3811，包 packages/harness-dispatch）：影子模式，对外零写。影子工作目录放在工作树的根下 _fleet2
+# （打头的下划线撞不上 <owner>_<name> 的仓目录；不放 _tmp：旧引擎把那下面它不认得的会话临时目录当残留收），
+# 归 fleet：内核在这下面建目录，再经 fleet-agent-scope adopt 交给会话用户。镜像在单元的 StateDirectory（/var/lib/fleet2）下。
+setup_fleet2_kernel() {
+  step "新内核进程（$FLEET2_KERNEL_UNIT，影子模式，只听 127.0.0.1:$FLEET2_KERNEL_PORT）"
+  local unit_changed=0
+  ensure_dir "$WORK_DIR/_fleet2" fleet:fleet 755 || return 1
+  put_file "/etc/systemd/system/$FLEET2_KERNEL_UNIT" root:root 644 "$(<"$DEPLOY_DIR/france/$FLEET2_KERNEL_UNIT")"
+  if ((WROTE)); then
+    unit_changed=1
+    systemctl daemon-reload
+  fi
+  if [[ ! -f "$FLEET2_KERNEL_ENV" ]]; then
+    pending "$FLEET2_KERNEL_UNIT 没起：等人把 GitHub 只读令牌放进 $FLEET2_KERNEL_ENV（root:fleet 640，一行 FLEET2_GITHUB_READ_TOKEN=…）"
+    return 0
+  fi
+  fix_meta "$FLEET2_KERNEL_ENV" root:fleet 640
+  # 代码跟着发版换：单元变了重启；跑着的工人由内核收到 SIGTERM 后收尾
+  ensure_unit_running "$FLEET2_KERNEL_UNIT" "$unit_changed"
+}
+readback_fleet2_kernel() {
+  local listen
+  if ! cmp -s -- "/etc/systemd/system/$FLEET2_KERNEL_UNIT" "$DEPLOY_DIR/france/$FLEET2_KERNEL_UNIT"; then
+    red "/etc/systemd/system/$FLEET2_KERNEL_UNIT 和仓里的不一样（或没装）：重跑 bash $0 --auto-tier"
+  fi
+  if [[ "$(stat -c '%U:%G %a' -- "$WORK_DIR/_fleet2" 2>/dev/null)" != "fleet:fleet 755" ]]; then
+    red "$WORK_DIR/_fleet2 不是 fleet:fleet 755：内核建不了影子工作目录"
+  fi
+  if [[ ! -f "$FLEET2_KERNEL_ENV" ]]; then
+    pending "$FLEET2_KERNEL_UNIT 没起：等人放 GitHub 只读令牌（$FLEET2_KERNEL_ENV）"
+    return 0
+  fi
+  if [[ "$(stat -c '%U:%G %a' -- "$FLEET2_KERNEL_ENV" 2>/dev/null)" != "root:fleet 640" ]]; then
+    red "$FLEET2_KERNEL_ENV 不是 root:fleet 640（里面有令牌）"
+  fi
+  if [[ "$(systemctl is-active "$FLEET2_KERNEL_UNIT" 2>/dev/null)" != active ]]; then
+    red "$FLEET2_KERNEL_UNIT 没在跑：journalctl -u $FLEET2_KERNEL_UNIT -n 50"
+    return 0
+  fi
+  if [[ "$(systemctl show -p Slice --value "$FLEET2_KERNEL_UNIT" 2>/dev/null)" == "$FLEET2_SHADOW_SLICE" ]]; then
+    red "$FLEET2_KERNEL_UNIT 跑在 $FLEET2_SHADOW_SLICE 里：它读 GitHub、拉镜像会被重定向到出网关"
+  fi
+  listen=$(ss -Hltn "sport = :$FLEET2_KERNEL_PORT" 2>/dev/null | awk '{ print $4 }' | sort -u | tr '\n' ' ')
+  if [[ "$listen" != "127.0.0.1:$FLEET2_KERNEL_PORT " ]]; then
+    red "$FLEET2_KERNEL_UNIT 的接口层听的是「$listen」，应只听 127.0.0.1:$FLEET2_KERNEL_PORT"
+  fi
+}
 readback_footprint() {
   local f u
   if [[ "$(systemctl is-active fleet-footprint.timer 2>/dev/null)" != active ]]; then
@@ -1170,6 +1222,7 @@ readback() {
   readback_release_request
   readback_footprint
   readback_fleet2_egress
+  readback_fleet2_kernel
   readback_proxy_headers
   readback_node_report_gate
   readback_service_home
@@ -1750,6 +1803,7 @@ setup_auto_tier() {
   setup_release_request_scripts
   setup_footprint
   setup_fleet2_egress
+  setup_fleet2_kernel
   # 只把这段原文抽出来跑的测试里，下面两个函数不在作用域；整份 france.sh 里都在。
   if declare -F install_scope_bin >/dev/null; then install_scope_bin; fi
   if declare -F ensure_work_tmp >/dev/null; then ensure_work_tmp; fi
@@ -1778,6 +1832,7 @@ readback_auto_tier() {
   readback_release_request_scripts
   readback_footprint
   readback_fleet2_egress
+  readback_fleet2_kernel
   readback_mirasim_session_unit
   # 不对就红（句子里有目录路径），不在读回里改权限。抽出来跑的测试里这个函数不在。
   if declare -F readback_work_tmp >/dev/null; then readback_work_tmp || true; fi
@@ -1832,6 +1887,7 @@ main() {
     setup_release_request_scripts
     setup_footprint
     setup_fleet2_egress
+    setup_fleet2_kernel
     setup_release_request
     setup_agent_rules
     setup_cli_tools

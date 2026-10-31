@@ -988,6 +988,8 @@ const AUTO_TIER_FILES = [
   // 新内核影子工人的出网关（#3803）：常驻单元加名单文件，不碰防火墙（防火墙表是人工档的 fleet2-shadow.*）
   'deploy/france/fleet2-egress.service',
   'deploy/france/fleet2-egress.allow',
+  // 新内核进程（#3811）：常驻单元，令牌文件由人放；执行体前缀脚本跟着发布版本走、不装到别处
+  'deploy/france/fleet2-kernel.service',
   // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
   'deploy/france/fleet-mirasim-session.service',
   'deploy/france/mirasim-retired',
@@ -1072,6 +1074,23 @@ test('出网关单元（#3803）：不进影子 slice，听的口和名单路径
   assert.match(unit, new RegExp(`^ConditionPathExists=${v('FLEET2_EGRESS_ALLOW')}$`, 'm'));
 });
 
+test('新内核单元（#3811）：不进影子 slice、口和令牌文件跟 france.sh 的变量一样、以会话用户起工人', () => {
+  const france = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
+  const unit = readFileSync(new URL('../france/fleet2-kernel.service', import.meta.url), 'utf8');
+  const v = (name) => new RegExp(`^${name}=(\\S+)`, 'm').exec(france)?.[1];
+  assert.doesNotMatch(unit, /^Slice=/m, '它读 GitHub、拉镜像，进了影子 slice 会被重定向到出网关');
+  assert.doesNotMatch(unit, /^NoNewPrivileges=yes/m, '影子工人经 sudo 起，不能禁提权');
+  assert.match(unit, new RegExp(`FLEET2_API_PORT=${v('FLEET2_KERNEL_PORT')}(\\s|$)`, 'm'));
+  assert.match(unit, new RegExp(`FLEET2_EGRESS_PORT=${v('FLEET2_EGRESS_PORT')}(\\s|$)`, 'm'));
+  assert.match(unit, new RegExp(`^EnvironmentFile=${v('FLEET2_KERNEL_ENV')}$`, 'm'));
+  assert.match(unit, new RegExp(`^ConditionPathExists=${v('FLEET2_KERNEL_ENV')}$`, 'm'));
+  assert.match(unit, /^Environment=FLEET2_SANDBOX=scope$/m);
+  const cmd = /FLEET2_WORKER_COMMAND=(\[.*?\])'/.exec(unit)?.[1] ?? '';
+  const [wrapper] = JSON.parse(cmd);
+  assert.equal(wrapper, '/srv/fleet-dao-releases/current/deploy/france/fleet2-worker.sh');
+  assert.ok(existsSync(new URL('../france/fleet2-worker.sh', import.meta.url)), '执行体前缀脚本要在仓里');
+});
+
 test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数里一个都没有', () => {
   const france = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
   const body = (name) => new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}`, 'm').exec(france)?.[1] ?? '';
@@ -1084,6 +1103,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
     'setup_release_request_scripts',
     'setup_footprint',
     'setup_fleet2_egress',
+    'setup_fleet2_kernel',
     'setup_mirasim_session',
   ]) {
     const text = body(fn);
@@ -1098,7 +1118,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
   // （Mirasim 常驻单元仍放最后，#1274）；注释行不算
   assert.match(
     body('setup_auto_tier').replace(/^\s*#.*\n/gm, ''),
-    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*setup_footprint\n\s*setup_fleet2_egress\n\s*if declare -F install_scope_bin >\/dev\/null; then install_scope_bin; fi\n\s*if declare -F ensure_work_tmp >\/dev\/null; then ensure_work_tmp; fi\n\s*setup_mirasim_session\s*$/,
+    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*setup_footprint\n\s*setup_fleet2_egress\n\s*setup_fleet2_kernel\n\s*if declare -F install_scope_bin >\/dev\/null; then install_scope_bin; fi\n\s*if declare -F ensure_work_tmp >\/dev\/null; then ensure_work_tmp; fi\n\s*setup_mirasim_session\s*$/,
   );
   assert.match(body('readback_auto_tier'), /readback_work_tmp/);
   // 读回也读回它：缺了 MIRASIM_NO_AGENT_EGRESS=1 之类判红（check_mirasim_session_unit_file）
