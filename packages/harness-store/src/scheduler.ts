@@ -262,6 +262,20 @@ export function retryJob(db: Db, job: Job, why: string, backoffMs: number): Prom
   });
 }
 
+/**
+ * 我们自己计划内的停机（发版重启）把在跑的活退回队列：马上可再领，这一次领取不消耗尝试次数。
+ * attempts 保持不动（runId 里带着它，下一次领取是新的 runId，不和被停的这一次撞流），改成把上限也加一，
+ * 净效果是剩下的尝试次数不变。被停的这一次不是失败，所以不走 retryJob 的“到顶进 dead”。
+ */
+export function releaseJob(db: Db, job: Job, why: string): Promise<void> {
+  return settleJob(db, job, {
+    state: 'pending',
+    lastError: why,
+    maxAttempts: sql`${jobs.maxAttempts} + 1` as unknown as number,
+    dueAt: sql`now()` as unknown as Date,
+  });
+}
+
 /** 取消一件活和它所有的子孙（还没完的）。领着的人下次心跳拿到 cancelled。回一共取消了几件。 */
 export async function cancelJob(db: Db, key: string, why: string): Promise<number> {
   return db.transaction(async (tx) => {

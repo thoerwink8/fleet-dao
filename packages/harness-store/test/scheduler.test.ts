@@ -11,6 +11,7 @@ import {
   heartbeat,
   NoQueueLimitError,
   queueHealth,
+  releaseJob,
   retryJob,
   schedule,
   setQueueLimit,
@@ -104,6 +105,25 @@ describe('做的进程出事', () => {
     if (!b) throw new Error('没再领到');
     await retryJob(t.db, b, '上游 503', 0);
     expect(await stateOf('r')).toMatchObject({ state: 'dead' });
+  });
+});
+
+describe('计划内停机退回（releaseJob，#3776）', () => {
+  it('退回后马上可领、不消耗尝试次数（反复被发版停也到不了 dead）；旧领取者收尾被拒', async () => {
+    await schedule(t.db, { queue: 'q', key: 'rel', payload: {}, maxAttempts: 1 });
+    for (let i = 1; i <= 3; i++) {
+      const [a] = await claimJobs(t.db, 'q', 5, LEASE);
+      if (!a) throw new Error(`第 ${i} 次没领到`);
+      expect(a.attempts).toBe(i);
+      await releaseJob(t.db, a, '派工器停机');
+      await expect(completeJob(t.db, a)).rejects.toBeInstanceOf(LostClaimError);
+      expect(await stateOf('rel')).toMatchObject({ state: 'pending', attempts: i, maxAttempts: 1 + i });
+    }
+    // 真失败照旧算：原本就只有 1 次，第一次真失败就进 dead
+    const [last] = await claimJobs(t.db, 'q', 5, LEASE);
+    if (!last) throw new Error('没再领到');
+    await retryJob(t.db, last, '上游 503', 0);
+    expect(await stateOf('rel')).toMatchObject({ state: 'dead' });
   });
 });
 

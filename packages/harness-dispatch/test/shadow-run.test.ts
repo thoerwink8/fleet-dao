@@ -129,6 +129,53 @@ describe('影子工作目录', () => {
     ]);
   }, 60_000);
 
+  it('发版停机叫停的影子活：不写 shadow_runs、目录清掉；新派工器再领，跑完才写一行（#3776）', async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), 'fleet2-shadow-rel-'));
+    const outDir = await mkdtemp(join(tmpdir(), 'fleet2-shadow-relout-'));
+    const mk = (mode: string) =>
+      new Dispatcher({
+        db: t.db,
+        mcpUrl: 'http://127.0.0.1:4799/mcp',
+        command: [process.execPath, FAKE],
+        model: 'claude-opus-5-5',
+        permissionMode: 'bypassPermissions',
+        prepareWorkspace: shadowWorkspaces({ db: t.db, mirrorRoot, tmpRoot, redact }),
+        hostEnv: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT, HOME: '/h' },
+        extraEnv: { FAKE_OUT_DIR: outDir, FAKE_WRITE: 'src/a.txt:changed', FAKE_MODE: mode },
+        tmpRoot,
+        workerBudget: { startupMs: 3_000, totalMs: 20_000, killGraceMs: 200 },
+        leaseMs: 5_000,
+        heartbeatMs: 50,
+        perMinute: 100,
+      });
+    const count = async () =>
+      Number((await t.pg.query<{ n: number }>('select count(*)::int n from fleet2.shadow_runs')).rows[0]?.n);
+    await freezeBatch(t.db, 'b5', [item(5)]);
+    await enqueueShadowBatch(t.db, 'b5', async () => six);
+
+    const d1 = mk('work-hang');
+    await d1.init();
+    expect(await d1.poll()).toBe(1);
+    const until = Date.now() + 15_000;
+    while (readdirSync(outDir).filter((f) => f.startsWith('run-')).length < 1) {
+      if (Date.now() > until) throw new Error('等工人起来超时');
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    await d1.stop();
+    expect(await count()).toBe(0);
+    expect((await t.pg.query<{ state: string }>('select state from fleet2.jobs')).rows[0]?.state).toBe(
+      'pending',
+    );
+    expect(readdirSync(tmpRoot).filter((f) => f.startsWith('fleet2-shadow-'))).toEqual([]);
+
+    const d2 = mk('ok');
+    await d2.init();
+    await d2.poll();
+    const [o] = await d2.settled();
+    expect(o).toMatchObject({ outcome: 'completed', final: true });
+    expect(await count()).toBe(1);
+  }, 60_000);
+
   it('给了 sandbox：建好就交出去、跑完按回执删；抓补丁不往工人的 .git 里写（法国上那边归会话用户）', async () => {
     const tmpRoot = await mkdtemp(join(tmpdir(), 'fleet2-shadow-sb-'));
     const steps: string[] = [];

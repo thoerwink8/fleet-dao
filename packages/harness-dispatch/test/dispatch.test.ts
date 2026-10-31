@@ -296,6 +296,79 @@ describe('叫停和丢租约', () => {
   });
 });
 
+describe('发版停机（release-pause，#3776 法国现场；旧坑 D1、#2797）', () => {
+  const jobDetail = async () =>
+    (
+      await t.pg.query<{ state: string; attempts: number; max_attempts: number }>(
+        'select state, attempts, max_attempts from fleet2.jobs',
+      )
+    ).rows[0];
+
+  it('停机叫停在跑的工人：活退回队列、剩余尝试次数不变、交回非终局；另一个派工器起来再领到，跑完才是终局', async () => {
+    const r1 = await rig({ env: { FAKE_MODE: 'work-hang' } });
+    await spawnRequest('rel-1');
+    expect(await r1.d.poll()).toBe(1);
+    await waitFor(() => r1.runs().length === 1);
+    const before = await jobDetail();
+
+    await r1.d.stop(); // 发版：systemd 停内核 → 派工器 stop()
+
+    const after = await jobDetail();
+    expect(after?.state).toBe('pending');
+    // 领的这一次 attempts 加了一，退回时上限也加一：领之前还剩几次，现在还剩几次
+    expect(after?.attempts).toBe(before?.attempts);
+    expect(after?.max_attempts).toBe((before?.max_attempts ?? 0) + 1);
+    const hbs = await handbacks();
+    expect(hbs).toHaveLength(1);
+    expect(hbs[0]?.payload).toMatchObject({
+      taskId: 'rel-1',
+      final: false,
+      willRetry: true,
+      outcome: 'released',
+      verdict: 'unknown',
+    });
+    expect(evidence(hbs[0] as never).worker?.killed?.reason).toBe('aborted');
+    expect(await verifyToken(t.db, r1.runs()[0]?.workerAuth)).toBeNull();
+
+    // 新进程：同一个库、新派工器实例，照原样再领
+    const r2 = await rig({});
+    const [o] = await runAll(r2);
+    expect(o).toMatchObject({ outcome: 'completed', final: true });
+    expect(r2.runs()).toHaveLength(1);
+    const all = await handbacks();
+    expect(all.map((h) => h.payload.final)).toEqual([false, true]);
+    expect(all[0]?.payload.runId).not.toBe(all[1]?.payload.runId);
+    expect(await jobDetail()).toMatchObject({ state: 'done', attempts: 2 });
+  });
+
+  it('停机退回不吃重试预算：已经用掉一次真失败重试，被发版停一次后仍剩同样多次', async () => {
+    const errors: unknown[] = [];
+    const r = await rig({
+      env: { FAKE_MODE: 'work-hang' },
+      over: { maxAttempts: 3, onError: (e) => errors.push(e) },
+    });
+    await spawnRequest('rel-2');
+    await r.d.poll();
+    await waitFor(() => r.runs().length === 1);
+    await r.d.stop();
+    expect(errors).toEqual([]);
+    expect(await jobDetail()).toMatchObject({ state: 'pending', attempts: 1, max_attempts: 4 });
+  });
+
+  it('指挥官叫停（user-stop）仍是终局，不退回队列', async () => {
+    const r = await rig({ env: { FAKE_MODE: 'work-hang' } });
+    await spawnRequest('rel-3');
+    await r.d.poll();
+    await waitFor(() => r.runs().length === 1);
+    await appendToSession(t.db, SESSION, 'worker.stop.requested', { taskId: 'rel-3', reason: '不做了' });
+    await r.d.poll();
+    const [o] = await r.d.settled();
+    expect(o).toMatchObject({ outcome: 'cancelled', final: true });
+    expect((await handbacks())[0]?.payload).toMatchObject({ final: true, willRetry: false });
+    expect((await jobDetail())?.state).toBe('cancelled');
+  });
+});
+
 describe('工人被杀、超时', () => {
   it('超时：交回带 deadline 原因和停在哪一步，核验判 failed，不重试', async () => {
     const r = await rig({
