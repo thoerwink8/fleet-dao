@@ -31,6 +31,8 @@ export const events = fleet2.table(
   },
   (t) => [
     unique('events_stream_seq_unique').on(t.streamId, t.seq),
+    // 按流取新事件、取最后一条（驾驶舱读会话，#3818）：读的行数跟一页成正比
+    index('events_stream_id_idx').on(t.streamId, t.id),
     check('events_seq_positive', sql`${t.seq} > 0`),
   ],
 );
@@ -217,9 +219,21 @@ export const shadowCompare = fleet2.table(
 );
 
 /** 第一个投影：每条流走到第几条、最后一条是什么类型。拿它证明「删了重建结果一致」。 */
-export const streamHeads = fleet2.table('stream_heads', {
-  streamId: text('stream_id').primaryKey(),
-  headSeq: integer('head_seq').notNull(),
-  lastType: text('last_type').notNull(),
-  events: integer('events').notNull(),
-});
+export const streamHeads = fleet2.table(
+  'stream_heads',
+  {
+    streamId: text('stream_id').primaryKey(),
+    headSeq: integer('head_seq').notNull(),
+    lastType: text('last_type').notNull(),
+    events: integer('events').notNull(),
+    /** 这条流最后一条事件的 events.id 和时刻（#3818）：驾驶舱会话列表按它倒序分页。 */
+    lastEventId: bigint('last_event_id', { mode: 'number' }).notNull(),
+    lastAt: timestamp('last_at', tz).notNull(),
+  },
+  (t) => [
+    // 会话列表：只看 session:* 的流，按最后事件倒序
+    index('stream_heads_session_last_idx')
+      .on(t.lastEventId.desc())
+      .where(sql`${t.streamId} like 'session:%'`),
+  ],
+);

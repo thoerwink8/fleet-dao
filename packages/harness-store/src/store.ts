@@ -113,13 +113,22 @@ export async function advanceStreamHeads(db: Db, pageSize = 200): Promise<number
       for (const e of page) {
         await tx
           .insert(streamHeads)
-          .values({ streamId: e.streamId, headSeq: e.seq, lastType: e.type, events: 1 })
+          .values({
+            streamId: e.streamId,
+            headSeq: e.seq,
+            lastType: e.type,
+            events: 1,
+            lastEventId: e.id,
+            lastAt: e.createdAt,
+          })
           .onConflictDoUpdate({
             target: streamHeads.streamId,
             set: {
               headSeq: sql`greatest(${streamHeads.headSeq}, ${e.seq})`,
               lastType: sql`case when ${e.seq} >= ${streamHeads.headSeq} then ${e.type} else ${streamHeads.lastType} end`,
               events: sql`${streamHeads.events} + 1`,
+              lastEventId: sql`greatest(${streamHeads.lastEventId}, ${e.id})`,
+              lastAt: sql`case when ${e.id} >= ${streamHeads.lastEventId} then ${e.createdAt.toISOString()}::timestamptz else ${streamHeads.lastAt} end`,
             },
           });
       }

@@ -29,6 +29,13 @@
       "when": 1793396162073,
       "tag": "0003_faithful_silverclaw",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793410948998,
+      "tag": "0004_clear_thor_girl",
+      "breakpoints": true
     }
   ]
 }
