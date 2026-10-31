@@ -4,7 +4,12 @@
 import { makeRedactor, secretsFromEnv } from '@fleet-dao/harness-runner';
 import type { Db } from '@fleet-dao/harness-store';
 import * as schema from '@fleet-dao/harness-store/schema';
-import { CLAUDE_PERMISSION_MODES, type ClaudePermissionMode } from '@fleet-dao/harness-workers';
+import {
+  CLAUDE_PERMISSION_MODES,
+  type ClaudePermissionMode,
+  WORKER_SHELLS,
+  type WorkerShell,
+} from '@fleet-dao/harness-workers';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { appTokenSource } from '../github-app.ts';
@@ -43,6 +48,13 @@ if (sandboxKind !== '' && sandboxKind !== 'scope') {
   console.error(`FLEET2_SANDBOX 只认 scope（或不给）：${sandboxKind}`);
   process.exit(2);
 }
+// FLEET2_SHELL：工人用哪个壳（#3842），claude-code（默认）或 grok；grok 要给 FLEET2_GROK_AUTH（登录态文件的绝对路径）
+const shell = (env.FLEET2_SHELL ?? 'claude-code') as WorkerShell;
+if (!WORKER_SHELLS.includes(shell)) {
+  console.error(`FLEET2_SHELL 只认 ${WORKER_SHELLS.join('、')}`);
+  process.exit(2);
+}
+const grokAuthPath = shell === 'grok' ? need('FLEET2_GROK_AUTH') : undefined;
 const permissionMode = (env.FLEET2_PERMISSION_MODE ?? 'bypassPermissions') as ClaudePermissionMode;
 if (!CLAUDE_PERMISSION_MODES.includes(permissionMode)) {
   console.error(`FLEET2_PERMISSION_MODE 只认 ${CLAUDE_PERMISSION_MODES.join('、')}`);
@@ -60,6 +72,8 @@ const kernel = createKernel({
   apiPort: port('FLEET2_API_PORT', 7345),
   dispatcher: {
     command: command as string[],
+    shell,
+    ...(grokAuthPath ? { grokAuthPath } : {}),
     model: need('FLEET2_MODEL'),
     permissionMode,
     // 工人环境由 buildWorkerEnv 按白名单现场构造，宿主的凭据一个都不抄

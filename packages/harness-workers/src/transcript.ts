@@ -165,10 +165,134 @@ export function parseStreamLine(line: string, runId: string, redact: Redactor): 
   return [];
 }
 
+/** 一个壳的输出怎么拆成过程事件。Claude 一行自成一条；Grok 的话一字一帧，要攒，进程结束时 end() 把攒着的吐出来。 */
+export interface TranscriptParser {
+  parse(line: string): TranscriptItem[];
+  end?(): TranscriptItem[];
+}
+
+export function claudeTranscriptParser(runId: string, redact: Redactor): TranscriptParser {
+  return { parse: (line) => parseStreamLine(line, runId, redact) };
+}
+
+const rec = (v: unknown): Record<string, unknown> =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+
+/** tool_call_update 的结果文字：先取 content 里的文本块，没有再取 rawOutput 里给模型看的那份。 */
+function grokResultText(frame: Record<string, unknown>): string {
+  const parts = (Array.isArray(frame.content) ? frame.content : [])
+    .map((c) => rec(rec(c).content).text)
+    .filter((t): t is string => typeof t === 'string' && t !== '');
+  if (parts.length > 0) return parts.join('\n');
+  const out = rec(frame.rawOutput);
+  for (const v of [out.output_for_prompt, rec(out.Content).content, rec(out.FileContent).content]) {
+    if (typeof v === 'string' && v !== '') return v;
+  }
+  return '';
+}
+
+/**
+ * Grok `--output-format streaming-json`（#3842）拆成同一套 transcript.* 事件，驾驶舱工人会话页不用分壳：
+ * text 是一字一帧的增量，攒到下一个非 text 帧再成一条助手的话；thought 不落（同 Claude 不落 thinking）；
+ * tool_call → tool_use，tool_call_update 到 completed / failed → tool_result（命令退出码非 0 算出错）；end → result。
+ */
+export class GrokTranscriptParser implements TranscriptParser {
+  readonly #runId: string;
+  readonly #redact: Redactor;
+  #text = '';
+
+  constructor(runId: string, redact: Redactor) {
+    this.#runId = runId;
+    this.#redact = redact;
+  }
+
+  #clip(raw: string, max = TRANSCRIPT_TEXT_MAX_BYTES) {
+    const safe = this.#redact(raw);
+    const c = clipBytes(safe, max);
+    return { text: c.text, truncated: c.truncated, chars: safe.length };
+  }
+
+  #flushText(): TranscriptItem[] {
+    const text = this.#text;
+    this.#text = '';
+    if (text.trim() === '') return [];
+    return [{ type: 'transcript.assistant', payload: { runId: this.#runId, ...this.#clip(text) } }];
+  }
+
+  parse(line: string): TranscriptItem[] {
+    let f: Record<string, unknown>;
+    try {
+      f = rec(JSON.parse(line));
+    } catch {
+      return [];
+    }
+    if (f.type === 'text') {
+      if (typeof f.data === 'string') this.#text += f.data;
+      return [];
+    }
+    if (f.type === 'thought') return [];
+    const out = this.#flushText();
+    const runId = this.#runId;
+    if (f.type === 'tool_call') {
+      const rawName = String(f.toolName ?? f.title ?? '?');
+      const input = this.#clip(JSON.stringify(f.rawInput ?? {}), TRANSCRIPT_INPUT_MAX_BYTES);
+      out.push({
+        type: 'transcript.tool_use',
+        payload: {
+          runId,
+          toolUseId: this.#redact(String(f.toolCallId ?? '')),
+          name: this.#redact(rawName),
+          summary: this.#redact(summarizeToolInput(rawName, f.rawInput)),
+          input: input.text,
+          inputTruncated: input.truncated,
+        },
+      });
+    } else if (f.type === 'tool_call_update' && (f.status === 'completed' || f.status === 'failed')) {
+      const raw = rec(f.rawOutput);
+      const exit = typeof raw.exit_code === 'number' ? raw.exit_code : undefined;
+      out.push({
+        type: 'transcript.tool_result',
+        payload: {
+          runId,
+          toolUseId: this.#redact(String(f.toolCallId ?? '')),
+          isError: f.status === 'failed' || (raw.type === 'Bash' && exit !== undefined && exit !== 0),
+          ...this.#clip(grokResultText(f)),
+        },
+      });
+    } else if (f.type === 'error') {
+      out.push({
+        type: 'transcript.assistant',
+        payload: { runId, ...this.#clip(`报错：${String(f.message ?? '')}`) },
+      });
+    } else if (f.type === 'end') {
+      const n = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+      const stop = String(f.stopReason ?? '');
+      out.push({
+        type: 'transcript.result',
+        payload: {
+          runId,
+          subtype: this.#redact(stop),
+          isError: stop !== 'end_turn',
+          ...this.#clip(''),
+          durationMs: null,
+          numTurns: n(f.num_turns),
+        },
+      });
+    }
+    return out;
+  }
+
+  end(): TranscriptItem[] {
+    return this.#flushText();
+  }
+}
+
 export interface TranscriptOptions {
   db: Db;
   runId: string;
   redact: Redactor;
+  /** 拆输出的规则；不给是 Claude Code 的 stream-json。 */
+  parser?: TranscriptParser;
   /** 攒多久必写一次。默认 1500ms。 */
   flushMs?: number;
   /** 攒到多少条立刻写。默认 50。 */
@@ -190,8 +314,9 @@ export interface TranscriptSummary {
 }
 
 export class TranscriptWriter {
-  readonly #o: Required<Omit<TranscriptOptions, 'db' | 'runId' | 'redact'>> &
+  readonly #o: Required<Omit<TranscriptOptions, 'db' | 'runId' | 'redact' | 'parser'>> &
     Pick<TranscriptOptions, 'db' | 'runId' | 'redact'>;
+  readonly #parser: TranscriptParser;
   readonly #stream: string;
   #pending: TranscriptItem[] = [];
   #timer: NodeJS.Timeout | undefined;
@@ -203,13 +328,15 @@ export class TranscriptWriter {
   #queuedBytes = 0;
 
   constructor(o: TranscriptOptions) {
+    const { parser, ...rest } = o;
     this.#o = {
       flushMs: 1500,
       maxBatch: 50,
       maxRows: TRANSCRIPT_MAX_ROWS,
       maxBytes: TRANSCRIPT_MAX_BYTES,
-      ...o,
+      ...rest,
     };
+    this.#parser = parser ?? claudeTranscriptParser(o.runId, o.redact);
     this.#stream = transcriptStream(o.runId);
   }
 
@@ -218,10 +345,14 @@ export class TranscriptWriter {
     if (this.#closed) return;
     let items: TranscriptItem[];
     try {
-      items = parseStreamLine(line, this.#o.runId, this.#o.redact);
+      items = this.#parser.parse(line);
     } catch {
       return;
     }
+    this.#enqueue(items);
+  }
+
+  #enqueue(items: TranscriptItem[]): void {
     for (const it of items) {
       const size = Buffer.byteLength(JSON.stringify(it.payload), 'utf8');
       if (this.#queued >= this.#o.maxRows || this.#queuedBytes + size > this.#o.maxBytes) {
@@ -295,6 +426,13 @@ export class TranscriptWriter {
   /** 把攒着的写完；超限丢掉的补一条 transcript.dropped。之后不再收。返回这一轮的数字，进 worker.settled。 */
   async close(): Promise<TranscriptSummary> {
     if (!this.#closed) {
+      let tail: TranscriptItem[] = [];
+      try {
+        tail = this.#parser.end?.() ?? [];
+      } catch {
+        // 攒着的拆不出来就算了，不拖垮收尾
+      }
+      this.#enqueue(tail);
       this.#closed = true;
       if (this.#sum.dropped > 0) {
         this.#pending.push({

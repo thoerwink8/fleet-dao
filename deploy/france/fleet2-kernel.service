@@ -20,9 +20,12 @@ Environment=FLEET2_GITHUB_APP_FILE=/etc/fleet-dao/github/gh-app-fleet-dao-engine
 Environment=PGHOST=/var/run/postgresql PGUSER=fleet
 Environment=FLEET2_DATABASE_URL=postgres:///fleet
 Environment=FLEET2_API_PORT=7345 FLEET2_EGRESS_PORT=7344
-Environment='FLEET2_WORKER_COMMAND=["/srv/fleet-dao-releases/current/deploy/france/fleet2-worker.sh"]'
+# 工人的壳和模型（#3842，2026-10-31 创始人拍：额度紧，新内核各环节用 Grok 4.7）。改回 Claude：FLEET2_SHELL=claude-code、
+# 执行体换成 /home/fleet-agent-carpool/.local/bin/reclaude、FLEET2_MODEL=claude-opus-5-5，去掉 FLEET2_GROK_AUTH
+Environment='FLEET2_WORKER_COMMAND=["/srv/fleet-dao-releases/current/deploy/france/fleet2-worker.sh","/home/fleet-agent-carpool/.grok/bin/grok"]'
 Environment=FLEET2_SANDBOX=scope
-Environment=FLEET2_MODEL=claude-opus-5-5 FLEET2_PERMISSION_MODE=bypassPermissions
+Environment=FLEET2_SHELL=grok FLEET2_GROK_AUTH=/home/fleet-agent-carpool/.grok/auth.json
+Environment=FLEET2_MODEL=grok-4.7 FLEET2_PERMISSION_MODE=bypassPermissions
 Environment=FLEET2_WORK_ROOT=/var/lib/fleet-work/_fleet2
 Environment=FLEET2_MIRROR_ROOT=/var/lib/fleet2/mirrors
 Environment=FLEET2_WORKER_HOME=/home/fleet-agent-carpool
