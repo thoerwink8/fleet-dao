@@ -148,6 +148,9 @@ describe('影子工作目录', () => {
           };
         },
         async stop() {},
+        async runAsWorker() {
+          throw new Error('这条用例不以工人身份跑命令');
+        },
       },
     });
     await freezeBatch(t.db, 'b3', [item(3)]);
