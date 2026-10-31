@@ -113,6 +113,7 @@ export function createKernel(o: KernelOptions) {
           mirrorRoot: o.mirrorRoot,
           tmpRoot: o.workRoot,
           redact: o.redact,
+          ...(o.dispatcher.sandbox ? { sandbox: o.dispatcher.sandbox } : {}),
         }),
         // 影子模式下 outbox 一个真实处理器都不装
         shadow:

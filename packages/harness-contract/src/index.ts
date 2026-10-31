@@ -16,6 +16,8 @@ export const EVENT_TYPES = [
   'session.turn.settled',
   'worker.spawned',
   'worker.settled',
+  // 工人以会话用户跑时（#3814）：收 scope、删交出去的目录的结局，收不干净也照实记
+  'worker.cleaned',
   'handback.recorded',
   // 接口层（#3775）：MCP 工具调用落成的事件，这一片只记账，外部动作由后面的片接。
   'worker.spawn.requested',
