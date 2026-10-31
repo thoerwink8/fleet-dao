@@ -145,6 +145,9 @@ MIRASIM_SESSION_PORT=4318
 FLEET2_SHADOW_SLICE=fleet2-shadow.slice
 FLEET2_EGRESS_PORT=7344
 FLEET2_SHADOW_NFT_FILE=/etc/fleet-dao/fleet2-shadow.nft
+# 出网关常驻（自动档，#3803）：单元写死听 7344（和上面的 FLEET2_EGRESS_PORT 一样，测试对照），名单从仓里装
+FLEET2_EGRESS_UNIT=fleet2-egress.service
+FLEET2_EGRESS_ALLOW=/etc/fleet-dao/fleet2-egress.allow
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
 MIRASIM_RETIRED_FILE=$DEPLOY_DIR/france/mirasim-retired
 # 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
@@ -1004,6 +1007,34 @@ setup_footprint() {
   ensure_unit_running fleet-footprint.timer "$unit_changed"
 }
 
+setup_fleet2_egress() {
+  step "新内核影子工人的出网关（$FLEET2_EGRESS_UNIT，只听 127.0.0.1:$FLEET2_EGRESS_PORT，名单 $FLEET2_EGRESS_ALLOW）"
+  local unit_changed=0 allow_changed=0
+  # /etc/fleet-dao 由人工档建（root:fleet 750），这里不再动它的权限
+  put_file "$FLEET2_EGRESS_ALLOW" root:root 644 "$(<"$DEPLOY_DIR/france/fleet2-egress.allow")"
+  if ((WROTE)); then allow_changed=1; fi
+  put_file "/etc/systemd/system/$FLEET2_EGRESS_UNIT" root:root 644 "$(<"$DEPLOY_DIR/france/$FLEET2_EGRESS_UNIT")"
+  if ((WROTE)); then
+    unit_changed=1
+    systemctl daemon-reload
+  fi
+  # 名单只在起进程时读：名单变了也要重启；代码跟着发版换，发版时这里重启一次接上新代码
+  ensure_unit_running "$FLEET2_EGRESS_UNIT" "$((unit_changed || allow_changed))"
+}
+readback_fleet2_egress() {
+  if [[ "$(systemctl is-active "$FLEET2_EGRESS_UNIT" 2>/dev/null)" != active ]]; then
+    red "$FLEET2_EGRESS_UNIT 没在跑：影子工人发往 443 的连接被重定向过去没人接，一律连不出去"
+  fi
+  if ! cmp -s -- "$FLEET2_EGRESS_ALLOW" "$DEPLOY_DIR/france/fleet2-egress.allow"; then
+    red "$FLEET2_EGRESS_ALLOW 和仓里的不一样（或没装）：重跑 bash $0 --auto-tier"
+  fi
+  if ! cmp -s -- "/etc/systemd/system/$FLEET2_EGRESS_UNIT" "$DEPLOY_DIR/france/$FLEET2_EGRESS_UNIT"; then
+    red "/etc/systemd/system/$FLEET2_EGRESS_UNIT 和仓里的不一样（或没装）"
+  fi
+  if [[ "$(systemctl show -p Slice --value "$FLEET2_EGRESS_UNIT" 2>/dev/null)" == "$FLEET2_SHADOW_SLICE" ]]; then
+    red "$FLEET2_EGRESS_UNIT 跑在 $FLEET2_SHADOW_SLICE 里：它自己连外面会被重定向回自己"
+  fi
+}
 readback_footprint() {
   local f u
   if [[ "$(systemctl is-active fleet-footprint.timer 2>/dev/null)" != active ]]; then
@@ -1138,6 +1169,7 @@ readback() {
   readback_auto_release
   readback_release_request
   readback_footprint
+  readback_fleet2_egress
   readback_proxy_headers
   readback_node_report_gate
   readback_service_home
@@ -1717,6 +1749,7 @@ setup_auto_tier() {
   setup_auto_release
   setup_release_request_scripts
   setup_footprint
+  setup_fleet2_egress
   # 只把这段原文抽出来跑的测试里，下面两个函数不在作用域；整份 france.sh 里都在。
   if declare -F install_scope_bin >/dev/null; then install_scope_bin; fi
   if declare -F ensure_work_tmp >/dev/null; then ensure_work_tmp; fi
@@ -1744,6 +1777,7 @@ readback_auto_tier() {
   done
   readback_release_request_scripts
   readback_footprint
+  readback_fleet2_egress
   readback_mirasim_session_unit
   # 不对就红（句子里有目录路径），不在读回里改权限。抽出来跑的测试里这个函数不在。
   if declare -F readback_work_tmp >/dev/null; then readback_work_tmp || true; fi
@@ -1797,6 +1831,7 @@ main() {
     setup_auto_release
     setup_release_request_scripts
     setup_footprint
+    setup_fleet2_egress
     setup_release_request
     setup_agent_rules
     setup_cli_tools
