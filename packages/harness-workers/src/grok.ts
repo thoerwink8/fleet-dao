@@ -10,8 +10,13 @@ import { join } from 'node:path';
 import type { ClaudePermissionMode, ClaudeSession } from './claude-code.ts';
 import { MCP_SERVER_NAME, type McpEndpoint, SESSION_TOKEN_HEADER } from './mcp-config.ts';
 
-/** 写码用不上的内置工具：工具定义每次调用都重带一遍，关掉省 token（名单同旧引擎 GROK_DISALLOWED_TOOLS）。 */
+/**
+ * 关掉的内置工具。web_search / web_fetch 走 grok 自家服务端，出网关拦不住，影子工人搜得到已经合并的答案（#3776 同一类口子），
+ * 一律关；其余是写码用不上的（工具定义每次调用都重带一遍，关掉省 token，同旧引擎 GROK_DISALLOWED_TOOLS）。
+ */
 export const GROK_DISALLOWED_TOOLS: readonly string[] = [
+  'web_search',
+  'web_fetch',
   'image_gen',
   'image_edit',
   'image_to_video',
@@ -31,6 +36,11 @@ export const GROK_UNATTENDED_ENV: Readonly<Record<string, string>> = {
   GROK_DISABLE_AUTOUPDATER: '1',
   GROK_FOLDER_TRUST: '0',
   GROK_ASK_USER_QUESTION: '0',
+  // 统计上报和崩溃报告关掉：影子 slice 里连不上（mixpanel、grok.com），法国 2026-10-31 一件活 15 分钟被出网关拒了 1200 多次
+  GROK_TELEMETRY_ENABLED: 'false',
+  GROK_TELEMETRY_TRACE_UPLOAD: 'false',
+  DISABLE_TELEMETRY: '1',
+  DISABLE_ERROR_REPORTING: '1',
 };
 
 export interface GrokArgsSpec {
@@ -75,6 +85,13 @@ export function grokConfigToml(endpoint: McpEndpoint): string {
   const u = new URL(endpoint.url);
   if (u.search) throw new Error('MCP 地址里不许带查询参数：令牌只走请求头');
   return [
+    '[features]',
+    'telemetry = false',
+    '',
+    '[telemetry]',
+    'mixpanel_enabled = false',
+    'trace_upload = false',
+    '',
     `[mcp_servers.${MCP_SERVER_NAME}]`,
     `url = ${tomlString(endpoint.url)}`,
     `headers = { ${tomlString(SESSION_TOKEN_HEADER)} = ${tomlString(endpoint.token)} }`,
