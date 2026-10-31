@@ -426,7 +426,7 @@ test.describe('#3781 第二轮：工具调用折叠、长输出预览、列表�
     await page.getByRole('link', { name: /cmd-demo-login-fix/ }).click();
     const handback = page.locator('[data-event-type="handback.recorded"]');
     await expect(handback).toBeVisible();
-    await expect(handback.getByText('已交付')).toHaveAttribute('title', 'delivered');
+    await expect(handback.getByText('已完成')).toHaveAttribute('title', 'completed');
     // 折叠的「原始内容」里本来就是原值，不在这里查
     await expect(handback.locator('span[title="handback.recorded"]')).toHaveText('交回核验');
   });

@@ -88,7 +88,7 @@ const SESSIONS: Record<string, Step[]> = {
         runId: 'd12-a1',
         attempt: 1,
         final: true,
-        outcome: 'delivered',
+        outcome: 'completed',
         verdict: 'pass',
         reasons: ['改动只在登录页', '测试和界面检查输出齐全'],
       },

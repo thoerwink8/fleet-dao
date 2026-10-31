@@ -9,11 +9,12 @@ describe('countStuck', () => {
     const tails: TailEvent[][] = [
       [{ type: 'worker.settled', exitCode: 1 }],
       [{ type: 'worker.settled', exitCode: 0 }],
-      [{ type: 'handback.recorded', final: true, outcome: 'delivered' }],
+      [{ type: 'handback.recorded', final: true, outcome: 'completed', verdict: 'unverified' }],
+      [{ type: 'handback.recorded', final: true, outcome: 'completed', verdict: 'failed' }],
       [{ type: 'worker.result.submitted', status: 'blocked' }],
       [],
     ];
-    expect(countStuck(tails, NOW)).toBe(2);
+    expect(countStuck(tails, NOW)).toBe(3);
     expect(countStuck([], NOW)).toBe(0);
   });
 

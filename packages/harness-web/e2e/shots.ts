@@ -26,7 +26,7 @@ for (let i = 0; i < 32; i++) {
   // 批量的都当做完，列表里「做完」组在最下面，上面几组一屏看得全
   await stack.emit(`bulk-${String(i).padStart(2, '0')}`, 'handback.recorded', {
     final: true,
-    outcome: 'delivered',
+    outcome: 'completed',
     verdict: 'pass',
     reasons: [],
   });

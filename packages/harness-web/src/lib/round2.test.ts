@@ -78,13 +78,21 @@ describe('工具调用折叠', () => {
 describe('deriveWorkerState', () => {
   const now = Date.parse('2026-10-31T12:00:00Z');
   const st = (...tail: TailEvent[]) => deriveWorkerState(tail, now);
-  it('终局交回 delivered = 做完；轮次结束不改变', () => {
-    expect(st({ type: 'handback.recorded', final: true, outcome: 'delivered' })).toBe('done');
+  it('终局交回 completed 且核验没判失败 = 做完；轮次结束不改变', () => {
+    expect(st({ type: 'handback.recorded', final: true, outcome: 'completed' })).toBe('done');
+    // 影子模式不核验：法国真实交回是 completed / unverified
+    expect(st({ type: 'handback.recorded', final: true, outcome: 'completed', verdict: 'unverified' })).toBe(
+      'done',
+    );
     expect(
-      st({ type: 'handback.recorded', final: true, outcome: 'delivered' }, { type: 'session.turn.settled' }),
+      st({ type: 'handback.recorded', final: true, outcome: 'completed' }, { type: 'session.turn.settled' }),
     ).toBe('done');
   });
-  it('终局交回没交付 = 卡住', () => {
+  it('终局交回没交付或核验判失败 = 卡住', () => {
+    expect(st({ type: 'handback.recorded', final: true, outcome: 'completed', verdict: 'failed' })).toBe(
+      'stuck',
+    );
+    expect(st({ type: 'handback.recorded', final: true, outcome: 'killed' })).toBe('stuck');
     expect(st({ type: 'handback.recorded', final: true, outcome: 'dead' })).toBe('stuck');
     expect(st({ type: 'handback.recorded', final: true, outcome: 'blocked' })).toBe('stuck');
   });
@@ -130,7 +138,7 @@ describe('deriveWorkerState', () => {
       st({ type: 'handback.recorded', final: true, outcome: 'dead' }, { type: 'worker.spawn.requested' }),
     ).toBe('waiting');
     expect(
-      st({ type: 'handback.recorded', final: true, outcome: 'delivered' }, { type: 'session.turn.started' }),
+      st({ type: 'handback.recorded', final: true, outcome: 'completed' }, { type: 'session.turn.started' }),
     ).toBe('running');
   });
   it('没有事件、全是不认识的类型 = 等待', () => {

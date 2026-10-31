@@ -308,7 +308,7 @@ describe('会话列表', () => {
     await appendToSession(t.db, 'k3', 'worker.result.submitted', { status: 'failed' });
     await appendToSession(t.db, 'k4', 'handback.recorded', { final: true, outcome: 'dead' });
     await appendToSession(t.db, 'ok1', 'worker.settled', { exitCode: 0 });
-    await appendToSession(t.db, 'ok2', 'handback.recorded', { final: true, outcome: 'delivered' });
+    await appendToSession(t.db, 'ok2', 'handback.recorded', { final: true, outcome: 'completed' });
     await appendToSession(t.db, 'run1', 'worker.spawned', {});
     const all = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as ListBody;
     expect(all.stuckCount).toBe(4);
@@ -375,7 +375,12 @@ describe('会话列表', () => {
     expect(short?.tail).toEqual([{ type: 'worker.spawned', deadline: '2026-10-31T12:00:00Z' }]);
     const long = body.sessions.find((s) => s.id === 'long');
     expect(long?.tail).toHaveLength(TAIL_EVENTS);
-    expect(long?.tail.at(-1)).toEqual({ type: 'handback.recorded', final: true, outcome: 'dead' });
+    expect(long?.tail.at(-1)).toEqual({
+      type: 'handback.recorded',
+      final: true,
+      outcome: 'dead',
+      verdict: 'unknown',
+    });
     expect(long?.tail.at(-2)).toEqual({ type: 'worker.settled', exitCode: 143, killed: 'stop-requested' });
     expect(JSON.stringify(long?.tail)).not.toContain('xxxx');
   });

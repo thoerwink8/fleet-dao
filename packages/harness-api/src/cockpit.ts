@@ -173,6 +173,7 @@ async function loadTails(db: Db, streamIds: string[]): Promise<Map<string, TailE
     cross join lateral (
       select e.id, e.type, jsonb_build_object(
         'outcome', e.payload->'outcome',
+        'verdict', e.payload->'verdict',
         'final', e.payload->'final',
         'status', e.payload->'status',
         'exitCode', e.payload->'exitCode',
