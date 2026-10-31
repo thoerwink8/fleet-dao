@@ -442,18 +442,36 @@ printf '%s\n' "$RENDERED" >"$TMP/ka.conf"
 check "https 模板：upstream fleet_dao_api 带 keepalive，每一处 proxy_pass 都走它" "$(site_keepalive_gaps "$TMP/ka.conf")" ""
 check "实时推送单列一段、读超时 1 小时；其余转发 1 分钟没回音回 504" \
   "$(grep -A1 'location = /api/events {' "$TMP/ka.conf" | grep -c 'proxy_read_timeout 1h;') $(grep -cx '    proxy_read_timeout 1m;' "$TMP/ka.conf")" "1 1"
-grep -v 'keepalive 16;' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+sed '/^upstream fleet_dao_api {/,/^}/ { /keepalive 16;/d }' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
 check "去掉 keepalive：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
   "upstream fleet_dao_api 里没有 keepalive：连接用完就关，不复用"
-sed 's/^    keepalive 16;/    # keepalive 16;/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+sed '/^upstream fleet_dao_api {/,/^}/ s/^    keepalive 16;/    # keepalive 16;/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
 check "keepalive 注释掉了：不算有" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
   "upstream fleet_dao_api 里没有 keepalive：连接用完就关，不复用"
-grep -v 'keepalive_timeout' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+sed '/^upstream fleet_dao_api {/,/^}/ { /keepalive_timeout/d }' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
 check "没写 keepalive_timeout：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
   "upstream fleet_dao_api 里没写 keepalive_timeout：要写明，而且比法国后端的空闲超时短"
 sed '0,/proxy_pass http:\/\/fleet_dao_api;/s//proxy_pass http:\/\/10.99.0.2:8787;/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
 check "有一处直接转给地址、绕开了 upstream：查得出是哪一句" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
-  "有 proxy_pass 没走 upstream fleet_dao_api：proxy_pass http://10.99.0.2:8787;"
+  "有 proxy_pass 没走 upstream fleet_dao_api 或 fleet2_cockpit：proxy_pass http://10.99.0.2:8787;"
+# 新驾驶舱只读口（#3818）：upstream fleet2_cockpit 也要连接复用，/next/api/ 的 proxy_pass 都走它
+check "新驾驶舱：upstream fleet2_cockpit 在，地址是隧道上的法国 7346" \
+  "$(grep -A1 '^upstream fleet2_cockpit {' "$TMP/ka.conf" | grep -c 'server 10.99.0.2:7346;')" 1
+sed '/^upstream fleet2_cockpit {/,/^}/ s/^    keepalive 16;/    # keepalive 16;/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+check "fleet2_cockpit 去掉 keepalive：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
+  "upstream fleet2_cockpit 里没有 keepalive：连接用完就关，不复用"
+sed '/^upstream fleet2_cockpit {/,/^}/ { /keepalive_timeout/d }' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+check "fleet2_cockpit 没写 keepalive_timeout：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
+  "upstream fleet2_cockpit 里没写 keepalive_timeout：要写明，而且比 harness-api 的空闲超时短"
+sed 's/^upstream fleet2_cockpit/upstream other_cockpit/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+check "没有 upstream fleet2_cockpit、却有 proxy_pass 转给它：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
+  "没有 upstream fleet2_cockpit：往新驾驶舱的请求每次都新建连接"
+check "/next/api/ 的 proxy_pass 走 fleet2_cockpit，实时推送嵌一段读超时 1 小时、不缓冲" \
+  "$(grep -c 'proxy_pass http://fleet2_cockpit;' "$TMP/ka.conf") $(grep -A3 'location ~ /events\$ {' "$TMP/ka.conf" | grep -c 'proxy_read_timeout 1h;') $(grep -A3 'location ~ /events\$ {' "$TMP/ka.conf" | grep -c 'proxy_buffering off;')" "2 1 1"
+check "/next/api/ 和嵌的那段里都没写 proxy_set_header 或 add_header（写了就整套不继承）" \
+  "$(awk '/location \^~ \/next\/api\/ \{/ { on = 1 } on && /proxy_set_header|add_header/ { n++ } on && /^    }$/ { on = 0 } END { print n + 0 }' "$TMP/ka.conf")" 0
+check "/next/ 静态四段：精确外壳 no-cache、assets immutable、回落到新外壳；写了 add_header 的都带 X-Robots-Tag" \
+  "$(grep -c 'try_files $uri $uri/ /next/index.html;' "$TMP/ka.conf") $(grep -A3 'location ^~ /next/assets/ {' "$TMP/ka.conf" | grep -c 'immutable') $(grep -A3 'location = /next/index.html {' "$TMP/ka.conf" | grep -c 'no-cache') $(grep -A4 'location ^~ /next/assets/ {' "$TMP/ka.conf" | grep -c 'X-Robots-Tag') $(grep -A3 'location = /next/index.html {' "$TMP/ka.conf" | grep -c 'X-Robots-Tag')" "1 1 1 1 1"
 sed 's/upstream fleet_dao_api/upstream other_api/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
 check "没有这个 upstream：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
   "没有 upstream fleet_dao_api：往法国的请求每次都新建连接"
@@ -461,6 +479,8 @@ render_site nginx-http.conf 10.99.0.2 >/dev/null
 printf '%s\n' "$RENDERED" >"$TMP/ka-bad.conf"
 check "一处 proxy_pass 都没有（只开 80 的模板）：说认不出，不说齐了" \
   "$(site_keepalive_gaps "$TMP/ka-bad.conf" | grep -c '一处 proxy_pass 都没有')" 1
+check "只开 80 的模板：有 /next/ 静态段、/next/api/ 回 404、没有 upstream fleet2_cockpit（不转给法国）" \
+  "$(grep -c 'try_files $uri $uri/ /next/index.html;' "$TMP/ka-bad.conf") $(grep -A1 'location ^~ /next/api/ {' "$TMP/ka-bad.conf" | grep -c 'return 404;') $(grep -c '^upstream fleet2_cockpit' "$TMP/ka-bad.conf")" "1 1 0"
 check "文件读不到：说读不到，不说齐了" "$(site_keepalive_gaps "$TMP/nowhere.conf")" "读不到站点配置 $TMP/nowhere.conf"
 
 # /api、/auth 的 502/503/504：nginx 自己造的门口错误回固定 JSON。三个码都要在，身体是同一段合法 JSON。

@@ -47,6 +47,9 @@ HK_F2B_IGNORE=10.99.0.0/24
 # 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook、/healthz 经隧道转到这里。
 # 站点里它是 upstream fleet_dao_api 唯一的 server，连接留着复用（nginx-https.conf 开头）
 API_UPSTREAM=$WG_PEER_ADDR:8787
+# 法国新驾驶舱只读口（fleet2-cockpit.service，#3818）：/next/api/ 经隧道转到这里。站点模板里的 upstream fleet2_cockpit 把端口写死成 7346
+# （地址用 TUNNEL_PEER 占位，不另加占位），这里只用于读回探活；改端口要和 nginx-https.conf、法国 france.sh 的 FLEET2_COCKPIT_PORT 一起改
+COCKPIT_UPSTREAM=$WG_PEER_ADDR:7346
 # 香港本机探法国：每分钟打隧道上的 /healthz，连续 3 次失败才算失联。状态不放进静态目录（发版会 --delete）。
 # 推送地址在另一份文件里，没配只写状态。改路径要同步 france-probe.sh 的默认值和两份 nginx 模板。
 PROBE_BIN=/usr/local/lib/fleet-dao/france-probe.sh
@@ -892,6 +895,20 @@ readback_upstream() {
     red "连 $API_UPSTREAM 超时：隧道断了，或法国 ufw 没在 wg-fleet 上放行这个端口"
   else
     pending "法国驾驶舱后端 $API_UPSTREAM 还没起（连接被拒：隧道和法国防火墙是通的）"
+  fi
+  readback_cockpit_upstream
+}
+
+# 经隧道连法国新驾驶舱只读口（fleet2-cockpit.service，#3818）：判法同上。站点模板里 upstream fleet2_cockpit 写的是同一个端口
+readback_cockpit_upstream() {
+  local rc=0
+  timeout 5 bash -c "exec 3<>/dev/tcp/${COCKPIT_UPSTREAM%:*}/${COCKPIT_UPSTREAM#*:}" 2>/dev/null || rc=$?
+  if ((rc == 0)); then
+    ok "经隧道连得上法国新驾驶舱只读口 $COCKPIT_UPSTREAM"
+  elif ((rc == 124)); then
+    red "连 $COCKPIT_UPSTREAM 超时：隧道断了，或法国 ufw 没在 wg-fleet 上放行这个端口（法国 bash deploy/france.sh 整套重跑）"
+  else
+    pending "法国新驾驶舱只读口 $COCKPIT_UPSTREAM 还没起（连接被拒：隧道和法国防火墙是通的；法国 fleet2-cockpit.service）"
   fi
 }
 

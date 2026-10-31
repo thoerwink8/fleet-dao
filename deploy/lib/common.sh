@@ -361,15 +361,20 @@ site_keepalive_gaps() { # 站点文件
     printf '读不到站点配置 %s\n' "$1"
     return 0
   fi
+  # 新驾驶舱只读口（#3818）的 upstream fleet2_cockpit 同样要齐，但只在有 proxy_pass 转给它时才要求它在；proxy_pass 只许走这两个 upstream
   awk '
     { sub(/#.*/, "") }
     /^[ \t]*upstream[ \t]+fleet_dao_api[ \t]*\{/ { up = 1; seen = 1; next }
+    /^[ \t]*upstream[ \t]+fleet2_cockpit[ \t]*\{/ { up = 2; cseen = 1; next }
     up && /^[ \t]*\}/ { up = 0; next }
-    up && /^[ \t]*keepalive[ \t]+[1-9][0-9]*;/ { ka = 1 }
-    up && /^[ \t]*keepalive_timeout[ \t]+[0-9]+[smh]?;/ { kt = 1 }
+    up == 1 && /^[ \t]*keepalive[ \t]+[1-9][0-9]*;/ { ka = 1 }
+    up == 1 && /^[ \t]*keepalive_timeout[ \t]+[0-9]+[smh]?;/ { kt = 1 }
+    up == 2 && /^[ \t]*keepalive[ \t]+[1-9][0-9]*;/ { cka = 1 }
+    up == 2 && /^[ \t]*keepalive_timeout[ \t]+[0-9]+[smh]?;/ { ckt = 1 }
     /^[ \t]*proxy_pass[ \t]/ {
       n++
-      if ($0 !~ /^[ \t]*proxy_pass[ \t]+http:\/\/fleet_dao_api;[ \t]*$/) {
+      if ($0 ~ /^[ \t]*proxy_pass[ \t]+http:\/\/fleet2_cockpit;[ \t]*$/) cuse = 1
+      else if ($0 !~ /^[ \t]*proxy_pass[ \t]+http:\/\/fleet_dao_api;[ \t]*$/) {
         gsub(/^[ \t]+|[ \t]+$/, "")
         bad = (bad == "" ? $0 : bad "；" $0)
       }
@@ -380,8 +385,13 @@ site_keepalive_gaps() { # 站点文件
         if (!ka) print "upstream fleet_dao_api 里没有 keepalive：连接用完就关，不复用"
         if (!kt) print "upstream fleet_dao_api 里没写 keepalive_timeout：要写明，而且比法国后端的空闲超时短"
       }
+      if (cuse && !cseen) print "没有 upstream fleet2_cockpit：往新驾驶舱的请求每次都新建连接"
+      if (cseen) {
+        if (!cka) print "upstream fleet2_cockpit 里没有 keepalive：连接用完就关，不复用"
+        if (!ckt) print "upstream fleet2_cockpit 里没写 keepalive_timeout：要写明，而且比 harness-api 的空闲超时短"
+      }
       if (!n) print "一处 proxy_pass 都没有：认不出这份站点配置"
-      if (bad != "") print "有 proxy_pass 没走 upstream fleet_dao_api：" bad
+      if (bad != "") print "有 proxy_pass 没走 upstream fleet_dao_api 或 fleet2_cockpit：" bad
     }' "$1"
 }
 
