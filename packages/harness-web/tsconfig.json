@@ -1,0 +1,12 @@
+{
+  // 前端由 Vite 打包（模块解析 bundler、带 DOM 和 JSX）；dev/ 和 e2e/ 是 Node 直接跑的 .ts，和前端同在一个配置里按 bundler 解析。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client"]
+  },
+  "include": ["src", "dev", "e2e", "vite.config.ts"]
+}

@@ -1,7 +1,7 @@
 // 会话事件流的读写：一个会话一条流 `session:<号>`。读都有页上限，行数和页大小成正比。
 import { type NewEvent, SCHEMA_VERSION, type StoredEvent } from '@fleet-dao/harness-contract';
 import { appendEvents, type Db, events, PAGE_MAX, StreamConflictError } from '@fleet-dao/harness-store';
-import { and, asc, eq, gt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm';
 
 export const sessionStream = (sessionId: string): string => `session:${sessionId}`;
 
@@ -60,6 +60,46 @@ export async function readSessionAfter(
     .orderBy(asc(events.id))
     .limit(Math.min(limit, PAGE_MAX));
   return rows.map(toStored);
+}
+
+export interface HistoryPage {
+  events: StoredEvent[];
+  /** 这个会话现在最新一条的事件号（没有事件是 0）：页面拿它当 SSE 的 Last-Event-ID 起点。 */
+  head: number;
+  /** 按读的方向还有没有没读到的（tail/before 看更老的，after 看更新的）。 */
+  hasMore: boolean;
+}
+
+/**
+ * 会话事件的历史页（驾驶舱首屏和 resync 整页重取用），行数和 limit 成正比（不超过 PAGE_MAX）：
+ * 不给游标 = 最新的 limit 条；before = 这个事件号之前最近的 limit 条；after = 这个事件号之后最早的 limit 条。
+ * 都按事件号升序返回。
+ */
+export async function readSessionHistory(
+  db: Db,
+  sessionId: string,
+  opts: { before?: number; after?: number; limit?: number } = {},
+): Promise<HistoryPage> {
+  const limit = Math.max(1, Math.min(opts.limit ?? 200, PAGE_MAX));
+  const stream = eq(events.streamId, sessionStream(sessionId));
+  const head = await latestSessionEventId(db, sessionId);
+  if (opts.after !== undefined) {
+    const rows = await db
+      .select()
+      .from(events)
+      .where(and(stream, gt(events.id, opts.after)))
+      .orderBy(asc(events.id))
+      .limit(limit + 1);
+    return { events: rows.slice(0, limit).map(toStored), head, hasMore: rows.length > limit };
+  }
+  const where = opts.before !== undefined ? and(stream, lt(events.id, opts.before)) : stream;
+  const rows = await db
+    .select()
+    .from(events)
+    .where(where)
+    .orderBy(desc(events.id))
+    .limit(limit + 1);
+  return { events: rows.slice(0, limit).reverse().map(toStored), head, hasMore: rows.length > limit };
 }
 
 /** afterId 之后这个会话有没有超过 cap 条：最多读 cap+1 行，不数全表。 */
