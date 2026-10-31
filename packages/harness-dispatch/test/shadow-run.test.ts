@@ -19,10 +19,11 @@ const redact = makeRedactor([]);
 let t: TestDb;
 let mirrorRoot: string;
 let baseSha: string;
+let src: string;
 
 beforeAll(async () => {
   t = await createTestDb();
-  const src = makeRepo();
+  src = makeRepo();
   mirrorRoot = await mkdtemp(join(tmpdir(), 'fleet2-shadow-mirrors-'));
   git(mirrorRoot, 'clone', '-q', '--bare', src, join(mirrorRoot, 'o', 'r.git'));
   baseSha = git(src, 'rev-parse', 'HEAD').trim();
@@ -174,6 +175,38 @@ describe('影子工作目录', () => {
     expect(steps).toEqual(['adopt:checked-out', 'release']);
     expect(readdirSync(tmpRoot)).toEqual([]);
   });
+
+  it('镜像不在就建、缺基线提交就拉；仓名带 .. 的拒', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet2-shadow-newmirror-'));
+    const tmpRoot = await mkdtemp(join(tmpdir(), 'fleet2-shadow-ws-'));
+    const prepare = shadowWorkspaces({
+      db: t.db,
+      mirrorRoot: root,
+      tmpRoot,
+      redact,
+      mirrorRemote: () => src,
+    });
+    const shadow = (sha: string) => ({ batchId: 'b4', repo: 'o/r', issue: 4, baseSha: sha });
+
+    const ws1 = await prepare({ taskId: 't4', ...six, shadow: shadow(baseSha) }, { runId: 'r4' });
+    expect(git(ws1.cwd, 'rev-parse', 'HEAD').trim()).toBe(baseSha);
+    expect(readdirSync(join(root, 'o'))).toEqual(['r.git']);
+    await ws1.cleanup?.();
+
+    writeFileSync(join(src, 'src', 'a.txt'), 'next\n');
+    git(src, 'commit', '-q', '-am', 'next');
+    const next = git(src, 'rev-parse', 'HEAD').trim();
+    const ws2 = await prepare({ taskId: 't5', ...six, shadow: shadow(next) }, { runId: 'r5' });
+    expect(git(ws2.cwd, 'rev-parse', 'HEAD').trim()).toBe(next);
+    await ws2.cleanup?.();
+
+    await expect(
+      prepare({ taskId: 't6', ...six, shadow: { ...shadow(baseSha), repo: 'o/..' } }, { runId: 'r6' }),
+    ).rejects.toThrow('仓名不合法');
+    await expect(
+      prepare({ taskId: 't7', ...six, shadow: shadow('0'.repeat(40)) }, { runId: 'r7' }),
+    ).rejects.toThrow('还是没有基线提交');
+  }, 60_000);
 
   it('没带影子目标的请求不建目录', async () => {
     const prepare = shadowWorkspaces({ db: t.db, mirrorRoot, tmpRoot: tmpdir(), redact });

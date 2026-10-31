@@ -1,12 +1,14 @@
 // 影子工作目录（#3808）：从本机的裸镜像 `<镜像根>/<仓>.git` 以 `clone --shared` 建一个自带 .git 的检出，停在批次的基线，跑完删掉。
+// 镜像不在就从 GitHub 匿名建、缺基线提交就拉（#3811）：只读、不带令牌，所以只认公开仓；私有仓建不成就按「工作环境没建成」退避重试。
 // 不用 `worktree add`：那样工作区的管理目录（索引、HEAD）在镜像里，法国上工人以会话用户跑、写不了镜像（#3814）。
 // 给了 sandbox 就把建好的目录交给会话用户，跑完按回执删；内核以 fleet 读它要 safe.directory，抓补丁用内核自己的临时索引，不写那边。
 // 终局交回记完后抓补丁（含新文件）写 fleet2.shadow_runs：补丁只存库里，分支不建、不推，任何自动流程不消费。
 // git 都经 runCommand（runProcess），走无凭据的工人环境；补丁那一步在工人改过的目录里跑，关 fsmonitor、不跑外部 diff。
 import { randomUUID } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Redactor } from '@fleet-dao/harness-runner';
 import { type Db, recordShadowRun } from '@fleet-dao/harness-store';
 import type { AdoptedDir, WorkerSandbox } from '@fleet-dao/harness-workers';
@@ -24,11 +26,17 @@ const GIT_SAFE = [
   '-c',
   'core.hooksPath=/dev/null',
 ];
+/** owner/repo，和 GitHub 的仓名字符集一样；不许 .. 这类跳出镜像根的写法。 */
+const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 export interface ShadowWorkspaceOptions {
   db: Db;
-  /** 裸镜像的根目录：`<根>/<owner>/<repo>.git`，由部署先拉好（只读 GitHub）。 */
+  /** 裸镜像的根目录：`<根>/<owner>/<repo>.git`。不在就建、缺基线提交就拉（#3811）。 */
   mirrorRoot: string;
+  /** 镜像从哪拉，默认 GitHub 的匿名 https（只读，不带令牌：只认公开仓）；测试换成本机路径。 */
+  mirrorRemote?: (repo: string) => string;
+  /** 建镜像、拉镜像的时限，默认 15 分钟。 */
+  fetchTimeoutMs?: number;
   /** 临时工作目录放哪。 */
   tmpRoot: string;
   redact: Redactor;
@@ -50,11 +58,11 @@ export class NotShadowRequestError extends Error {
 export function shadowWorkspaces(o: ShadowWorkspaceOptions) {
   const run = o.run ?? runCommand;
   const timeoutMs = o.timeoutMs ?? 120_000;
-  const git = (cwd: string, args: string[], env?: Record<string, string>) =>
+  const git = (cwd: string, args: string[], env?: Record<string, string>, ms = timeoutMs) =>
     run({
       command: ['git', ...GIT_SAFE, ...args],
       cwd,
-      timeoutMs,
+      timeoutMs: ms,
       redact: o.redact,
       maxOutputChars: o.maxPatchChars ?? 2_000_000,
       ...(env ? { env } : {}),
@@ -68,11 +76,50 @@ export function shadowWorkspaces(o: ShadowWorkspaceOptions) {
     }
     return res;
   };
+  const remote = o.mirrorRemote ?? ((repo: string) => `https://github.com/${repo}.git`);
+  const fetchMs = o.fetchTimeoutMs ?? 15 * 60_000;
+  const hasCommit = async (mirror: string, sha: string) => {
+    const r = await git(mirror, ['cat-file', '-e', `${sha}^{commit}`]);
+    return r.ran && r.exitCode === 0;
+  };
+
+  /** 镜像不在就建（先建到临时名再改名，半截的不留在正名上）；缺基线提交就拉一次各分支，拉完还没有就报错。 */
+  async function ensureMirror(repo: string, sha: string): Promise<string> {
+    if (!REPO.test(repo) || repo.split('/').some((p) => p === '.' || p === '..')) {
+      throw new Error(`仓名不合法：${repo}`);
+    }
+    const mirror = join(o.mirrorRoot, `${repo}.git`);
+    if (!existsSync(mirror)) {
+      await mkdir(dirname(mirror), { recursive: true });
+      const part = `${mirror}.part-${randomUUID().slice(0, 8)}`;
+      try {
+        await must(
+          '建镜像',
+          git(o.mirrorRoot, ['clone', '--quiet', '--bare', remote(repo), part], undefined, fetchMs),
+        );
+        await rename(part, mirror);
+      } finally {
+        await rm(part, { recursive: true, force: true });
+      }
+    }
+    if (await hasCommit(mirror, sha)) return mirror;
+    await must(
+      '拉镜像',
+      git(
+        mirror,
+        ['fetch', '--quiet', '--prune', remote(repo), '+refs/heads/*:refs/heads/*'],
+        undefined,
+        fetchMs,
+      ),
+    );
+    if (!(await hasCommit(mirror, sha))) throw new Error(`镜像 ${repo} 拉过了还是没有基线提交 ${sha}`);
+    return mirror;
+  }
 
   return async function prepareWorkspace(req: SpawnRequest, ctx: { runId: string }): Promise<Workspace> {
     const target = req.shadow;
     if (!target) throw new NotShadowRequestError(req.taskId);
-    const mirror = join(o.mirrorRoot, `${target.repo}.git`);
+    const mirror = await ensureMirror(target.repo, target.baseSha);
     await mkdir(o.tmpRoot, { recursive: true });
     const dir = join(o.tmpRoot, `fleet2-shadow-${ctx.runId}-${randomUUID().slice(0, 8)}`);
     let adopted: AdoptedDir | undefined;
