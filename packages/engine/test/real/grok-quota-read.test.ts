@@ -4,7 +4,7 @@ import { type QuotaConfig, type QuotaDeps, readAllQuotas } from '@fleet-dao/adap
 import { alertByKey, registerScheduledJobs, seed } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { QUOTA_READ_JOB, runQuotaReadJob } from '../../src/jobs/quota-read.ts';
+import { QUOTA_READ_JOB, QuotaReadFailedError, runQuotaReadJob } from '../../src/jobs/quota-read.ts';
 import { quotaReadJob } from '../../src/real/quota-read.ts';
 
 const AUTH_PATH = '/home/tester/.grok/auth.json';
@@ -141,12 +141,18 @@ describe('真实 quota-read 接线：Grok 账单结构 unknown 不冒充额度',
         prepaidBalance: { val: 0 },
       },
     };
-    const failed = await run();
-    expect(failed).toMatchObject({ outcome: 'partial', scanned: 1, found: 1 });
-    expect(failed.why).toContain('usage_unreported');
-    expect(failed.why).toContain('用量未知');
-    expect(failed.why).toContain('config.creditUsagePercent');
-    expect(failed.why).not.toContain('47');
+    // 唯一的池读到的是 unknown（没报用量）：整轮没读到数，记 failed 并抛（#3592），原因里带着池的 unknown。
+    const failed = await run().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(failed).toBeInstanceOf(QuotaReadFailedError);
+    const why = (failed as Error).message;
+    expect(why).toContain('unknown [grok]');
+    expect(why).toContain('usage_unreported');
+    expect(why).toContain('用量未知');
+    expect(why).toContain('config.creditUsagePercent');
+    expect(why).not.toContain('47');
 
     const afterFailure = await poolRow(t);
     expect(afterFailure).toEqual(beforeFailure);
@@ -168,7 +174,7 @@ describe('真实 quota-read 接线：Grok 账单结构 unknown 不冒充额度',
       'select outcome from schedule_runs where job = $1 order by id',
       ['quota-read'],
     );
-    expect(runsAfterFailure.rows.map((r) => r.outcome)).toEqual(['ok', 'partial']);
+    expect(runsAfterFailure.rows.map((r) => r.outcome)).toEqual(['ok', 'failed']);
 
     now = new Date(START.getTime() + 45 * 60_000);
     body = billing(63);
@@ -190,7 +196,40 @@ describe('真实 quota-read 接线：Grok 账单结构 unknown 不冒充额度',
       'select outcome from schedule_runs where job = $1 order by id',
       ['quota-read'],
     );
-    expect(allRuns.rows.map((r) => r.outcome)).toEqual(['ok', 'partial', 'ok']);
+    expect(allRuns.rows.map((r) => r.outcome)).toEqual(['ok', 'failed', 'ok']);
+  });
+
+  it('库里停用标记（channels.enabled、channel_states disabled）：这个池不读、不写库，整轮记 unscanned', async () => {
+    const guarded = () => {
+      const deps = quotaReadJob({ db: t.db, now: () => now, loadConfig: async () => config })();
+      let reads = 0;
+      return {
+        deps: {
+          ...deps,
+          read: async (c: QuotaConfig) => {
+            reads += 1;
+            return deps.read(c);
+          },
+        },
+        reads: () => reads,
+      };
+    };
+    const lastOk = async () => poolRow(t);
+
+    await t.client.exec("update channels set enabled = false where id = 'grok-subscription'");
+    const a = guarded();
+    await expect(runQuotaReadJob(a.deps)).resolves.toMatchObject({ outcome: 'unscanned' });
+    expect(a.reads()).toBe(0);
+    expect(await lastOk()).toBeNull();
+
+    await t.client.exec("update channels set enabled = true where id = 'grok-subscription'");
+    await t.client.exec(
+      "insert into channel_states (channel_id, status, reason, flagged_at) values ('grok-subscription', 'disabled', '上游 401', now())",
+    );
+    const b = guarded();
+    await expect(runQuotaReadJob(b.deps)).resolves.toMatchObject({ outcome: 'unscanned' });
+    expect(b.reads()).toBe(0);
+    expect(await lastOk()).toBeNull();
   });
 
   it('unknown 账单结构仍返回 bad_response，不生成任何窗口', async () => {

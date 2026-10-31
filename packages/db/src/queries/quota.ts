@@ -3,6 +3,7 @@ import type { QuotaWindow, ScopeMembership } from '@fleet-dao/shared';
 import { and, asc, eq, gte, inArray, isNotNull, isNull, lt, lte, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
+  channelStates,
   channels,
   pools,
   quotaWindowSamples,
@@ -279,6 +280,34 @@ export async function poolLastReadOk(db: Db, poolIds: readonly string[]): Promis
     .from(pools)
     .where(inArray(pools.id, [...poolIds]));
   for (const r of rows) out.set(r.id, r.at);
+  return out;
+}
+
+/**
+ * 渠道在库里被停用的池（#3592）：channels.enabled 为 false，或 channel_states 标着 disabled。key 是池 id，值是给人看的原因。
+ * 定时读额度用它把这些池整个排除在外——不读、不计入整轮结局。库里没有的池、没停用的池不在结果里。
+ */
+export async function disabledPoolReasons(db: Db, poolIds: readonly string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (poolIds.length === 0) return out;
+  const rows = await db
+    .select({
+      id: pools.id,
+      channelId: pools.channelId,
+      enabled: channels.enabled,
+      state: channelStates.status,
+      reason: channelStates.reason,
+    })
+    .from(pools)
+    .innerJoin(channels, eq(channels.id, pools.channelId))
+    .leftJoin(channelStates, eq(channelStates.channelId, channels.id))
+    .where(inArray(pools.id, [...poolIds]));
+  for (const r of rows) {
+    if (!r.enabled) out.set(r.id, `渠道 ${r.channelId} 在库里已停用（channels.enabled = false）`);
+    else if (r.state === 'disabled') {
+      out.set(r.id, `渠道 ${r.channelId} 在库里标着 disabled（channel_states）：${r.reason ?? '没写原因'}`);
+    }
+  }
   return out;
 }
 
