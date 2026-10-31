@@ -5,6 +5,7 @@
     "/var/lib/fleet-dao/engine",
     "/var/lib/fleet-dao/github",
     "/var/log/fleet-dao",
+    "/var/lib/fleet2",
     "/opt/fleet-dao/temporal",
     "/var/lib/fleet-work",
     "/var/lib/fleet-sessions",

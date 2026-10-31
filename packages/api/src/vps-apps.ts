@@ -59,9 +59,14 @@ export const VPS_APPS: readonly VpsApp[] = [
     id: 'engine',
     name: '引擎',
     place: '/var/lib/fleet-dao/engine',
-    // 新内核影子工人的出网关（#3803）跟引擎算一处：跑发布版本里的代码，不占自己的目录
-    units: [service('fleet-engine.service'), service('fleet2-egress.service')],
-    dirs: ['/var/lib/fleet-dao/engine', '/var/lib/fleet-dao/github', '/var/log/fleet-dao'],
+    // 新内核（#3811）和它影子工人的出网关（#3803）跟引擎算一处：跑发布版本里的代码；内核的镜像在 /var/lib/fleet2，
+    // 影子工作目录在工作树的根下（算在「会话」那一处）
+    units: [
+      service('fleet-engine.service'),
+      service('fleet2-egress.service'),
+      service('fleet2-kernel.service'),
+    ],
+    dirs: ['/var/lib/fleet-dao/engine', '/var/lib/fleet-dao/github', '/var/log/fleet-dao', '/var/lib/fleet2'],
   },
   {
     id: 'temporal',

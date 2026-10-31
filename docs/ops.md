@@ -131,6 +131,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /var/lib/fleet-hk-france-probe | root:root | 755 | deploy/hk.sh |
 | /var/lib/fleet-sessions | fleet:fleet | 711 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-work | root:root | 755 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-work/_fleet2 | fleet:fleet | 755 | deploy/france.sh |
 | /var/lib/fleet-work/_tmp | fleet:fleet | 755 | deploy/lib/human-tier.sh |
 | /var/log/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/www/fleet-dao-acme | root:root | 755 | deploy/hk.sh |
@@ -161,6 +162,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
 | fleet2-egress.service | 法国 | fleet-dao 新内核影子工人的出网关（SNI 透明代理，只听 127.0.0.1:7344） |
+| fleet2-kernel.service | 法国 | fleet-dao 新内核（影子模式，接口层只听 127.0.0.1:7345） |
 | fleet2-shadow-firewall.service | 法国 | fleet-dao 新内核影子工人的出网限制（nft 表 inet fleet2_shadow） |
 | fleet2-shadow.slice | 法国 | fleet-dao 新内核影子工人的 slice（出网按它限） |
 | fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
@@ -320,7 +322,7 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | 应用 | 单元 | 目录、库 |
 |---|---|---|
 | 驾驶舱 | `fleet-api.service`、`fleet-footprint.service` | `/var/lib/fleet-dao/release-request`（代码在发布版本目录里；静态页在香港 `/srv/fleet-dao-web`，不在这台） |
-| 引擎 | `fleet-engine.service`、`fleet2-egress.service` | `/var/lib/fleet-dao/engine`、`/var/lib/fleet-dao/github`、`/var/log/fleet-dao` |
+| 引擎 | `fleet-engine.service`、`fleet2-egress.service`、`fleet2-kernel.service` | `/var/lib/fleet-dao/engine`、`/var/lib/fleet-dao/github`、`/var/log/fleet-dao`、`/var/lib/fleet2`（新内核的镜像） |
 | Temporal | `fleet-temporal.service` | `/opt/fleet-dao/temporal`（数据在库里，算在「数据库」） |
 | 数据库 | `postgresql@16-main.service` | 所有非模板库（`pg_database_size`，不读数据目录） |
 | AI 会话 | `fleet-agents.slice` | `/var/lib/fleet-work`、`/var/lib/fleet-sessions`、`/home/fleet-agent-carpool` |
