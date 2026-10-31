@@ -369,3 +369,50 @@ describe('G4：SSE 续传', () => {
     bad.cancel();
   });
 });
+
+describe('历史页（驾驶舱首屏和 resync 重取，#3781）', () => {
+  async function getHistory(base: string, session: string, token: string | null, query = '') {
+    const res = await fetch(`${base}/sessions/${session}/history${query}`, {
+      headers: token ? { 'X-Fleet-Session-Token': token } : {},
+    });
+    const text = await res.text();
+    const body = (res.status === 200 ? JSON.parse(text) : null) as {
+      events: { id: number }[];
+      head: number;
+      hasMore: boolean;
+    };
+    return { status: res.status, body };
+  }
+
+  it('不给游标是最新一页（升序），before 往前翻，after 往后翻，head 是最新事件号', async () => {
+    const { base } = await start();
+    const s = await issueToken(t.db, 'h-page', 'worker');
+    const ids: number[] = [];
+    for (let i = 1; i <= 5; i++) ids.push((await progress('h-page', i)).id);
+    const tail = await getHistory(base, 'h-page', s.token, '?limit=2');
+    expect(tail.body.events.map((e: { id: number }) => e.id)).toEqual(ids.slice(3));
+    expect(tail.body.hasMore).toBe(true);
+    expect(tail.body.head).toBe(ids[4]);
+    const older = await getHistory(base, 'h-page', s.token, `?limit=2&before=${ids[3]}`);
+    expect(older.body.events.map((e: { id: number }) => e.id)).toEqual(ids.slice(1, 3));
+    expect(older.body.hasMore).toBe(true);
+    const oldest = await getHistory(base, 'h-page', s.token, `?limit=2&before=${ids[1]}`);
+    expect(oldest.body.events.map((e: { id: number }) => e.id)).toEqual(ids.slice(0, 1));
+    expect(oldest.body.hasMore).toBe(false);
+    const newer = await getHistory(base, 'h-page', s.token, `?limit=3&after=${ids[1]}`);
+    expect(newer.body.events.map((e: { id: number }) => e.id)).toEqual(ids.slice(2));
+    expect(newer.body.hasMore).toBe(false);
+  });
+
+  it('空会话返回空页和 head 0；令牌错、跨会话、网址带令牌、坏游标都被拒', async () => {
+    const { base } = await start();
+    const s = await issueToken(t.db, 'h-empty', 'worker');
+    const empty = await getHistory(base, 'h-empty', s.token);
+    expect(empty.body).toEqual({ events: [], head: 0, hasMore: false });
+    expect((await getHistory(base, 'h-empty', null)).status).toBe(401);
+    expect((await getHistory(base, 'h-other', s.token)).status).toBe(403);
+    expect((await getHistory(base, 'h-empty', s.token, `?access_token=${s.token}`)).status).toBe(400);
+    expect((await getHistory(base, 'h-empty', s.token, '?before=x')).status).toBe(400);
+    expect((await getHistory(base, 'h-empty', s.token, '?before=1&after=1')).status).toBe(400);
+  });
+});

@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { type Db, PAGE_MAX } from '@fleet-dao/harness-store';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { gapExceeds, latestSessionEventId, readSessionAfter } from './events.ts';
+import { gapExceeds, latestSessionEventId, readSessionAfter, readSessionHistory } from './events.ts';
 import { readTokenFromRequest, type TokenClaims, verifyToken } from './tokens.ts';
 import { toolsFor } from './tools.ts';
 
@@ -112,6 +112,9 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
     });
+    // 带 Last-Event-ID 续传时没有新事件就不会有第一个字节：先写一行注释，响应头才会真的送出去（经代理也一样），
+    // 客户端才知道连上了。注释行不是事件，客户端忽略。
+    res.write(': connected\n\n');
     let closed = false;
     let timer: NodeJS.Timeout | undefined;
     const finish = () => {
@@ -158,16 +161,45 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
     void tick();
   }
 
+  /** GET /sessions/<号>/history?before=&after=&limit=：只读历史页，驾驶舱首屏和 resync 后整页重取用。 */
+  async function handleHistory(url: URL, res: ServerResponse, claims: TokenClaims, sessionId: string) {
+    if (claims.sessionId !== sessionId) return reply(res, 403, '令牌不属于这个会话');
+    const num = (name: string): number | undefined | null => {
+      const raw = url.searchParams.get(name);
+      if (raw === null) return undefined;
+      return /^\d{1,15}$/.test(raw) ? Number(raw) : null;
+    };
+    const before = num('before');
+    const after = num('after');
+    const limit = num('limit');
+    if (before === null || after === null || limit === null)
+      return reply(res, 400, '游标和 limit 要是非负整数');
+    if (before !== undefined && after !== undefined) return reply(res, 400, 'before 和 after 不能同时给');
+    const page = await readSessionHistory(db, sessionId, {
+      ...(before !== undefined ? { before } : {}),
+      ...(after !== undefined ? { after } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    res
+      .writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      .end(JSON.stringify(page));
+  }
+
   const server = createServer((req, res) => {
     void (async () => {
       try {
         const url = new URL(req.url ?? '/', 'http://localhost');
         if (hasTokenInQuery(url)) return reply(res, 400, '令牌只能放请求头或 cookie，不能放网址');
         const sse = /^\/sessions\/([^/]+)\/events$/.exec(url.pathname);
-        if (url.pathname !== '/mcp' && !sse) return reply(res, 404, '没有这个路径');
+        const history = /^\/sessions\/([^/]+)\/history$/.exec(url.pathname);
+        if (url.pathname !== '/mcp' && !sse && !history) return reply(res, 404, '没有这个路径');
         const token = readTokenFromRequest(req.headers);
         const claims = await verifyToken(db, token);
         if (!claims || token === undefined) return reply(res, 401, '令牌无效');
+        if (history) {
+          if (req.method !== 'GET') return reply(res, 405, '只收 GET');
+          return await handleHistory(url, res, claims, decodeURIComponent(history[1] ?? ''));
+        }
         if (sse) {
           if (req.method !== 'GET') return reply(res, 405, '只收 GET');
           return await handleSse(req, res, claims, token, decodeURIComponent(sse[1] ?? ''));

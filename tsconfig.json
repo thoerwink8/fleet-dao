@@ -17,6 +17,9 @@
       "path": "packages/harness-api"
     },
     {
+      "path": "packages/harness-web"
+    },
+    {
       "path": "packages/harness-runner"
     },
     {

@@ -1,0 +1,142 @@
+/* 新驾驶舱的设计令牌：浅色工作台（页底 #f0f3fa、品牌蓝 #2962ff、1px 发丝线、白卡片）。
+   尺寸规矩：间距只用 4 的倍数（--spacing: 4px）；条高 56px（--bar-h）；侧栏 208px，收起 64px；768px 以下换底部标签栏；
+   正文 14px、说明 12px；数字一律 .num。颜色只用下面的令牌，异常才上红黄，正常态不上绿。 */
+@import "tailwindcss";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource-variable/noto-sans-sc/wght.css";
+
+@theme {
+  --color-*: initial;
+  --color-white: #ffffff;
+  --color-black: #000000;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-canvas: #f0f3fa;
+  --color-surface: #ffffff;
+  --color-subtle: #f8f9fd;
+  --color-line: #e0e3eb;
+  --color-line-strong: #c3c7d1;
+  --color-ink: #131722;
+  --color-ink-2: #434651;
+  --color-muted: #6a6d78;
+  --color-brand: #2962ff;
+  --color-brand-hover: #1e53e5;
+  --color-brand-strong: #1848cc;
+  --color-brand-soft: #e3ebff;
+  --color-success: #067d69;
+  --color-success-soft: #e0f3ef;
+  --color-warning: #a85300;
+  --color-warning-soft: #fff3e0;
+  --color-danger: #d61f2f;
+  --color-danger-soft: #fde8ea;
+  --color-neutral-soft: #eef0f5;
+
+  --font-sans: "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-number: "Inter Variable", "Noto Sans SC Variable", system-ui, sans-serif;
+  --font-mono:
+    "JetBrains Mono Variable", "SF Mono", "Cascadia Mono", ui-monospace, Menlo, Consolas, monospace;
+  --spacing: 4px;
+
+  --text-*: initial;
+  --text-2xs: 12px;
+  --text-2xs--line-height: 20px;
+  --text-xs: 13px;
+  --text-xs--line-height: 20px;
+  --text-sm: 14px;
+  --text-sm--line-height: 22px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 20px;
+  --text-lg--line-height: 28px;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 500;
+
+  --radius-*: initial;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  --shadow-*: initial;
+  --shadow-xs: 0 1px 2px rgb(16 24 40 / 0.04);
+  --shadow-md: 0 6px 16px rgb(16 24 40 / 0.08);
+
+  --animate-fade-in: fade-in 150ms ease-out;
+  --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+}
+
+@layer base {
+  :root {
+    --bar-h: 56px;
+  }
+  *,
+  ::before,
+  ::after {
+    border-color: var(--color-line);
+  }
+  html,
+  body {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+  }
+  body {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 22px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--color-brand-soft);
+  }
+}
+
+.num {
+  font-family: var(--font-number);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "cv11";
+}
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-dot,
+  .animate-fade-in {
+    animation: none;
+  }
+}
