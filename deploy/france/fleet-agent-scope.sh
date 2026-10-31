@@ -206,9 +206,16 @@ stop() {
   echo "已收掉 $unit"
 }
 
+# 只列 fleet-agents.slice 下面的：旧引擎重启时把列出来、它不认得的会话收掉（engine/src/real/orphan-reap.ts），
+# 新内核的影子工人（--slice fleet2-shadow）归新内核自己收，不能让旧引擎当成残留收了。
 list() {
+  local unit active id
   systemctl list-units --type=scope --all --plain --no-legend "$PREFIX*.scope" |
-    awk -v p="$PREFIX" '{ id = $1; sub("^" p, "", id); sub(/[.]scope$/, "", id); print id, $3 }'
+    while read -r unit _ active _; do
+      [[ "$(systemctl show -p Slice --value "$unit" 2>/dev/null)" == "$SLICE" ]] || continue
+      id=${unit#"$PREFIX"}
+      echo "${id%.scope} $active"
+    done
 }
 
 # 把工作树交给会话用户（docs/design.md 第十四节）：不在就建，在就改属主。只有一个会话用户，续会话（含切号后的
