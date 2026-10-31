@@ -1,0 +1,1 @@
+CREATE INDEX "shadow_batch_items_snapshot_idx" ON "fleet2"."shadow_batch_items" USING btree ("snapshot_at","batch_id");

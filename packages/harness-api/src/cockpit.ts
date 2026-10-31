@@ -2,7 +2,7 @@
 // 浏览器带的是旧驾驶舱签发的登录 Cookie，这里自己验，不经旧后端、不发不存不转任何会话令牌：
 //   签名对（HMAC-SHA256，purpose fleet-session/v1，密钥 FLEET_SESSION_SECRET）、没过期、public.users 里 active 且 role=founder、
 //   Cookie 里的 v 等于 users.session_version。开着的 SSE 每个周期重核一次，退出或摘掉白名单最晚一个周期后断开。
-// 这个口只有三条 GET：会话列表、历史页、SSE。不认会话令牌（请求头或 cookie 里带了就 401），没有 /mcp，不回 CORS 头。
+// 这个口只有 GET：会话列表、历史页、SSE（加工人过程两条、任务波次图两条，见 AGENTS.md）。不认会话令牌（请求头或 cookie 里带了就 401），没有 /mcp，不回 CORS 头。
 // Cookie 格式从旧驾驶舱 packages/api 的 tokens.ts / session.ts 拷来（决定 0124：新包不依赖旧包），固定向量见 AGENTS.md 和测试。
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -15,6 +15,7 @@ import { sessionStream } from './events.ts';
 import { type HarnessApi, hasTokenInQuery, wrapServer } from './server.ts';
 import { reply, serveHistory, serveSse } from './session-http.ts';
 import { TOKEN_COOKIE, TOKEN_HEADER } from './tokens.ts';
+import { isBatchCursor, listBatches, loadBatchGraph } from './work.ts';
 
 /** https 下的登录 Cookie 名（旧驾驶舱 session.ts 的 cookieNames）。 */
 export const COCKPIT_COOKIE = '__Host-fleet_session';
@@ -295,9 +296,46 @@ export function createCockpitApi(options: CockpitOptions): CockpitApi {
     return { ok: true };
   }
 
+  async function handleWork(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+    batchId: string | undefined,
+  ): Promise<void> {
+    if (batchId !== undefined && !isValidSessionId(batchId)) return reply(res, 404, '没有这个批次');
+    if (req.method !== 'GET') return reply(res, 405, '只收 GET');
+    const verdict = await authorize(req);
+    if (!verdict.ok) return reply(res, verdict.status, verdict.message);
+    const json = (body: unknown) =>
+      res
+        .writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        .end(JSON.stringify(body));
+    if (batchId !== undefined) {
+      const graph = await loadBatchGraph(db, batchId);
+      if (!graph) return reply(res, 404, '没有这个批次');
+      return void json(graph);
+    }
+    const limitRaw = url.searchParams.get('limit');
+    const before = url.searchParams.get('before') ?? undefined;
+    const limit = limitRaw === null ? 10 : Number(limitRaw);
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 50 ||
+      (limitRaw !== null && !/^\d{1,2}$/.test(limitRaw))
+    ) {
+      return reply(res, 400, 'limit 要是 1 到 50 的整数');
+    }
+    if (before !== undefined && !isBatchCursor(before)) return reply(res, 400, 'before 要是上一页给的游标');
+    json(await listBatches(db, before === undefined ? { limit } : { limit, before }));
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (hasTokenInQuery(url)) return reply(res, 400, '令牌只能放请求头或 cookie，不能放网址');
+    // 任务波次图（#3784）：/work/batches 批次列表，/work/batches/<批次号> 一批的整份快照
+    const w = /^\/next\/api\/work\/batches(?:\/([^/]+))?$/.exec(url.pathname);
+    if (w) return await handleWork(req, res, url, w[1] === undefined ? undefined : decodeURIComponent(w[1]));
     // /sessions/<号>/(history|events) 读会话流；/transcripts/<runId>/(history|events) 读工人过程流 transcript:<runId>（#3781）
     const m =
       /^\/next\/api\/(?:sessions(?:\/([^/]+)\/(history|events))?|transcripts\/([^/]+)\/(history|events))$/.exec(

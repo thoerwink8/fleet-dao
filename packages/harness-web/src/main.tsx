@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router';
 import './app.css';
 import { BlockPlaceholder, MorePage, Shell } from './components/shell';
+import { Work } from './pages/work';
 import { Workbench } from './pages/workbench';
 
 // 整个新驾驶舱挂在 /next/ 下（vite.config.ts 的 base）；旧驾驶舱在根路径，互不干扰。
@@ -15,13 +16,7 @@ const router = createBrowserRouter(
         { path: 's/:id', element: <Workbench /> },
         {
           path: 'work',
-          element: (
-            <BlockPlaceholder
-              title="任务"
-              slice="任务波次图：母单 #3770 的第 8 片（编排）一起做。"
-              note="一张单拆出的子任务按依赖分波、点格子进会话，要等编排落地才有数据。"
-            />
-          ),
+          element: <Work />,
         },
         {
           path: 'decide',

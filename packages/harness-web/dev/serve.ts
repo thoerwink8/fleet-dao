@@ -3,7 +3,7 @@
 // 前端另开一个终端 `pnpm --filter @fleet-dao/harness-web dev:web`，开 http://localhost:5180/next/ 。
 // 想看实时：在这个进程的标准输入敲命令往会话里写事件（见启动提示）。
 import { createInterface } from 'node:readline';
-import { seed } from './seed.ts';
+import { seed, seedWork } from './seed.ts';
 import { startStack } from './stack.ts';
 
 const dataDir = process.env.HARNESS_WEB_DATA_DIR;
@@ -12,6 +12,7 @@ const stack = await startStack({
   ...(dataDir ? { dataDir } : {}),
 });
 const made = await seed(stack);
+await seedWork(stack);
 console.log(`开发后端已起：${stack.url}（接口层 ${stack.apiUrl()}，库：${dataDir ?? '内存，退出即没'}）`);
 console.log(made.length > 0 ? `灌了样例会话：${made.join('、')}` : '库里已有样例会话，没重灌');
 console.log(

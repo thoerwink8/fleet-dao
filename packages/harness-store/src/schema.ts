@@ -176,6 +176,8 @@ export const shadowBatchItems = fleet2.table(
   (t) => [
     unique('shadow_batch_items_unique').on(t.batchId, t.repo, t.issue),
     check('shadow_batch_items_sha', sql`${t.baseSha} ~ '^[0-9a-f]{40}$'`),
+    // 驾驶舱的批次列表按冻结时刻从新到老翻页（#3784）：沿这个索引一个时刻一个时刻地跳，读的行数跟批次数走，不扫整张表
+    index('shadow_batch_items_snapshot_idx').on(t.snapshotAt, t.batchId),
   ],
 );
 

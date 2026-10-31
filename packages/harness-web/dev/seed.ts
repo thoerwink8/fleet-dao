@@ -1,5 +1,5 @@
 // 灌几条样例事件：三个会话，覆盖每种事件类型（含异常：叫停、被杀、核验不过）。时间往回摊开，列表和时间线好看。
-import { events } from '@fleet-dao/harness-store';
+import { events, freezeBatch, jobs, recordShadowRun, shadowCompare } from '@fleet-dao/harness-store';
 import { eq } from 'drizzle-orm';
 import type { Stack } from './stack.ts';
 
@@ -528,4 +528,262 @@ export async function seed(stack: Stack): Promise<string[]> {
     made.push(sessionId);
   }
   return made;
+}
+
+// ---------------------------------------------------------------- 影子批次样例（任务页 /work，#3784）
+// 和真实内核写的是同一批表：批次清单、派工请求（会话 shadow-<批次>）、派工器的活、worker:<runId> 开工记录、
+// session:worker-<runId> 进度、交回、影子产物和打分。状态不是写死的，是接口从这些推出来的。
+
+export type WorkKind =
+  | 'pending'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'retry'
+  | 'paused'
+  | 'blocked'
+  | 'dead'
+  | 'cancelled';
+
+export interface WorkItemSeed {
+  issue: number;
+  kind: WorkKind;
+  /** 指定这张单（最近一次）运行的号；不给就按派工器的规则 d<请求事件号>-a<n>。 */
+  runId?: string;
+}
+
+const SHA = 'c'.repeat(40);
+
+/** 灌一个影子批次。ageMin：冻结时刻距现在多少分钟。返回每张单的运行号（e2e 对账用）。 */
+export async function seedWorkBatch(
+  stack: Stack,
+  batchId: string,
+  items: readonly WorkItemSeed[],
+  opts: { repo?: string; ageMin?: number } = {},
+): Promise<Record<number, string[]>> {
+  const { db } = stack;
+  const repo = opts.repo ?? 'demo/web';
+  const snapshotAt = new Date(Date.now() - (opts.ageMin ?? 60) * 60_000);
+  await freezeBatch(
+    db,
+    batchId,
+    items.map((i) => ({ repo, issue: i.issue, baseSha: SHA, snapshotAt })),
+  );
+  const session = `shadow-${batchId}`;
+  const ago = async (id: number, min: number) => {
+    await db
+      .update(events)
+      .set({ createdAt: new Date(Date.now() - min * 60_000) })
+      .where(eq(events.id, id));
+  };
+  const runs: Record<number, string[]> = {};
+  const lease = (min: number) => new Date(Date.now() + min * 60_000);
+  for (const it of items) {
+    if (it.kind === 'pending') {
+      runs[it.issue] = [];
+      continue;
+    }
+    const req = await stack.emit(session, 'worker.spawn.requested', {
+      taskId: `${batchId}-t${it.issue}`,
+      task: `修 #${it.issue}：${['登录页窄屏按钮被挤出', '列表分页游标重复', '导出报表时区错位', '设置页保存后不刷新', '暗色模式对比度不够'][it.issue % 5]}`,
+      expected: '补回归测试，改动限在相关模块',
+      must_do: '先复现再改',
+      must_not: '不动无关文件',
+      context: '影子批次样例',
+      stop_when: '测试绿或确认无法复现',
+      shadow: { batchId, repo, issue: it.issue, baseSha: SHA },
+    });
+    await ago(req, 50);
+    const key = `spawn:${req}`;
+    const rid = (n: number) => (n === 1 && it.runId ? it.runId : `d${req}-a${n}`);
+    const addJob = (state: string, attempts: number, extra: Partial<typeof jobs.$inferInsert> = {}) =>
+      db.insert(jobs).values({
+        queue: 'worker',
+        key,
+        payload: {},
+        state,
+        attempts,
+        ...(state === 'claimed' ? { claimToken: `tok-${req}`, leaseUntil: lease(10) } : {}),
+        ...extra,
+      });
+    const spawned = async (runId: string, startedMin: number, model = 'claude-sonnet-5-5') => {
+      const id = await stack.emitStream(`worker:${runId}`, 'worker.spawned', {
+        runId,
+        sessionId: `s-${runId}`,
+        sessionMode: 'new',
+        model,
+        shadow: true,
+        deadline: lease(30).toISOString(),
+      });
+      await ago(id, startedMin);
+    };
+    const progress = async (runId: string, summary: string, min: number) => {
+      const id = await stack.emit(`worker-${runId}`, 'worker.progress.reported', { summary });
+      await ago(id, min);
+    };
+    const handback = async (extra: Record<string, unknown>, min: number) => {
+      const id = await stack.emit(session, 'handback.recorded', {
+        taskId: `${batchId}-t${it.issue}`,
+        ...extra,
+      });
+      await ago(id, min);
+    };
+    switch (it.kind) {
+      case 'running': {
+        await addJob('claimed', 1);
+        await spawned(rid(1), 7);
+        await progress(rid(1), '已复现，正在改分页游标的比较条件', 3);
+        runs[it.issue] = [rid(1)];
+        break;
+      }
+      case 'done': {
+        await addJob('done', 1);
+        await spawned(rid(1), 42);
+        await progress(rid(1), '改完了，跑测试', 25);
+        await handback(
+          {
+            runId: rid(1),
+            attempt: 1,
+            final: true,
+            outcome: 'completed',
+            verdict: 'passed',
+            reasons: ['改动只在相关模块，测试输出齐全'],
+          },
+          20,
+        );
+        const shadowId = await recordShadowRun(db, {
+          runId: rid(1),
+          batchId,
+          repo,
+          issue: it.issue,
+          baseSha: SHA,
+          verdict: 'passed',
+          patch: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-a\n+b\n',
+          wallMs: 22 * 60_000,
+        });
+        if (it.issue % 2 === 1) {
+          await db.insert(shadowCompare).values({
+            shadowRunId: shadowId,
+            batchId,
+            mergedPr: 4000 + it.issue,
+            mergedSha: SHA,
+            score: { lineJaccard: 0.4 + (it.issue % 5) / 10, fileJaccard: 1 },
+          });
+        }
+        runs[it.issue] = [rid(1)];
+        break;
+      }
+      case 'failed': {
+        await addJob('done', 1);
+        await spawned(rid(1), 38);
+        await handback(
+          {
+            runId: rid(1),
+            attempt: 1,
+            final: true,
+            outcome: 'completed',
+            verdict: 'failed',
+            reasons: ['核验没过：改动超出范围，动了无关文件'],
+          },
+          15,
+        );
+        runs[it.issue] = [rid(1)];
+        break;
+      }
+      case 'retry': {
+        await addJob('claimed', 2);
+        await spawned(rid(1), 30, 'claude-sonnet-5-5');
+        await handback(
+          {
+            runId: rid(1),
+            attempt: 1,
+            final: false,
+            willRetry: true,
+            outcome: 'failed-to-start',
+            verdict: 'failed',
+            reasons: ['没起来：工作区准备超时'],
+          },
+          25,
+        );
+        await spawned(rid(2), 4, 'claude-opus-5-5');
+        await progress(rid(2), '第二次尝试：已开始读相关模块', 2);
+        runs[it.issue] = [rid(1), rid(2)];
+        break;
+      }
+      case 'paused': {
+        await addJob('pending', 1);
+        await handback(
+          {
+            runId: rid(1),
+            attempt: 1,
+            final: false,
+            willRetry: true,
+            outcome: 'released',
+            verdict: 'unknown',
+            reasons: ['派工器停机（发版），退回队列，新进程再派'],
+          },
+          10,
+        );
+        runs[it.issue] = [rid(1)];
+        break;
+      }
+      case 'blocked': {
+        await addJob('claimed', 1, { leaseUntil: new Date(Date.now() - 20 * 60_000) });
+        await spawned(rid(1), 45);
+        await progress(rid(1), '等待外部依赖，已半小时没有新进展', 30);
+        runs[it.issue] = [rid(1)];
+        break;
+      }
+      case 'dead': {
+        await addJob('dead', 3, { lastError: '三次都没起来：工作区准备超时' });
+        runs[it.issue] = [];
+        break;
+      }
+      case 'cancelled': {
+        await addJob('cancelled', 1);
+        await spawned(rid(1), 20);
+        runs[it.issue] = [rid(1)];
+        break;
+      }
+    }
+  }
+  return runs;
+}
+
+/** 两个批次：最新一批 10 单（排队、在跑、做完、失败、重试过、暂停都有），和一批较早的 3 单全做完的。 */
+export async function seedWork(stack: Stack): Promise<string[]> {
+  const exists = await stack.db
+    .select({ id: events.id })
+    .from(events)
+    .where(eq(events.streamId, 'session:shadow-demo-batch-2'))
+    .limit(1);
+  if (exists.length > 0) return [];
+  await seedWorkBatch(
+    stack,
+    'demo-batch-1',
+    [
+      { issue: 101, kind: 'done' },
+      { issue: 102, kind: 'done' },
+      { issue: 103, kind: 'done' },
+    ],
+    { repo: 'demo/api', ageMin: 26 * 60 },
+  );
+  await seedWorkBatch(
+    stack,
+    'demo-batch-2',
+    [
+      { issue: 1, kind: 'pending' },
+      { issue: 2, kind: 'running' },
+      { issue: 3, kind: 'done', runId: DEMO_RUN_ID },
+      { issue: 4, kind: 'failed' },
+      { issue: 5, kind: 'retry' },
+      { issue: 6, kind: 'done' },
+      { issue: 7, kind: 'paused' },
+      { issue: 8, kind: 'running' },
+      { issue: 9, kind: 'dead' },
+      { issue: 10, kind: 'blocked' },
+    ],
+    { repo: 'demo/web', ageMin: 60 },
+  );
+  return ['demo-batch-1', 'demo-batch-2'];
 }
