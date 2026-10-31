@@ -14,6 +14,11 @@
   - 契约里没有单独的“工具调用”事件，这里的“工具调用”＝接口层 MCP 工具落成的四种事件（`worker.spawn.requested`、`worker.stop.requested`、`worker.progress.reported`、`worker.result.submitted`，对应 `spawn_worker`、`stop_worker`、`report_progress`、`submit_result`）。连续 3 条起折叠成一行「调了 N 次工具：report_progress×5…」（`src/lib/tool-runs.ts`），收起时卡片仍在页面里（`hidden`），事件号对账和展开都不重新取。
   - 长输出（证据、错误输出末尾，还有轮次文字、任务和进度摘要）默认只显示前 200 字或 12 行，先到为准，可展开（`src/lib/clamp.ts`、`src/components/clamped.tsx`）。
   - 列表按工人状态分四组：卡住或失败 > 在跑 > 空闲或等待 > 做完，组内按最后事件号倒序，卡住的置顶并带数量（`src/lib/session-state.ts` 的 `deriveWorkerState`，纯函数，规则写在它的注释里，单测 `src/lib/round2.test.ts`）。状态读的是列表接口给的 `tail`（最近 24 条事件的瘦身版）。分组只对已加载的会话排，没点「加载更多」时更老的卡住会话不在里面（数量带「+」不会骗人，已加载多少数多少）。
+- 收尾（#3781）：
+  - 界面上露出的原始枚举值（事件类型、任务结果、交回结局、核验结论、会话模式、任务状态）显示中文，映射只在 `src/lib/labels.ts` 一处（`typeLabel`、`outcomeLabel`、`verdictLabel` 等，返回 `{text, raw}`），原值放元素的 `title` 里方便排查；不认识的值照原样显示，不丢。契约里加了新的类型或结局，先在这里补中文名。
+  - 「做完」组默认折叠，组头显示条数、点开展开；折叠状态存 `localStorage`（键 `fleet.next.sessions.done-collapsed`，读写包 try/catch，读不到就当折叠，`src/lib/collapse.ts`）。折叠时不渲染会话行，所以 e2e 里要点做完组里的会话先 `expandDone(page)`。
+  - 顶栏「卡住 N」用接口给的 `stuckCount`（全库数，翻页不影响），前端不再自己数；旧接口没给时不显示。组头里的数字仍是已加载会话里该组的个数。窄屏这条顶栏本来就收起。
+  - 判状态的规则（`deriveWorkerState` 等）搬到 `packages/harness-contract/src/worker-state.ts`（子路径 `@fleet-dao/harness-contract/worker-state`，不带 zod），这里的 `session-state.ts` 只留分组、排序和中文组名，从那边转出。
 - 第三轮（#3781）：工人会话详情。工人会话号是 `worker-<runId>`（派工器给工人令牌绑的会话号），页面据此再开一条过程流（`useTranscriptFeed` → `SessionFeed` 的 `kind: 'transcripts'`，读 `/next/api/transcripts/<runId>/…`），和会话流里的进度、交结果按事件号（全库单调，不同流直接比）串成一条时间线（`src/lib/transcript.ts` 的 `buildSteps`、`buildTimeline`，纯函数，单测在 `transcript.test.ts`）。
   - 助手的话是正文（`SayRow`，不套卡片）；一次工具调用一行（`ToolRow`：图标、工具名、参数摘要、出错或运行中标记），点开看参数和结果，结果和参数沿用 200 字或 12 行预览（`OutputBlock`）；调用和结果按 `toolUseId` 配对，结果没来的显示「运行中」。
   - 连续 3 次起的工具调用折叠成一行摘要「调了 N 个工具：Read×3、Bash×5 · 1 个出错」（`ToolRunRow`，出错的边框变红、收起时每一步仍在页面里 `hidden`）；和上面 MCP 事件的折叠互不混。

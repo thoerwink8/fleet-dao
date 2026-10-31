@@ -7,6 +7,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { transcriptStream } from '@fleet-dao/harness-contract';
+import { countStuck, type TailEvent } from '@fleet-dao/harness-contract/worker-state';
 import { advanceStreamHeads, type Db, events, streamHeads } from '@fleet-dao/harness-store';
 import { and, desc, eq, lt, type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -132,17 +133,8 @@ function parseLimitAndBefore(url: URL): { limit: number; before?: number } | nul
   return { limit, before: Number(beforeRaw) };
 }
 
-/** 近期事件的瘦身版：只带驾驶舱判工人状态用得上的几个字段（不带大文本）。 */
-export interface TailEvent {
-  type: string;
-  outcome?: unknown;
-  final?: unknown;
-  status?: unknown;
-  exitCode?: unknown;
-  killed?: unknown;
-  spawnError?: unknown;
-  deadline?: unknown;
-}
+// 近期事件的瘦身版 TailEvent：只带判工人状态用得上的几个字段（不带大文本），形状和判读规则都在 harness-contract。
+export type { TailEvent };
 
 export interface SessionListItem {
   id: string;
@@ -206,12 +198,29 @@ async function loadTails(db: Db, streamIds: string[]): Promise<Map<string, TailE
   return out;
 }
 
-/** 会话列表：先把投影推到最新，再按最后事件号倒序取一页；读的行数和页大小成正比。 */
+/**
+ * 全库卡住的会话数：对每个会话流取近期事件，按 harness-contract 的 deriveWorkerState 同一套规则判，
+ * 不受分页影响（前端翻没翻页数都一样）。读的行数 ≤ 会话数 × TAIL_EVENTS。
+ */
+async function countStuckSessions(db: Db, now: number): Promise<number> {
+  const heads = await db
+    .select({ streamId: streamHeads.streamId })
+    .from(streamHeads)
+    .where(sql`${streamHeads.streamId} like 'session:%'`);
+  const tails = await loadTails(
+    db,
+    heads.map((h) => h.streamId),
+  );
+  return countStuck(tails.values(), now);
+}
+
+/** 会话列表：先把投影推到最新，再按最后事件号倒序取一页；读的行数和页大小成正比（stuckCount 另算，见上）。 */
 export async function listSessions(
   db: Db,
-  opts: { limit: number; before?: number },
-): Promise<{ sessions: SessionListItem[]; nextBefore: number | null }> {
+  opts: { limit: number; before?: number; now?: number },
+): Promise<{ sessions: SessionListItem[]; nextBefore: number | null; stuckCount: number }> {
   await advanceStreamHeads(db);
+  const stuckCount = await countStuckSessions(db, opts.now ?? Date.now());
   const conds: SQL[] = [sql`${streamHeads.streamId} like 'session:%'`];
   if (opts.before !== undefined) conds.push(lt(streamHeads.lastEventId, opts.before));
   const rows = await db
@@ -244,6 +253,7 @@ export async function listSessions(
       tail: tails.get(r.streamId) ?? [],
     })),
     nextBefore: rows.length > opts.limit ? (page.at(-1)?.lastEventId ?? null) : null,
+    stuckCount,
   };
 }
 

@@ -33,6 +33,8 @@ export interface SessionsPage {
   sessions: SessionSummary[];
   /** 非空 = 还有更老的会话，下一页把它当 before 传。 */
   nextBefore: number | null;
+  /** 服务端按 harness-contract 的 deriveWorkerState 数出的卡住会话数（全库）；旧接口没有。 */
+  stuckCount?: number;
 }
 
 export type FeedStatus = 'loading' | 'live' | 'reconnecting' | 'failed';

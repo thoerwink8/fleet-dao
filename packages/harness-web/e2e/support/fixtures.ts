@@ -77,3 +77,10 @@ export async function pageIds(page: Page): Promise<number[]> {
 }
 
 export const feedStatus = (page: Page) => page.getByTestId('session-stream');
+
+/** 「做完」组默认折叠：要点里面的会话时先点开（已经开着就不动）。 */
+export async function expandDone(page: Page): Promise<void> {
+  const toggle = page.getByTestId('toggle-done');
+  await toggle.waitFor();
+  if ((await toggle.getAttribute('aria-expanded')) === 'false') await toggle.click();
+}

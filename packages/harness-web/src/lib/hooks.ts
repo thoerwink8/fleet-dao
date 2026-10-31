@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { API_BASE, fetchSessions, isUnauthorized } from './api';
 import { pollInterval } from './backoff';
 import { SessionFeed } from './feed';
-import type { FeedState, SessionSummary } from './types';
+import type { FeedState, SessionSummary, SessionsPage } from './types';
 import { releaseWhenHidden } from './visibility';
 
 /**
@@ -65,6 +65,8 @@ export const SESSIONS_POLL_MS = 10_000;
 
 export interface SessionsState {
   sessions: SessionSummary[] | null;
+  /** 服务端算的「卡住」个数（全库，不受翻页影响）；旧接口没有这个字段或还没读到时是 null，页面不显示，不自己数。 */
+  stuckCount: number | null;
   /** 最近一次读失败的原因；成功一次就清空。 */
   error: string | null;
   failures: number;
@@ -82,7 +84,7 @@ export interface SessionsState {
  * 轮询刷新的是最新一页（同一个会话以最新一页里的为准，不重复）。
  */
 export function useSessions(): SessionsState {
-  const [head, setHead] = useState<{ sessions: SessionSummary[]; nextBefore: number | null } | null>(null);
+  const [head, setHead] = useState<SessionsPage | null>(null);
   // 见过的全部会话（按号去重，同一个会话以最新读到的为准）：最新一页被新会话顶下去的，不会从列表里消失
   const [known, setKnown] = useState<ReadonlyMap<string, SessionSummary>>(new Map());
   const remember = useCallback((list: SessionSummary[]) => {
@@ -179,5 +181,12 @@ export function useSessions(): SessionsState {
     [head, known],
   );
 
-  return { sessions, ...meta, hasMore: nextBefore !== null, loadingMore, loadMore };
+  return {
+    sessions,
+    stuckCount: head?.stuckCount ?? null,
+    ...meta,
+    hasMore: nextBefore !== null,
+    loadingMore,
+    loadMore,
+  };
 }

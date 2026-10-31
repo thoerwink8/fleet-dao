@@ -5,7 +5,8 @@
   "description": "新内核的契约（决定 0124）：事件信封、事件类型、外部动作的种类和操作键；接口层唯一一份",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./worker-state": "./src/worker-state.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"
