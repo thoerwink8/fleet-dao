@@ -16,6 +16,10 @@ import { type Category, categoryOf, num, str, strList, TYPE_LABEL } from '../lib
 import { formatClock, formatDuration, shortId } from '../lib/format';
 import type { FeedEvent } from '../lib/types';
 import { Chip, type Tone } from './chip';
+import { ClampedText, OutputBlock } from './clamped';
+
+const clamp = (t: string | undefined, fallback: string): ReactNode =>
+  t === undefined ? fallback : <ClampedText text={t} />;
 
 const ICON: Record<string, ReactNode> = {
   'session.turn.started': <MessageSquare />,
@@ -74,7 +78,7 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
         ['背景', str(p.context)],
       ];
       return {
-        title: str(p.task) ?? '派工请求',
+        title: clamp(str(p.task), '派工请求'),
         detail: (
           <dl className="mt-2 flex flex-col gap-1.5">
             <Field label="期望">{str(p.expected) ?? '—'}</Field>
@@ -135,7 +139,7 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
               {str(p.lastStep) ? <Field label="最后一步">{str(p.lastStep)}</Field> : null}
               {str(p.spawnError) ? <Field label="起不来">{str(p.spawnError)}</Field> : null}
             </dl>
-            {tail ? <Raw value={tail} label="错误输出末尾" /> : null}
+            {tail ? <OutputBlock label="错误输出末尾" text={tail} /> : null}
           </div>
         ),
       };
@@ -143,7 +147,7 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
     case 'worker.progress.reported': {
       const pct = num(p.percent);
       return {
-        title: str(p.summary) ?? '进度',
+        title: clamp(str(p.summary), '进度'),
         detail:
           pct !== undefined ? (
             <div className="mt-2 flex items-center gap-2">
@@ -176,9 +180,9 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
               ? '被卡住'
               : (status ?? '—');
       return {
-        title: str(p.summary) ?? '交结果',
+        title: clamp(str(p.summary), '交结果'),
         chips: <Chip tone={tone}>{label}</Chip>,
-        detail: str(p.evidence) ? <Raw value={str(p.evidence)} label="证据" /> : undefined,
+        detail: str(p.evidence) ? <OutputBlock label="证据" text={str(p.evidence) as string} /> : undefined,
       };
     }
     case 'handback.recorded': {
@@ -214,7 +218,7 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
     case 'session.turn.started':
     case 'session.turn.settled': {
       const text = str(p.text) ?? str(p.summary);
-      return { title: text ?? (ev.type === 'session.turn.started' ? '会话轮次开始' : '会话轮次结束') };
+      return { title: clamp(text, ev.type === 'session.turn.started' ? '会话轮次开始' : '会话轮次结束') };
     }
     default:
       return { title: TYPE_LABEL[ev.type] ?? ev.type, detail: <Raw value={p} /> };

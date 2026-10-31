@@ -1,5 +1,6 @@
 // 前端读到的数据形状。事件的形状和接口层（packages/harness-api）一一对应：id 就是 fleet2.events.id，SSE 的事件号也是它。
 import type { EventType } from '@fleet-dao/harness-contract';
+import type { TailEvent } from './session-state';
 
 export interface FeedEvent {
   id: number;
@@ -24,6 +25,8 @@ export interface SessionSummary {
   lastType: string;
   /** 最后一条事件的载荷（列表取一句摘要用，不用拉整条流）。 */
   lastPayload: Record<string, unknown>;
+  /** 最近一批事件的瘦身版（最旧在前），列表按它推工人状态；旧接口没有这个字段时当空。 */
+  tail?: TailEvent[];
 }
 
 export interface SessionsPage {

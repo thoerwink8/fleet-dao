@@ -211,6 +211,84 @@ const SESSIONS: Record<string, Step[]> = {
       },
     },
   ],
+  // 在跑：连着六次工具调用（折叠成一行摘要）+ 一段很长的开场白（预览 200 字）
+  'cmd-demo-migration': [
+    {
+      type: 'session.turn.started',
+      ago: 9,
+      payload: {
+        turnId: 't1',
+        text: '把旧驾驶舱的任务页迁到新内核：先盘点旧页面读了哪些表，再逐个对到新内核的事件上，缺的字段列出来；迁的时候不改旧页面一行，两边并行跑，等新页面的数字和旧页面对得上再切；切之前把对不上的清单交给我看，我来定哪些是旧页面算错了、哪些是新内核漏了。另外两件事先说清楚：一是所有对数的口径以新内核的事件为准，旧页面里手工改过的数不算；二是迁移期间任何一边读失败都不许吞掉，页面上要写明读不到的原因和下一次重试的时间，不能显示成零或空。',
+      },
+    },
+    {
+      type: 'worker.spawn.requested',
+      ago: 8,
+      payload: {
+        taskId: 'd4a7b3c2-1111-4222-8333-abcdefabcdef',
+        task: '盘点旧任务页读的表和字段，对到新内核事件',
+        expected: '一张表：旧字段、新事件字段、对不上的原因',
+        must_do: '只读，不改旧页面',
+        must_not: '不动 packages/web',
+        context: '母单 #3770。',
+        stop_when: '清单交齐，或发现缺的字段超过一半就停下报',
+      },
+    },
+    {
+      type: 'worker.spawned',
+      ago: 7,
+      payload: {
+        runId: 'd14-a1',
+        sessionId: 'w-b3c4',
+        sessionMode: 'new',
+        model: 'claude-sonnet-5-5',
+        shadow: true,
+        deadline: new Date(Date.now() + 40 * 60_000).toISOString(),
+      },
+    },
+    {
+      type: 'worker.progress.reported',
+      ago: 6,
+      payload: { summary: '读完旧任务页的 14 个接口。', percent: 10 },
+    },
+    {
+      type: 'worker.progress.reported',
+      ago: 5,
+      payload: { summary: '对出 9 个字段，还剩 5 个没有对应事件。', percent: 35 },
+    },
+    {
+      type: 'worker.progress.reported',
+      ago: 4,
+      payload: { summary: '其中 3 个可以从交回事件推出来。', percent: 50 },
+    },
+    {
+      type: 'worker.progress.reported',
+      ago: 3,
+      payload: {
+        summary:
+          '剩下 2 个字段（重试次数、排队时长）新内核事件里没有，需要在派工事件里补；我先写进清单，不改契约。清单里每一行都带旧字段所在的接口、新内核候选事件和对不上的原因，方便你一眼看出哪些是真缺、哪些只是名字不同。',
+        percent: 70,
+      },
+    },
+    {
+      type: 'worker.progress.reported',
+      ago: 1,
+      payload: { summary: '清单写完，正在自查一遍。', percent: 90 },
+    },
+  ],
+  // 做完工人交了结果、等核验：证据很长（40 行），默认只显示前 12 行
+  'cmd-demo-test-run': [
+    { type: 'session.turn.started', ago: 2, payload: { turnId: 't1', text: '跑一遍全量测试给个结论。' } },
+    {
+      type: 'worker.result.submitted',
+      ago: 1,
+      payload: {
+        status: 'done',
+        summary: '全量测试通过。',
+        evidence: Array.from({ length: 40 }, (_, i) => `mod-${String(i + 1).padStart(2, '0')} ok`).join('\n'),
+      },
+    },
+  ],
 };
 
 /** 灌样例；已经有同名会话的跳过（持久化目录里重复启动不重复灌）。 */

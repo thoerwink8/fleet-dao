@@ -9,6 +9,7 @@ import {
   type CockpitApi,
   createCockpitApi,
   signSessionCookie,
+  TAIL_EVENTS,
 } from '../src/cockpit.ts';
 import { appendToSession } from '../src/events.ts';
 import { issueToken } from '../src/tokens.ts';
@@ -291,6 +292,7 @@ interface ListBody {
     lastAt: string;
     lastType: string;
     lastPayload: unknown;
+    tail: Record<string, unknown>[];
   }[];
   nextBefore: number | null;
 }
@@ -313,6 +315,32 @@ describe('会话列表', () => {
     const second = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as ListBody;
     expect(second.sessions.map((s) => s.id)).toEqual(['a', 'c', 'b']);
     expect(second.sessions[0]?.eventCount).toBe(3);
+  });
+
+  it('每个会话带近期事件的瘦身版（判工人状态用）：最旧在前、封顶 TAIL_EVENTS、不带大文本', async () => {
+    const { base } = await start();
+    await seed('long', TAIL_EVENTS + 6);
+    await appendToSession(t.db, 'long', 'worker.settled', {
+      exitCode: 143,
+      killed: 'stop-requested',
+      spawnError: null,
+      stderrTail: 'x'.repeat(5000),
+    });
+    await appendToSession(t.db, 'long', 'handback.recorded', {
+      final: true,
+      outcome: 'dead',
+      verdict: 'unknown',
+      reasons: ['不会出现在 tail 里'],
+    });
+    await appendToSession(t.db, 'short', 'worker.spawned', { deadline: '2026-10-31T12:00:00Z', model: 'm' });
+    const body = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as ListBody;
+    const short = body.sessions.find((s) => s.id === 'short');
+    expect(short?.tail).toEqual([{ type: 'worker.spawned', deadline: '2026-10-31T12:00:00Z' }]);
+    const long = body.sessions.find((s) => s.id === 'long');
+    expect(long?.tail).toHaveLength(TAIL_EVENTS);
+    expect(long?.tail.at(-1)).toEqual({ type: 'handback.recorded', final: true, outcome: 'dead' });
+    expect(long?.tail.at(-2)).toEqual({ type: 'worker.settled', exitCode: 143, killed: 'stop-requested' });
+    expect(JSON.stringify(long?.tail)).not.toContain('xxxx');
   });
 
   it('只列会话流，不列工人流；游标分页不重不漏', async () => {

@@ -25,6 +25,9 @@ test.describe('会话工作台', () => {
     await expect.poll(() => pageIds(page)).toEqual(await dbIds(stack, S));
     await emitProgress(stack, S, 4, 2);
     await expect.poll(() => pageIds(page)).toEqual(await dbIds(stack, S));
+    // 5 条进度连在一起：默认折叠成一行摘要，点开才看到每一条
+    await expect(page.locator('[data-tool-run]')).toContainText('调了 5 次工具：report_progress×5');
+    await page.locator('[data-tool-run]').getByRole('button').first().click();
     await expect(page.getByText('进度 5', { exact: true })).toBeVisible();
   });
 
@@ -340,6 +343,79 @@ test.describe('#3818：登录和翻页', () => {
     await stack.emit('page-00', 'worker.progress.reported', { summary: 'bump' });
     await expect(items.first()).toContainText('page-00');
     await expect(items).toHaveCount(35);
+  });
+});
+
+test.describe('#3781 第二轮：工具调用折叠、长输出预览、列表按状态分组', () => {
+  test('列表按工人状态分组：卡住 > 在跑 > 等待 > 做完，卡住的置顶带数量，状态变了自己挪组', async ({
+    page,
+    stack,
+  }) => {
+    await seed(stack);
+    await page.goto(`${stack.url}/next/`);
+    const groups = page.locator('section[aria-label="会话列表"] [data-group]');
+    await expect(groups).toHaveCount(4);
+    expect(await groups.evaluateAll((els) => els.map((e) => e.getAttribute('data-group')))).toEqual([
+      'stuck',
+      'running',
+      'waiting',
+      'done',
+    ]);
+    await expect(page.getByTestId('group-count-stuck')).toHaveText('1');
+    await expect(page.locator('[data-group="stuck"] [data-session-id]')).toHaveText(/cmd-demo-flaky-ci/);
+    await expect(page.locator('[data-group="running"] [data-session-id]')).toHaveText(/cmd-demo-migration/);
+    await expect(page.locator('[data-group="done"] [data-session-id]')).toHaveText(/cmd-demo-login-fix/);
+    // 组内按最后事件倒序：等待组里 test-run（更新）在 docs-sweep 前面
+    expect(
+      await page
+        .locator('[data-group="waiting"] [data-session-id]')
+        .evaluateAll((els) => els.map((e) => e.getAttribute('data-session-id'))),
+    ).toEqual(['cmd-demo-test-run', 'cmd-demo-docs-sweep']);
+    // 新的终局交回（没交付）进来：下一次轮询后 test-run 挪进卡住组，卡住数变 2
+    await stack.emit('cmd-demo-test-run', 'handback.recorded', { final: true, outcome: 'dead' });
+    await expect(page.getByTestId('group-count-stuck')).toHaveText('2', { timeout: 25_000 });
+    await expect(page.locator('[data-group="stuck"] [data-session-id]').first()).toHaveText(
+      /cmd-demo-test-run/,
+    );
+  });
+
+  test('连续工具调用默认折叠成一行摘要，可展开；折叠时事件号对账不变', async ({ page, stack }) => {
+    await seed(stack);
+    await openSession(page, stack, 'cmd-demo-migration');
+    const run = page.locator('[data-tool-run]');
+    await expect(run).toHaveCount(1);
+    await expect(run).toContainText('调了 5 次工具：report_progress×5');
+    const cards = run.locator('[data-event-id]');
+    await expect(cards).toHaveCount(5);
+    await expect(cards.first()).toBeHidden();
+    await expect.poll(() => pageIds(page)).toEqual(await dbIds(stack, 'cmd-demo-migration'));
+    await run.getByRole('button').first().click();
+    await expect(cards.first()).toBeVisible();
+    await expect(cards.last()).toBeVisible();
+    await run.getByRole('button').first().click();
+    await expect(cards.first()).toBeHidden();
+  });
+
+  test('长输出默认只显示前 200 字或 12 行，可展开收起', async ({ page, stack }) => {
+    await seed(stack);
+    await openSession(page, stack, 'cmd-demo-test-run');
+    const out = page.getByTestId('tool-output');
+    await expect(out).toHaveAttribute('data-clamped', 'closed');
+    await expect(out).toContainText('mod-01');
+    await expect(out).toContainText('mod-12');
+    await expect(out).not.toContainText('mod-13');
+    await out.getByRole('button', { name: /展开全部（\d+ 字、40 行）/ }).click();
+    await expect(out).toHaveAttribute('data-clamped', 'open');
+    await expect(out).toContainText('mod-40');
+    await out.getByRole('button', { name: '收起' }).click();
+    await expect(out).not.toContainText('mod-40');
+    // 字数先到：开场白有几百字，只显示前 200 字
+    await openSession(page, stack, 'cmd-demo-migration');
+    const clamped = page.locator('[data-clamped="closed"]').first();
+    await expect(clamped).toContainText('把旧驾驶舱的任务页迁到新内核');
+    await expect(clamped).not.toContainText('显示成零或空');
+    await clamped.getByRole('button').click();
+    await expect(page.locator('[data-clamped="open"]').first()).toContainText('显示成零或空');
   });
 });
 
