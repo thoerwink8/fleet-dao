@@ -76,6 +76,7 @@ async function runOne(name: ScenarioName): Promise<boolean> {
   say(`\n== ${name}：会话 ${id}，请求事件 ${sub.eventIds.join(',')}，批次 ${sub.batchId} ==`);
   const deadline = Date.now() + Number(flag('wait-min') ?? 40) * 60_000;
   let stopped = false;
+  let hinted = false;
   let state = '';
   for (;;) {
     const js = await jobsOf(db, sub.eventIds);
@@ -89,6 +90,12 @@ async function runOne(name: ScenarioName): Promise<boolean> {
         );
         stopped = true;
       }
+    }
+    if (name === 'restart' && !hinted && (await readChain(db, id)).some((r) => r.type === 'worker.spawned')) {
+      say(
+        `${new Date().toISOString()} 这件活的工人已起，现在可以手动 systemctl restart fleet2-kernel（只一次，脚本不碰系统服务）`,
+      );
+      hinted = true;
     }
     if (Date.now() > deadline) {
       say(
