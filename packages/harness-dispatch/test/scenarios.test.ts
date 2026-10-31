@@ -180,6 +180,30 @@ describe('被人叫停', () => {
   }, 30_000);
 });
 
+describe('重启接回', () => {
+  it('工人在跑时派工器停机：交回 released / final=false / willRetry，活回 pending；新派工器重领跑完才是终局', async () => {
+    const d1 = await dispatcher({}, { FAKE_MODE: 'work-hang' });
+    const sub = await submitScenario(t.db, 'scn-t-restart', scenarioSpec('restart'), target());
+    await d1.poll();
+    const until = Date.now() + 15_000;
+    while ((await readChain(t.db, 'scn-t-restart')).every((r) => r.type !== 'worker.spawned')) {
+      if (Date.now() > until) throw new Error('等工人起来超时');
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    await d1.stop();
+    expect((await jobsOf(t.db, sub.eventIds))[0]?.state).toBe('pending');
+    const d2 = await dispatcher();
+    await d2.poll();
+    await d2.settled();
+    const rows = await readChain(t.db, 'scn-t-restart');
+    const hb = rows.filter((r) => r.type === 'handback.recorded');
+    expect(hb.map((r) => [r.outcome, r.final])).toEqual([
+      ['released', 'false/willRetry'],
+      ['completed', 'true'],
+    ]);
+  }, 30_000);
+});
+
 describe('限流', () => {
   it('专用队列上排 7 件、每分钟 3 件：第一轮只放 3 件，其余等窗口', async () => {
     const r = await runRateLimit(t.db, 't', { perMinute: 3, total: 7, pollMs: 100, maxWaitMs: 1_500 });

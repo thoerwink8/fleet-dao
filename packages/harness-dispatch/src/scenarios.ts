@@ -24,10 +24,18 @@ import { and, asc, eq, inArray, like, or } from 'drizzle-orm';
 import { type DispatchPayload, spawnJobKey, WORKER_QUEUE } from './intake.ts';
 import type { ShadowTarget, SpawnRequest } from './prompt.ts';
 
-export const SCENARIO_NAMES = ['success', 'timeout', 'killed', 'blocked', 'duplicate', 'rate-limit'] as const;
+export const SCENARIO_NAMES = [
+  'success',
+  'timeout',
+  'killed',
+  'blocked',
+  'duplicate',
+  'rate-limit',
+  'restart',
+] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
-/** 脚本造不出来、要另外处理的两种：写明原因，不假装跑过。 */
+/** 脚本造不出来、要另外处理的：写明原因，不假装跑过。 */
 export const MANUAL_SCENARIOS = {
   offline:
     '断网：派工请求里没有任何字段能改工人连的模型入口（SpawnRequest 只有六项加影子目标，工人环境由 buildWorkerEnv 按白名单构造，' +
@@ -35,8 +43,9 @@ export const MANUAL_SCENARIOS = {
     '代码里它的表现是：工人起来后一直没有实质事件，起步时限到点判 no_progress，确定没副作用，记 final=false 的交回并退避重试。' +
     '这一条由 test/scenarios.test.ts 用静默假工人覆盖。',
   restart:
-    '重启接回：要对 fleet2-kernel 做 systemctl restart，只许一次且要在没有影子工人在跑的时候，脚本不碰系统服务；' +
-    '到点由人手动重启，再用 chain 看在跑那件活的 released / final=false / willRetry=true 和后续的接回。',
+    '重启接回的重启本身：脚本不碰系统服务。`run restart` 排一件 sleep 300 的活，工人起来后脚本打印提示并一直等；' +
+    '这时在跑的是它的工人（不是影子批次的），由人手动 systemctl restart fleet2-kernel 一次，脚本等到活收尾再打事件链：' +
+    '应有 released / final=false / willRetry=true，随后新进程重领、跑完的终局交回。',
 } as const;
 
 const SCENARIO_NOTE =
@@ -55,6 +64,7 @@ export interface ScenarioSpec {
 }
 
 export function scenarioSpec(name: Exclude<ScenarioName, 'rate-limit'>): ScenarioSpec {
+  // restart：见下面的 case，工人睡 300 秒给人留出重启的时间
   const base = {
     context: SCENARIO_NOTE,
     must_not: '不碰除任务要求以外的文件，不联网，不读工作目录以外的东西',
@@ -77,12 +87,23 @@ export function scenarioSpec(name: Exclude<ScenarioName, 'rate-limit'>): Scenari
       return {
         six: {
           ...base,
-          task: '用 shell 工具运行 `sleep 900`，等它结束后再交结果',
-          expected: '睡满 900 秒后用 submit_result 交 status=done',
-          must_do: '必须真的运行 sleep 900，不许缩短、不许后台运行',
+          // 工人的 shell 工具前台最长 600 秒，900 秒的睡眠它会判做不了直接交 blocked（真机第一次就是这样）；500 秒够长，叫停（内核一轮 30 秒加心跳 20 秒）来得及
+          task: '用 shell 工具运行 `sleep 500`，等它结束后再交结果',
+          expected: '睡满 500 秒后用 submit_result 交 status=done',
+          must_do: '必须真的运行 sleep 500，不许缩短、不许后台运行',
           stop_when: 'sleep 结束并交了结果',
         },
         stopWhenSpawned: true,
+      };
+    case 'restart':
+      return {
+        six: {
+          ...base,
+          task: '用 shell 工具运行 `sleep 300`，等它结束后再交结果',
+          expected: '睡满 300 秒后用 submit_result 交 status=done',
+          must_do: '必须真的运行 sleep 300，不许缩短、不许后台运行',
+          stop_when: 'sleep 结束并交了结果',
+        },
       };
     case 'blocked':
       return {
