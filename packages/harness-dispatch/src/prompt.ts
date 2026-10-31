@@ -5,7 +5,20 @@ import { randomBytes } from 'node:crypto';
 import { SpawnWorkerInput } from '@fleet-dao/harness-contract';
 import { z } from 'zod';
 
-export const SpawnRequest = z.object({ taskId: z.string().min(1), ...SpawnWorkerInput });
+/** 影子驱动写派工请求时带上的：在哪张单、从哪个基线起。指挥官的 spawn_worker 入参里没有它，带不进来。 */
+export const ShadowTarget = z.object({
+  batchId: z.string().min(1),
+  repo: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
+  issue: z.number().int().positive(),
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/),
+});
+export type ShadowTarget = z.infer<typeof ShadowTarget>;
+
+export const SpawnRequest = z.object({
+  taskId: z.string().min(1),
+  ...SpawnWorkerInput,
+  shadow: ShadowTarget.optional(),
+});
 export type SpawnRequest = z.infer<typeof SpawnRequest>;
 
 export function parseSpawnRequest(payload: unknown): SpawnRequest | null {

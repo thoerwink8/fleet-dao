@@ -14,6 +14,7 @@
 - 调度器直接收成 `dead` 的活（排队时过了截止、领到 `max_attempts` 的毒活）不经 `processJob`：领活时经 `claimJobs` 的 `onDead` 在同一个事务里记终局交回（`outcome: dead`、`verdict: unknown`、原因取 `lastError`），收件箱不少一件；记不进去整次领取回滚。
 - 崩溃后重领不盲重派：重领时若已有终局交回，只补 `completeJob`；若上一次的 `worker:<runId>` 流有 `worker.spawned` 却没有对应交回，说明派工器在中途死了、工人做到哪不知道，记 `unknown` 的终局交回就停。
 - 影子自检的真实探测（`shadow-probes.ts`，接 `harness-workers` 的 `ShadowProbes`）：影子工人和会话用户同一个用户，家目录里的推送凭据（`.git-credentials`、`gh` 的 `hosts.yml`、`.netrc`、`.ssh/id_*`）和全局 git 凭据助手工人都拿得到，有一样就没过；出网规则看 `fleet2-shadow-firewall.service` 在跑且出网关的口连得上；outbox 装了任何真实处理器就没过。查不了一律 `unknown`。
+- 影子派工（#3808）：`shadow-driver.ts` 给冻结批次里没派过的单往 `shadow-<批次>` 会话流写派工请求，带 `shadow`（批次、仓、单号、基线）；回执和请求在同一个事务里写，同一张单只出一条。指挥官的 `spawn_worker` 入参只有六项，带不进 `shadow`。`shadow-workspace.ts` 从本机裸镜像 `<镜像根>/<仓>.git` 以 `worktree add --detach` 建到基线，没带 `shadow` 的请求不建；终局交回记完后经 `Workspace.collect` 抓补丁（`add -N` 让新文件进 diff）写 `shadow_runs`，再删目录、`worktree prune`。补丁只存库里，不建分支、不推。
 - 提示词（`prompt.ts`）：指示类字段在块外，`context` 只出现在带随机标记的资料块里，块尾标记伪造不了（SEC1）。
 
 ## 没做的
