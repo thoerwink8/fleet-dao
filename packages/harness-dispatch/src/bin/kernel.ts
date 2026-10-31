@@ -4,11 +4,12 @@
 import { makeRedactor, secretsFromEnv } from '@fleet-dao/harness-runner';
 import type { Db } from '@fleet-dao/harness-store';
 import * as schema from '@fleet-dao/harness-store/schema';
-import { CLAUDE_PERMISSION_MODES, type ClaudePermissionMode, scopeSandbox } from '@fleet-dao/harness-workers';
+import { CLAUDE_PERMISSION_MODES, type ClaudePermissionMode } from '@fleet-dao/harness-workers';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { githubReader } from '../github-read.ts';
 import { createKernel } from '../kernel.ts';
+import { scopeSandbox } from '../scope-sandbox.ts';
 
 const env = process.env;
 const need = (k: string): string => {

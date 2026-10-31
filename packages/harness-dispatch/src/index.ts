@@ -4,6 +4,7 @@ export * from './github-read.ts';
 export * from './intake.ts';
 export * from './kernel.ts';
 export * from './prompt.ts';
+export * from './scope-sandbox.ts';
 export * from './shadow-driver.ts';
 export * from './shadow-probes.ts';
 export * from './shadow-workspace.ts';
