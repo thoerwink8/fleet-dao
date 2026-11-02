@@ -228,5 +228,23 @@ describe('outbox 真实处理器', () => {
   it('装了任何一个就没过', async () => {
     expect(await probes({}).p.realHandlersAbsent()).toBe('pass');
     expect(await probes({ handlers: ['github.merge'] }).p.realHandlersAbsent()).toBe('fail');
+    // 纯影子没有允许名单：推分支的处理器也不许有
+    expect(await probes({ handlers: ['git.push'] }).p.realHandlersAbsent()).toBe('fail');
+  });
+
+  it('真执行（#3783）只许装名单里的种类：推分支、开 PR 过，合并、评论没过', async () => {
+    const allowed = ['git.push', 'github.pr.open'];
+    const withAllow = (handlers: string[]) =>
+      realShadowProbes({
+        home,
+        egressPort: 7344,
+        redact,
+        realHandlers: () => handlers,
+        allowedHandlers: allowed,
+      }).realHandlersAbsent();
+    expect(await withAllow(allowed)).toBe('pass');
+    expect(await withAllow([])).toBe('pass');
+    expect(await withAllow([...allowed, 'github.merge'])).toBe('fail');
+    expect(await withAllow(['github.comment'])).toBe('fail');
   });
 });

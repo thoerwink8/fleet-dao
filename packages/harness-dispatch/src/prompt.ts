@@ -14,11 +14,24 @@ export const ShadowTarget = z.object({
 });
 export type ShadowTarget = z.infer<typeof ShadowTarget>;
 
-export const SpawnRequest = z.object({
-  taskId: z.string().min(1),
-  ...SpawnWorkerInput,
-  shadow: ShadowTarget.optional(),
+/**
+ * 真执行驱动写派工请求时带上的（#3783，第 7 片）：在哪张单、从哪个基线起、拿的是旧库 tasks 那一行的哪个所有权令牌、
+ * 开 PR 用什么标题。和影子目标一样，指挥官的 spawn_worker 入参里没有它，带不进来。
+ */
+export const RealTarget = ShadowTarget.extend({
+  fencing: z.number().int().nonnegative(),
+  title: z.string().min(1),
 });
+export type RealTarget = z.infer<typeof RealTarget>;
+
+export const SpawnRequest = z
+  .object({
+    taskId: z.string().min(1),
+    ...SpawnWorkerInput,
+    shadow: ShadowTarget.optional(),
+    real: RealTarget.optional(),
+  })
+  .refine((r) => !(r.shadow && r.real), '影子目标和真执行目标不能同时给');
 export type SpawnRequest = z.infer<typeof SpawnRequest>;
 
 export function parseSpawnRequest(payload: unknown): SpawnRequest | null {

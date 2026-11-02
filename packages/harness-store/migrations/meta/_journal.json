@@ -43,6 +43,13 @@
       "when": 1793431190949,
       "tag": "0005_harsh_argent",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793651642044,
+      "tag": "0006_quick_celestials",
+      "breakpoints": true
     }
   ]
 }

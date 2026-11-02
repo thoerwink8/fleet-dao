@@ -1293,6 +1293,20 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task correct-mer
 - 为什么这么写：每个测试进程不再各建一份内存 PGlite（峰值 800+ MiB），共用一张真库之后降到 ~0.3G；`packages/conventions/src/test-run.ts` 的 `WORKER_MIB`/`RESERVE_MIB` 等实测过再调。CI cluster 由普通 runner 用户启动，只监听回环 5432，跟生产用户、登录鉴权没有任何关系。
 - 装机法国侧**不装**：这是 CI 的事，法国那台生产 Postgres 里没有 `fleet_test_template` 这张库，也不应该有——第二条已经讲过它只放 `fleet` 和 `temporal_*`。机器的 docker、镜像源都不为它配。
 
+### 新内核真执行：推分支、开 PR，不合并（#3783，重写第 7 片）
+
+`fleet2-kernel.service` 带 `FLEET2_PUBLISH=1`：对人冻结的**真执行批次**（影子批次不受影响）认领单、派工，工人交回后内核经 outbox 推分支 `fleet2/<单号>-<运行号>`、开 PR（正文 `Closes #单号`，记模型和核验结论）。**不开自动合并**，合不合由现有合并闸和人决定；内核里没有任何合并的调用（`packages/harness-dispatch/test/github-write.test.ts` 扫源码守着）。
+
+- 令牌：同一个 GitHub App（`/etc/fleet-dao/github/gh-app-fleet-dao-engine.json`），读单、读合并结果仍用只读令牌；发布那一步另换一枚**写令牌**，权限只有 `contents: write`、`pull_requests: write`、`metadata: read`、只含本仓、1 小时过期（`PUBLISH_PERMISSIONS`）。App 在 GitHub 上必须已授予这两项写权限（旧引擎同一个 App 推分支开 PR，本来就有）；没有时发布那一步换令牌失败，动作退避、到上限进 dead，读写其余照常。
+- 出网关名单**不变**：`deploy/france/fleet2-egress.allow` 不放 GitHub。推送是内核（`fleet` 用户，不在影子 slice 里）在自己建的临时目录里做的，工人整个过程拿不到任何 GitHub 凭据，也连不到 GitHub。
+- 认领：旧库 `tasks` 那一行（`owner = harness`，条件更新：没有行就插、只有 `queued` 且归引擎的行才改，旧系统手上有的不抢，下一轮再看）；外部动作带这一刻的 `tasks.fencing`，执行前再核，对不上进 dead。
+- 人手命令（在法国以 `fleet` 跑，配置同内核）：
+  - 冻结：`node packages/harness-dispatch/src/bin/real.ts freeze <批次号> <owner/仓#单号>…`（基线取主线现在的提交；单要开着、不是 PR）。
+  - 看一张单：`… real.ts status <owner/仓#单号>…`（走到切回表哪一行、外部动作状态、`issue:` 流上的事件）。
+  - 按状态切回：`… real.ts release <owner/仓#单号> [--pr handoff|close]`。返回 `done`，或 `wait`（工人没收尾、检查在跑、结果未知）、`choose`（开了 PR：选交旧引擎接管还是关掉重派）、`alarm`（补偿失败，所有权不放）、`none`（已合并，不回退）。
+- 记账：`fleet2.real_batch_items`（批次清单）、`fleet2.publish_runs`（补丁、模型、核验、状态 ready/held/empty/released）、`fleet2.outbox`（`git.push`、`github.pr.open`）；`issue:<owner/仓>#<单号>` 流上有 `publish.pushed`、`publish.pr.opened`、`task.released`。核验没过、没有改动、工人没干净交活的产物只记 held/empty，不推。
+- 关掉真执行：把单元里的 `FLEET2_PUBLISH` 改成 `0` 发版即可，在途的单先按状态切回。
+
 ## 十、「你好」工作流（P0 验收）
 
 让引擎工人跑一次 `helloWorkflow`，耗时查得到：Temporal 把每次执行的开始、结束、耗时记在本机 Postgres（库 `temporal_visibility` 的表 `executions_visibility`）。

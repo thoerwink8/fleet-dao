@@ -86,5 +86,38 @@ export function githubReader(o: GitHubReadOptions) {
     return { pr: pr.number, sha: pr.mergeCommit.oid, diff };
   };
 
-  return { taskFor, readMerged };
+  /** 一张单现在是不是还开着（挑真执行的单时用）：回状态和有没有标签「引擎v2」。 */
+  async function issueFacts(repo: string, issue: number) {
+    const res = await call(
+      `${api}/repos/${repo}/issues/${issue}`,
+      { headers: await headers(repo) },
+      `读 ${repo}#${issue}`,
+    );
+    const j = (await res.json()) as {
+      state?: string;
+      title?: string;
+      pull_request?: unknown;
+      labels?: ({ name?: string } | string)[];
+    };
+    return {
+      open: j.state === 'open',
+      isPr: Boolean(j.pull_request),
+      title: String(j.title ?? ''),
+      labels: (j.labels ?? []).map((l) => (typeof l === 'string' ? l : String(l.name ?? ''))),
+    };
+  }
+
+  /** 分支现在的提交号（冻结真执行批次的基线）。 */
+  async function headSha(repo: string, branch: string): Promise<string> {
+    const res = await call(
+      `${api}/repos/${repo}/commits/${encodeURIComponent(branch)}`,
+      { headers: await headers(repo, 'application/vnd.github.sha') },
+      `读 ${repo} ${branch} 的提交号`,
+    );
+    const sha = (await res.text()).trim();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`读 ${repo} ${branch} 的提交号：回来的形状认不出`);
+    return sha;
+  }
+
+  return { taskFor, readMerged, issueFacts, headSha };
 }

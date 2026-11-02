@@ -338,6 +338,36 @@ export async function checkFencing(
   return false;
 }
 
+/** 一张单名下的外部动作（切回、状态页用），按预留先后，最多 limit 条。 */
+export async function listOpsForTask(db: Db, ref: TaskRef, limit = 50): Promise<OutboxOp[]> {
+  const rows = await db
+    .select()
+    .from(outbox)
+    .where(and(eq(outbox.repo, ref.repo), eq(outbox.issue, ref.issue)))
+    .orderBy(asc(outbox.id))
+    .limit(Math.min(limit, PAGE_MAX));
+  return rows.map(toOp);
+}
+
+/** 按操作键读一条。 */
+export async function getOp(db: Db, key: string): Promise<(OutboxOp & { result: unknown }) | null> {
+  const [row] = await db.select().from(outbox).where(eq(outbox.opKey, key));
+  return row ? { ...toOp(row), result: row.result } : null;
+}
+
+/**
+ * 切回用：这张单还没开始做的（pending）外部动作一律作废进 dead。claimed / unknown 不动：
+ * 有人正在做、或发出去了结果不知道，只能等它们收尾、对账，不在半路转手。回作废了几条。
+ */
+export async function cancelPendingOps(db: Db, ref: TaskRef, why: string): Promise<number> {
+  const rows = await db
+    .update(outbox)
+    .set({ state: 'dead', lastError: why, updatedAt: sql`now()` })
+    .where(and(eq(outbox.repo, ref.repo), eq(outbox.issue, ref.issue), eq(outbox.state, 'pending')))
+    .returning({ id: outbox.id });
+  return rows.length;
+}
+
 /** 积压：到期没做的最老一条多大了（秒），健康检查看调度有没有往前走。没有积压回 0。 */
 export async function oldestDueAgeSeconds(db: Db): Promise<number> {
   const [row] = await db

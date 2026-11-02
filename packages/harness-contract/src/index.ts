@@ -22,6 +22,10 @@ export const EVENT_TYPES = [
   // 工人以会话用户跑时（#3814）：收 scope、删交出去的目录的结局，收不干净也照实记
   'worker.cleaned',
   'handback.recorded',
+  // 真执行（#3783，第 7 片）：写在 issue:<owner>/<仓>#<单号> 流上。推了分支、开了 PR、单被切回旧系统各记一条，整条链能按单号查。
+  'publish.pushed',
+  'publish.pr.opened',
+  'task.released',
   // 接口层（#3775）：MCP 工具调用落成的事件，这一片只记账，外部动作由后面的片接。
   'worker.spawn.requested',
   'worker.stop.requested',
@@ -80,6 +84,9 @@ export const SpawnWorkerInput = {
 /** 外部动作的种类：所有对外副作用只经 outbox，按种类分发。 */
 export const OUTBOX_KINDS = ['git.push', 'github.pr.open', 'github.comment', 'github.merge'] as const;
 export type OutboxKind = (typeof OUTBOX_KINDS)[number];
+
+/** 一张单的事件流名（真执行的推送、开 PR、切回记在这条流上）。 */
+export const issueStream = (ref: { repo: string; issue: number }): string => `issue:${ref.repo}#${ref.issue}`;
 
 /** 外部动作挂在哪张单上：所有权令牌按这张单核。 */
 export const TaskRef = z.object({

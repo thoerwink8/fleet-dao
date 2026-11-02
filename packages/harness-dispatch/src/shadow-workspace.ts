@@ -16,6 +16,7 @@ import type { AdoptedDir, WorkerSandbox } from '@fleet-dao/harness-workers';
 import { type CommandResult, type CommandSpec, runCommand } from './command.ts';
 import type { Workspace } from './dispatcher.ts';
 import type { SpawnRequest } from './prompt.ts';
+import type { PublishCollected } from './publish.ts';
 
 const GIT_SAFE = [
   '-c',
@@ -47,6 +48,11 @@ export interface ShadowWorkspaceOptions {
   /** 补丁最多存多少字符，超了不存、进 onError。 */
   maxPatchChars?: number;
   run?: (spec: CommandSpec) => Promise<CommandResult>;
+  /**
+   * 真执行（#3783）：带 `real` 目标的请求，抓到补丁后交给它记账（publish.ts 的 recordPublish）。不给就不认 real 请求。
+   * 工作目录的建法、工人的隔离和影子完全一样；差别只在补丁去哪：影子进 shadow_runs 不推，真执行进 publish_runs 由 outbox 推。
+   */
+  publish?: (r: PublishCollected) => Promise<void>;
 }
 
 export class NotShadowRequestError extends Error {
@@ -118,7 +124,8 @@ export function shadowWorkspaces(o: ShadowWorkspaceOptions) {
   }
 
   return async function prepareWorkspace(req: SpawnRequest, ctx: { runId: string }): Promise<Workspace> {
-    const target = req.shadow;
+    const real = req.real && o.publish ? req.real : undefined;
+    const target = real ?? req.shadow;
     if (!target) throw new NotShadowRequestError(req.taskId);
     const mirror = await ensureMirror(target.repo, target.baseSha);
     await mkdir(o.tmpRoot, { recursive: true });
@@ -158,7 +165,7 @@ export function shadowWorkspaces(o: ShadowWorkspaceOptions) {
     return {
       cwd: dir,
       baseRef: target.baseSha,
-      async collect({ verdict, wallMs }) {
+      async collect({ verdict, wallMs, outcome, reasons }) {
         // 新文件先记成「打算加」，diff 才看得见。工人的 .git 一个字节都不写（法国上归会话用户、写不了）：
         // 索引用拷到内核临时目录的一份；add 也会写对象（-N 写空 blob，本机实测），对象库换成临时目录的，
         // 工人的对象库只读着当备用库（影子目录自带完整 .git，没有 alternates，也不连镜像）
@@ -179,16 +186,28 @@ export function shadowWorkspaces(o: ShadowWorkspaceOptions) {
             git(dir, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', target.baseSha, '--'], env),
           );
           if (diff.truncated) throw new Error(`补丁超过 ${o.maxPatchChars ?? 2_000_000} 字符，没存`);
-          await recordShadowRun(o.db, {
-            runId: ctx.runId,
-            batchId: target.batchId,
-            repo: target.repo,
-            issue: target.issue,
-            baseSha: target.baseSha,
-            verdict,
-            patch: diff.stdout,
-            wallMs,
-          });
+          if (real && o.publish) {
+            await o.publish({
+              runId: ctx.runId,
+              target: real,
+              verdict,
+              outcome,
+              reasons,
+              patch: diff.stdout,
+              wallMs,
+            });
+          } else {
+            await recordShadowRun(o.db, {
+              runId: ctx.runId,
+              batchId: target.batchId,
+              repo: target.repo,
+              issue: target.issue,
+              baseSha: target.baseSha,
+              verdict,
+              patch: diff.stdout,
+              wallMs,
+            });
+          }
         } finally {
           await rm(scratch, { recursive: true, force: true });
         }

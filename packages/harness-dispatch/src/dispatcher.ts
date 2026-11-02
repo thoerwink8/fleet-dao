@@ -62,7 +62,12 @@ export interface Workspace {
   /** 检查命令（argv）。 */
   checkCommand?: readonly string[];
   /** 终局交回记完、收尾之前调（影子拿它抓补丁）；失败进 onError，不改交回、不挡收尾。 */
-  collect?(handback: { verdict: VerifyReport['verdict']; wallMs: number }): Promise<void>;
+  collect?(handback: {
+    verdict: VerifyReport['verdict'];
+    wallMs: number;
+    outcome: string;
+    reasons: readonly string[];
+  }): Promise<void>;
   /** 记完交回后调；失败不影响结果。 */
   cleanup?(): Promise<void>;
 }
@@ -571,7 +576,7 @@ export class Dispatcher {
       }
       if (ws?.collect) {
         try {
-          await ws.collect({ verdict, wallMs: result?.wallMs ?? 0 });
+          await ws.collect({ verdict, wallMs: result?.wallMs ?? 0, outcome, reasons });
         } catch (err) {
           o.onError?.(err, job);
         }

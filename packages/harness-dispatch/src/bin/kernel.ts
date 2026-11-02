@@ -1,5 +1,6 @@
 // 起新内核进程（#3811）：node packages/harness-dispatch/src/bin/kernel.ts，配置全从环境变量来（法国上是单元的 EnvironmentFile）。
-// 影子模式：接口层只听回环、对外零写；GitHub 只读短期令牌（用 App 凭据按仓现换）只在这个进程里。每行一条 JSON 打到 stdout（进 journal），
+// 影子模式：接口层只听回环、对外零写；GitHub 只读短期令牌（用 App 凭据按仓现换）只在这个进程里。FLEET2_PUBLISH=1 开真执行（#3783）：
+// 对冻结的真执行批次认领单、派工，交回后经 outbox 推分支、开 PR，不合并。每行一条 JSON 打到 stdout（进 journal），
 // 影子静默打 {"alert":"shadow-silent",…}。收到 SIGTERM 先不领新活、等跑着的工人收尾再退。
 import { makeRedactor, secretsFromEnv } from '@fleet-dao/harness-runner';
 import type { Db } from '@fleet-dao/harness-store';
@@ -12,10 +13,12 @@ import {
 } from '@fleet-dao/harness-workers';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { appTokenSource } from '../github-app.ts';
+import { appTokenSource, PUBLISH_PERMISSIONS } from '../github-app.ts';
 import { githubReader } from '../github-read.ts';
+import { githubWriter } from '../github-write.ts';
 import { createKernel } from '../kernel.ts';
 import { scopeSandbox } from '../scope-sandbox.ts';
+import { acquireTask, currentFencing } from '../task-claim.ts';
 
 const env = process.env;
 const need = (k: string): string => {
@@ -64,7 +67,19 @@ if (!CLAUDE_PERMISSION_MODES.includes(permissionMode)) {
 const sql = postgres(need('FLEET2_DATABASE_URL'), { max: 4, onnotice: () => {} });
 const db = drizzle(sql, { schema }) as unknown as Db;
 const redact = makeRedactor(secretsFromEnv(env));
-const gh = githubReader({ tokenFor: appTokenSource({ file: need('FLEET2_GITHUB_APP_FILE') }) });
+const appFile = need('FLEET2_GITHUB_APP_FILE');
+const gh = githubReader({ tokenFor: appTokenSource({ file: appFile }) });
+// FLEET2_PUBLISH=1：真执行（#3783，第 7 片）。另起一个令牌源，权限只有 PUBLISH_PERMISSIONS（contents 和 pull_requests 的写），
+// 只给发布那一步；读单、读合并结果仍用上面只读的。不开合并：这个进程里没有任何合并的调用。
+const publishOn = env.FLEET2_PUBLISH === '1';
+if (env.FLEET2_PUBLISH !== undefined && env.FLEET2_PUBLISH !== '1' && env.FLEET2_PUBLISH !== '0') {
+  console.error('FLEET2_PUBLISH 只认 1 或 0');
+  process.exit(2);
+}
+const writeToken = publishOn
+  ? appTokenSource({ file: appFile, permissions: PUBLISH_PERMISSIONS })
+  : undefined;
+const githubCalls = new Map<string, number>();
 
 const kernel = createKernel({
   db,
@@ -97,11 +112,34 @@ const kernel = createKernel({
     }),
   onError: (step, err) =>
     log({ error: step, message: redact(err instanceof Error ? err.message : String(err)) }),
+  ...(writeToken
+    ? {
+        publish: {
+          acquire: (ref, title) => acquireTask(db, ref, title),
+          model: need('FLEET2_MODEL'),
+          outbox: {
+            github: githubWriter({
+              tokenFor: writeToken,
+              // 旧坑 E1：每次 GitHub 写口的调用记一笔，按粗名字累计，tick 报告里带出来
+              onCall: (what) => githubCalls.set(what, (githubCalls.get(what) ?? 0) + 1),
+            }),
+            tokenFor: writeToken,
+            fencingOf: (ref) => currentFencing(db, ref),
+            hostEnv: env,
+          },
+        },
+      }
+    : {}),
+  onTick: (r) => {
+    if (r.real && (r.real.requested > 0 || r.real.skipped.length > 0 || (r.real.outbox?.claimed ?? 0) > 0)) {
+      log({ real: r.real, githubCalls: Object.fromEntries(githubCalls) });
+    }
+  },
   tickMs: Number(env.FLEET2_TICK_MS ?? 30_000),
 });
 
 const apiPort = await kernel.start();
-log({ started: true, apiPort, shadow: true });
+log({ started: true, apiPort, shadow: !publishOn, publish: publishOn });
 
 let stopping = false;
 const stop = async (signal: string) => {
