@@ -7,6 +7,7 @@ export * from './intake.ts';
 export * from './kernel.ts';
 export * from './prompt.ts';
 export * from './publish.ts';
+export * from './real-batch.ts';
 export * from './real-driver.ts';
 export * from './scope-sandbox.ts';
 export * from './shadow-driver.ts';
