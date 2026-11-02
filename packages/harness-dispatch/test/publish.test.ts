@@ -300,7 +300,7 @@ describe('推分支、开 PR', () => {
 });
 
 describe('PR 正文', () => {
-  it('写关单词、哪单、哪个模型、核验结论和原因', () => {
+  it('写关单词、哪单、哪个模型、核验结论和原因，以及会话号和查整条链的流名', () => {
     const body = prBody({
       repo: 'o/r',
       issue: 9,
@@ -310,12 +310,17 @@ describe('PR 正文', () => {
       baseSha,
       wallMs: 61_000,
       reason: '检查退出码 0',
+      batchId: 'b9',
     });
-    expect(body.split('\n')[0]).toBe('Closes #9');
+    const lines = body.split('\n');
+    expect(lines[0]).toBe('Closes #9');
     expect(body).toContain('o/r#9');
     expect(body).toContain('grok-4.7');
     expect(body).toContain('passed（检查退出码 0）');
     expect(body).toContain('61 秒');
     expect(body).toContain('没有开自动合并');
+    // 批次号来自 publish_runs.batch_id，会话号和两条流名都能对上 fleet2.events
+    expect(lines).toContain('会话：real-b9');
+    expect(lines).toContain('查整条链：fleet2.events 里 stream_id 为 session:real-b9、issue:o/r#9');
   });
 });
