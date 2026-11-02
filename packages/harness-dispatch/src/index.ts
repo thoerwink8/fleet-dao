@@ -10,6 +10,7 @@ export * from './publish.ts';
 export * from './real-driver.ts';
 export * from './scope-sandbox.ts';
 export * from './shadow-driver.ts';
+export * from './shadow-freeze.ts';
 export * from './shadow-probes.ts';
 export * from './shadow-workspace.ts';
 export * from './switch-back.ts';
