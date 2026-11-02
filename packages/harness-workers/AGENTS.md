@@ -2,7 +2,7 @@
 
 决定 0124 的新内核（母单 #3770，第 3 片 #3775）里起工人的那一层。两个壳：Claude Code（经 reclaude）和 Grok 命令行（#3842，`src/grok.ts`），槽位按 `shell` 选；进程起停交给 `harness-runner`，事件写进 `harness-store` 的 `fleet2.events`。不依赖旧包，从旧 `adapters/src/{env,claude-code/args,grok/args}.ts` 复制改写。
 
-- Grok 壳：grok 没有 `--mcp-config`，MCP 只认 `config.toml`。每轮把 `GROK_HOME` 指到临时目录下的 `grok-home`，里面一份 0600 的 `config.toml` 只挂内核的 MCP（令牌只在这个文件里），登录态用 `GROK_AUTH_PATH` 指回会话用户家里的 `~/.grok/auth.json`；提示词写成临时目录里的文件走 `--prompt-file`（Node 给的 stdin 是 socketpair，grok 读 `/dev/stdin` 报 ENXIO）。无人值守那几个环境变量见 `GROK_UNATTENDED_ENV`。输出是 `streaming-json`：判帧用 `harness-runner` 的 `classifyGrokLine`，过程用 `GrokTranscriptParser` 拆成和 Claude 同一套 `transcript.*`（话一字一帧，攒到下一个非话帧成一条；进程没走到 end 被杀时 `close()` 把攒着的吐出来）。
+- Grok 壳：grok 没有 `--mcp-config`，MCP 只认 `config.toml`。每轮把 `GROK_HOME` 指到临时目录下的 `grok-home`，里面一份 0600 的 `config.toml` 只挂内核的 MCP（令牌只在这个文件里），登录态用 `GROK_AUTH_PATH` 指回会话用户家里的 `~/.grok/auth.json`；提示词写成临时目录里的文件走 `--prompt-file`（Node 给的 stdin 是 socketpair，grok 读 `/dev/stdin` 报 ENXIO）。无人值守那几个环境变量见 `GROK_UNATTENDED_ENV`。法国上这些变量要经 `deploy/france/fleet2-worker.sh` 用 `/usr/bin/env` 带到 grok 前面（sudo 的 env_keep 和 `fleet-agent-scope` 只放 `FLEET_*` 等几类，别的会被擦掉；2026-10-31 第四批 grok 因此全程没有 MCP、统计上报被出网关拒了上万次，#3842）：这里新增或改名一个变量，那个脚本的名单要跟着改（`deploy/test/auto-release.test.mjs` 对账）。输出是 `streaming-json`：判帧用 `harness-runner` 的 `classifyGrokLine`，过程用 `GrokTranscriptParser` 拆成和 Claude 同一套 `transcript.*`（话一字一帧，攒到下一个非话帧成一条；进程没走到 end 被杀时 `close()` 把攒着的吐出来）。
 
 ## 不变量
 

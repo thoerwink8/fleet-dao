@@ -78,6 +78,7 @@ import {
 } from '../france/auto-release/lib.mjs';
 import { assessRunningRelease, readRunningRelease } from '../france/auto-release/running-release.mjs';
 import { parseRequest } from '../france/release-request/lib.mjs';
+import { runChild } from './child.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
 const H1 = 'b'.repeat(40); // 主线头
@@ -1112,6 +1113,54 @@ test('新内核单元（#3811）：不进影子 slice、口和令牌文件跟 fr
   assert.equal(bin.endsWith('/grok'), shell === 'grok', '壳和执行体对不上');
   if (shell === 'grok')
     assert.match(unit, /FLEET2_GROK_AUTH=\/home\/fleet-agent-carpool\/\.grok\/auth\.json(\s|$)/m);
+});
+
+test('fleet2-worker.sh（#3842）：grok 的环境变量经 env 带到执行体前面（sudo 会擦掉 GROK_*），reclaude 不带，不认的执行体拒', () => {
+  const script = new URL('../france/fleet2-worker.sh', import.meta.url);
+  const text = readFileSync(script, 'utf8');
+  // 把真 sudo 换成打印参数，其余原样跑
+  const dir = mkdtempSync(join(tmpdir(), 'fleet2-worker-'));
+  try {
+    const copy = join(dir, 'fleet2-worker.sh');
+    const swapped = text.replace(
+      'exec /usr/bin/sudo -n /usr/local/sbin/fleet-agent-scope',
+      "exec /usr/bin/printf '%s\\n'",
+    );
+    assert.notEqual(swapped, text, '脚本里要有那行 exec sudo');
+    writeFileSync(copy, swapped, { mode: 0o755 });
+    const run = (bin, env) =>
+      runChild('bash', [copy, bin, '--flag'], {
+        env: { PATH: process.env.PATH, FLEET_RUN_ID: 'd1-a1', ...env },
+      });
+    const grok = '/home/fleet-agent-carpool/.grok/bin/grok';
+    const g = run(grok, { GROK_HOME: '/t/grok-home', GROK_TELEMETRY_ENABLED: 'false', IGNORED: 'x' });
+    assert.equal(g.status, 0, g.stderr);
+    const lines = g.stdout.split('\n');
+    const at = lines.indexOf('/usr/bin/env');
+    assert.ok(at >= 0, 'grok 要经 /usr/bin/env 起');
+    assert.deepEqual(lines.slice(at, at + 5), [
+      '/usr/bin/env',
+      'GROK_HOME=/t/grok-home',
+      'GROK_TELEMETRY_ENABLED=false',
+      grok,
+      '--flag',
+    ]);
+    assert.ok(!g.stdout.includes('IGNORED'), '名单外的变量不带');
+    const c = run('/home/fleet-agent-carpool/.local/bin/reclaude', { GROK_HOME: '/t/grok-home' });
+    assert.equal(c.status, 0, c.stderr);
+    assert.ok(!c.stdout.includes('/usr/bin/env') && !c.stdout.includes('GROK_HOME'), 'reclaude 不带环境');
+    assert.equal(run('/bin/sh', {}).status, 2, '不认的执行体拒');
+    assert.equal(run(grok, { GROK_HOME: '/t/a\nb' }).status, 2, '值里有控制字符就拒');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // 名单和 harness-workers 的 grokEnv 一致：那边多设一个变量、这边没跟上，就红
+  const grokTs = readFileSync(new URL('../../packages/harness-workers/src/grok.ts', import.meta.url), 'utf8');
+  const unattended = /GROK_UNATTENDED_ENV[^{]*\{([^}]*)\}/s.exec(grokTs)?.[1] ?? '';
+  const keys = [...unattended.matchAll(/^\s*([A-Z][A-Z0-9_]+):/gm)].map((m) => m[1]);
+  assert.ok(keys.length >= 7, `读到 GROK_UNATTENDED_ENV 的变量名：${keys.join(',')}`);
+  for (const k of [...keys, 'GROK_HOME', 'GROK_AUTH_PATH'])
+    assert.ok(text.includes(k), `fleet2-worker.sh 要带 ${k}`);
 });
 
 test('新驾驶舱只读口单元（#3818）：地址口和 france.sh 的变量一样、读旧后端的密钥文件、以 fleet 跑、不限重启次数', () => {
