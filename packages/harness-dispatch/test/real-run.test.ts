@@ -166,6 +166,11 @@ describe('真执行一整条', () => {
 
       // 两个 PR，头分支各自 fleet2/<单>-<运行>，正文关各自的单、记模型
       expect(gh.prs).toHaveLength(2);
+      // 假 GitHub 收到的 openPr 参数里带本批会话流，事后不用靠分支名猜
+      expect(gh.openPrArgs).toHaveLength(2);
+      for (const arg of gh.openPrArgs) {
+        expect(arg.body).toContain('session:real-r1');
+      }
       for (const pr of gh.prs) {
         const issue = Number(/^fleet2\/(\d+)-/.exec(pr.headRef)?.[1]);
         expect([1, 2]).toContain(issue);

@@ -28,6 +28,7 @@ import { WORKER_BASE_KEYS } from '@fleet-dao/harness-workers';
 import { type CommandResult, type CommandSpec, runCommand } from './command.ts';
 import { GitHubDefiniteError, type GitHubWriter, type PrInfo } from './github-write.ts';
 import type { RealTarget } from './prompt.ts';
+import { realSessionId } from './real-driver.ts';
 
 /** 装了处理器的外部动作种类。合并、评论不在里面：没有处理器的种类领到就进 dead。 */
 export const PUBLISH_KINDS: readonly OutboxKind[] = ['git.push', 'github.pr.open'];
@@ -405,10 +406,18 @@ async function openPrOp(d: PublishDeps, op: OutboxOp): Promise<Record<string, un
   return done(seen, true);
 }
 
-/** PR 正文：关单词、哪单、用了哪个模型、结果如何。不开自动合并，等合并闸和人。 */
+/**
+ * PR 正文：关单词、哪单、用了哪个模型、结果如何，以及会话号和查整条链的流名。
+ * 批次号用 publish_runs.batch_id（不另加列）。不开自动合并，等合并闸和人。
+ */
 export function prBody(
-  run: Pick<PublishRun, 'repo' | 'issue' | 'model' | 'runId' | 'verdict' | 'baseSha' | 'wallMs' | 'reason'>,
+  run: Pick<
+    PublishRun,
+    'repo' | 'issue' | 'model' | 'runId' | 'verdict' | 'baseSha' | 'wallMs' | 'reason' | 'batchId'
+  >,
 ): string {
+  const session = realSessionId(run.batchId);
+  const streams = `session:${session}、${issueStream({ repo: run.repo, issue: run.issue })}`;
   return [
     `Closes #${run.issue}`,
     '',
@@ -419,6 +428,8 @@ export function prBody(
     `- 运行：${run.runId}，用时 ${Math.round(run.wallMs / 1000)} 秒`,
     `- 机械核验：${run.verdict}${run.reason ? `（${run.reason.slice(0, 300)}）` : ''}`,
     `- 基线：${run.baseSha}`,
+    `会话：${session}`,
+    `查整条链：fleet2.events 里 stream_id 为 ${streams}`,
   ].join('\n');
 }
 

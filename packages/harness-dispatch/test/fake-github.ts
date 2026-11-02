@@ -15,6 +15,8 @@ const run = (cwd: string, ...args: string[]): string =>
 export interface FakeGitHub extends GitHubWriter {
   prs: PrInfo[];
   calls: string[];
+  /** 每次 openPr 收到的参数，按调用顺序。 */
+  openPrArgs: { head: string; base: string; title: string; body: string }[];
   /** 下一次开 PR：建出来了，但回超时。 */
   loseNextOpenResponse: boolean;
   failRename: boolean;
@@ -27,6 +29,7 @@ export interface FakeGitHub extends GitHubWriter {
 export function fakeGitHub(bare: string): FakeGitHub {
   const prs: PrInfo[] = [];
   const calls: string[] = [];
+  const openPrArgs: FakeGitHub['openPrArgs'] = [];
   const sha = (branch: string): string | null => {
     try {
       return run(bare, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`).trim() || null;
@@ -37,6 +40,7 @@ export function fakeGitHub(bare: string): FakeGitHub {
   const gh: FakeGitHub = {
     prs,
     calls,
+    openPrArgs,
     loseNextOpenResponse: false,
     failRename: false,
     status: 'none',
@@ -56,6 +60,7 @@ export function fakeGitHub(bare: string): FakeGitHub {
     },
     async openPr(repo, pr) {
       calls.push(`openPr ${pr.head}`);
+      openPrArgs.push({ head: pr.head, base: pr.base, title: pr.title, body: pr.body });
       if (prs.some((p) => p.headRef === pr.head))
         throw new GitHubDefiniteError('开 PR', 422, 'A pull request already exists');
       const made: PrInfo = {
