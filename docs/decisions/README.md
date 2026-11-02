@@ -101,6 +101,7 @@
 | [0122](0122-github-linkage-ledger-and-intake-service.md) | GitHub 联动重做：单只记目标，过程进账本，三个入口共用一个开单服务 | 2026-10-31 | 生效 | — |
 | [0123](0123-github-volume-trim-record-prs.md) | GitHub 单和 PR 减量：存量不动，记录类不再走 PR | 2026-10-31 | 生效 | — |
 | [0124](0124-harness-rewrite-parallel.md) | harness 内核和网页驾驶舱整套重写：新包并行、影子比对、按状态切回 | 2026-10-31 | 生效 | — |
+| [0125](0125-acceptance-gate-and-two-installs.md) | 新 harness 整体形态：AI 调度、可配置验收闸、自定义模型渠道、一套代码两种装法 | 2026-11-03 | 生效 | — |
 
 ## 历史
 
