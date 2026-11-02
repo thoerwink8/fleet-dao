@@ -14,7 +14,7 @@
 
 - 影子比对（`src/shadow.ts`，#3776）：批次清单 `shadow_batch_items` 一冻结就不改（同批号再冻结抛 `BatchFrozenError`）；影子产物 `shadow_runs` 必须是清单里的单、基线和清单一样，同一个 `runId` 重放回原行；旧 PR 合并后 `recordCompare` 拿合并 diff 评一次分写 `shadow_compare`，评过的不重算不覆盖。两边 diff 先按文件规范化（去掉所有空白、空行不算）再比文件和改动行的重合。补丁只存这里，不推、任何自动流程不消费。`sweepCompare` 按产物号一页一轮给没评分的产物评分：读旧 PR 合并结果的函数由部署传进来（只读 GitHub），没合并、读失败的留到下一轮，不当成评过。防「影子静默不跑」：`shadowSilence` 看一批里还有没产物的单、最近一条产物（没有按冻结时刻）离数据库 `now()` 超过 24 小时就回 `silent`。
 
-- 真执行的账（`src/real.ts`，#3783）：`real_batch_items` 冻结真执行批次（和 `shadow_batch_items` 分开存，冻结后不改）；`publish_runs` 存一次交回的补丁、所有权令牌、模型、核验和该不该推（`ready` 已排推送 / `held` 核验没过 / `empty` 没改动 / `released` 切回了），同一个 `runId` 重放回原行；`outbox` 加了按单读 `listOpsForTask`、按键读 `getOp`、切回作废没开始的动作 `cancelPendingOps`（领着的和结果不知道的不动）。
+- 真执行的账（`src/real.ts`，#3783）：`real_batch_items` 冻结真执行批次（和 `shadow_batch_items` 分开存，冻结后不改）；`publish_runs` 存一次交回的补丁、所有权令牌、模型、核验和该不该推（`ready` 已排推送 / `held` 核验没过 / `empty` 没改动 / `released` 切回了），同一个 `runId` 重放回原行；`outbox` 加了按单读 `listOpsForTask`、按键读 `getOp`、切回作废没开始的动作 `cancelPendingOps`（领着的和结果不知道的不动）；整张表按状态计数是 `countOpsByState`（库里聚合成一行五个数，不把各行扫出来）。
 
 ## 迁移和测试
 

@@ -1,17 +1,19 @@
 // 真执行的人手命令（#3783，第 7 片）。配置同内核（环境变量），在法国上以 fleet 跑：
 //   node packages/harness-dispatch/src/bin/real.ts freeze <批次号> <owner/仓#单号>…   冻结一批（基线取主线现在的提交；单要开着、不是 PR）
-//   node packages/harness-dispatch/src/bin/real.ts status <owner/仓#单号>…           这张单走到切回表的哪一行、外部动作、事件链
+//   node packages/harness-dispatch/src/bin/real.ts status <owner/仓#单号>…           这张单走到切回表的哪一行、外部动作、事件链；另带整张 outbox 各状态条数和到期没做的最老一条秒数
 //   node packages/harness-dispatch/src/bin/real.ts release <owner/仓#单号> [--pr handoff|close]   按状态切回旧系统
 // 输出是 JSON，一份一行，方便贴进 PR。freeze 只写 fleet2.real_batch_items，不碰 GitHub 和旧库；release 才会写（分支改名、关 PR、放回旧系统）。
 import { issueStream } from '@fleet-dao/harness-contract';
 import { makeRedactor, secretsFromEnv } from '@fleet-dao/harness-runner';
 import {
+  countOpsByState,
   type Db,
   events,
   freezeRealBatch,
   getPublishRun,
   latestPublishRun,
   listOpsForTask,
+  oldestDueAgeSeconds,
   readStream,
 } from '@fleet-dao/harness-store';
 import * as schema from '@fleet-dao/harness-store/schema';
@@ -85,6 +87,10 @@ try {
         to: { state: 'queued' | 'stopped'; doing: string },
       ) => releaseTask(db, ref, f, to),
     };
+    const backlog = {
+      counts: await countOpsByState(db),
+      oldestDueAgeSeconds: await oldestDueAgeSeconds(db),
+    };
     for (const r of rest.map(parseRef)) {
       const { stage, facts } = await taskStage(deps, r);
       const run = await latestPublishRun(db, r);
@@ -106,6 +112,7 @@ try {
           state: o.state,
           attempts: o.attempts,
         })),
+        outbox: backlog,
         issueEvents: chain,
         sessionEvents: run ? (await readStream(db, `worker:${run.runId}`, 0, 10)).map((e) => e.type) : [],
         publishRun: run ? (await getPublishRun(db, run.runId))?.reason : null,

@@ -368,6 +368,32 @@ export async function cancelPendingOps(db: Db, ref: TaskRef, why: string): Promi
   return rows.length;
 }
 
+/** 整张 outbox 各状态有几条（没有的状态是 0）。库里聚合成一行，不把表里的行扫出来。 */
+export async function countOpsByState(db: Db): Promise<{
+  pending: number;
+  claimed: number;
+  done: number;
+  unknown: number;
+  dead: number;
+}> {
+  const [row] = await db
+    .select({
+      pending: sql<number>`(count(*) filter (where ${outbox.state} = 'pending'))::int`,
+      claimed: sql<number>`(count(*) filter (where ${outbox.state} = 'claimed'))::int`,
+      done: sql<number>`(count(*) filter (where ${outbox.state} = 'done'))::int`,
+      unknown: sql<number>`(count(*) filter (where ${outbox.state} = 'unknown'))::int`,
+      dead: sql<number>`(count(*) filter (where ${outbox.state} = 'dead'))::int`,
+    })
+    .from(outbox);
+  return {
+    pending: Number(row?.pending ?? 0),
+    claimed: Number(row?.claimed ?? 0),
+    done: Number(row?.done ?? 0),
+    unknown: Number(row?.unknown ?? 0),
+    dead: Number(row?.dead ?? 0),
+  };
+}
+
 /** 积压：到期没做的最老一条多大了（秒），健康检查看调度有没有往前走。没有积压回 0。 */
 export async function oldestDueAgeSeconds(db: Db): Promise<number> {
   const [row] = await db
