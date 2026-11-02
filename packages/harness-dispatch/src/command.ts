@@ -26,6 +26,13 @@ export interface CommandSpec {
   maxOutputChars?: number;
   /** 额外的环境变量（例如 GIT_INDEX_FILE）；同样过工人环境的禁表。 */
   env?: Readonly<Record<string, string>>;
+  /** 喂给标准输入的内容（例如 git apply 读补丁），默认空。 */
+  stdin?: string;
+  /**
+   * 内核自己的命令用的完整环境（发布那一步的 git 要带认证头），给了就整个替换工人环境，不过禁表。
+   * 只许内核跑它自己建的目录里的 git：工人写的东西（检查命令、工人的工作目录）绝不能走这条。
+   */
+  trustedEnv?: Readonly<Record<string, string>>;
 }
 
 export interface CommandResult {
@@ -50,12 +57,14 @@ export async function runCommand(spec: CommandSpec): Promise<CommandResult> {
     {
       command: [...spec.command],
       cwd: spec.cwd,
-      env: buildWorkerEnv({
-        base: spec.hostEnv ?? process.env,
-        tmpDir: tmpdir(),
-        extra: { ...spec.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
-      }),
-      stdin: '',
+      env: spec.trustedEnv
+        ? { ...spec.trustedEnv }
+        : buildWorkerEnv({
+            base: spec.hostEnv ?? process.env,
+            tmpDir: tmpdir(),
+            extra: { ...spec.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
+          }),
+      stdin: spec.stdin ?? '',
       runId,
       // 起步时限比总时限长一点：命令不出声也不算“无进展”，到点只以总时限为准
       budget: { startupMs: spec.timeoutMs + 1_000, totalMs: spec.timeoutMs, killGraceMs: 2_000 },

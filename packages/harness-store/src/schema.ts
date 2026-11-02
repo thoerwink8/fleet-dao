@@ -78,6 +78,8 @@ export const outbox = fleet2.table(
       sql`(${t.state} = 'claimed') = (${t.leaseUntil} is not null and ${t.claimToken} is not null)`,
     ),
     index('outbox_due_idx').on(t.nextAt).where(sql`${t.state} in ('pending', 'unknown')`),
+    // 按单查这张单的外部动作（切回、状态页，#3783）
+    index('outbox_task_idx').on(t.repo, t.issue, t.id),
   ],
 );
 
@@ -218,6 +220,63 @@ export const shadowCompare = fleet2.table(
     createdAt: timestamp('created_at', tz).notNull().defaultNow(),
   },
   (t) => [index('shadow_compare_batch_idx').on(t.batchId, t.shadowRunId)],
+);
+
+/**
+ * 真执行批次的清单（#3783，第 7 片）：和影子批次分开存（影子的驱动、波次图都只认 shadow_batch_items），冻结后不改。
+ * 这几张单交给新内核真推分支、真开 PR（不合并）；基线是冻结那一刻的主线提交。
+ */
+export const realBatchItems = fleet2.table(
+  'real_batch_items',
+  {
+    batchId: text('batch_id').notNull(),
+    repo: text('repo').notNull(),
+    issue: integer('issue').notNull(),
+    baseSha: text('base_sha').notNull(),
+    snapshotAt: timestamp('snapshot_at', tz).notNull(),
+  },
+  (t) => [
+    unique('real_batch_items_unique').on(t.batchId, t.repo, t.issue),
+    check('real_batch_items_sha', sql`${t.baseSha} ~ '^[0-9a-f]{40}$'`),
+    // 按单找它在哪一批（切回、状态页）
+    index('real_batch_items_task_idx').on(t.repo, t.issue, t.snapshotAt),
+  ],
+);
+
+/**
+ * 真执行一次的产物（#3783）：工人交回后抓到的补丁、拿的是哪个令牌、用的哪个模型、核验结论，以及要不要推。
+ * state：ready 已排了 git.push；held 核验没过，不推（人看）；empty 没有改动，不推；released 单被切回旧系统，不再推。
+ * 补丁存这里，outbox 的推送从这里取（载荷里只放 runId）。
+ */
+export const publishRuns = fleet2.table(
+  'publish_runs',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    runId: text('run_id').notNull(),
+    batchId: text('batch_id').notNull(),
+    repo: text('repo').notNull(),
+    issue: integer('issue').notNull(),
+    baseSha: text('base_sha').notNull(),
+    /** 派这件活时旧库 tasks.fencing 的值：外部动作的所有权令牌。 */
+    fencing: bigint('fencing', { mode: 'number' }).notNull(),
+    model: text('model').notNull(),
+    title: text('title').notNull(),
+    verdict: text('verdict').notNull(),
+    patch: text('patch').notNull(),
+    wallMs: integer('wall_ms').notNull(),
+    branch: text('branch').notNull(),
+    state: text('state').notNull(),
+    reason: text('reason'),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('publish_runs_run_unique').on(t.runId),
+    check('publish_runs_verdict_known', sql`${t.verdict} in ('unverified', 'passed', 'failed', 'unknown')`),
+    check('publish_runs_state_known', sql`${t.state} in ('ready', 'held', 'empty', 'released')`),
+    index('publish_runs_task_idx').on(t.repo, t.issue, t.id),
+    index('publish_runs_batch_idx').on(t.batchId, t.repo, t.issue),
+  ],
 );
 
 /** 第一个投影：每条流走到第几条、最后一条是什么类型。拿它证明「删了重建结果一致」。 */

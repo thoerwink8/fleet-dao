@@ -215,7 +215,7 @@ describe('影子工作目录', () => {
         .map((p) => `${p}:${statSync(join(gitDir, p)).mtimeMs}`)
         .sort();
     const before = snapshot();
-    await ws.collect?.({ verdict: 'passed', wallMs: 1 });
+    await ws.collect?.({ verdict: 'passed', wallMs: 1, outcome: 'completed', reasons: [] });
     expect(snapshot()).toEqual(before);
     const patch = (await t.pg.query<{ patch: string }>('select patch from fleet2.shadow_runs')).rows[0]
       ?.patch;

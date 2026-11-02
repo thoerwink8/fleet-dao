@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { appJwt, appTokenSource } from '../src/github-app.ts';
+import { appJwt, appTokenSource, PUBLISH_PERMISSIONS } from '../src/github-app.ts';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const pem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
@@ -66,6 +66,30 @@ describe('按仓换只读令牌', () => {
       permissions: { issues: 'read', pull_requests: 'read', contents: 'read', metadata: 'read' },
     });
     expect(calls.every((c) => c.auth.startsWith('Bearer ') && c.auth.split('.').length === 3)).toBe(true);
+  });
+
+  it('发布令牌（#3783）：权限只比只读多 contents、pull_requests 的写，没有 issues 写、没有别的；默认仍只读', async () => {
+    const clock = { t: Date.now() };
+    const { f, calls } = fakeApi({ clock });
+    await appTokenSource({ file, fetch: f, now: () => clock.t, permissions: PUBLISH_PERMISSIONS })('o/r');
+    expect(JSON.parse(calls[1]?.body ?? '')).toEqual({
+      repositories: ['r'],
+      permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' },
+    });
+    const writes = Object.entries(PUBLISH_PERMISSIONS).filter(([, v]) => v === 'write');
+    expect(writes.map(([k]) => k).sort()).toEqual(['contents', 'pull_requests']);
+    // 默认那一路没被带上写权限
+    const again = fakeApi({ clock });
+    await appTokenSource({ file, fetch: again.f, now: () => clock.t })('o/r');
+    expect(Object.values(JSON.parse(again.calls[1]?.body ?? '').permissions)).not.toContain('write');
+  });
+
+  it('发布令牌换失败的错误里写「写」令牌，不冒充只读', async () => {
+    const clock = { t: Date.now() };
+    const { f } = fakeApi({ clock, tokenStatus: 403 });
+    await expect(
+      appTokenSource({ file, fetch: f, now: () => clock.t, permissions: PUBLISH_PERMISSIONS })('o/r'),
+    ).rejects.toThrow('换 o/r 的写令牌：HTTP 403');
   });
 
   it('按仓缓存；到期前 5 分钟换新', async () => {

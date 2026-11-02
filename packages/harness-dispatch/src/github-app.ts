@@ -10,6 +10,8 @@ export interface AppTokenOptions {
   fetch?: typeof fetch;
   now?: () => number;
   timeoutMs?: number;
+  /** 令牌带哪些权限，默认只读（READ_ONLY_PERMISSIONS）。要写权限的调用方显式给 PUBLISH_PERMISSIONS，且自己单独建一个令牌源。 */
+  permissions?: AppPermissions;
 }
 
 export const READ_ONLY_PERMISSIONS = {
@@ -18,6 +20,19 @@ export const READ_ONLY_PERMISSIONS = {
   contents: 'read',
   metadata: 'read',
 } as const;
+
+/**
+ * 内核推分支、开 PR 那一步的令牌（#3783，第 7 片）：只比只读多 contents 和 pull_requests 的写，别的一概不给
+ * （没有 issues 写、没有 actions、没有 administration）。合并不在这里：开 PR 之后合不合由现有合并闸和人决定。
+ * 这套令牌只在发布那一步用，读单、读合并结果仍用只读的。
+ */
+export const PUBLISH_PERMISSIONS = {
+  contents: 'write',
+  pull_requests: 'write',
+  metadata: 'read',
+} as const;
+
+export type AppPermissions = Readonly<Record<string, 'read' | 'write'>>;
 
 const REFRESH_BEFORE_MS = 5 * 60_000;
 const b64 = (v: string | Buffer) => Buffer.from(v).toString('base64url');
@@ -36,6 +51,7 @@ export function appTokenSource(o: AppTokenOptions): (repo: string) => Promise<st
   const api = (o.api ?? 'https://api.github.com').replace(/\/$/, '');
   const f = o.fetch ?? fetch;
   const now = o.now ?? Date.now;
+  const what = Object.values(o.permissions ?? {}).includes('write') ? '写' : '只读';
   const cache = new Map<string, { token: string; expiresAt: number }>();
   let cred: { appId: number; pem: string } | undefined;
 
@@ -77,13 +93,16 @@ export function appTokenSource(o: AppTokenOptions): (repo: string) => Promise<st
     if (typeof inst.id !== 'number') throw new Error(`查 ${repo} 的 App 安装：回来的形状认不出`);
     const tok = await call(
       `${api}/app/installations/${inst.id}/access_tokens`,
-      { method: 'POST', body: JSON.stringify({ repositories: [name], permissions: READ_ONLY_PERMISSIONS }) },
-      `换 ${repo} 的只读令牌`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ repositories: [name], permissions: o.permissions ?? READ_ONLY_PERMISSIONS }),
+      },
+      `换 ${repo} 的${what}令牌`,
       jwt,
     );
     const expiresAt = Date.parse(String(tok.expires_at));
     if (typeof tok.token !== 'string' || !tok.token || Number.isNaN(expiresAt)) {
-      throw new Error(`换 ${repo} 的只读令牌：回来的形状认不出`);
+      throw new Error(`换 ${repo} 的${what}令牌：回来的形状认不出`);
     }
     return { token: tok.token, expiresAt };
   };

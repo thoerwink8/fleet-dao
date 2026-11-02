@@ -38,8 +38,13 @@ export interface ShadowProbeDeps {
   egressPort: number;
   /** 载入 nft 表 inet fleet2_shadow 的单元。 */
   firewallUnit?: string;
-  /** outbox 里装了真实处理器的种类；影子里必须是空的。 */
+  /** outbox 里装了真实处理器的种类；纯影子模式必须是空的。 */
   realHandlers: () => readonly string[];
+  /**
+   * 真执行（#3783）允许装的种类，默认没有。装了名单以外的种类（尤其是合并）就没过：
+   * 工人的隔离不变（没有凭据、出网受限），但内核不许长出名单以外的对外写。
+   */
+  allowedHandlers?: readonly string[];
   redact: Redactor;
   timeoutMs?: number;
   run?: (spec: CommandSpec) => Promise<CommandResult>;
@@ -70,7 +75,8 @@ export function realShadowProbes(deps: ShadowProbeDeps): ShadowProbes {
       return r.exitCode === EXIT_CREDENTIAL ? 'fail' : 'unknown';
     },
     async realHandlersAbsent(): Promise<ProbeResult> {
-      return deps.realHandlers().length === 0 ? 'pass' : 'fail';
+      const allowed = new Set(deps.allowedHandlers ?? []);
+      return deps.realHandlers().every((k) => allowed.has(k)) ? 'pass' : 'fail';
     },
     async egressRulesPresent(): Promise<ProbeResult> {
       // 不看会话用户的家，cwd 不能用它：内核用户进不去，spawn 就失败
