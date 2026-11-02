@@ -1,11 +1,13 @@
 // 真执行的账（#3783）：批次冻结、产物幂等、按单取最近一次、作废还没做的外部动作。
 import { opKey } from '@fleet-dao/harness-contract';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   activeRealBatches,
   BatchFrozenError,
   cancelPendingOps,
   claimDueOps,
+  countOpsByState,
   enqueueOp,
   freezeRealBatch,
   getPublishRun,
@@ -17,6 +19,7 @@ import {
   recordPublishRun,
   setPublishState,
 } from '../src/index.ts';
+import { outbox } from '../src/schema.ts';
 import { createTestDb, type TestDb } from '../src/testing.ts';
 
 let t: TestDb;
@@ -125,5 +128,41 @@ describe('外部动作的按单读和作废', () => {
     ]);
     // 别的单不受影响
     expect((await listOpsForTask(t.db, { repo: 'o/r', issue: 2 })).map((o) => o.state)).toEqual(['pending']);
+  });
+});
+
+describe('outbox 各状态计数', () => {
+  const ref = { repo: 'o/r', issue: 1 };
+  const zero = { pending: 0, claimed: 0, done: 0, unknown: 0, dead: 0 };
+
+  it('空表五个数都是 0', async () => {
+    expect(await countOpsByState(t.db)).toEqual(zero);
+  });
+
+  it('五种状态各若干条，五个数和手算一致', async () => {
+    // 手算：pending 2、claimed 3、done 1、unknown 4、dead 2
+    const want = { pending: 2, claimed: 3, done: 1, unknown: 4, dead: 2 };
+    for (const [state, n] of Object.entries(want)) {
+      for (let i = 0; i < n; i++) {
+        const d = `${state}-${i}`;
+        await enqueueOp(t.db, {
+          opKey: opKey('git.push', ref, 3, d),
+          kind: 'git.push',
+          ref,
+          fencing: 3,
+          payload: {},
+        });
+        if (state === 'pending') continue;
+        await t.db
+          .update(outbox)
+          .set(
+            state === 'claimed'
+              ? { state, leaseUntil: sql`now() + interval '1 minute'`, claimToken: d }
+              : { state, leaseUntil: null, claimToken: null },
+          )
+          .where(eq(outbox.opKey, opKey('git.push', ref, 3, d)));
+      }
+    }
+    expect(await countOpsByState(t.db)).toEqual(want);
   });
 });
