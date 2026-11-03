@@ -738,7 +738,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
+          # 不开 cache: pnpm。这一台要真跑 vite 构建页面；还原出来的 pnpm 仓（D:\.pnpm-store\v11，含全局虚拟仓的链接目录）里 rolldown 的原生绑定
+          # 读起来是 EPERM（#3894 后第二、三次跑都栽在这，第一次没有缓存、全新装就好），直接装，多一两分钟
       - run: pnpm install --frozen-lockfile
       - run: rustup component add rustfmt clippy
       # 外壳不含路由、不开命令的检查在 test 台里跑（packages/conventions/test/desktop-shell.test.ts，红了能拦），这里不重复
@@ -765,7 +766,12 @@ jobs:
         shell: pwsh
         run: |
           cargo install tauri-driver --locked
-          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          # 先把 WebView2 运行时更到最新（镜像自带的可能偏旧，旧版在这台上不认环境变量给的调试口，驱动起不了会话）
+          $boot = "$env:RUNNER_TEMP\MicrosoftEdgeWebview2Setup.exe"
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $boot
+          $u = Start-Process $boot -ArgumentList '/silent', '/install' -Wait -PassThru
+          Write-Host "WebView2 引导程序退出码 $($u.ExitCode)"
+          $key ='HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
           $ver = (Get-ItemProperty $key).pv
           Write-Host "WebView2 运行时 $ver"
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\edgedriver" | Out-Null
@@ -780,11 +786,22 @@ jobs:
           $p = Start-Process $setup -ArgumentList '/S', "/D=$inst" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "安装包静默安装退出码 $($p.ExitCode)" }
           Get-ChildItem $inst | Format-Table Name, Length
+          # 驱动带详细日志起（tauri-driver 只认一个可执行文件，用一个小批处理包一层），会话起不来时才看得到原因
+          $shots = "$env:RUNNER_TEMP\desktop-e2e"
+          New-Item -ItemType Directory -Force $shots | Out-Null
+          $wrap = "$env:RUNNER_TEMP\edgedriver\msedgedriver-logged.cmd"
+          Set-Content $wrap "@`"%~dp0msedgedriver.exe`" %* --verbose --log-path=`"$shots\msedgedriver.log`""
           node apps/desktop/e2e/run.ts `
             --app "$inst\fleet-desktop.exe" `
             --tauri-driver "$HOME\.cargo\bin\tauri-driver.exe" `
-            --edge-driver "$env:RUNNER_TEMP\edgedriver\msedgedriver.exe" `
-            --shots "$env:RUNNER_TEMP\desktop-e2e"
+            --edge-driver $wrap `
+            --shots $shots
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -and (Test-Path "$shots\msedgedriver.log")) {
+            Write-Host '--- msedgedriver.log（末尾 150 行）---'
+            Get-Content "$shots\msedgedriver.log" -Tail 150
+          }
+          exit $code
       # 总是留：窗口里的页面截图（1440、390）和每一步的结果
       - uses: actions/upload-artifact@v4
         if: always()

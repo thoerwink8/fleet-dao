@@ -8,7 +8,7 @@
 //   6. 强杀外壳，2 秒内内核进程号不在
 // 用法：node apps/desktop/e2e/run.ts --app <fleet-desktop.exe> --tauri-driver <exe> --edge-driver <msedgedriver.exe> [--shots <目录>]
 // 数据目录用临时目录（FLEET2_DATA_DIR），不碰用户真实的 %LOCALAPPDATA%\Fleet2。任何一步不成就退出码 1。
-import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -50,6 +50,13 @@ function ps(script: string): string {
     encoding: 'utf8',
   }).trim();
 }
+/** 只为留线索：不抛，错误输出也一并带上。 */
+function psSafe(script: string): string {
+  const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+  });
+  return `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+}
 /** 命令行里带 needle 的进程号（用 CIM 读命令行，Get-Process 读不到）。 */
 function pidsWith(needle: string, name: string): number[] {
   const out = ps(
@@ -73,6 +80,20 @@ const quiet = (script: string): void => {
     // 没有要收的进程时 Stop-Process 会报错，当没事
   }
 };
+
+/**
+ * 等上一个外壳留下的 WebView2 浏览器进程退干净（最多 15 秒，再不退就收掉）。它们占着外壳的 WebView2 用户数据目录：
+ * 下一个外壳（WebDriver 起的）要是撞上还活着的那个，会并进去、拿不到 msedgedriver 要的调试口，会话报 DevToolsActivePort file doesn't exist
+ * （CI 的 runner 上进程退得慢，本机退得快，所以只在 CI 红）。
+ */
+async function settleWebview(): Promise<void> {
+  const count = () => pidsWith('com.fleet2.desktop', 'msedgewebview2.exe').length;
+  for (let i = 0; i < 150 && count() > 0; i++) await sleep(100);
+  for (const p of pidsWith('com.fleet2.desktop', 'msedgewebview2.exe'))
+    quiet(`Stop-Process -Id ${p} -Force -ErrorAction SilentlyContinue`);
+  for (let i = 0; i < 50 && count() > 0; i++) await sleep(100);
+  await sleep(500);
+}
 
 // ---- 0. 托盘和开机自启 ----
 {
@@ -98,6 +119,8 @@ const quiet = (script: string): void => {
     },
   );
 }
+
+await settleWebview();
 
 // ---- 0b. 不经驱动直接起：外壳活着、有 WebView2 子进程、内核起来且 /health 通 ----
 // 这一步单独列出来，是为了驱动起不来会话时能分清「应用本身起不来」和「驱动没接上」。
@@ -142,7 +165,82 @@ const quiet = (script: string): void => {
   }
   quiet(`Stop-Process -Id ${app.pid} -Force -ErrorAction SilentlyContinue`);
   for (let i = 0; i < 40 && pidsWith('kernel.mjs', 'node.exe').length > 0; i++) await sleep(100);
-  await sleep(1000);
+  await settleWebview();
+}
+
+// ---- 0c. 线索：照驱动的办法（环境变量给 WebView2 一个调试口）不经驱动起一遍，看 DevToolsActivePort 落在哪 ----
+{
+  const local = process.env.LOCALAPPDATA ?? '';
+  const udf = join(local, 'com.fleet2.desktop', 'EBWebView');
+  // 几种给法各试一遍（每种 12 秒）：哪种出得了调试口，驱动那边就照哪种给（ms:edgeOptions.args 会并进这个环境变量）
+  let found = '';
+  for (const args of [
+    '--remote-debugging-port=0 --enable-logging --log-level=0',
+    '--remote-debugging-port=0 --no-sandbox',
+    '--remote-debugging-port=9222 --no-sandbox --disable-gpu',
+  ]) {
+    rmSync(join(udf, 'DevToolsActivePort'), { force: true });
+    const probe = spawn(appExe, [], {
+      stdio: 'ignore',
+      env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: args },
+    });
+    let got = '';
+    for (let i = 0; i < 48 && got === ''; i++) {
+      await sleep(250);
+      if (existsSync(join(udf, 'DevToolsActivePort')))
+        got = readFileSync(join(udf, 'DevToolsActivePort'), 'utf8').replace(/\s+/g, ' ');
+    }
+    console.log(`线索 0c：参数「${args}」→ 调试口文件 ${got === '' ? '没出现' : `出现了 ${got}`}`);
+    if (got === '') {
+      // WebView2 的浏览器主进程（没有 --type= 的那个）命令行里到底有没有收到调试口参数；调试口文件有没有落到别处
+      console.log(
+        psSafe(
+          `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' } | ForEach-Object { 'BROWSER ' + $_.ProcessId + ' ' + $_.CommandLine }`,
+        ),
+      );
+      console.log(
+        psSafe(
+          `Get-ChildItem -Path $env:LOCALAPPDATA,$env:TEMP -Recurse -Force -Filter DevToolsActivePort -ErrorAction SilentlyContinue | ForEach-Object { 'FOUND ' + $_.FullName }`,
+        ),
+      );
+    }
+    if (got === '' && found === '' && args.includes('--enable-logging')) {
+      // 第一种没出来时顺手留一张整个桌面的截图，看这台机器上窗口有没有真画出来
+      psSafe(
+        `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('${join(shots, 'desktop-0c.png')}')`,
+      );
+    }
+    found = found || got;
+    quiet(`Stop-Process -Id ${probe.pid} -Force -ErrorAction SilentlyContinue`);
+    for (let i = 0; i < 40 && pidsWith('kernel.mjs', 'node.exe').length > 0; i++) await sleep(100);
+    await settleWebview();
+  }
+  console.log(`线索 0c：用户数据目录 ${udf}，存在 ${existsSync(udf)}`);
+  if (found === '') {
+    // 组策略能把调试口关掉（RemoteDebuggingAllowed）：看这台机器上有没有 Edge、WebView2 的策略
+    for (const key of [
+      'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge',
+      'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2',
+      'HKLM:\\SOFTWARE\\Policies\\Microsoft\\EdgeWebView',
+      'HKCU:\\SOFTWARE\\Policies\\Microsoft\\Edge',
+      'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome',
+    ]) {
+      console.log(
+        `策略 ${key}：${psSafe(`if (Test-Path '${key}') { (Get-ItemProperty '${key}' | Out-String).Trim() } else { '（没有）' }`)}`,
+      );
+    }
+    console.log(
+      `WebView2 环境变量：${psSafe("Get-ChildItem Env: | Where-Object { $_.Name -like '*WEBVIEW2*' -or $_.Name -like '*EDGE*' } | Out-String")}`,
+    );
+    console.log(
+      psSafe(
+        `Get-ChildItem -Recurse -Force -ErrorAction SilentlyContinue '${udf}' | Select-Object -First 40 FullName,Length | Format-Table -AutoSize | Out-String -Width 220`,
+      ),
+    );
+    console.log(
+      psSafe(`Get-Content '${join(udf, 'chrome_debug.log')}' -Tail 40 -ErrorAction SilentlyContinue`),
+    );
+  }
 }
 
 // ---- WebDriver 会话 ----
@@ -323,6 +421,7 @@ try {
       await sleep(250);
     // 地址经环境变量 FLEET2_REMOTE_URL 交给外壳（tauri-driver 不转交命令行参数）：另起一个 tauri-driver，环境里带它
     driver.kill();
+    await settleWebview();
     driver2 = spawn(tauriDriver, ['--native-driver', edgeDriver, '--port', '4445', '--native-port', '4446'], {
       stdio: 'inherit',
       env: { ...process.env, FLEET2_REMOTE_URL: remoteUrl },
@@ -360,7 +459,22 @@ try {
     quiet('Get-Process fleet-desktop -ErrorAction SilentlyContinue | Stop-Process -Force');
   }
 } catch (e) {
-  record('跑到一半出错', false, e instanceof Error ? e.message : String(e));
+  record('跑到一半出错', false, e instanceof Error ? e.message.slice(0, 300) : String(e));
+  // 留线索：外壳自己写的启动日志（panic、起不来）、最近的应用崩溃事件
+  console.log(
+    `外壳日志：${psSafe("Get-Content (Join-Path $env:TEMP 'fleet2-shell.log') -ErrorAction SilentlyContinue | Out-String") || '（没有）'}`,
+  );
+  console.log(
+    `应用事件：${psSafe(
+      `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-10)} -MaxEvents 40 -ErrorAction SilentlyContinue | Where-Object { $_.LevelDisplayName -in 'Error','Warning' } | ForEach-Object { $_.TimeCreated.ToString('o') + ' ' + $_.ProviderName + ' ' + (($_.Message -replace '\\s+',' ').Substring(0, [Math]::Min(400, $_.Message.Length))) }`,
+    )}`,
+  );
+  // 这一刻还在的 Edge、WebView2、外壳进程和它们的命令行
+  console.log(
+    psSafe(
+      `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'msedge|fleet-desktop|tauri-driver' } | ForEach-Object { "$($_.ProcessId) $($_.Name) " + ($_.CommandLine -replace '\\s+',' ').Substring(0, [Math]::Min(300, $_.CommandLine.Length)) }`,
+    ),
+  );
 } finally {
   driver.kill();
   driver2?.kill();
