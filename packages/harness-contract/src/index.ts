@@ -81,9 +81,42 @@ export const SpawnWorkerInput = {
   stop_when: z.string().min(1),
 };
 
-/** 外部动作的种类：所有对外副作用只经 outbox，按种类分发。 */
-export const OUTBOX_KINDS = ['git.push', 'github.pr.open', 'github.comment', 'github.merge'] as const;
-export type OutboxKind = (typeof OUTBOX_KINDS)[number];
+/**
+ * 出站信封版本。新写入是第 2 版。第 1 版只过渡：旧名仍能读入。
+ * 事件信封仍是 SCHEMA_VERSION（事件形状没改，不升）。不认识的整数拒。
+ */
+export const OUTBOX_SCHEMA_VERSION = 2;
+/** 过渡版本：只认改名之前的四种出站种类。 */
+export const OUTBOX_SCHEMA_TRANSITION = 1;
+
+/** 新写入的出站种类（平台无关）。对外副作用只经 outbox，按种类分发。 */
+export const OUTBOX_KINDS = ['change.push', 'change.pr.open', 'change.comment', 'change.merge'] as const;
+
+/** 过渡版本仍能读入的旧名。新写入不再用。 */
+const OUTBOX_KINDS_TRANSITION = ['git.push', 'github.pr.open', 'github.comment', 'github.merge'] as const;
+
+export type OutboxKind = (typeof OUTBOX_KINDS)[number] | (typeof OUTBOX_KINDS_TRANSITION)[number];
+
+function isOutboxKind(kind: unknown, kinds: readonly string[]): kind is OutboxKind {
+  return typeof kind === 'string' && kinds.includes(kind);
+}
+
+/** 认出站种类：当前版只收 change.*，过渡版只收旧名；schemaVersion 不是这两版就拒。 */
+export function parseOutbox(raw: unknown): { ok: true; kind: OutboxKind } | { ok: false; why: string } {
+  const version = (raw as { schemaVersion?: unknown } | null)?.schemaVersion;
+  const kind = (raw as { kind?: unknown } | null)?.kind;
+  if (version === OUTBOX_SCHEMA_VERSION && isOutboxKind(kind, OUTBOX_KINDS)) return { ok: true, kind };
+  if (version === OUTBOX_SCHEMA_TRANSITION && isOutboxKind(kind, OUTBOX_KINDS_TRANSITION)) {
+    return { ok: true, kind };
+  }
+  if (version !== OUTBOX_SCHEMA_VERSION && version !== OUTBOX_SCHEMA_TRANSITION) {
+    return {
+      ok: false,
+      why: `出站信封版本 ${String(version)} 认不出（只认 ${OUTBOX_SCHEMA_VERSION}，过渡版 ${OUTBOX_SCHEMA_TRANSITION}）`,
+    };
+  }
+  return { ok: false, why: `出站种类 ${String(kind)} 这一版不认` };
+}
 
 /** 一张单的事件流名（真执行的推送、开 PR、切回记在这条流上）。 */
 export const issueStream = (ref: { repo: string; issue: number }): string => `issue:${ref.repo}#${ref.issue}`;
