@@ -2,11 +2,29 @@
 // 三条硬规矩：对外副作用只经 outbox；结果不知道记 unknown 不盲重试；令牌对不上的外部动作丢进 dead，不做。
 import { randomUUID } from 'node:crypto';
 import type { NewEvent, OutboxKind, StoredEvent, TaskRef } from '@fleet-dao/harness-contract';
+import {
+  DEADLINE_GRACE_MS,
+  deriveWorkerState,
+  pushTail,
+  type TailEvent,
+  tailEventFrom,
+  trackedDeadlineMs,
+  type WorkerState,
+} from '@fleet-dao/harness-contract/worker-state';
 import { and, asc, eq, gt, inArray, lte, sql } from 'drizzle-orm';
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import * as schema from './schema.ts';
 
-const { events, commandReceipts, outbox, projectionCheckpoints, streamHeads } = schema;
+const {
+  events,
+  commandReceipts,
+  outbox,
+  projectionCheckpoints,
+  sessionWorkerState,
+  streamHeads,
+  workerStateCounts,
+  workerStateMeta,
+} = schema;
 
 export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
 
@@ -152,6 +170,251 @@ export async function resetStreamHeads(db: Db): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.delete(streamHeads);
     await tx.delete(projectionCheckpoints).where(eq(projectionCheckpoints.name, STREAM_HEADS));
+  });
+}
+
+const SESSION_WORKER_STATE = 'session_worker_state';
+const WORKER_STATES = ['done', 'running', 'stuck', 'waiting'] as const satisfies readonly WorkerState[];
+
+/**
+ * 卡住个数只读这一句：状态计数表里 stuck 那一行。
+ * 四种状态各一行，整表扫到也只有四行，不随会话数涨。测试拿这句去看执行计划。
+ */
+export const STUCK_COUNT_READ_SQL =
+  "select n::int as n from fleet2.worker_state_counts where state = 'stuck'";
+
+/** 计数前先看最早的截止时间（一行）。还没到宽限就不用去碰会话表。 */
+export const STUCK_COUNT_META_SQL = 'select next_deadline from fleet2.worker_state_meta where id = 1';
+
+/** 上面那句计数最多碰这么多行（四种状态各一行）。 */
+export const STUCK_COUNT_ROW_BOUND = WORKER_STATES.length;
+
+function rowsOf<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  const rows = (result as { rows?: T[] } | null)?.rows;
+  return rows ?? [];
+}
+
+function asTail(v: unknown): TailEvent[] {
+  const parsed = typeof v === 'string' ? (JSON.parse(v) as unknown) : v;
+  return Array.isArray(parsed) ? (parsed as TailEvent[]) : [];
+}
+
+function asMillis(v: Date | string | null | undefined): number | null {
+  if (v == null) return null;
+  const t = v instanceof Date ? v.getTime() : Date.parse(String(v));
+  return Number.isNaN(t) ? null : t;
+}
+
+async function ensureWorkerStateRows(tx: Db): Promise<void> {
+  await tx
+    .insert(workerStateCounts)
+    .values(WORKER_STATES.map((state) => ({ state, n: 0 })))
+    .onConflictDoNothing();
+  await tx.insert(workerStateMeta).values({ id: 1 }).onConflictDoNothing();
+}
+
+async function lockWorkerState(tx: Db): Promise<void> {
+  await tx.execute(
+    sql`select ${workerStateCounts.state} from ${workerStateCounts} order by ${workerStateCounts.state} for update`,
+  );
+  await tx.execute(
+    sql`select ${workerStateMeta.id} from ${workerStateMeta} where ${workerStateMeta.id} = 1 for update`,
+  );
+}
+
+/** 还在跑的会话里最早的截止时间，写回那一行。只在推进投影或真有会话到点时调用。 */
+async function refreshNextDeadline(tx: Db): Promise<void> {
+  await tx.execute(sql`
+    update ${workerStateMeta}
+    set next_deadline = (
+      select min(${sessionWorkerState.deadline}) from ${sessionWorkerState}
+      where ${sessionWorkerState.state} = 'running' and ${sessionWorkerState.deadline} is not null
+    )
+    where ${workerStateMeta.id} = 1
+  `);
+}
+
+/** 截止时间加宽限已经过了的，从在跑改成卡住。回改了几行（只碰这些行，不扫没记截止时间的会话）。 */
+async function expireRunning(tx: Db, now: number): Promise<number> {
+  const cutoff = new Date(now - DEADLINE_GRACE_MS).toISOString();
+  const result = await tx.execute(sql`
+    update ${sessionWorkerState}
+    set state = 'stuck', deadline = null
+    where ${sessionWorkerState.state} = 'running'
+      and ${sessionWorkerState.deadline} is not null
+      and ${sessionWorkerState.deadline} < ${cutoff}::timestamptz
+    returning ${sessionWorkerState.streamId}
+  `);
+  return rowsOf(result).length;
+}
+
+/**
+ * 把会话工人状态投影往前推：从检查点往后一页一页读，同一个事务里改投影、计数和检查点。
+ * 只折 `session:` 流；窗口和判法是 harness-contract 的 deriveWorkerState。回推进了几条事件。
+ */
+export async function advanceSessionWorkerState(db: Db, now = Date.now(), pageSize = 200): Promise<number> {
+  let total = 0;
+  for (;;) {
+    const moved = await db.transaction(async (tx) => {
+      const w = tx as unknown as Db;
+      await ensureWorkerStateRows(w);
+      await lockWorkerState(w);
+      const [cp] = await w
+        .select({ last: projectionCheckpoints.lastEventId })
+        .from(projectionCheckpoints)
+        .where(eq(projectionCheckpoints.name, SESSION_WORKER_STATE))
+        .for('update');
+      const after = cp?.last ?? 0;
+      const page = await w
+        .select()
+        .from(events)
+        .where(gt(events.id, after))
+        .orderBy(asc(events.id))
+        .limit(Math.min(pageSize, PAGE_MAX));
+      if (page.length === 0) return 0;
+      const sessionIds = [
+        ...new Set(page.filter((e) => e.streamId.startsWith('session:')).map((e) => e.streamId)),
+      ];
+      const had = new Map<string, { state: WorkerState; tail: TailEvent[] }>();
+      if (sessionIds.length > 0) {
+        const existing = await w
+          .select({
+            streamId: sessionWorkerState.streamId,
+            state: sessionWorkerState.state,
+            tail: sessionWorkerState.tail,
+          })
+          .from(sessionWorkerState)
+          .where(inArray(sessionWorkerState.streamId, sessionIds));
+        for (const row of existing)
+          had.set(row.streamId, { state: row.state as WorkerState, tail: asTail(row.tail) });
+      }
+      const dirty = new Map<
+        string,
+        {
+          prev: WorkerState | null;
+          state: WorkerState;
+          tail: TailEvent[];
+          deadlineMs: number | null;
+          headSeq: number;
+          lastEventId: number;
+        }
+      >();
+      for (const e of page) {
+        if (!e.streamId.startsWith('session:')) continue;
+        let cur = dirty.get(e.streamId);
+        if (!cur) {
+          const prev = had.get(e.streamId);
+          cur = {
+            prev: prev?.state ?? null,
+            state: prev?.state ?? 'waiting',
+            tail: prev?.tail ?? [],
+            deadlineMs: null,
+            headSeq: 0,
+            lastEventId: 0,
+          };
+          dirty.set(e.streamId, cur);
+        }
+        cur.tail = pushTail(cur.tail, tailEventFrom(e.type, e.payload));
+        cur.state = deriveWorkerState(cur.tail, now);
+        cur.deadlineMs = trackedDeadlineMs(cur.tail, now);
+        cur.headSeq = e.seq;
+        cur.lastEventId = e.id;
+      }
+      if (dirty.size > 0) {
+        await w
+          .insert(sessionWorkerState)
+          .values(
+            [...dirty.entries()].map(([streamId, cur]) => ({
+              streamId,
+              state: cur.state,
+              deadline: cur.deadlineMs === null ? null : new Date(cur.deadlineMs),
+              tail: cur.tail,
+              headSeq: cur.headSeq,
+              lastEventId: cur.lastEventId,
+            })),
+          )
+          .onConflictDoUpdate({
+            target: sessionWorkerState.streamId,
+            set: {
+              state: sql`excluded.state`,
+              deadline: sql`excluded.deadline`,
+              tail: sql`excluded.tail`,
+              headSeq: sql`excluded.head_seq`,
+              lastEventId: sql`excluded.last_event_id`,
+            },
+          });
+        const delta = new Map<WorkerState, number>();
+        const add = (state: WorkerState, d: number) => delta.set(state, (delta.get(state) ?? 0) + d);
+        for (const cur of dirty.values()) {
+          if (cur.prev === cur.state) continue;
+          if (cur.prev) add(cur.prev, -1);
+          add(cur.state, 1);
+        }
+        for (const [state, d] of delta) {
+          if (d === 0) continue;
+          await w
+            .update(workerStateCounts)
+            .set({ n: sql`${workerStateCounts.n} + ${d}` })
+            .where(eq(workerStateCounts.state, state));
+        }
+      }
+      await refreshNextDeadline(w);
+      const last = page.at(-1)?.id ?? after;
+      await w
+        .insert(projectionCheckpoints)
+        .values({ name: SESSION_WORKER_STATE, lastEventId: last })
+        .onConflictDoUpdate({
+          target: projectionCheckpoints.name,
+          set: { lastEventId: last, updatedAt: new Date() },
+        });
+      return page.length;
+    });
+    total += moved;
+    if (moved === 0) return total;
+  }
+}
+
+/** 删掉会话工人状态投影、计数和检查点（重建前用）。只动投影，不碰事件。 */
+export async function resetSessionWorkerState(db: Db): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(sessionWorkerState);
+    await tx.delete(workerStateCounts);
+    await tx.delete(workerStateMeta);
+    await tx.delete(projectionCheckpoints).where(eq(projectionCheckpoints.name, SESSION_WORKER_STATE));
+  });
+}
+
+/**
+ * 全库卡住的会话数。平时只读计数表的一行；最早的截止时间还没过宽限，就不碰会话表。
+ * 到点了才把那些已经过了宽限的在跑会话改判卡住，并改同一份计数。
+ */
+export async function countProjectedStuck(db: Db, now: number): Promise<number> {
+  return db.transaction(async (tx) => {
+    const w = tx as unknown as Db;
+    await ensureWorkerStateRows(w);
+    await lockWorkerState(w);
+    const meta = rowsOf<{ next_deadline: Date | string | null }>(
+      await w.execute(sql.raw(STUCK_COUNT_META_SQL)),
+    )[0];
+    const nextMs = asMillis(meta?.next_deadline ?? null);
+    if (nextMs !== null && nextMs + DEADLINE_GRACE_MS < now) {
+      const flipped = await expireRunning(w, now);
+      if (flipped > 0) {
+        await w
+          .update(workerStateCounts)
+          .set({ n: sql`${workerStateCounts.n} + ${flipped}` })
+          .where(eq(workerStateCounts.state, 'stuck'));
+        await w
+          .update(workerStateCounts)
+          .set({ n: sql`${workerStateCounts.n} - ${flipped}` })
+          .where(eq(workerStateCounts.state, 'running'));
+        await refreshNextDeadline(w);
+      }
+    }
+    const result = await w.execute(sql.raw(STUCK_COUNT_READ_SQL));
+    const raw = rowsOf<{ n: number | string }>(result)[0]?.n ?? 0;
+    return typeof raw === 'number' ? raw : Number(raw);
   });
 }
 
