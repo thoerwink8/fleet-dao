@@ -14,18 +14,27 @@ export type HandoffExpired =
   | { transferred: true; owner: TaskOwner }
   | { transferred: false; marked: false; why: 'missing' | 'lease_live' | 'unconfirmed' };
 
-async function setOwner(db: Db, taskId: string, owner: TaskOwner): Promise<void> {
+/** 事务也能传：建行和派单都在自己的事务里写这一列。 */
+type OwnerDb = Pick<Db, 'update'>;
+
+async function setOwner(db: OwnerDb, taskId: string, owner: TaskOwner): Promise<void> {
   const rows = await db.update(tasks).set({ owner }).where(eq(tasks.id, taskId)).returning({ id: tasks.id });
   if (rows.length === 0) throw new Error(`任务 ${taskId} 没有这一行，owner 没写成`);
 }
 
-/** 旧引擎拉单：把这张单的 owner 写成 v1。 */
-export function writeIntakeOwner(db: Db, taskId: string): Promise<void> {
+/**
+ * 旧引擎拉单建行（store 的 createTaskFromIssue）之后把 owner 写成 v1。
+ * 已经有的行不从这里改：新内核的行（harness）拉单不碰。
+ */
+export function writeIntakeOwner(db: OwnerDb, taskId: string): Promise<void> {
   return setOwner(db, taskId, 'v1');
 }
 
-/** 点名派单：把这张单的 owner 写成 v1。 */
-export function writeDispatchOwner(db: Db, taskId: string): Promise<void> {
+/**
+ * 点名派单（engine 的 dispatchIssue）派成之后把 owner 写成 v1。
+ * 调用方先确认这张单不是新内核的（owner ≠ harness），这里只负责写入。
+ */
+export function writeDispatchOwner(db: OwnerDb, taskId: string): Promise<void> {
   return setOwner(db, taskId, 'v1');
 }
 

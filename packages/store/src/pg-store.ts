@@ -58,6 +58,7 @@ import {
   toTask,
   users,
   worktreeInventory,
+  writeIntakeOwner,
 } from '@fleet-dao/db';
 import { ciPolicyOf, runBelongsToTask, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
@@ -1669,6 +1670,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             title: input.title,
             rawRequest: input.rawRequest,
             requestedBy: input.requestedBy,
+            // 认领只有一处（决定 0124）：拉单建出来的行归旧引擎。已有的行（含新内核）不改 owner。
+            owner: 'v1',
             // 排在这个仓最后
             priority: sql`(select coalesce(max(${tasks.priority}), 0) + 1 from ${tasks} where ${tasks.repoId} = ${input.repoId})`,
             createdAt: now(),
@@ -1676,6 +1679,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .onConflictDoNothing({ target: [tasks.repoId, tasks.issueNumber] })
           .returning();
         if (created) {
+          await writeIntakeOwner(tx, created.id);
           await insertAudit(tx, entry);
           return { task: toTask(created), created: true };
         }

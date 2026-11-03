@@ -21,6 +21,7 @@
 
 import { loadStandardPaths, type StandardPath } from '@fleet-dao/conventions';
 import { familyGate, isGithubActionsAuthor, localGate } from '@fleet-dao/core';
+import { type Db, writeDispatchOwner } from '@fleet-dao/db';
 import {
   type EngineMasterState,
   engineMasterOf,
@@ -106,6 +107,11 @@ export type DispatchIssueResult =
   | { outcome: 'refused'; failures: GateFailure[] };
 
 export interface DispatchIssueDeps {
+  /**
+   * 真装配传库：派成之后把这张单的 tasks.owner 写成 v1（决定 0124，writeDispatchOwner）。
+   * 不传的只有没接库的测试；真接线（real/dispatch-issue.ts）一定传。
+   */
+  db?: Db;
   /** 受管的仓里按名字找（不分大小写）；没有回 null。读不到照抛。 */
   findRepo(owner: string, name: string): Promise<IntakeRepo | null>;
   /** 引擎总开关那一行（real 里是 @fleet-dao/db 的 readEngineMasterRow）；没设过回 null；读不到照抛。 */
@@ -380,6 +386,11 @@ async function decide(deps: DispatchIssueDeps, args: DispatchIssueArgs): Promise
         ),
       ],
     };
+  }
+  // 派成了才写认领。新内核的行（standing 已经拒过；这里再看一眼，免得起工作流的间隙被人改成 harness）不覆盖。
+  if (deps.db) {
+    const row = await deps.issueTask(repo, args.issueNumber);
+    if (row && row.owner !== 'harness') await writeDispatchOwner(deps.db, row.id);
   }
   return { outcome: 'started', forced: soft, tier: brief.tier, adopted };
 }

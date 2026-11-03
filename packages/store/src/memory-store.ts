@@ -1377,6 +1377,8 @@ export function createMemoryStore(
       if (!(input.issueNumber > 0)) throw new Error('tasks_issue_number_positive：issue 号要大于 0');
       checkAudit(entry);
       const inRepo = data.tasks.filter((t) => t.repoId === input.repoId).map((t) => t.priority);
+      // owner 不在这份内存形状里。Postgres 的 createTaskFromIssue 把 tasks.owner 写成 v1（writeIntakeOwner）；
+      // 内存版没有这一列，新任务和库的默认一样，归旧引擎。
       const task: Task = {
         id: input.id,
         repoId: input.repoId,

@@ -1,13 +1,16 @@
 // 新旧并行的认领（决定 0124，#3773）：一张单只有 tasks 那一行，owner 分新旧系统，fencing 由触发器在所有权变化时加一。
-import { eq } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-// 新内核认领在另一个包里（不让 db 倒过来依赖它）。这一行要写进 packages/db/tsconfig.json 的 include，
+// 三个入口在别的包里（db 不倒过来依赖它们）。这几行要写进 packages/db/tsconfig.json 的 include，
 // 否则 tsc -b 报 TS6307：复合项目不能凭相对路径把包外的 .ts 拉进来。
+import { type DispatchIssueDeps, dispatchIssue } from '../../engine/src/jobs/dispatch-issue.ts';
 import { acquireTask } from '../../harness-dispatch/src/task-claim.ts';
+import { createPgStore } from '../../store/src/pg-store.ts';
 import { intakeTaskRow } from '../src/queries/intake.ts';
 import { claimLocalTask } from '../src/queries/local-claims.ts';
 import { stopTaskRows } from '../src/queries/reconcile.ts';
-import { handoffExpiredOwner, writeDispatchOwner, writeIntakeOwner } from '../src/queries/task-owner.ts';
+import { handoffExpiredOwner } from '../src/queries/task-owner.ts';
 import { runs, tasks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addRoute, addRun, addTask, ago, catalog, HOUR, NOW } from './helpers.ts';
@@ -105,16 +108,114 @@ describe('tasks.owner 和 fencing', () => {
   });
 
   it('旧引擎拉单写的是 tasks.owner', async () => {
-    const [, id] = await seed();
-    await t.db.update(tasks).set({ owner: 'harness' }).where(eq(tasks.id, id));
-    await writeIntakeOwner(t.db, id);
+    const repo = await addRepo(t.db, 'app');
+    const id = randomUUID();
+    const created = await createPgStore(t.db, { now: () => NOW }).createTaskFromIssue(
+      {
+        id,
+        repoId: repo.id,
+        issueNumber: 7,
+        title: 't',
+        rawRequest: '原话',
+        requestedBy: 'founder-a',
+      },
+      {
+        actor: { kind: 'engine', id: 'intake' },
+        action: 'task.create',
+        target: `task:${id}`,
+        via: 'github',
+        ok: true,
+      },
+    );
+    expect(created.created).toBe(true);
     expect(await ownerOf(id)).toMatchObject({ owner: 'v1' });
   });
 
   it('点名派单写的是 tasks.owner', async () => {
-    const [, id] = await seed();
-    await t.db.update(tasks).set({ owner: 'harness' }).where(eq(tasks.id, id));
-    await writeDispatchOwner(t.db, id);
+    const repo = await addRepo(t.db, 'app');
+    const id = randomUUID();
+    const issueBody = [
+      '## 场景',
+      '',
+      '创始人要在驾驶舱看到每张单走到哪一步。',
+      '',
+      '## 原话',
+      '',
+      '「我回来打开驾驶舱，这张单就该在做完的那一栏」',
+      '',
+      '## 已知的模块',
+      '',
+      '- `packages/web/src/pages/`：驾驶舱页面',
+      '',
+      '## 怎么算做完',
+      '',
+      '1. 页面上能看到「验收中」这个状态',
+      '',
+    ].join('\n');
+    const deps: DispatchIssueDeps = {
+      db: t.db,
+      findRepo: async () => ({
+        id: repo.id,
+        owner: 'acme',
+        name: 'app',
+        defaultBranch: 'main',
+        testCommand: 'pnpm check',
+        autoDispatchSince: null,
+      }),
+      engineMasterRow: async () => ({ value: true, updatedBy: 'u1', updatedAt: NOW.toISOString() }),
+      whitelist: async () => ({
+        userIds: new Set([1]),
+        logins: new Set<string>(),
+        botIds: new Set<number>(),
+      }),
+      plan: async () => ({
+        state: 'open',
+        pullRequest: false,
+        milestone: { number: 3, title: 'v1 三段一条龙' },
+        openMilestones: [
+          { number: 3, title: 'v1 三段一条龙' },
+          { number: 4, title: 'v2 下一版' },
+        ],
+        labels: ['需求'],
+        parent: null,
+        subIssues: 0,
+      }),
+      listIssue: async () => ({
+        number: 7,
+        title: '给驾驶舱加状态',
+        body: issueBody,
+        author: { login: 'frank', id: 1, type: 'User' },
+        createdAt: '2026-10-01T00:00:00.000Z',
+        labels: ['需求'],
+        milestone: { number: 3, title: 'v1 三段一条龙' },
+      }),
+      issueTask: async () => {
+        const [row] = await t.db
+          .select({
+            id: tasks.id,
+            state: tasks.state,
+            executor: tasks.executor,
+            owner: tasks.owner,
+          })
+          .from(tasks)
+          .where(and(eq(tasks.repoId, repo.id), eq(tasks.issueNumber, 7)));
+        return row ?? null;
+      },
+      taskGenerations: async () => ({ ok: true, lives: [] }),
+      openPrClaims: async () => new Map(),
+      prerequisiteStates: async () => new Map(),
+      now: () => NOW,
+      readSpecDoc: async () => null,
+      failedAttempts: async () => 0,
+      // 准入过了才建行（和真装配的 start 一样：先有行，派成之后再写 owner）。
+      start: async () => {
+        await addTask(t.db, repo.id, { id, issueNumber: 7 });
+        return 'started';
+      },
+      audit: async () => {},
+    };
+    const result = await dispatchIssue(deps, { owner: 'acme', name: 'app', issueNumber: 7, force: false });
+    expect(result, JSON.stringify(result)).toMatchObject({ outcome: 'started' });
     expect(await ownerOf(id)).toMatchObject({ owner: 'v1' });
   });
 
