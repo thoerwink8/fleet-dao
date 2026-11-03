@@ -108,6 +108,7 @@ export async function schedule(
  * 到点的 pending 和租约过期的 claimed 都能领；领到的 attempts 加一，超过上限的直接 dead、不交出去。
  * 给了 onDead，这次收成 dead 的活在同一个事务里交给它（比如给派活的一方记交回）：它抛错整次领取回滚，
  * 不会出现「活死了、却没人知道」。
+ * 等锁超过会话的 lock_timeout 时返回空数组，不一直堵着（事务已回滚，这次没有领到）。
  */
 export async function claimJobs(
   db: Db,
@@ -117,109 +118,128 @@ export async function claimJobs(
   opts: { onDead?: (tx: Db, dead: Job[]) => Promise<void> } = {},
 ): Promise<Job[]> {
   const token = randomUUID();
-  return db.transaction(async (txRaw) => {
-    const tx = txRaw as unknown as Db;
-    const [limit] = await tx.select().from(queueLimits).where(eq(queueLimits.queue, queue)).for('update');
-    if (!limit) throw new NoQueueLimitError(queue);
-    const expired = await tx
-      .update(jobs)
-      .set({
-        state: 'dead',
-        lastError: '过了截止时刻还没做完',
-        leaseUntil: null,
-        claimToken: null,
-        updatedAt: sql`now()`,
-      })
-      .where(
-        and(
-          eq(jobs.queue, queue),
-          inArray(jobs.state, ['pending', 'claimed']),
-          isNotNull(jobs.deadlineAt),
-          lt(jobs.deadlineAt, sql`now()`),
-        ),
-      )
-      .returning();
-    const dead = expired.map(toJob);
-    const report = async () => {
-      if (opts.onDead && dead.length > 0) await opts.onDead(tx, dead);
-    };
-    const [inflight] = await tx
-      .select({ n: sql<number>`count(*)::int` })
-      .from(jobs)
-      .where(and(eq(jobs.queue, queue), eq(jobs.state, 'claimed'), gte(jobs.leaseUntil, sql`now()`)));
-    const [recent] = await tx
-      .select({ n: sql<number>`count(*)::int` })
-      .from(jobs)
-      .where(and(eq(jobs.queue, queue), gt(jobs.claimedAt, sql`now() - interval '1 minute'`)));
-    const room = Math.min(
-      max,
-      PAGE_MAX,
-      limit.maxInflight - Number(inflight?.n ?? 0),
-      limit.perMinute - Number(recent?.n ?? 0),
-    );
-    if (room <= 0) {
-      await report();
-      return [];
-    }
-    const due = await tx
-      .select({ id: jobs.id })
-      .from(jobs)
-      .where(
-        and(
-          eq(jobs.queue, queue),
-          or(
-            and(eq(jobs.state, 'pending'), lte(jobs.dueAt, sql`now()`)),
-            and(eq(jobs.state, 'claimed'), lt(jobs.leaseUntil, sql`now()`)),
-          ),
-        ),
-      )
-      .orderBy(asc(jobs.dueAt), asc(jobs.id))
-      .limit(room)
-      .for('update', { skipLocked: true });
-    if (due.length === 0) {
-      await report();
-      return [];
-    }
-    const rows = await tx
-      .update(jobs)
-      .set({
-        state: 'claimed',
-        claimToken: token,
-        claimedAt: sql`now()`,
-        leaseUntil: sql`now() + make_interval(secs => ${leaseMs / 1000})`,
-        attempts: sql`${jobs.attempts} + 1`,
-        updatedAt: sql`now()`,
-      })
-      .where(
-        inArray(
-          jobs.id,
-          due.map((d) => d.id),
-        ),
-      )
-      .returning();
-    const over = rows.filter((r) => r.attempts > r.maxAttempts);
-    if (over.length > 0) {
-      const poisoned = await tx
+  try {
+    return await db.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      const [limit] = await tx.select().from(queueLimits).where(eq(queueLimits.queue, queue)).for('update');
+      if (!limit) throw new NoQueueLimitError(queue);
+      const expired = await tx
         .update(jobs)
         .set({
           state: 'dead',
-          lastError: sql`concat('领了 ', ${jobs.attempts} - 1, ' 次都没做完（多半是做的进程死了）：', coalesce(${jobs.lastError}, ''))`,
+          lastError: '过了截止时刻还没做完',
           leaseUntil: null,
           claimToken: null,
           updatedAt: sql`now()`,
         })
         .where(
-          inArray(
-            jobs.id,
-            over.map((r) => r.id),
+          and(
+            eq(jobs.queue, queue),
+            inArray(jobs.state, ['pending', 'claimed']),
+            isNotNull(jobs.deadlineAt),
+            lt(jobs.deadlineAt, sql`now()`),
           ),
         )
         .returning();
-      dead.push(...poisoned.map(toJob));
-    }
-    await report();
-    return rows.filter((r) => r.attempts <= r.maxAttempts).map(toJob);
-  });
+      const dead = expired.map(toJob);
+      const report = async () => {
+        if (opts.onDead && dead.length > 0) await opts.onDead(tx, dead);
+      };
+      const [inflight] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(jobs)
+        .where(and(eq(jobs.queue, queue), eq(jobs.state, 'claimed'), gte(jobs.leaseUntil, sql`now()`)));
+      const [recent] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(jobs)
+        .where(and(eq(jobs.queue, queue), gt(jobs.claimedAt, sql`now() - interval '1 minute'`)));
+      const room = Math.min(
+        max,
+        PAGE_MAX,
+        limit.maxInflight - Number(inflight?.n ?? 0),
+        limit.perMinute - Number(recent?.n ?? 0),
+      );
+      if (room <= 0) {
+        await report();
+        return [];
+      }
+      const due = await tx
+        .select({ id: jobs.id })
+        .from(jobs)
+        .where(
+          and(
+            eq(jobs.queue, queue),
+            or(
+              and(eq(jobs.state, 'pending'), lte(jobs.dueAt, sql`now()`)),
+              and(eq(jobs.state, 'claimed'), lt(jobs.leaseUntil, sql`now()`)),
+            ),
+          ),
+        )
+        .orderBy(asc(jobs.dueAt), asc(jobs.id))
+        .limit(room)
+        .for('update', { skipLocked: true });
+      if (due.length === 0) {
+        await report();
+        return [];
+      }
+      const rows = await tx
+        .update(jobs)
+        .set({
+          state: 'claimed',
+          claimToken: token,
+          claimedAt: sql`now()`,
+          leaseUntil: sql`now() + make_interval(secs => ${leaseMs / 1000})`,
+          attempts: sql`${jobs.attempts} + 1`,
+          updatedAt: sql`now()`,
+        })
+        .where(
+          inArray(
+            jobs.id,
+            due.map((d) => d.id),
+          ),
+        )
+        .returning();
+      const over = rows.filter((r) => r.attempts > r.maxAttempts);
+      if (over.length > 0) {
+        const poisoned = await tx
+          .update(jobs)
+          .set({
+            state: 'dead',
+            lastError: sql`concat('领了 ', ${jobs.attempts} - 1, ' 次都没做完（多半是做的进程死了）：', coalesce(${jobs.lastError}, ''))`,
+            leaseUntil: null,
+            claimToken: null,
+            updatedAt: sql`now()`,
+          })
+          .where(
+            inArray(
+              jobs.id,
+              over.map((r) => r.id),
+            ),
+          )
+          .returning();
+        dead.push(...poisoned.map(toJob));
+      }
+      await report();
+      return rows.filter((r) => r.attempts <= r.maxAttempts).map(toJob);
+    });
+  } catch (err) {
+    // 55P03：语句在等锁，超过了 lock_timeout，Postgres 取消它。返回空，调用方不用一直等。
+    // 只读（25006）、没设限速这些不是等锁，照样抛出去，不能当成「没活可领」。
+    if (pgCode(err) === '55P03') return [];
+    throw err;
+  }
+}
+
+/** Postgres 的 SQLSTATE。驱动有时把原错误放在 cause 里。 */
+function pgCode(err: unknown): string | undefined {
+  let cur: unknown = err;
+  for (let i = 0; i < 5 && cur !== undefined && cur !== null; i++) {
+    if (typeof cur !== 'object') return undefined;
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return code;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 /** 心跳续租：还归你就续上回 ok；被取消了回 cancelled（马上停手）；被别人领走了回 lost（停手，结果别写）。 */
