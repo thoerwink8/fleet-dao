@@ -2,7 +2,7 @@
 // 用法：node probes/desktop/bundle-kernel.ts <输出目录> [node.exe 路径，默认当前 node]
 // 输出目录里：kernel.mjs、node.exe、pglite.wasm/pglite.data/initdb.wasm；迁移目录放在输出目录的上一级 migrations/。
 // 不进内核运行代码；只是量"打成一个 JS 文件加官方 node.exe 能不能起来"。
-import { copyFileSync, cpSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,13 @@ const out = resolve(process.argv[2]);
 const nodeExe = process.argv[3] ?? process.execPath;
 mkdirSync(out, { recursive: true });
 
+// 版本号构建期内联（profiles/version.ts 的 __FLEET2_VERSION__），运行时不读 package.json
+const { version } = JSON.parse(
+  readFileSync(join(root, 'packages/harness-dispatch/package.json'), 'utf8'),
+) as {
+  version: string;
+};
+
 await build({
   entryPoints: [join(root, 'packages/harness-dispatch/src/bin/kernel.ts')],
   outfile: join(out, 'kernel.mjs'),
@@ -28,6 +35,7 @@ await build({
   banner: {
     js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
   },
+  define: { __FLEET2_VERSION__: JSON.stringify(version) },
   logLevel: 'info',
 });
 
@@ -37,9 +45,6 @@ const pgDist = dirname(req.resolve('@electric-sql/pglite'));
 for (const f of ['pglite.wasm', 'pglite.data', 'initdb.wasm']) copyFileSync(join(pgDist, f), join(out, f));
 // 迁移目录：MIGRATIONS_FOLDER 是 new URL('../migrations', import.meta.url)，打包后落在 kernel.mjs 的上一级
 cpSync(join(root, 'packages/harness-store/migrations'), join(out, '..', 'migrations'), { recursive: true });
-// 实测发现：local 档案按 new URL('../../package.json', import.meta.url) 读版本号，打包后落在输出目录的上上级
-// （写进 6.4a 的"要改"：正式打包时把版本号在构建期内联，别在运行时读源码路径）
-copyFileSync(join(root, 'packages/harness-dispatch/package.json'), join(out, '..', '..', 'package.json'));
 copyFileSync(nodeExe, join(out, 'node.exe'));
 
 let total = 0;

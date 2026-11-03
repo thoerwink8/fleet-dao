@@ -2,7 +2,6 @@
 //   存储 PGlite 落文件（用户数据目录，不在安装目录）；内核、驾驶舱口、静态页一个进程，只听 127.0.0.1；
 //   本机令牌文件鉴权；没有 cgroup、没有出网关，隔离档位如实读回；没有 GitHub 写（进程里没有任何 GitHub 凭据）。
 // 这一片不接任务来源和外送（后续片）：taskFor、readMerged 是明说"没接"的桩，没有批次时节拍什么也不做。
-import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -17,6 +16,7 @@ import { CLAUDE_PERMISSION_MODES, type ClaudePermissionMode } from '@fleet-dao/h
 import { restrictToCurrentUserWindows } from './acl.ts';
 import { type Assembly, ConfigError, type Env, log, port } from './config.ts';
 import { readIsolation } from './isolation.ts';
+import { kernelVersion } from './version.ts';
 
 /** 用户数据目录：Windows 是 %LOCALAPPDATA%\Fleet2，macOS 是 Application Support，其余 XDG。FLEET2_DATA_DIR 可改。 */
 export function defaultDataDir(env: Env, platform: NodeJS.Platform = process.platform): string {
@@ -53,9 +53,7 @@ export async function assembleLocal(
   }
   const distDir = resolve(env.FLEET2_WEB_DIST);
   const model = env.FLEET2_MODEL ?? 'unset';
-  const version = (
-    JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }
-  ).version;
+  const version = kernelVersion();
 
   const store = await openLocalDb(join(dataDir, 'db'));
   const token = await ensureLocalToken(join(dataDir, 'local-token'), (file) =>
