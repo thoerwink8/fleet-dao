@@ -1,5 +1,5 @@
 // 桌面第 0 片实测 ①（#3868）：用打包出的 node.exe + kernel.mjs 起本机内核，30 秒内 /api/local/status 返回 200 则退出码 0。
-// 用法：node packages/harness-dispatch/src/bin/desktop-probe/health-check.ts <bundle 目录（里面有 node.exe、kernel.mjs）> [超时秒，默认 30]
+// 用法：node scripts/desktop-probe/health-check.ts <bundle 目录（里面有 node.exe、kernel.mjs）> [超时秒，默认 30]
 // 数据目录和页面目录都放在临时目录里，不碰用户真实的 %LOCALAPPDATA%\Fleet2；端口取 17347。
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -7,9 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 if (!process.argv[2]) {
-  console.error(
-    '用法：node packages/harness-dispatch/src/bin/desktop-probe/health-check.ts <bundle 目录> [超时秒]',
-  );
+  console.error('用法：node scripts/desktop-probe/health-check.ts <bundle 目录> [超时秒]');
   process.exit(2);
 }
 const dir = resolve(process.argv[2]);

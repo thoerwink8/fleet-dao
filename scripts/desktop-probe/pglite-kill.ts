@@ -1,5 +1,5 @@
 // 桌面第 0 片实测 ②（#3868）：PGlite 落文件，写入中途 taskkill /F，重开后事件行数和最大 seq 要对得上，连续 N 次（默认 50）。
-// 用法：node packages/harness-dispatch/src/bin/desktop-probe/pglite-kill.ts [次数，默认 50]
+// 用法：node scripts/desktop-probe/pglite-kill.ts [次数，默认 50]
 // 每次：起 pglite-writer（开库自检 → 狂写）→ 等它写起来再随机等 0–800ms → taskkill /F /T → 下一次开库自检。
 // 判"损坏"（任一条成立就计一次）：开库失败或超时；count != maxSeq（seq 从 1 连续，不连续就是丢了中间的行）；
 // maxSeq < 确认文件里的下限（已 commit 的丢了）；批不原子（事务里 5 行只落了一部分）。

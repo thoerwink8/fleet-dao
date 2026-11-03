@@ -1,11 +1,11 @@
 // 桌面第 0 片实测 ②（#3868）的写入端：由 pglite-kill.ts 起、被它 taskkill /F 强杀。
-// 用法：node packages/harness-dispatch/src/bin/desktop-probe/pglite-writer.ts <数据目录> <落盘确认文件> <写几轮，0 = 只检查>
+// 用法：node scripts/desktop-probe/pglite-writer.ts <数据目录> <落盘确认文件> <写几轮，0 = 只检查>
 // 开库（走 openLocalDb，同 local 档案：PGlite 落文件 + 迁移），先自检再写；自检结果打成一行 JSON：
 //   {"opened":{"count":N,"maxSeq":M,"badBatches":K}}
 // 写入分两种：单行 insert；一个事务里 5 行（批）。每次 commit 返回后才往确认文件追加 maxSeq，
 // 所以"确认文件里的最大 seq"是肯定已经提交成功的下限。
 import { appendFileSync, readFileSync } from 'node:fs';
-import { openLocalDb } from '@fleet-dao/harness-store/local-db';
+import { openLocalDb } from '../../packages/harness-store/src/local-db.ts';
 
 const [dir, ackFile, roundsRaw] = process.argv.slice(2);
 if (!dir || !ackFile || roundsRaw === undefined) {
