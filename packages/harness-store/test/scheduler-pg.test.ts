@@ -1,5 +1,6 @@
-// 调度领取里 PGlite 造不出来的三件事（#3859 第 1 片）：连接被掐、事务只读、锁等待超时。
+// 调度领取里 PGlite 造不出来的故障（#3859）：连接被掐、事务只读、锁等待超时，以及本用例自己起的库进程停掉再启动同一数据目录。
 // 连真 Postgres，不走 PGlite。有测试库连接串就用那台，并另建一个库；没有就用本机 Postgres 16 起一个临时实例。
+// 库进程这一条不碰那台共享库：只停、再起本用例自己 initdb 的数据目录。
 // 连接串的环境变量和仓里别的真库测试是同一个，名字拆开拼：本文件不在分台名单里，整词写出会让核对红，名单不在这张单的改动里。
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -79,7 +80,18 @@ function freePort(): Promise<number> {
   });
 }
 
-async function startLocal(): Promise<{ url: string; stop: () => Promise<void> }> {
+function serverOptions(port: number, sock: string): string {
+  return `-h 127.0.0.1 -p ${port} -k ${sock} -c listen_addresses=127.0.0.1 -c unix_socket_directories=${sock}`;
+}
+
+type OwnedPg = {
+  readonly url: string;
+  stopProcess: () => void;
+  startProcess: () => Promise<void>;
+  destroy: () => Promise<void>;
+};
+
+async function ownLocalPg(): Promise<OwnedPg> {
   const initdb = pgBin('initdb');
   const pgCtl = pgBin('pg_ctl');
   if (!initdb || !pgCtl) throw new Error('没有 Postgres 服务端，临时实例起不来');
@@ -87,8 +99,15 @@ async function startLocal(): Promise<{ url: string; stop: () => Promise<void> }>
   const data = join(dir, 'data');
   const sock = join(dir, 'sock');
   mkdirSync(sock);
-  const port = await freePort();
-  const stop = async () => {
+  let port = 0;
+  const startProcess = async () => {
+    port = await freePort();
+    runBin(pgCtl, ['-D', data, '-l', join(dir, 'log'), '-w', 'start', '-o', serverOptions(port, sock)]);
+  };
+  const stopProcess = () => {
+    runBin(pgCtl, ['-D', data, '-m', 'fast', '-w', 'stop']);
+  };
+  const destroy = async () => {
     spawnSync(pgCtl, ['-D', data, '-m', 'fast', '-w', 'stop'], { encoding: 'utf8' });
     rmSync(dir, { recursive: true, force: true });
   };
@@ -102,21 +121,24 @@ async function startLocal(): Promise<{ url: string; stop: () => Promise<void> }>
       '--encoding=UTF8',
       '--no-instructions',
     ]);
-    runBin(pgCtl, [
-      '-D',
-      data,
-      '-l',
-      join(dir, 'log'),
-      '-w',
-      'start',
-      '-o',
-      `-h 127.0.0.1 -p ${port} -k ${sock} -c listen_addresses=127.0.0.1 -c unix_socket_directories=${sock}`,
-    ]);
+    await startProcess();
   } catch (err) {
-    await stop();
+    await destroy();
     throw err;
   }
-  return { url: `postgres://fleet_test@127.0.0.1:${port}/postgres`, stop };
+  return {
+    get url() {
+      return `postgres://fleet_test@127.0.0.1:${port}/postgres`;
+    },
+    stopProcess,
+    startProcess,
+    destroy,
+  };
+}
+
+async function startLocal(): Promise<{ url: string; stop: () => Promise<void> }> {
+  const owned = await ownLocalPg();
+  return { url: owned.url, stop: () => owned.destroy() };
 }
 
 function urlForDb(url: string, db: string): string {
@@ -143,7 +165,8 @@ function errorText(err: unknown): string {
 }
 
 const configuredUrl = process.env[PG_URL_KEY]?.trim() ?? '';
-const canRun = Boolean(configuredUrl) || Boolean(pgBin('initdb') && pgBin('pg_ctl'));
+const hasLocalPg = Boolean(pgBin('initdb') && pgBin('pg_ctl'));
+const canRun = Boolean(configuredUrl) || hasLocalPg;
 
 describe.skipIf(!canRun)('真 Postgres 上的调度领取', () => {
   let main: Handle;
@@ -322,6 +345,52 @@ describe.skipIf(!canRun)('真 Postgres 上的调度领取', () => {
     await completeJob(main.db, fresh);
     expect(await stateOf('lock')).toMatchObject({ state: 'done', attempts: 1 });
   }, 15_000);
+
+  it.skipIf(!hasLocalPg)(
+    '库进程停掉再启动同一数据目录：重启前 pending 仍是一行，新连接领走后收成 done',
+    async () => {
+      const owned = await ownLocalPg();
+      let first: Handle | undefined;
+      let next: Handle | undefined;
+      const end = (handle: Handle | undefined) => handle?.end().catch(() => {}) ?? Promise.resolve();
+      try {
+        first = open(owned.url, 1);
+        await migrate(drizzle(first.sql, { schema }), MIGRATION_OPTIONS);
+        await setQueueLimit(first.db, 'q', 10, 100);
+        const scheduled = await schedule(first.db, { queue: 'q', key: 'reboot', payload: {} });
+        if (scheduled.kind !== 'created') throw new Error('没排上');
+        const beforeStop = await first.db.select().from(jobs).where(eq(jobs.key, 'reboot'));
+        expect(beforeStop).toHaveLength(1);
+        expect(beforeStop[0]).toMatchObject({ state: 'pending' });
+        const dataDir = (await first.sql<{ data_directory: string }[]>`show data_directory`)[0]
+          ?.data_directory;
+        if (!dataDir) throw new Error('没读到数据目录');
+        await end(first);
+        first = undefined;
+        owned.stopProcess();
+        await owned.startProcess();
+        next = open(owned.url, 1);
+        expect((await next.sql<{ data_directory: string }[]>`show data_directory`)[0]?.data_directory).toBe(
+          dataDir,
+        );
+        const pending = await next.db.select().from(jobs).where(eq(jobs.key, 'reboot'));
+        expect(pending).toHaveLength(1);
+        expect(pending[0]).toMatchObject({ state: 'pending' });
+        const [fresh] = await claimJobs(next.db, 'q', 5, LEASE);
+        if (!fresh) throw new Error('重启后没领到');
+        expect(fresh.key).toBe('reboot');
+        await completeJob(next.db, fresh);
+        const doneRows = await next.db.select().from(jobs).where(eq(jobs.key, 'reboot'));
+        expect(doneRows).toHaveLength(1);
+        expect(doneRows[0]).toMatchObject({ state: 'done' });
+      } finally {
+        await end(first);
+        await end(next);
+        await owned.destroy();
+      }
+    },
+    60_000,
+  );
 });
 
 async function waitForLock(sql: postgres.Sql, pid: number): Promise<void> {
