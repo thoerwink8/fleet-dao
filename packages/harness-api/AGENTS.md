@@ -26,7 +26,7 @@
 
 ## 本机单口服务（`src/local.ts`，#3858）
 
-本机装法（装配档案 local）把驾驶舱口、`/api/local/*`、静态页并成一个口，`listen` 里写死 127.0.0.1。驾驶舱口加了两个选项让它能复用：`authorize`（换掉 Cookie 核验）、`apiPrefix`（`/api`，页面挂根路径），并多暴露 `handler`、`endStreams`。鉴权是本机令牌：32 字节随机、存用户数据目录的 `local-token`（`ensureLocalToken`：posix 0600；Windows 没有权限位，由调用方传 `restrictWindows`，装配档案里用 `icacls` 去继承只授本用户，没传就拒绝；本包不起子进程），请求头 `X-Fleet-Local-Token` 或 Cookie `fleet_local`（HttpOnly、SameSite=Strict）。`pnpm fleet2 up` 打印的登录链接带一次性登录码（5 分钟、用一次就废，`/local-login?code=`），页面上也可 `POST /api/local/login` 粘贴令牌；令牌本身不进网址（网址带 token 字样的参数一律 400）。Host 头不是回环名 421（防 DNS 重绑）。静态页不要令牌，`/api` 下全要。`/api/local/status` 是装配档案填的状态（隔离档位、对外写、宿主、设置），页面「宿主」「设置」读它。测试 `test/local.test.ts`。
+本机装法（装配档案 local）把驾驶舱口、`/api/local/*`、静态页并成一个口，`listen` 里写死 127.0.0.1。驾驶舱口加了两个选项让它能复用：`authorize`（换掉 Cookie 核验）、`apiPrefix`（`/api`，页面挂根路径），并多暴露 `handler`、`endStreams`。鉴权是本机令牌：32 字节随机、存用户数据目录的 `local-token`（`ensureLocalToken`：posix 0600；Windows 没有权限位，由调用方传 `restrictWindows`，装配档案里用 `icacls` 去继承只授本用户，没传就拒绝；本包不起子进程），请求头 `X-Fleet-Local-Token` 或 Cookie `fleet_local`（HttpOnly、SameSite=Strict）。`pnpm fleet2 up` 打印的登录链接带一次性登录码（5 分钟、用一次就废，`/local-login?code=`），页面上也可 `POST /api/local/login` 粘贴令牌；令牌本身不进网址（网址带 token 字样的参数一律 400）。Host 头不是回环名 421（防 DNS 重绑）。静态页不要令牌，`/api` 下全要。`GET /health` 不要令牌，回 `{"ok":true}`（口通了的探针，不带版本和路径；桌面外壳等它 200 才开窗口，#3870）。`/api/local/status` 是装配档案填的状态（隔离档位、对外写、宿主、设置），页面「宿主」「设置」读它。测试 `test/local.test.ts`。
 
 ## 测试
 

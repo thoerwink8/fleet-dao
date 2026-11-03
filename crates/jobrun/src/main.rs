@@ -10,14 +10,8 @@
 // directly. The supervisor's exit code is CMD's exit code; what happened to the rest of the tree is
 // written to the report file. Exit 3 means "no such job", 4 "name already taken", 64 usage, 127 spawn failure.
 #[cfg(windows)]
-mod win;
-
-#[cfg(windows)]
-mod app;
-
-#[cfg(windows)]
 fn main() {
-    std::process::exit(app::main());
+    std::process::exit(jobrun::app::main());
 }
 
 #[cfg(not(windows))]

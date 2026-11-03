@@ -174,6 +174,13 @@ export function createLocalGateway(o: LocalGatewayOptions): LocalGateway {
       setCookie(res, 302, { location: '/' });
       return;
     }
+    // 存活探针：桌面外壳等它回 200 才打开窗口。不要令牌，也不带任何内容（没有版本、路径），只说「口已经通了」。
+    if (p === '/health') {
+      if (req.method !== 'GET') return reply(res, 405, '只收 GET');
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end('{"ok":true}');
+      return;
+    }
     if (hasTokenInQuery(url)) return reply(res, 400, '令牌只能放请求头或 cookie，不能放网址');
 
     if (p === '/api/local/login') {
