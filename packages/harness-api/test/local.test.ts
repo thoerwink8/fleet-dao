@@ -189,6 +189,16 @@ describe('静态页', () => {
   });
 });
 
+describe('存活探针 /health（桌面外壳等它通了才开窗口，#3870）', () => {
+  it('不带令牌回 200 和 {"ok":true}，不泄露别的；只收 GET（Host 头防重绑在它前面，上一组已测）', async () => {
+    const { base } = await start();
+    const r = await fetch(`${base}/health`);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true });
+    expect((await fetch(`${base}/health`, { method: 'POST' })).status).toBe(405);
+  });
+});
+
 // Windows 的收紧动作（icacls）在装配档案里，真跑在 harness-dispatch 的测试里；这里只验本包的行为
 const winStub = async () => {};
 

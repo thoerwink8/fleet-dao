@@ -1,0 +1,15 @@
+{
+  "name": "@fleet-dao/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "桌面外壳（Tauri 2）：只管起内核、开窗口、托盘；不含业务代码",
+  "scripts": {
+    "stage": "node scripts/stage.ts",
+    "build": "node scripts/stage.ts && tauri build --bundles nsis",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4"
+  }
+}

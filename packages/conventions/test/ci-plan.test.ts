@@ -1399,7 +1399,7 @@ describe('ci.yml 和这里对得上', () => {
   it('heavy 是独立的 job：每个 PR 和主线都跑、串行、可重试、核对跑的 == 名单；不在 check 的 needs 里、不开单', () => {
     const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
     for (const j of NON_BLOCKING_JOBS) expect(ids, j).toContain(j);
-    expect([...NON_BLOCKING_JOBS]).toEqual(['heavy', 'windows']);
+    expect([...NON_BLOCKING_JOBS]).toEqual(['heavy', 'windows', 'desktop']);
     const heavy = job('heavy');
     expect(heavy).not.toMatch(/^ {4}needs:/m);
     expect(heavy).not.toMatch(/^ {4}if:/m);
@@ -1429,6 +1429,21 @@ describe('ci.yml 和这里对得上', () => {
     expect(win).not.toContain('secrets.');
     for (const id of ids.filter((i) => i !== 'windows'))
       expect(job(id), id).not.toMatch(/needs:[^\n]*\bwindows\b/);
+  });
+
+  it('desktop 台（#3870）是独立的不挡 job：windows-latest 出 NSIS 安装包并上传、跑 WebDriver 端到端；别的 job 的 needs 里都没有它', () => {
+    const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
+    const d = job('desktop');
+    expect(d).toContain('runs-on: windows-latest');
+    expect(d).not.toMatch(/^ {4}needs:/m);
+    expect(d).toContain('tauri build --bundles nsis');
+    expect(d).toContain('actions/upload-artifact');
+    expect(d).toContain('apps/desktop/e2e/run.ts');
+    expect(d).toContain('cargo test');
+    expect(d).toContain('desktop-shell.test.ts');
+    expect(d).not.toContain('secrets.');
+    for (const id of ids.filter((i) => i !== 'desktop'))
+      expect(job(id), id).not.toMatch(/needs:[^\n]*\bdesktop\b/);
   });
 
   it('没有 job 用仓库密钥；lint 里卫生检查一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到仓根只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
