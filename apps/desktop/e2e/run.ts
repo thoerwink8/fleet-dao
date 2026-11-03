@@ -99,6 +99,52 @@ const quiet = (script: string): void => {
   );
 }
 
+// ---- 0b. 不经驱动直接起：外壳活着、有 WebView2 子进程、内核起来且 /health 通 ----
+// 这一步单独列出来，是为了驱动起不来会话时能分清「应用本身起不来」和「驱动没接上」。
+{
+  const app = spawn(appExe, [], { stdio: 'ignore' });
+  let health = 0;
+  let kernels: number[] = [];
+  for (let i = 0; i < 80 && health !== 200; i++) {
+    await sleep(250);
+    kernels = pidsWith('kernel.mjs', 'node.exe');
+    health = await fetch('http://127.0.0.1:7347/health').then(
+      (r) => r.status,
+      () => 0,
+    );
+  }
+  await sleep(1500);
+  const webviews = ps(
+    `(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -like '*com.fleet2.desktop*' } | Measure-Object).Count`,
+  );
+  const up = alive(app.pid ?? 0);
+  record(
+    '不经驱动直接起：外壳活着、内核起来、/health 通、有 WebView2 子进程',
+    up && health === 200 && kernels.length === 1 && Number(webviews) > 0,
+    {
+      shellAlive: up,
+      health,
+      kernels,
+      webview2Processes: Number(webviews),
+    },
+  );
+  if (!up || Number(webviews) === 0) {
+    // 起不来时留线索：最近五分钟应用崩溃的事件
+    try {
+      console.log(
+        ps(
+          `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 20 -ErrorAction SilentlyContinue | Where-Object { $_.Message -like '*fleet-desktop*' -or $_.Message -like '*msedgewebview2*' } | ForEach-Object { $_.TimeCreated.ToString('o') + ' ' + $_.ProviderName + ' ' + ($_.Message -replace '\\s+',' ') }`,
+        ),
+      );
+    } catch {
+      // 没有事件就没有
+    }
+  }
+  quiet(`Stop-Process -Id ${app.pid} -Force -ErrorAction SilentlyContinue`);
+  for (let i = 0; i < 40 && pidsWith('kernel.mjs', 'node.exe').length > 0; i++) await sleep(100);
+  await sleep(1000);
+}
+
 // ---- WebDriver 会话 ----
 const driver: ChildProcess = spawn(tauriDriver, ['--native-driver', edgeDriver], { stdio: 'inherit' });
 let base = 'http://127.0.0.1:4444';
