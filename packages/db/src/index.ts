@@ -57,6 +57,7 @@ export * from './queries/session-org-state.ts';
 export * from './queries/stalled-tasks.ts';
 export * from './queries/subtasks.ts';
 export * from './queries/task-list.ts';
+export * from './queries/task-owner.ts';
 export * from './queries/task-process.ts';
 export * from './queries/task-route-pins.ts';
 export * from './queries/verify-aggregates.ts';

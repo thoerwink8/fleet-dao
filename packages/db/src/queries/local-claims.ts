@@ -1,5 +1,5 @@
 // 本机领单（决定 0096，shared 的 local-claims.ts）：本机会话领一张单、续租、结束，和法国拉单收回到期的租约。
-// 写的都是 tasks 那一行（executor、lease_until、claimed_by，状态只用引擎认的那几个），每一下同一事务记一条操作记录。
+// 写的都是 tasks 那一行（owner、executor、lease_until、claimed_by，状态只用引擎认的那几个），每一下同一事务记一条操作记录。
 // 读不到、写不成照抛，不拿空顶。
 import type { LocalClaimRefusal, LocalFinishOutcome, TaskExecutor, TaskState } from '@fleet-dao/shared';
 import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
@@ -127,6 +127,7 @@ export async function claimLocalTask(
         .update(tasks)
         .set({
           state: 'running',
+          owner: 'v1',
           executor: 'local',
           leaseUntil,
           claimedBy: input.nodeId,
@@ -148,6 +149,7 @@ export async function claimLocalTask(
           requestedBy: `node:${input.nodeId}`,
           state: 'running',
           priority: sql`(select coalesce(max(${tasks.priority}), 0) + 1 from ${tasks} where ${tasks.repoId} = ${repoId})`,
+          owner: 'v1',
           executor: 'local',
           leaseUntil,
           claimedBy: input.nodeId,
