@@ -20,4 +20,6 @@
 
 - 2026-11-03 15:32–15:34 UTC，法国本机（隧道 `10.99.0.2`），切换前：父区四台对子域 NS 均 NOERROR，委派仍是 `dns1.digitalplat.org`、`dns2.digitalplat.org`（TTL 3600）。直问 dns1 的 SOA/A，UDP 与 TCP 均超时。dns2 曾答 SOA（serial 2026101301），随后 A 也超时。`1.1.1.1`、`8.8.8.8`、`9.9.9.9` 的 A 查询都是 SERVFAIL。本机 curl 报解析失败，没有 HTTP 码。
 - 同一时段经隧道直连香港 `10.99.0.1:443`（不经公网解析）GET 公开策略桥：HTTP 200，`cache-control: no-store`，`version` 1，`ciPolicy` 为 force。这只说明入口和读桥当时通，不能代替「解析成功之后的 200」。
-- 切换后的法国、香港、GitHub runner 解析，以及经公网解析读到的策略桥 200：没量成。本会话没有 DigitalPlat / Cloudflare 登录，改不了 NS；隧道上香港 22 被拒，没有登录壳可在香港跑 dig；`gh` 未登录，不能在 runner 上跑。
+- 2026-11-03 17:10–17:16 UTC，法国本机再量一次，切换仍没发生。父区 `ns1.digitalplat.org` 至 `ns4.digitalplat.org` 对子域 NS 都是 NOERROR，委派仍是 `dns1.digitalplat.org`、`dns2.digitalplat.org`（TTL 3600）。`1.1.1.1` 的 NS 查询同样 NOERROR、同一组委派。本机解析器的 A 是 NOERROR，指向现有香港地址（地址不进仓）。直问 dns1：SOA 答过一次（serial 仍是 2026101301），随后多条查询 UDP 超时。直问 dns2 的 A，UDP 超时。
+- 同一时段从法国按普通解析（不写 `--resolve`、`--max-redirs 0`）GET 公开策略桥：HTTP 200，没有重定向，`cache-control: no-store`，`version` 1，`ciPolicy` 为 force。委派仍是上面那两台，这一次 200 不是 NS 换成多节点之后的那一次。
+- 切换后的法国、香港、GitHub runner 解析：仍没量成。本会话没有 DigitalPlat / Cloudflare 的登录或 API 凭据；`/etc/fleet-dao` 是 `root:fleet` 750，会话用户不在 `fleet` 组，进程带 NoNewPrivs，sudo 起不来，读不到机器配置和上传钥匙；保险箱钥匙不在这台会话用户家里；`gh` 未登录；隧道和香港公网的 22 都拒绝连接。没有这三样，NS 改不了，香港和 runner 上的 dig 也跑不了。
