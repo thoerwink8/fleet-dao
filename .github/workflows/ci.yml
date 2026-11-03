@@ -720,6 +720,80 @@ jobs:
       - run: cargo build -p jobrun
       - run: pnpm exec vitest run packages/harness-runner
 
+  # 桌面外壳台（#3870，决定 0125 第 8 条）：Windows 上编译 apps/desktop（Tauri 2）、出 NSIS 安装包（不签名，作产物上传）、静默装一遍，
+  # 再用 WebDriver（tauri-driver + 和 WebView2 同版本的 msedgedriver）真开窗口核对：五块导航都通、页面调不了外壳命令、托盘和开机自启、
+  # 单实例、强杀外壳后内核 2 秒内不在。和 windows 台一样每个 PR 和主线推送都跑，不在 check 的 needs 里（NON_BLOCKING_JOBS）：红了只让这个 job 红。
+  desktop:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      # 内核随包带的 node.exe 就是这里装的官方版（第 0 片实测用的也是 24，#3868）
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: rustup component add rustfmt clippy
+      # 外壳不含路由、不开命令的检查在 test 台里跑（packages/conventions/test/desktop-shell.test.ts，红了能拦），这里不重复
+      # 备安装包要带的东西：本机版页面、打包后的内核加 node.exe、jobrun.exe
+      - run: node apps/desktop/scripts/stage.ts
+      - name: 外壳的 Rust 检查（独立 workspace：tauri-build 要先有上一步备好的资源）
+        working-directory: apps/desktop/src-tauri
+        run: |
+          cargo fmt --all --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - name: 出 NSIS 安装包
+        working-directory: apps/desktop
+        run: pnpm exec tauri build --bundles nsis
+      - name: 安装包大小
+        run: ls -l apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-nsis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          retention-days: 7
+          if-no-files-found: error
+      - name: 端到端要的驱动（tauri-driver，和 WebView2 同版本的 msedgedriver）
+        shell: pwsh
+        run: |
+          cargo install tauri-driver --locked
+          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $ver = (Get-ItemProperty $key).pv
+          Write-Host "WebView2 运行时 $ver"
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\edgedriver" | Out-Null
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$ver/edgedriver_win64.zip" -OutFile "$env:RUNNER_TEMP\ed.zip"
+          Expand-Archive "$env:RUNNER_TEMP\ed.zip" -DestinationPath "$env:RUNNER_TEMP\edgedriver" -Force
+          & "$env:RUNNER_TEMP\edgedriver\msedgedriver.exe" --version
+      - name: 静默装一遍，真起、真点、真杀
+        shell: pwsh
+        run: |
+          $inst = "$env:RUNNER_TEMP\fleet2-install"
+          $setup = (Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe).FullName
+          $p = Start-Process $setup -ArgumentList '/S', "/D=$inst" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "安装包静默安装退出码 $($p.ExitCode)" }
+          Get-ChildItem $inst | Format-Table Name, Length
+          node apps/desktop/e2e/run.ts `
+            --app "$inst\fleet-desktop.exe" `
+            --tauri-driver "$HOME\.cargo\bin\tauri-driver.exe" `
+            --edge-driver "$env:RUNNER_TEMP\edgedriver\msedgedriver.exe" `
+            --shots "$env:RUNNER_TEMP\desktop-e2e"
+      # 总是留：窗口里的页面截图（1440、390）和每一步的结果
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/desktop-e2e/
+          retention-days: 7
+          if-no-files-found: warn
+
   # 必过检查：changes 必须绿；lint、test、web、e2e、deploy 各自该跑的必须绿、该跳过的必须是跳过（packages/conventions/src/bin/ci-verdict.ts 调 ciVerdict）。
   # lint 里面几步各报各的（哪一步红写在它的 job 日志和汇总步里）；汇总 job 认的是 lint 这个 job 的结论。
   check:

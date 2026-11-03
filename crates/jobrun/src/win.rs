@@ -232,10 +232,43 @@ pub fn resume_process(pid: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Starts `command` suspended, puts it into `job`, then resumes it: the process cannot fork anything
+/// before it is a member, and it dies with the job. The caller keeps the `Job` alive for as long as
+/// the child should live; dropping it (or the caller being killed) takes the whole tree down.
+/// The child gets no console window.
+pub fn spawn_in_job(
+    job: &Job,
+    command: &mut std::process::Command,
+) -> io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+    let mut child = command
+        .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+        .spawn()?;
+    if let Err(e) = job.assign(&child).and_then(|_| resume_process(child.id())) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
+    }
+    Ok(child)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn spawn_in_job_runs_the_child_and_dropping_the_job_kills_it() {
+        let job = Job::create(&format!("spawn-{}", std::process::id())).expect("job");
+        let mut cmd = Command::new("ping");
+        cmd.args(["-n", "30", "127.0.0.1"]).stdout(Stdio::null());
+        let mut child = spawn_in_job(&job, &mut cmd).expect("spawn");
+        assert_eq!(job.pids().unwrap(), vec![child.id()]);
+        assert!(child.try_wait().unwrap().is_none(), "child is running");
+        drop(job);
+        child.wait().unwrap();
+    }
 
     fn sleeper() -> std::process::Child {
         Command::new("ping")
