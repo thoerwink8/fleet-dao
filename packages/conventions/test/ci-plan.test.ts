@@ -1440,7 +1440,6 @@ describe('ci.yml 和这里对得上', () => {
     expect(d).toContain('actions/upload-artifact');
     expect(d).toContain('apps/desktop/e2e/run.ts');
     expect(d).toContain('cargo test');
-    expect(d).toContain('desktop-shell.test.ts');
     expect(d).not.toContain('secrets.');
     for (const id of ids.filter((i) => i !== 'desktop'))
       expect(job(id), id).not.toMatch(/needs:[^\n]*\bdesktop\b/);

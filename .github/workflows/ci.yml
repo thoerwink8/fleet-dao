@@ -741,8 +741,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: rustup component add rustfmt clippy
-      # 外壳不含路由、不开命令的检查（红了能拦：测试里造了违规的外壳看它红）
-      - run: pnpm exec vitest run packages/conventions/test/desktop-shell.test.ts
+      # 外壳不含路由、不开命令的检查在 test 台里跑（packages/conventions/test/desktop-shell.test.ts，红了能拦），这里不重复
       # 备安装包要带的东西：本机版页面、打包后的内核加 node.exe、jobrun.exe
       - run: node apps/desktop/scripts/stage.ts
       - name: 外壳的 Rust 检查（独立 workspace：tauri-build 要先有上一步备好的资源）
