@@ -3,7 +3,6 @@
 // 浏览器拿令牌的办法有两个，令牌本身都不进网址：`fleet2 up` 打印的一次性登录码（5 分钟、用一次就废）换 Cookie；
 // 或者在页面上粘贴令牌，POST /api/local/login 换 Cookie。Cookie 是 HttpOnly + SameSite=Strict。
 // 为防 DNS 重绑，Host 头不是回环名一律 421。静态页不要令牌（里面没有机密），/api 下全要。
-import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync,
@@ -25,35 +24,32 @@ export const LOCAL_COOKIE = 'fleet_local';
 export const LOCAL_TOKEN_HEADER = 'x-fleet-local-token';
 const LOGIN_CODE_TTL_MS = 5 * 60_000;
 
-/** 只留当前用户可读写：posix 用 0600，Windows 用 icacls 去掉继承、只授权给当前用户。 */
-export function restrictToCurrentUser(path: string, isDir = false): void {
-  if (process.platform !== 'win32') {
-    chmodSync(path, isDir ? 0o700 : 0o600);
-    return;
-  }
-  const user =
-    process.env.USERDOMAIN && process.env.USERNAME
-      ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
-      : (process.env.USERNAME ?? '');
-  if (!user) throw new Error('取不到当前用户名，没法收紧令牌文件的权限');
-  execFileSync('icacls', [path, '/inheritance:r', '/grant:r', `${user}:${isDir ? '(OI)(CI)F' : 'F'}`], {
-    stdio: 'ignore',
-  });
-}
-
-/** 读本机令牌文件；没有就生成（随机 32 字节，十六进制）。文件权限收紧到仅当前用户。 */
-export function ensureLocalToken(file: string): string {
+/**
+ * 读本机令牌文件；没有就生成（随机 32 字节，十六进制），文件权限收紧到仅当前用户：
+ * posix 用 0600；Windows 没有 posix 权限位，由调用方给 `restrictWindows`（装配档案里用 icacls 去继承、只授本用户），没给就拒绝，不假装收紧了。
+ * 本包不起子进程（新内核起子进程只走 harness-runner），所以收紧动作由调用方传进来。
+ */
+export async function ensureLocalToken(
+  file: string,
+  restrictWindows?: (file: string) => Promise<void>,
+): Promise<string> {
+  const restrict = async (): Promise<void> => {
+    if (process.platform !== 'win32') return void chmodSync(file, 0o600);
+    if (!restrictWindows)
+      throw new Error('Windows 上要给 restrictWindows 才能把令牌文件收紧到只有本用户可读');
+    await restrictWindows(file);
+  };
   if (existsSync(file)) {
     const token = readFileSync(file, 'utf8').trim();
     if (/^[0-9a-f]{64}$/.test(token)) {
-      restrictToCurrentUser(file);
+      await restrict();
       return token;
     }
   }
   mkdirSync(dirname(file), { recursive: true });
   const token = randomBytes(32).toString('hex');
   writeFileSync(file, `${token}\n`, { mode: 0o600 });
-  restrictToCurrentUser(file);
+  await restrict();
   return token;
 }
 

@@ -14,6 +14,7 @@ import {
 import { makeRedactor } from '@fleet-dao/harness-runner';
 import { openLocalDb } from '@fleet-dao/harness-store/local-db';
 import { CLAUDE_PERMISSION_MODES, type ClaudePermissionMode } from '@fleet-dao/harness-workers';
+import { restrictToCurrentUserWindows } from './acl.ts';
 import { type Assembly, ConfigError, type Env, log, port } from './config.ts';
 import { readIsolation } from './isolation.ts';
 
@@ -27,13 +28,12 @@ export function defaultDataDir(env: Env, platform: NodeJS.Platform = process.pla
 }
 
 const NO_SOURCE = '本机装法这一片还没接任务来源';
-const DEFAULT_DIST = new URL('../../../harness-web/dist-local', import.meta.url);
 
 export async function assembleLocal(
   env: Env,
 ): Promise<Assembly & { gateway: ReturnType<typeof createLocalGateway> }> {
   const dataDir = defaultDataDir(env);
-  const uiPort = port(env, 'FLEET2_UI_PORT', 7346, true);
+  const uiPort = port(env, 'FLEET2_UI_PORT', 7347, true);
   const commandRaw = env.FLEET2_WORKER_COMMAND ?? '["claude"]';
   const command = JSON.parse(commandRaw) as unknown;
   if (!Array.isArray(command) || command.length === 0 || command.some((c) => typeof c !== 'string')) {
@@ -47,16 +47,21 @@ export async function assembleLocal(
   if (permissionMode === 'bypassPermissions') {
     throw new ConfigError('本机装法工人和你同一个用户，不许 bypassPermissions；用 acceptEdits 或 dontAsk');
   }
-  const distDir = env.FLEET2_WEB_DIST
-    ? resolve(env.FLEET2_WEB_DIST)
-    : decodeURIComponent(DEFAULT_DIST.pathname).replace(/^\/([A-Za-z]:)/, '$1');
+  // 页面目录由 pnpm fleet2 up 构建后传进来（base=/ 的本机版）；直接起内核没给就不起，不悄悄只剩接口
+  if (!env.FLEET2_WEB_DIST) {
+    throw new ConfigError('没给 FLEET2_WEB_DIST（本机版页面目录）；本机装法用 pnpm fleet2 up 起');
+  }
+  const distDir = resolve(env.FLEET2_WEB_DIST);
   const model = env.FLEET2_MODEL ?? 'unset';
   const version = (
     JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }
   ).version;
 
   const store = await openLocalDb(join(dataDir, 'db'));
-  const token = ensureLocalToken(join(dataDir, 'local-token'));
+  const token = await ensureLocalToken(join(dataDir, 'local-token'), (file) =>
+    // 当前用户名取自进程环境（给的 env 只是覆盖配置项，可以不带 USERNAME 这类系统变量）
+    restrictToCurrentUserWindows(file, { ...process.env, ...env }, makeRedactor([])),
+  );
   const cockpit = createCockpitApi({
     db: store.db,
     authorize: localAuthorize(token),
@@ -129,6 +134,13 @@ export async function assembleLocal(
     async afterStart() {
       const actual = await gateway.listen(uiPort);
       listen = `127.0.0.1:${actual}`;
+      // 给人看的几行（不是日志）：登录链接带的是一次性登录码，不是令牌，5 分钟内用一次
+      console.log('');
+      console.log(`fleet2 已起：http://${listen}/`);
+      console.log(
+        `登录（一次性，5 分钟内有效）：http://${listen}/local-login?code=${gateway.issueLoginCode()}`,
+      );
+      console.log('Ctrl-C 退出；数据在用户数据目录，下次再起事件还在。');
     },
     startedFields: () => ({
       profile: 'local',

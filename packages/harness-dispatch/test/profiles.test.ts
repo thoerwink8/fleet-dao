@@ -1,5 +1,6 @@
 // 装配档案（#3858）：france 的配置和默认值守着不变；local 整条装起来、只听回环、无令牌被拒、杀掉再起事件还在、隔离档位读回「弱」。
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { appendToSession, LOCAL_TOKEN_HEADER } from '@fleet-dao/harness-api';
@@ -110,6 +111,10 @@ describe('local 档案', () => {
     expect(defaultDataDir({ FLEET2_DATA_DIR: root })).toBe(root);
   });
 
+  it('没给本机版页面目录就不起，不悄悄只剩接口', async () => {
+    await expect(assembleLocal({ FLEET2_DATA_DIR: join(root, 'nodist') })).rejects.toThrow(/FLEET2_WEB_DIST/);
+  });
+
   it('权限档不许 bypassPermissions', async () => {
     await expect(
       assembleLocal({ FLEET2_DATA_DIR: join(root, 'bad'), FLEET2_PERMISSION_MODE: 'bypassPermissions' }),
@@ -118,7 +123,12 @@ describe('local 档案', () => {
 
   it('整条起来：只听回环、无令牌被拒、档位弱；停掉再起，事件还在', async () => {
     const dir = join(root, 'full');
-    const env = { FLEET2_DATA_DIR: dir, FLEET2_UI_PORT: '0', FLEET2_TICK_MS: '0' };
+    const env = {
+      FLEET2_DATA_DIR: dir,
+      FLEET2_UI_PORT: '0',
+      FLEET2_TICK_MS: '0',
+      FLEET2_WEB_DIST: join(root, 'dist'),
+    };
     const a1 = await assembleLocal(env);
     const r1 = await runAssembly(a1, { signals: false });
     const base1 = `http://${(a1.startedFields(r1.apiPort).ui as string).replace(/^http:\/\//, '').replace(/\/$/, '')}`;
@@ -137,6 +147,14 @@ describe('local 档案', () => {
     expect(status.isolation.level).toBe('weak');
     expect(status.externalWrites.github).toBe(false);
 
+    // 令牌文件只有本用户读得了：posix 看 0600；Windows 看 icacls 列出的授权里没有 Users、Everyone、Authenticated Users
+    if (process.platform === 'win32') {
+      const acl = execFileSync('icacls', [join(dir, 'local-token')], { encoding: 'utf8' });
+      expect(acl).toContain(process.env.USERNAME ?? '');
+      expect(acl).not.toMatch(/Everyone|BUILTINUsers|Authenticated Users/);
+    } else {
+      expect(statSync(join(dir, 'local-token')).mode & 0o777).toBe(0o600);
+    }
     await appendToSession(a1.kernel.db, 'persist-1', 'session.turn.started', {
       role: 'user',
       text: 'hi',

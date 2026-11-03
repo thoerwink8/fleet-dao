@@ -189,19 +189,26 @@ describe('静态页', () => {
   });
 });
 
+// Windows 的收紧动作（icacls）在装配档案里，真跑在 harness-dispatch 的测试里；这里只验本包的行为
+const winStub = async () => {};
+
 describe('令牌文件', () => {
-  it('没有就生成 64 位十六进制，再读是同一个；只有本用户读得了（posix 看 0600）', () => {
+  it('没有就生成 64 位十六进制，再读是同一个；只有本用户读得了（posix 看 0600）', async () => {
     const file = join(tmp, 'tok', 'local-token');
-    const a = ensureLocalToken(file);
+    const a = await ensureLocalToken(file, winStub);
     expect(a).toMatch(/^[0-9a-f]{64}$/);
-    expect(ensureLocalToken(file)).toBe(a);
+    expect(await ensureLocalToken(file, winStub)).toBe(a);
     if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 
-  it('文件内容坏了就重新生成，不信任旧内容', () => {
+  it('文件内容坏了就重新生成，不信任旧内容', async () => {
     const file = join(tmp, 'tok2', 'local-token');
     mkdirSync(join(tmp, 'tok2'), { recursive: true });
     writeFileSync(file, 'short');
-    expect(ensureLocalToken(file)).toMatch(/^[0-9a-f]{64}$/);
+    expect(await ensureLocalToken(file, winStub)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it.skipIf(process.platform !== 'win32')('Windows 上没给收紧函数就拒绝，不假装收紧了', async () => {
+    await expect(ensureLocalToken(join(tmp, 'tok3', 'local-token'))).rejects.toThrow(/restrictWindows/);
   });
 });

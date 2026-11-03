@@ -1,5 +1,5 @@
 // 起新内核进程（#3811）：node packages/harness-dispatch/src/bin/kernel.ts，配置全从环境变量来（法国上是单元的 EnvironmentFile）。
-// 装配档案（#3858）：FLEET2_PROFILE=france（默认，行为同 #3811 以来）| local（本机一条命令起用 bin/fleet2.ts up）。
+// 装配档案（#3858）：FLEET2_PROFILE=france（默认，行为同 #3811 以来）| local（本机一条命令起用 pnpm fleet2 up）。
 // 每行一条 JSON 打到 stdout（进 journal），影子静默打 {"alert":"shadow-silent",…}。收到 SIGTERM 先不领新活、等跑着的工人收尾再退。
 import { ConfigError, PROFILES, type ProfileName } from '../profiles/config.ts';
 import { assembleFrance } from '../profiles/france.ts';
