@@ -35,6 +35,10 @@
 - `src/app.css`：设计令牌（页底 `#f0f3fa`、品牌色 `#2962ff`、1px 发丝线、白卡片、正常态不上绿）。
 - `dev/`：本机开发和 e2e 用的整套后端。`dev/stack.ts` = PGlite 跑 fleet2 真迁移（外加最小的 `public.users`，放一位创始人）+ **真的驾驶舱口**（`harness-api` 的 `createCockpitApi`，部署用的就是这份代码）+ 一个只转发 `/next/api/*`、放 `dist/` 的前门（相当于香港 nginx）；`dev/seed.ts` 灌样例事件；`dev/serve.ts` 是一条命令的入口。前门不带任何凭据、不认识会话令牌。
 
+## 本机装法的页面（#3858）
+
+`vite build --mode desktop`（`pnpm --filter @fleet-dao/harness-web build:local`，vite 不许把模式叫 local）出 `dist-local/`：`base=/`，接口在 `/api`，`src/lib/profile.ts` 的 `IS_LOCAL` 为真。导航换成会话、任务、待我、宿主、设置（`shell.tsx` 的 `NAV_LOCAL`；待我取代决策，宿主取代法国运维），三块新页面在 `src/pages/local-pages.tsx`：待我（卡住的排前、其次做完没看的；待拍板、待验收等验收闸接进来再出）、宿主（隔离档位和读回的事实）、设置（当前配置，只读）；数据来自 `/api/local/status`（`src/lib/local-status.ts`）。没登录时 `LoginPrompt` 换成粘贴本机令牌的表单。由 `pnpm fleet2 up` 起的单口服务放出来，见 `packages/harness-api/AGENTS.md`「本机单口服务」。香港那份（`/next/`）的导航和路由不变。
+
 ## 本机跑起来看
 
 两个终端：

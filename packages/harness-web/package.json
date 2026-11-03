@@ -8,6 +8,7 @@
     "dev": "node dev/serve.ts",
     "dev:web": "vite",
     "build": "vite build",
+    "build:local": "vite build --mode desktop",
     "e2e": "playwright test -c e2e/playwright.config.ts"
   },
   "dependencies": {

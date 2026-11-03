@@ -24,6 +24,10 @@
 - 任务波次图（#3784，`src/work.ts`）：另有两条 GET `/next/api/work/batches?limit&before`（批次列表，`limit` 1–50 默认 10，`before` 是上一页给的 `nextBefore`）和 `/next/api/work/batches/<批次号>`（一批的整份快照，批次不存在 404）。形状在 `harness-contract/src/work-graph.ts`。节点状态由 `fleet2.jobs`（键 `spawn:<请求事件号>`）、会话 `shadow-<批次>` 里的派工请求和交回、`shadow_runs`、`shadow_compare` 推出（`deriveNodeState`，规则写在函数注释里：终局交回 > 活的状态 > 影子产物 > 还没派）；类别现在恒为 `shadow`，模型取最近一次运行的 `worker.spawned`，一句话说明取最近一次运行的最近一句进度（`session:worker-<runId>`），退到交回的原因、出错原因、任务标题。读的行数跟这一批的单数、尝试次数成正比，每条查询走哪个索引写在文件头注释，`test/work.test.ts` 关掉顺序扫描后 `EXPLAIN` 逐条核对；批次列表沿 `shadow_batch_items_snapshot_idx` 一个冻结时刻一个时刻地往下跳（同一批各单的 `snapshot_at` 应相同）。一批最多给 `GRAPH_NODE_MAX`（500）个节点，超了 `truncatedFrom` 写真实总数。会话号规则 `shadow-<批次>` 照抄 harness-dispatch 的 `shadowSessionId`，那边改了这里要跟着改。
 - 环境变量：`FLEET2_DATABASE_URL`、`FLEET_SESSION_SECRET`、`FLEET2_COCKPIT_HOST`（默认 127.0.0.1）、`FLEET2_COCKPIT_PORT`（默认 7346）、`FLEET2_COCKPIT_COOKIE_NAME`（只有本机 http 的 e2e 才改）。这个库用户要能读 `public.users` 的 `id, role, active, session_version`。
 
+## 本机单口服务（`src/local.ts`，#3858）
+
+本机装法（装配档案 local）把驾驶舱口、`/api/local/*`、静态页并成一个口，`listen` 里写死 127.0.0.1。驾驶舱口加了两个选项让它能复用：`authorize`（换掉 Cookie 核验）、`apiPrefix`（`/api`，页面挂根路径），并多暴露 `handler`、`endStreams`。鉴权是本机令牌：32 字节随机、存用户数据目录的 `local-token`（`ensureLocalToken`：posix 0600；Windows 没有权限位，由调用方传 `restrictWindows`，装配档案里用 `icacls` 去继承只授本用户，没传就拒绝；本包不起子进程），请求头 `X-Fleet-Local-Token` 或 Cookie `fleet_local`（HttpOnly、SameSite=Strict）。`pnpm fleet2 up` 打印的登录链接带一次性登录码（5 分钟、用一次就废，`/local-login?code=`），页面上也可 `POST /api/local/login` 粘贴令牌；令牌本身不进网址（网址带 token 字样的参数一律 400）。Host 头不是回环名 421（防 DNS 重绑）。静态页不要令牌，`/api` 下全要。`/api/local/status` 是装配档案填的状态（隔离档位、对外写、宿主、设置），页面「宿主」「设置」读它。测试 `test/local.test.ts`。
+
 ## 测试
 
 - `npx vitest run packages/harness-api`：PGlite 跑 fleet2 真迁移（`@fleet-dao/harness-store/testing`），起真的 HTTP 服务，用 MCP SDK 客户端和 fetch 流式读 SSE。对应旧坑 SEC2、SEC3、G4。

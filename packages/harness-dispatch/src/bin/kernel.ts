@@ -1,154 +1,23 @@
 // 起新内核进程（#3811）：node packages/harness-dispatch/src/bin/kernel.ts，配置全从环境变量来（法国上是单元的 EnvironmentFile）。
-// 影子模式：接口层只听回环、对外零写；GitHub 只读短期令牌（用 App 凭据按仓现换）只在这个进程里。FLEET2_PUBLISH=1 开真执行（#3783）：
-// 对冻结的真执行批次认领单、派工，交回后经 outbox 推分支、开 PR，不合并。每行一条 JSON 打到 stdout（进 journal），
-// 影子静默打 {"alert":"shadow-silent",…}。收到 SIGTERM 先不领新活、等跑着的工人收尾再退。
-import { makeRedactor, secretsFromEnv } from '@fleet-dao/harness-runner';
-import type { Db } from '@fleet-dao/harness-store';
-import * as schema from '@fleet-dao/harness-store/schema';
-import {
-  CLAUDE_PERMISSION_MODES,
-  type ClaudePermissionMode,
-  WORKER_SHELLS,
-  type WorkerShell,
-} from '@fleet-dao/harness-workers';
-import { drizzle } from 'drizzle-orm/postgres-js';
-import postgres from 'postgres';
-import { appTokenSource, PUBLISH_PERMISSIONS } from '../github-app.ts';
-import { githubReader } from '../github-read.ts';
-import { githubWriter } from '../github-write.ts';
-import { createKernel } from '../kernel.ts';
-import { scopeSandbox } from '../scope-sandbox.ts';
-import { acquireTask, currentFencing } from '../task-claim.ts';
+// 装配档案（#3858）：FLEET2_PROFILE=france（默认，行为同 #3811 以来）| local（本机一条命令起用 pnpm fleet2 up）。
+// 每行一条 JSON 打到 stdout（进 journal），影子静默打 {"alert":"shadow-silent",…}。收到 SIGTERM 先不领新活、等跑着的工人收尾再退。
+import { ConfigError, PROFILES, type ProfileName } from '../profiles/config.ts';
+import { assembleFrance } from '../profiles/france.ts';
+import { runAssembly } from '../profiles/run.ts';
 
-const env = process.env;
-const need = (k: string): string => {
-  const v = env[k];
-  if (!v) {
-    console.error(`没给 ${k}，不起`);
+const profile = (process.env.FLEET2_PROFILE ?? 'france') as ProfileName;
+try {
+  if (!PROFILES.includes(profile)) throw new ConfigError(`FLEET2_PROFILE 只认 ${PROFILES.join('、')}`);
+  // local 档案才载入 PGlite；法国进程不带它
+  const assembly =
+    profile === 'local'
+      ? await (await import('../profiles/local.ts')).assembleLocal(process.env)
+      : assembleFrance(process.env);
+  await runAssembly(assembly, { signals: true });
+} catch (err) {
+  if (err instanceof ConfigError || (err instanceof Error && err.name === 'LocalDbBusyError')) {
+    console.error(err.message);
     process.exit(2);
   }
-  return v;
-};
-const port = (k: string, def: number): number => {
-  const n = Number(env[k] ?? def);
-  if (!Number.isInteger(n) || n <= 0 || n > 65_535) {
-    console.error(`${k} 不是端口：${env[k]}`);
-    process.exit(2);
-  }
-  return n;
-};
-const log = (o: Record<string, unknown>) =>
-  console.log(JSON.stringify({ at: new Date().toISOString(), ...o }));
-
-const command = JSON.parse(need('FLEET2_WORKER_COMMAND')) as unknown;
-if (!Array.isArray(command) || command.length === 0 || command.some((c) => typeof c !== 'string')) {
-  console.error('FLEET2_WORKER_COMMAND 要是非空的字符串数组（JSON），例如 ["reclaude"]');
-  process.exit(2);
+  throw err;
 }
-// FLEET2_SANDBOX=scope：工人以会话用户跑（法国，执行体前缀是 deploy/france/fleet2-worker.sh），目录经 fleet-agent-scope 交接
-const sandboxKind = env.FLEET2_SANDBOX ?? '';
-if (sandboxKind !== '' && sandboxKind !== 'scope') {
-  console.error(`FLEET2_SANDBOX 只认 scope（或不给）：${sandboxKind}`);
-  process.exit(2);
-}
-// FLEET2_SHELL：工人用哪个壳（#3842），claude-code（默认）或 grok；grok 要给 FLEET2_GROK_AUTH（登录态文件的绝对路径）
-const shell = (env.FLEET2_SHELL ?? 'claude-code') as WorkerShell;
-if (!WORKER_SHELLS.includes(shell)) {
-  console.error(`FLEET2_SHELL 只认 ${WORKER_SHELLS.join('、')}`);
-  process.exit(2);
-}
-const grokAuthPath = shell === 'grok' ? need('FLEET2_GROK_AUTH') : undefined;
-const permissionMode = (env.FLEET2_PERMISSION_MODE ?? 'bypassPermissions') as ClaudePermissionMode;
-if (!CLAUDE_PERMISSION_MODES.includes(permissionMode)) {
-  console.error(`FLEET2_PERMISSION_MODE 只认 ${CLAUDE_PERMISSION_MODES.join('、')}`);
-  process.exit(2);
-}
-
-const sql = postgres(need('FLEET2_DATABASE_URL'), { max: 4, onnotice: () => {} });
-const db = drizzle(sql, { schema }) as unknown as Db;
-const redact = makeRedactor(secretsFromEnv(env));
-const appFile = need('FLEET2_GITHUB_APP_FILE');
-const gh = githubReader({ tokenFor: appTokenSource({ file: appFile }) });
-// FLEET2_PUBLISH=1：真执行（#3783，第 7 片）。另起一个令牌源，权限只有 PUBLISH_PERMISSIONS（contents 和 pull_requests 的写），
-// 只给发布那一步；读单、读合并结果仍用上面只读的。不开合并：这个进程里没有任何合并的调用。
-const publishOn = env.FLEET2_PUBLISH === '1';
-if (env.FLEET2_PUBLISH !== undefined && env.FLEET2_PUBLISH !== '1' && env.FLEET2_PUBLISH !== '0') {
-  console.error('FLEET2_PUBLISH 只认 1 或 0');
-  process.exit(2);
-}
-const writeToken = publishOn
-  ? appTokenSource({ file: appFile, permissions: PUBLISH_PERMISSIONS })
-  : undefined;
-const githubCalls = new Map<string, number>();
-
-const kernel = createKernel({
-  db,
-  redact,
-  apiPort: port('FLEET2_API_PORT', 7345),
-  dispatcher: {
-    command: command as string[],
-    shell,
-    ...(grokAuthPath ? { grokAuthPath } : {}),
-    model: need('FLEET2_MODEL'),
-    permissionMode,
-    // 工人环境由 buildWorkerEnv 按白名单现场构造，宿主的凭据一个都不抄
-    hostEnv: env,
-    tmpRoot: need('FLEET2_WORK_ROOT'),
-    ...(sandboxKind === 'scope' ? { sandbox: scopeSandbox() } : {}),
-  },
-  mirrorRoot: need('FLEET2_MIRROR_ROOT'),
-  workRoot: need('FLEET2_WORK_ROOT'),
-  workerHome: need('FLEET2_WORKER_HOME'),
-  egressPort: port('FLEET2_EGRESS_PORT', 7344),
-  taskFor: gh.taskFor,
-  readMerged: gh.readMerged,
-  onSilence: (batchId, s) =>
-    log({
-      alert: 'shadow-silent',
-      batchId,
-      pending: s.pending,
-      lastAt: s.lastAt.toISOString(),
-      silentMs: s.silentMs,
-    }),
-  onError: (step, err) =>
-    log({ error: step, message: redact(err instanceof Error ? err.message : String(err)) }),
-  ...(writeToken
-    ? {
-        publish: {
-          acquire: (ref, title) => acquireTask(db, ref, title),
-          model: need('FLEET2_MODEL'),
-          outbox: {
-            github: githubWriter({
-              tokenFor: writeToken,
-              // 旧坑 E1：每次 GitHub 写口的调用记一笔，按粗名字累计，tick 报告里带出来
-              onCall: (what) => githubCalls.set(what, (githubCalls.get(what) ?? 0) + 1),
-            }),
-            tokenFor: writeToken,
-            fencingOf: (ref) => currentFencing(db, ref),
-            hostEnv: env,
-          },
-        },
-      }
-    : {}),
-  onTick: (r) => {
-    if (r.real && (r.real.requested > 0 || r.real.skipped.length > 0 || (r.real.outbox?.claimed ?? 0) > 0)) {
-      log({ real: r.real, githubCalls: Object.fromEntries(githubCalls) });
-    }
-  },
-  tickMs: Number(env.FLEET2_TICK_MS ?? 30_000),
-});
-
-const apiPort = await kernel.start();
-log({ started: true, apiPort, shadow: !publishOn, publish: publishOn });
-
-let stopping = false;
-const stop = async (signal: string) => {
-  if (stopping) return;
-  stopping = true;
-  log({ stopping: signal });
-  await kernel.stop();
-  await sql.end({ timeout: 5 });
-  process.exit(0);
-};
-process.on('SIGTERM', () => void stop('SIGTERM'));
-process.on('SIGINT', () => void stop('SIGINT'));

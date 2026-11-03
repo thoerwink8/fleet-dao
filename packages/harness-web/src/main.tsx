@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router';
 import './app.css';
 import { BlockPlaceholder, MorePage, Shell } from './components/shell';
+import { IS_LOCAL } from './lib/profile';
+import { HostsPage, InboxPage, LocalSettingsPage } from './pages/local-pages';
 import { Work } from './pages/work';
 import { Workbench } from './pages/workbench';
 
@@ -18,6 +20,13 @@ const router = createBrowserRouter(
           path: 'work',
           element: <Work />,
         },
+        ...(IS_LOCAL
+          ? [
+              { path: 'inbox', element: <InboxPage /> },
+              { path: 'hosts', element: <HostsPage /> },
+              { path: 'settings', element: <LocalSettingsPage /> },
+            ]
+          : []),
         {
           path: 'decide',
           element: (
@@ -38,16 +47,20 @@ const router = createBrowserRouter(
             />
           ),
         },
-        {
-          path: 'settings',
-          element: (
-            <BlockPlaceholder
-              title="设置"
-              slice="设置块：旧驾驶舱的设置、渠道、路由在第 10 片前并进来。"
-              note="现在设置请继续用旧驾驶舱。"
-            />
-          ),
-        },
+        ...(IS_LOCAL
+          ? []
+          : [
+              {
+                path: 'settings',
+                element: (
+                  <BlockPlaceholder
+                    title="设置"
+                    slice="设置块：旧驾驶舱的设置、渠道、路由在第 10 片前并进来。"
+                    note="现在设置请继续用旧驾驶舱。"
+                  />
+                ),
+              },
+            ]),
         { path: 'more', element: <MorePage /> },
         {
           path: '*',

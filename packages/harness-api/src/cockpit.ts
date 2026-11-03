@@ -77,10 +77,16 @@ export function signSessionCookie(secret: string, claims: SessionClaims, purpose
   return `${body}.${mac(secret, purpose, body).toString('base64url')}`;
 }
 
+export type CockpitVerdict = { ok: true } | { ok: false; status: 401 | 403; message: string };
+
 export interface CockpitOptions {
   db: Db;
-  /** 旧驾驶舱的 FLEET_SESSION_SECRET。 */
-  sessionSecret: string;
+  /** 旧驾驶舱的 FLEET_SESSION_SECRET。给了 `authorize` 就不用。 */
+  sessionSecret?: string;
+  /** 换掉登录核验（本机装法用本机令牌，#3858）：每个请求、SSE 每个周期都调一次。不给就是上面的 Cookie 核验。 */
+  authorize?: (req: IncomingMessage) => Promise<CockpitVerdict>;
+  /** 接口路径前缀，默认 /next/api；本机装法页面挂在根路径，用 /api。 */
+  apiPrefix?: string;
   /** Cookie 名，默认 __Host-fleet_session；只有本机 http 开发和 e2e 才改。 */
   cookieName?: string;
   /** 取当前时间（秒级判过期用），测试可换。 */
@@ -92,9 +98,14 @@ export interface CockpitOptions {
   heartbeatMs?: number;
 }
 
-export type CockpitApi = HarnessApi;
+export interface CockpitApi extends HarnessApi {
+  /** 同一套处理函数，供本机装法把驾驶舱口并进自己的单口服务（#3858）。 */
+  handler(req: IncomingMessage, res: ServerResponse): Promise<void>;
+  /** 收掉开着的 SSE（不关 server）。 */
+  endStreams(): void;
+}
 
-type Verdict = { ok: true } | { ok: false; status: 401 | 403; message: string };
+type Verdict = CockpitVerdict;
 
 function parseCookies(header: string | undefined): Map<string, string> {
   const out = new Map<string, string>();
@@ -255,8 +266,15 @@ export async function listSessions(
 }
 
 export function createCockpitApi(options: CockpitOptions): CockpitApi {
-  const { db, sessionSecret } = options;
-  if (sessionSecret.length < 16) throw new Error('sessionSecret 太短');
+  const { db } = options;
+  const sessionSecret = options.sessionSecret ?? '';
+  if (!options.authorize && sessionSecret.length < 16) throw new Error('sessionSecret 太短');
+  const prefix = (options.apiPrefix ?? '/next/api').replace(/\/$/, '');
+  const esc = prefix.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const workRe = new RegExp(`^${esc}/work/batches(?:/([^/]+))?$`);
+  const streamRe = new RegExp(
+    `^${esc}/(?:sessions(?:/([^/]+)/(history|events))?|transcripts/([^/]+)/(history|events))$`,
+  );
   const cookieName = options.cookieName ?? COCKPIT_COOKIE;
   const clock = options.now ?? (() => new Date());
   const open = new Set<() => void>();
@@ -270,6 +288,7 @@ export function createCockpitApi(options: CockpitOptions): CockpitApi {
 
   /** 核登录。会话令牌（请求头、cookie）、Authorization 一概不认：带了就 401，哪怕登录 Cookie 是好的。 */
   async function authorize(req: IncomingMessage): Promise<Verdict> {
+    if (options.authorize) return options.authorize(req);
     if (req.headers[TOKEN_HEADER] !== undefined || req.headers.authorization !== undefined) {
       return { ok: false, status: 401, message: '这个口只认登录 Cookie' };
     }
@@ -329,13 +348,10 @@ export function createCockpitApi(options: CockpitOptions): CockpitApi {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (hasTokenInQuery(url)) return reply(res, 400, '令牌只能放请求头或 cookie，不能放网址');
     // 任务波次图（#3784）：/work/batches 批次列表，/work/batches/<批次号> 一批的整份快照
-    const w = /^\/next\/api\/work\/batches(?:\/([^/]+))?$/.exec(url.pathname);
+    const w = workRe.exec(url.pathname);
     if (w) return await handleWork(req, res, url, w[1] === undefined ? undefined : decodeURIComponent(w[1]));
     // /sessions/<号>/(history|events) 读会话流；/transcripts/<runId>/(history|events) 读工人过程流 transcript:<runId>（#3781）
-    const m =
-      /^\/next\/api\/(?:sessions(?:\/([^/]+)\/(history|events))?|transcripts\/([^/]+)\/(history|events))$/.exec(
-        url.pathname,
-      );
+    const m = streamRe.exec(url.pathname);
     if (!m) return reply(res, 404, '没有这个路径');
     const isTranscript = m[3] !== undefined;
     const rawId = isTranscript ? m[3] : m[1];
@@ -368,5 +384,12 @@ export function createCockpitApi(options: CockpitOptions): CockpitApi {
   });
   server.keepAliveTimeout = COCKPIT_KEEP_ALIVE_MS;
   server.headersTimeout = COCKPIT_KEEP_ALIVE_MS + 5000;
-  return { server, ...wrapServer(server, open) };
+  return {
+    server,
+    ...wrapServer(server, open),
+    handler: handle,
+    endStreams: () => {
+      for (const end of [...open]) end();
+    },
+  };
 }
