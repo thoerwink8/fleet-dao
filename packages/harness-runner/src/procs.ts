@@ -1,11 +1,26 @@
 // 认一个会话的进程、按会话收（旧坑 A5）：会话 = 带会话标记 FLEET_RUN_ID 的进程，加根进程、它的进程组、它的子孙。
 // 从旧 adapters/src/procs.ts 复制改写：记下每个进程的起始时刻，发信号前核对，PID 被别的进程复用了就不碰。
 // 只认 Linux 的 /proc；没有 /proc（Windows 本机跑测试）时查不了，调用方照实记「没查成」，不当成收干净了。
+// 测试进程的标记值见 runMarker：同名 runId 不会被别的 Vitest 进程收掉。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 /** 会话标记：每个会话一个值，子孙都继承，内核重启后也能按它认出上一代的进程。 */
 export const RUN_MARKER_KEY = 'FLEET_RUN_ID';
+
+/**
+ * 写进 `FLEET_RUN_ID` 的值。生产就是 runId，重启后的新进程仍按它找到上一代的孤儿。
+ * Vitest 每个文件一个进程、库里的事件号都从 1 起，runId 会撞成同一个（d1-a1）：
+ * 测试里的标记带上本进程号，收尸不会误杀别的测试还在跑的工人。
+ */
+export function runMarker(
+  runId: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  pid = process.pid,
+): string {
+  if (env.VITEST?.trim()) return `${pid}:${runId}`;
+  return runId;
+}
 
 export const HAS_PROC = existsSync('/proc/self/stat');
 
@@ -55,7 +70,7 @@ export type ProcSnapshot = Map<number, string>;
 export function sessionSnapshot(runId: string, rootPid?: number): ProcSnapshot {
   const found: ProcSnapshot = new Map();
   if (!HAS_PROC) return found;
-  const needle = Buffer.from(`${RUN_MARKER_KEY}=${runId}\0`);
+  const needle = Buffer.from(`${RUN_MARKER_KEY}=${runMarker(runId)}\0`);
   const children = new Map<number, number[]>();
   const stats = new Map<number, ProcStat>();
   for (const pid of allPids()) {

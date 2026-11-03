@@ -1,5 +1,6 @@
 // 运行层对着旧坑 A1–A5、A7、H1 的测试（specs/3770-harness-rewrite/旧坑验收用例.md）。全用假执行体（fake-cli.mjs）。
 // A6（OOM 归属证据，要 cgroup）在法国真机测，见 #3775。
+import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +9,7 @@ import { type Budget, BudgetTooLongError, deriveDeadline } from '../src/budget.t
 import { classifyClaudeLine } from '../src/frames.ts';
 import { sweepOrphans } from '../src/orphans.ts';
 import { type RunSpec, runProcess } from '../src/process.ts';
-import { HAS_PROC, runAlive } from '../src/procs.ts';
+import { HAS_PROC, RUN_MARKER_KEY, runAlive, runMarker } from '../src/procs.ts';
 import { makeRedactor, secretsFromEnv } from '../src/redact.ts';
 import { StopReason } from '../src/stop-reason.ts';
 
@@ -145,6 +146,49 @@ describe('停滞', () => {
 });
 
 describe('A5 子进程只走一个起法、按会话收', () => {
+  it('生产标记就是 runId；Vitest 里带上本进程号，同名 runId 不再是同一个会话', () => {
+    expect(runMarker('d1-a1', {}, 42)).toBe('d1-a1');
+    expect(runMarker('d1-a1', { VITEST: '  ' }, 42)).toBe('d1-a1');
+    expect(runMarker('d1-a1', { VITEST: 'true' }, 42)).toBe('42:d1-a1');
+  });
+
+  it.skipIf(!HAS_PROC)(
+    '别的进程上同名 runId 的工人不会被这次收尸杀掉',
+    async () => {
+      const runId = `t-${process.pid}-neighbor`;
+      // 裸的 runId 是生产标记，也是并行测试以前撞车的那个值。本进程在 Vitest 里只收「进程号:runId」。
+      const neighbor = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1<<30)'], {
+        env: { PATH: process.env.PATH ?? '', [RUN_MARKER_KEY]: runId },
+        detached: true,
+        stdio: 'ignore',
+      });
+      neighbor.unref();
+      const pid = neighbor.pid;
+      if (pid === undefined) throw new Error('邻居进程没起来');
+      const alive = () => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      try {
+        expect(alive()).toBe(true);
+        await runProcess(spec('work', { runId }));
+        expect(alive()).toBe(true);
+        expect(runAlive(runId)).toBe(false);
+      } finally {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // 已经没了
+        }
+      }
+    },
+    15_000,
+  );
+
   it.skipIf(!HAS_PROC)('执行体退了、脱离进程组的孙子还在：按会话标记收掉，收完不剩', async () => {
     const s = spec('grandchild');
     const r = await runProcess(s);

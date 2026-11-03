@@ -8,7 +8,14 @@ import { spawn } from 'node:child_process';
 import { type Budget, fmtMs } from './budget.ts';
 import { classifyClaudeLine, type Frame } from './frames.ts';
 import { LineSplitter } from './lines.ts';
-import { type ProcSnapshot, RUN_MARKER_KEY, reapSession, sessionSnapshot, signalSnapshot } from './procs.ts';
+import {
+  type ProcSnapshot,
+  RUN_MARKER_KEY,
+  reapSession,
+  runMarker,
+  sessionSnapshot,
+  signalSnapshot,
+} from './procs.ts';
 import type { Redactor } from './redact.ts';
 import { stopCauseOf } from './stop-reason.ts';
 
@@ -21,7 +28,7 @@ export interface RunSpec {
   /** 整份环境，不合并宿主的；这里再加上会话标记。 */
   env: Record<string, string>;
   stdin: string;
-  /** 会话编号：写进环境当标记（FLEET_RUN_ID），收尸时按它认出脱离了进程组的子孙。 */
+  /** 会话编号：收尸标记见 runMarker（生产写 runId，测试再加进程号），用来认出脱离了进程组的子孙。 */
   runId: string;
   budget: Budget;
   /** 这一层的绝对截止时刻（budget.ts 的 deriveDeadline 算）。 */
@@ -159,7 +166,7 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
 
     const child = spawn(bin, args, {
       cwd: spec.cwd,
-      env: { ...spec.env, [RUN_MARKER_KEY]: spec.runId },
+      env: { ...spec.env, [RUN_MARKER_KEY]: runMarker(spec.runId) },
       stdio: ['pipe', 'pipe', 'pipe'],
       // 自成一个进程组；脱离了组的子孙靠会话标记另外认
       detached: posix,
