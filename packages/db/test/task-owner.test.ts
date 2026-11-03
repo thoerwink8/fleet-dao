@@ -1,6 +1,8 @@
 // 新旧并行的认领（决定 0124，#3773）：一张单只有 tasks 那一行，owner 分新旧系统，fencing 由触发器在所有权变化时加一。
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+// 新内核认领在另一个包里（不让 db 倒过来依赖它）。这一行要写进 packages/db/tsconfig.json 的 include，
+// 否则 tsc -b 报 TS6307：复合项目不能凭相对路径把包外的 .ts 拉进来。
 import { acquireTask } from '../../harness-dispatch/src/task-claim.ts';
 import { intakeTaskRow } from '../src/queries/intake.ts';
 import { claimLocalTask } from '../src/queries/local-claims.ts';

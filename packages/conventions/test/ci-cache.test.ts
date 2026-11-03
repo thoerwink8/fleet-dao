@@ -155,10 +155,10 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     ]);
   });
 
-  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 adapters 和 core、agents 读 db、agents-sync、conventions 和 core），不往上、不顺依赖往下传 TEST_READS', () => {
+  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 adapters、core 和新内核认领、agents 读 db、agents-sync、conventions 和 core），不往上、不顺依赖往下传 TEST_READS', () => {
     expect(sourceClosure(GRAPH, ['api'])).toEqual(['api', 'db', 'shared', 'web']);
-    // db 读 adapters 的夹具和 core 的告警文案（TEST_READS）；假依赖图里 adapters 没有下游
-    expect(sourceClosure(GRAPH, ['db'])).toEqual(['adapters', 'core', 'db', 'shared']);
+    // db 读 adapters 的夹具、core 的告警文案，以及新内核认领那一个文件（TEST_READS 按它所在的包算）；假依赖图里这些包没有下游
+    expect(sourceClosure(GRAPH, ['db'])).toEqual(['adapters', 'core', 'db', 'harness-dispatch', 'shared']);
     expect(sourceClosure(GRAPH, ['agent-eval'])).toEqual(['agent-eval', 'shared']);
     // engine 依赖 api，但 api 读 web 是 api 测试自己的事：engine 的闭包里不带 web
     expect(sourceClosure(GRAPH, ['engine'])).not.toContain('web');

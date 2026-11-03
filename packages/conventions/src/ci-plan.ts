@@ -124,6 +124,7 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'web'] as const;
  * api/test/health-public-text.test.ts 按路径动态加载 web/src/build/scan.ts；
  * db/test/catalog.test.ts、candidates.test.ts 读 adapters 的夹具（#984，不进 package.json：db 不倒过来依赖 adapters）；
  * db/test/claim-ledger-gone.test.ts 读 core 的 alert-work.ts；
+ * db/test/task-owner.test.ts 调新内核的 acquireTask（harness-dispatch/src/task-claim.ts），核对它写的是旧库真迁移出来的 tasks.owner（不进 package.json：db 不倒过来依赖新内核）；
  * agents/test/worker.test.ts 读 db 的路由骨架 routing.default.json（本机启动器照它定思考档位，#470）；
  * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）；
  * agents/test/rules/project-subagents.rules.test.ts 读 conventions 的 standard-paths.json（钉住标准路径清单盖着 agents/subagents/）：
@@ -142,7 +143,7 @@ export const TEST_READS: Record<string, string[]> = {
     '.github/workflows/managed-feedback.yml',
     'packages/shared/src/private-quotes.ts',
   ],
-  db: ['adapters', 'core'],
+  db: ['adapters', 'core', 'packages/harness-dispatch/src/task-claim.ts'],
   [AGENTS_UNIT]: [
     'db',
     'agents-sync',
