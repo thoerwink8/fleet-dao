@@ -1,5 +1,5 @@
 // 会话的工人状态：从该会话最近的几条事件推出来。纯函数，规则只在这一个文件里（#3781 收尾）：
-// 驾驶舱前端按它给列表分组，接口层按它数「卡住」个数，两边 import 同一份，不写两份。
+// 驾驶舱前端按它给列表分组；投影按同一份规则记下当前态，接口层数「卡住」时读投影，不现扫事件。
 // 优先级：卡住或失败 > 在跑 > 空闲或等待 > 做完（herdr 的 blocked / working / idle / done）。
 // 不依赖 zod 等运行时库，前端打包不会因此变大，所以单独放子路径 `@fleet-dao/harness-contract/worker-state`。
 
@@ -20,6 +20,21 @@ export interface TailEvent {
 
 /** 工人超过截止时间这么久还没交，就算卡住（毫秒）。 */
 export const DEADLINE_GRACE_MS = 5 * 60_000;
+
+/** 判状态只看最近这么多条。列表的 tail 和投影的窗口用同一个数。 */
+export const TAIL_EVENTS = 24;
+
+/** 从载荷里摘进 tail 的字段。大文本不进。投影和列表的瘦身版都按这份。 */
+export const TAIL_FIELDS = [
+  'outcome',
+  'verdict',
+  'final',
+  'status',
+  'exitCode',
+  'killed',
+  'spawnError',
+  'deadline',
+] as const;
 
 const present = (v: unknown): boolean => v !== null && v !== undefined && v !== '' && v !== false;
 
@@ -79,9 +94,57 @@ export function deriveWorkerState(tail: readonly TailEvent[], now: number = Date
   return 'waiting';
 }
 
-/** 数这批会话里有几个是卡住的（接口层和前端用同一条规则）。 */
+/** 数这批会话里有几个是卡住的（和投影用同一条规则；全库个数改读投影，不靠它扫）。 */
 export function countStuck(tails: Iterable<readonly TailEvent[]>, now: number = Date.now()): number {
   let n = 0;
   for (const t of tails) if (deriveWorkerState(t, now) === 'stuck') n++;
   return n;
+}
+
+/** 一条事件收成判状态用的瘦身版：只留 TAIL_FIELDS，空值丢掉。 */
+export function tailEventFrom(type: string, payload: unknown): TailEvent {
+  const ev: Record<string, unknown> = { type };
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const src = payload as Record<string, unknown>;
+    for (const k of TAIL_FIELDS) {
+      const v = src[k];
+      if (v !== undefined && v !== null) ev[k] = v;
+    }
+  }
+  return ev as unknown as TailEvent;
+}
+
+/** 把一条新事件折进窗口，超过 limit 丢掉最旧的。一条条折，结果等于只留最后 limit 条。 */
+export function pushTail(tail: readonly TailEvent[], event: TailEvent, limit = TAIL_EVENTS): TailEvent[] {
+  if (limit < 1) return [];
+  const start = tail.length >= limit ? tail.length - (limit - 1) : 0;
+  const next = tail.slice(start);
+  next.push(event);
+  return next;
+}
+
+/**
+ * 状态还是在跑、并且这次启动写了截止时间时，返回那个截止时间（毫秒）。
+ * 过了它再加宽限，deriveWorkerState 会改判卡住；投影记下这个时刻，到点再改，不用把会话重读一遍。
+ */
+export function trackedDeadlineMs(tail: readonly TailEvent[], now: number): number | null {
+  if (deriveWorkerState(tail, now) !== 'running') return null;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const e = tail[i];
+    if (!e) continue;
+    switch (e.type) {
+      case 'worker.spawned':
+      case 'worker.progress.reported':
+      case 'worker.stop.requested':
+        return deadlineBefore(tail, i) ?? null;
+      case 'session.turn.started':
+      case 'handback.recorded':
+      case 'worker.settled':
+      case 'worker.result.submitted':
+      case 'worker.spawn.requested':
+        return null;
+      default:
+    }
+  }
+  return null;
 }

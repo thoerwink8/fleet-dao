@@ -1,6 +1,14 @@
 // 驾驶舱口（#3818）：浏览器带旧驾驶舱的登录 Cookie 只读会话。安全条目对应 #3818 设计第四节：
 // 网址带令牌、无 Cookie / 签名错 / 过期 / 别的用途、非创始人、版本号对不上、撤销即断、会话令牌不认、非法会话号、无 CORS、字节里无令牌头名。
-import { appendEvents, events } from '@fleet-dao/harness-store';
+
+import { deriveWorkerState, type TailEvent } from '@fleet-dao/harness-contract/worker-state';
+import {
+  appendEvents,
+  countProjectedStuck,
+  events,
+  STUCK_COUNT_META_SQL,
+  STUCK_COUNT_READ_SQL,
+} from '@fleet-dao/harness-store';
 import { createTestDb, type TestDb } from '@fleet-dao/harness-store/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -43,7 +51,7 @@ afterEach(async () => {
   await t.pg.exec(`update public.users set session_version = 0 where id = '${FOUNDER}'`);
   await t.pg.exec(`update public.users set active = true where id = '${FOUNDER}'`);
   await t.pg.exec(
-    'truncate fleet2.events, fleet2.projection_checkpoints, fleet2.stream_heads restart identity',
+    'truncate fleet2.events, fleet2.projection_checkpoints, fleet2.stream_heads, fleet2.session_worker_state, fleet2.worker_state_counts, fleet2.worker_state_meta restart identity',
   );
 });
 
@@ -416,6 +424,151 @@ describe('会话列表', () => {
     expect(body.sessions).toHaveLength(30);
     expect(body.nextBefore).toBe(body.sessions[29]?.lastEventId);
   });
+});
+
+describe('卡住个数读投影（#3853 第 2 片）', () => {
+  const SESSIONS = 5000;
+  /** 计数表四种状态各一行；整表读到也是这个数，和造了多少会话无关。 */
+  const ROW_BOUND = 4;
+
+  type Spec = { type: string; payload: Record<string, unknown> };
+  const noise = (n: number): Spec[] =>
+    Array.from({ length: n }, () => ({ type: 'session.turn.settled', payload: { text: 'x'.repeat(40) } }));
+
+  function eventsFor(i: number): Spec[] {
+    switch (i % 100) {
+      case 0:
+        return [{ type: 'worker.settled', payload: { exitCode: 1, stderrTail: 'z'.repeat(8000) } }];
+      case 1:
+        return [{ type: 'worker.settled', payload: { exitCode: 0, killed: 'stop-requested' } }];
+      case 2:
+        return [{ type: 'worker.result.submitted', payload: { status: 'blocked' } }];
+      case 3:
+        return [{ type: 'handback.recorded', payload: { final: true, outcome: 'dead', verdict: 'failed' } }];
+      case 4:
+        return [{ type: 'worker.spawned', payload: { deadline: '2020-01-01T00:00:00.000Z' } }];
+      case 5:
+        return [{ type: 'worker.settled', payload: { exitCode: 0 } }];
+      case 6:
+        return [
+          { type: 'handback.recorded', payload: { final: true, outcome: 'completed', verdict: 'passed' } },
+        ];
+      case 7:
+        return [{ type: 'worker.spawned', payload: { deadline: '2099-01-01T00:00:00.000Z' } }];
+      case 8:
+        return [{ type: 'worker.spawn.requested', payload: {} }];
+      case 9:
+        // 卡住的那条被挤出最近 24 条，手算不算卡住
+        return [{ type: 'worker.settled', payload: { exitCode: 1 } }, ...noise(TAIL_EVENTS)];
+      case 10:
+        return [...noise(TAIL_EVENTS), { type: 'worker.settled', payload: { spawnError: 'ENOENT' } }];
+      default:
+        return [{ type: 'worker.progress.reported', payload: { summary: 'ok' } }];
+    }
+  }
+
+  function hand(now: number): number {
+    let n = 0;
+    for (let i = 0; i < SESSIONS; i++) {
+      const tail: TailEvent[] = eventsFor(i)
+        .slice(-TAIL_EVENTS)
+        .map((e) => ({ type: e.type, ...e.payload }));
+      if (deriveWorkerState(tail, now) === 'stuck') n++;
+    }
+    return n;
+  }
+
+  async function examined(query: string): Promise<{ rows: number; plan: string }> {
+    const analyzed = await t.pg.query<{ 'QUERY PLAN': unknown }>(`explain (analyze, format json) ${query}`);
+    const cell = analyzed.rows[0]?.['QUERY PLAN'];
+    const parsed = typeof cell === 'string' ? (JSON.parse(cell) as unknown) : cell;
+    const root = (Array.isArray(parsed) ? parsed[0] : parsed) as
+      | { Plan?: Record<string, unknown> }
+      | undefined;
+    let max = 0;
+    const walk = (node: Record<string, unknown> | undefined) => {
+      if (!node) return;
+      const loops = typeof node['Actual Loops'] === 'number' ? node['Actual Loops'] : 1;
+      const actual = typeof node['Actual Rows'] === 'number' ? node['Actual Rows'] : 0;
+      const removed = typeof node['Rows Removed by Filter'] === 'number' ? node['Rows Removed by Filter'] : 0;
+      max = Math.max(max, (actual + removed) * loops);
+      const kids = node.Plans;
+      if (Array.isArray(kids)) for (const kid of kids) walk(kid as Record<string, unknown>);
+    };
+    walk(root?.Plan);
+    const text = await t.pg.query<{ 'QUERY PLAN': string }>(`explain ${query}`);
+    return { rows: max, plan: text.rows.map((row) => row['QUERY PLAN']).join('\n') };
+  }
+
+  it('五千个会话里若干卡住：个数与手算一致，计数读的行数有固定上界', async () => {
+    const rows: {
+      streamId: string;
+      seq: number;
+      type: string;
+      schemaVersion: number;
+      payload: Record<string, unknown>;
+    }[] = [];
+    for (let i = 0; i < SESSIONS; i++) {
+      const evs = eventsFor(i);
+      for (let s = 0; s < evs.length; s++) {
+        const e = evs[s];
+        if (!e) continue;
+        rows.push({
+          streamId: `session:n${i}`,
+          seq: s + 1,
+          type: e.type,
+          schemaVersion: 1,
+          payload: e.payload,
+        });
+      }
+    }
+    for (let i = 0; i < rows.length; i += 500) await t.db.insert(events).values(rows.slice(i, i + 500));
+
+    const now = Date.now();
+    const expected = hand(now);
+    expect(expected).toBeGreaterThan(0);
+    expect(expected).toBeLessThan(SESSIONS);
+
+    const { base } = await start();
+    const body = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as ListBody;
+    expect(body.sessions).toHaveLength(30);
+    expect(body.stuckCount).toBe(expected);
+
+    const projected = (
+      await t.pg.query<{ n: number }>('select count(*)::int as n from fleet2.session_worker_state')
+    ).rows[0]?.n;
+    expect(projected).toBe(SESSIONS);
+    const tailBytes = (
+      await t.pg.query<{ n: number }>(
+        'select max(octet_length(tail::text))::int as n from fleet2.session_worker_state',
+      )
+    ).rows[0]?.n;
+    expect(tailBytes ?? 0).toBeLessThan(2500);
+
+    const countPlan = await examined(STUCK_COUNT_READ_SQL);
+    expect(countPlan.rows, countPlan.plan).toBeGreaterThan(0);
+    expect(countPlan.rows, countPlan.plan).toBeLessThanOrEqual(ROW_BOUND);
+    expect(ROW_BOUND * 100).toBeLessThan(SESSIONS);
+    expect(countPlan.plan).not.toContain('session_worker_state');
+    expect(countPlan.plan).not.toContain('events');
+    const metaPlan = await examined(STUCK_COUNT_META_SQL);
+    expect(metaPlan.rows, metaPlan.plan).toBeGreaterThan(0);
+    expect(metaPlan.rows, metaPlan.plan).toBeLessThanOrEqual(1);
+    expect(metaPlan.plan).not.toContain('session_worker_state');
+    expect(metaPlan.plan).not.toContain('events');
+
+    await appendToSession(t.db, 'extra-stuck', 'worker.settled', { exitCode: 1 });
+    const again = (await (await fetch(`${base}/next/api/sessions`, { headers: auth() })).json()) as ListBody;
+    expect(again.stuckCount).toBe(expected + 1);
+    const againPlan = await examined(STUCK_COUNT_READ_SQL);
+    expect(againPlan.rows, againPlan.plan).toBeLessThanOrEqual(ROW_BOUND);
+
+    const future = Date.parse('2100-01-01T00:00:00.000Z');
+    expect(hand(future)).toBeGreaterThan(expected);
+    expect(await countProjectedStuck(t.db, future)).toBe(hand(future) + 1);
+    const afterFlip = await examined(STUCK_COUNT_READ_SQL);
+    expect(afterFlip.rows, afterFlip.plan).toBeLessThanOrEqual(ROW_BOUND);
+  }, 180_000);
 });
 
 describe('历史页和 SSE', () => {

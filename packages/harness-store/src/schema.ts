@@ -279,6 +279,53 @@ export const publishRuns = fleet2.table(
   ],
 );
 
+/**
+ * 每个会话当前的工人状态（#3853 第 2 片）。事件往前推，窗口和判法跟 deriveWorkerState 同一份。
+ * 卡住个数不扫这张表，读 worker_state_counts 里那一行。
+ */
+export const sessionWorkerState = fleet2.table(
+  'session_worker_state',
+  {
+    streamId: text('stream_id').primaryKey(),
+    state: text('state').notNull(),
+    /** 还在跑、且这次启动写了截止时间。过了宽限又没有新事件时，读计数前改判卡住。 */
+    deadline: timestamp('deadline', tz),
+    /** 最近 TAIL_EVENTS 条瘦身事件，最旧在前。下一条折进来不用再读事件表。 */
+    tail: jsonb('tail').notNull(),
+    headSeq: integer('head_seq').notNull(),
+    lastEventId: bigint('last_event_id', { mode: 'number' }).notNull(),
+  },
+  (t) => [
+    check('session_worker_state_known', sql`${t.state} in ('stuck', 'running', 'waiting', 'done')`),
+    // 到点改判：只沿还在跑、记了截止时间的行往下找，不扫全部会话
+    index('session_worker_state_deadline_idx')
+      .on(t.deadline)
+      .where(sql`${t.state} = 'running' and ${t.deadline} is not null`),
+  ],
+);
+
+/**
+ * 四种工人状态各一行，记当前有几个会话。卡住个数只读 state = 'stuck' 这一行，
+ * 读的行数不随会话数涨（整表最多四行）。
+ */
+export const workerStateCounts = fleet2.table(
+  'worker_state_counts',
+  {
+    state: text('state').primaryKey(),
+    n: integer('n').notNull(),
+  },
+  (t) => [
+    check('worker_state_counts_known', sql`${t.state} in ('stuck', 'running', 'waiting', 'done')`),
+    check('worker_state_counts_nonneg', sql`${t.n} >= 0`),
+  ],
+);
+
+/** 还在跑的会话里最早的截止时间。计数前先看这一行：还没到就不用去碰会话表。 */
+export const workerStateMeta = fleet2.table('worker_state_meta', {
+  id: integer('id').primaryKey(),
+  nextDeadline: timestamp('next_deadline', tz),
+});
+
 /** 第一个投影：每条流走到第几条、最后一条是什么类型。拿它证明「删了重建结果一致」。 */
 export const streamHeads = fleet2.table(
   'stream_heads',
