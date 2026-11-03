@@ -605,6 +605,15 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
     }
   });
 
+  /**
+   * 契约测试扫驾驶舱文案，但这条不进 TEST_READS，也不要求 planCi 在改文案时选上契约。
+   * ci-plan.ts 在包的面上：写进 TEST_READS 就要改它，本机 test:changed 连带 api、engine、github、store，
+   * 引擎自测 30 分钟跑不完。缓存键另盖（ci-cache.ts 的 PRIVATE_WORDS_COPY_DIR），同一 PR 再推不会跳过扫描。
+   */
+  const privateWordsCopyRead = (rel: string, ref: string) =>
+    rel === 'packages/harness-contract/test/private-words.test.ts' &&
+    (ref === 'packages/harness-web/src' || ref.startsWith('packages/harness-web/src/'));
+
   /** 拿一个「算要跑什么」的函数扫一遍：每个测试读的包外文件，改它的 PR 都得测到读的那个单元。返回漏记的清单。 */
   const scan = (plan: (changed: string[]) => CiPlan) => {
     const missed: string[] = [];
@@ -612,7 +621,7 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
       if (ALWAYS.has(rel)) continue;
       const own = unit === AGENTS_UNIT ? 'agents/' : `packages/${unit}/`;
       for (const ref of refs(rel)) {
-        if (`${ref}/`.startsWith(own)) continue;
+        if (`${ref}/`.startsWith(own) || privateWordsCopyRead(rel, ref)) continue;
         const probe = statSync(join(ROOT, ref)).isDirectory() ? `${ref}/x` : ref;
         const p = plan([probe]);
         if (!p.full && !testArgs(p).includes(own)) missed.push(`${rel} 读 ${ref}，改它的 PR 不测 ${unit}`);
@@ -644,6 +653,7 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
     for (const { unit, rel } of files) {
       if (ALWAYS.has(rel)) continue;
       for (const ref of refs(rel)) {
+        if (privateWordsCopyRead(rel, ref)) continue;
         const target = /^packages\/([^/]+)\//.exec(ref)?.[1];
         if (target === undefined || target === unit) continue;
         const has =
@@ -703,6 +713,14 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
 
   it('缓存键盖住扫描器扫出的每一处包外读取（ci-cache.ts 的 keyCovers）', () => {
     expect(cacheMissed(keyCovers)).toEqual([]);
+  });
+
+  it('【故意造出的失败】缓存键少盖驾驶舱文案：正好报 private-words 读 harness-web/src 这一处', () => {
+    const cut: typeof keyCovers = (roots, path) =>
+      keyCovers({ ...roots, dirs: roots.dirs.filter((d) => d !== 'packages/harness-web/src') }, path);
+    expect(cacheMissed(cut)).toEqual([
+      'packages/harness-contract/test/private-words.test.ts 读 packages/harness-web/src，缓存键没盖住',
+    ]);
   });
 
   it('【故意造出的失败】缓存键少盖一块（deploy/ 那棵）：扫出来必须正好是读 deploy/ 的那些测试，不是空、也不是别人', () => {

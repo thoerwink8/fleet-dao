@@ -311,11 +311,19 @@ export interface KeyRoots {
   wholeRepoTests: boolean;
 }
 
+/**
+ * private-words.test.ts 扫驾驶舱文案（packages/harness-web/src）。
+ * 不写进 ci-plan.ts 的 TEST_READS：那个文件在包的面上，改一行本机就要连带测 api、engine、github、store，
+ * 引擎自测 30 分钟跑不完。键仍盖住这份文案，同一 PR 再推不会拿旧的绿结果跳过扫描。
+ * 只在契约这一组的键上加，不顺依赖往下传。
+ */
+export const PRIVATE_WORDS_COPY_DIR = 'packages/harness-web/src';
+
 export function keyRoots(units: readonly string[], closure: readonly string[]): KeyRoots {
   return {
     packages: closure.map((p) => `packages/${p}`),
     files: [...EXTERNAL_INPUT_FILES],
-    dirs: [...EXTERNAL_INPUT_DIRS],
+    dirs: [...EXTERNAL_INPUT_DIRS, ...(units.includes('harness-contract') ? [PRIVATE_WORDS_COPY_DIR] : [])],
     fixtures: true,
     wholeRepoTests: units.some((u) => WHOLE_REPO_READERS.includes(u)),
   };

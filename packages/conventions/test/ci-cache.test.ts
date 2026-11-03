@@ -25,6 +25,7 @@ import {
   MANIFEST_FILE,
   type Manifest,
   makeHasher,
+  PRIVATE_WORDS_COPY_DIR,
   parseManifest,
   passedFiles,
   relativeToRoot,
@@ -235,6 +236,15 @@ describe('键：盖住测试的全部输入，不相干的不变', { timeout: 30
 
   it('同样的输入同一个键（确定）', () => {
     expect(keyOf({}).key).toBe(base);
+  });
+
+  it('契约测试扫驾驶舱文案：键盖住 harness-web/src，别的单元不因此盖住', () => {
+    const mine = keyRoots(['harness-contract'], ['harness-contract', 'shared']);
+    expect(mine.dirs).toContain(PRIVATE_WORDS_COPY_DIR);
+    expect(keyCovers(mine, 'packages/harness-web/src')).toBe(true);
+    expect(keyCovers(mine, 'packages/harness-web/src/main.tsx')).toBe(true);
+    const other = keyRoots(['api'], ['api', 'shared']);
+    expect(keyCovers(other, 'packages/harness-web/src/main.tsx')).toBe(false);
   });
 
   it('被测单元、向下依赖、TEST_READS 读的包的源码变了：键变', () => {

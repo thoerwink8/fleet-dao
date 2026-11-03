@@ -103,6 +103,8 @@ describe('私有词', () => {
   });
 
   it('契约源码和驾驶舱文案源码没有命中', () => {
+    // 驾驶舱文案这条跨包读不进 ci-plan.ts 的 TEST_READS（那个文件在包的面上，改它本机连带测 api、engine、github、store）。
+    // 缓存键在 ci-cache.ts 的 PRIVATE_WORDS_COPY_DIR 盖住同一目录，同一 PR 再推不会跳过这里。
     const dirs = [join(root, 'packages/harness-contract/src'), join(root, 'packages/harness-web/src')];
     const hits: string[] = [];
     for (const dir of dirs) {
