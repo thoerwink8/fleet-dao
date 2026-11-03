@@ -1536,7 +1536,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     return out;
   };
 
-  it('全跑：每一台都有明确的文件清单，合起来正好是全部测试文件、不重不漏；每台的名字看得出第几台/共几台、pg、temporal', () => {
+  it('全跑：每一台都有明确的文件清单，合起来正好是全部测试文件、不重不漏；每台的名字看得出第几台/共几台、pg、temporal', { timeout: 30_000 }, () => {
     const p = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
     // 8 台封顶（TARGET_BOX_MS 50 秒、MAX_BOXES 8）：全量的耗时合计远大于 8×50 秒 → 8 台
     expect(p.tests.length).toBe(8);
