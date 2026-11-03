@@ -7,8 +7,15 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { transcriptStream } from '@fleet-dao/harness-contract';
-import { countStuck, type TailEvent } from '@fleet-dao/harness-contract/worker-state';
-import { advanceStreamHeads, type Db, events, streamHeads } from '@fleet-dao/harness-store';
+import { TAIL_EVENTS, type TailEvent } from '@fleet-dao/harness-contract/worker-state';
+import {
+  advanceSessionWorkerState,
+  advanceStreamHeads,
+  countProjectedStuck,
+  type Db,
+  events,
+  streamHeads,
+} from '@fleet-dao/harness-store';
 import { and, desc, eq, lt, type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { sessionStream } from './events.ts';
@@ -136,6 +143,7 @@ function parseLimitAndBefore(url: URL): { limit: number; before?: number } | nul
 
 // 近期事件的瘦身版 TailEvent：只带判工人状态用得上的几个字段（不带大文本），形状和判读规则都在 harness-contract。
 export type { TailEvent };
+export { TAIL_EVENTS };
 
 export interface SessionListItem {
   id: string;
@@ -148,9 +156,6 @@ export interface SessionListItem {
   tail: TailEvent[];
 }
 
-/** 每个会话带多少条近期事件：页大小 × 这个数 = 状态判读最多多读的行数。 */
-export const TAIL_EVENTS = 24;
-
 interface TailRow {
   stream_id: string;
   type: string;
@@ -159,7 +164,8 @@ interface TailRow {
 
 /**
  * 一页会话的近期事件：对页里每个会话走 (stream_id, id) 索引倒着取 TAIL_EVENTS 条，所以读的行数 ≤ 页大小 × TAIL_EVENTS，
- * 和流多长无关。只摘判状态要的字段，大文本（证据、错误输出）留在库里。
+ * 和流多长无关。只摘判状态要的字段（和 harness-contract 的 TAIL_FIELDS 同一份），大文本留在库里。
+ * 全库卡住个数不走这里，读投影里的计数。
  */
 async function loadTails(db: Db, streamIds: string[]): Promise<Map<string, TailEvent[]>> {
   const out = new Map<string, TailEvent[]>();
@@ -201,28 +207,17 @@ async function loadTails(db: Db, streamIds: string[]): Promise<Map<string, TailE
 }
 
 /**
- * 全库卡住的会话数：对每个会话流取近期事件，按 harness-contract 的 deriveWorkerState 同一套规则判，
- * 不受分页影响（前端翻没翻页数都一样）。读的行数 ≤ 会话数 × TAIL_EVENTS。
+ * 会话列表：先把投影推到最新，再按最后事件号倒序取一页；读的行数和页大小成正比。
+ * stuckCount 读工人状态投影里已经记下的计数（四种状态各一行），不随会话数涨。
  */
-async function countStuckSessions(db: Db, now: number): Promise<number> {
-  const heads = await db
-    .select({ streamId: streamHeads.streamId })
-    .from(streamHeads)
-    .where(sql`${streamHeads.streamId} like 'session:%'`);
-  const tails = await loadTails(
-    db,
-    heads.map((h) => h.streamId),
-  );
-  return countStuck(tails.values(), now);
-}
-
-/** 会话列表：先把投影推到最新，再按最后事件号倒序取一页；读的行数和页大小成正比（stuckCount 另算，见上）。 */
 export async function listSessions(
   db: Db,
   opts: { limit: number; before?: number; now?: number },
 ): Promise<{ sessions: SessionListItem[]; nextBefore: number | null; stuckCount: number }> {
+  const now = opts.now ?? Date.now();
   await advanceStreamHeads(db);
-  const stuckCount = await countStuckSessions(db, opts.now ?? Date.now());
+  await advanceSessionWorkerState(db, now);
+  const stuckCount = await countProjectedStuck(db, now);
   const conds: SQL[] = [sql`${streamHeads.streamId} like 'session:%'`];
   if (opts.before !== undefined) conds.push(lt(streamHeads.lastEventId, opts.before));
   const rows = await db

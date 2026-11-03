@@ -50,6 +50,13 @@
       "when": 1793651642044,
       "tag": "0006_quick_celestials",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793691358679,
+      "tag": "0007_session_worker_state",
+      "breakpoints": true
     }
   ]
 }
