@@ -46,6 +46,7 @@ export function dispatchIssueDeps(w: DispatchIssueWiring): DispatchIssueDeps {
   const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
   return {
+    db: w.db,
     async findRepo(owner, name) {
       const all = await intake.repos();
       return all.find((r) => same(r.owner, owner) && same(r.name, name)) ?? null;
