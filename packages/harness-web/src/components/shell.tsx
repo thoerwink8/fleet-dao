@@ -11,6 +11,7 @@ import {
 import { type ReactNode, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import { cn } from '../lib/cn';
+import { IS_LOCAL } from '../lib/profile';
 
 interface NavItem {
   to: string;
@@ -22,13 +23,22 @@ interface NavItem {
 
 // 五块一级信息架构（specs/3752 第五节）：会话工作台、任务波次图、决策卡、法国运维、设置。
 // 这一片只有会话工作台有内容，其余四块是占位页，写明哪一片做。
-export const NAV: NavItem[] = [
+const NAV_HK: NavItem[] = [
   { to: '/', label: '会话', short: '会话', icon: <MessagesSquare />, end: false },
   { to: '/work', label: '任务', short: '任务', icon: <Workflow /> },
   { to: '/decide', label: '决策', short: '决策', icon: <CircleCheckBig /> },
   { to: '/ops', label: '法国运维', short: '运维', icon: <Server /> },
   { to: '/settings', label: '设置', short: '设置', icon: <Settings /> },
 ];
+// 本机装法（#3858，决定 0125 第 7 条）：会话、任务、待我、宿主、设置；待我取代决策，宿主取代法国运维。
+const NAV_LOCAL: NavItem[] = [
+  { to: '/', label: '会话', short: '会话', icon: <MessagesSquare />, end: false },
+  { to: '/work', label: '任务', short: '任务', icon: <Workflow /> },
+  { to: '/inbox', label: '待我', short: '待我', icon: <CircleCheckBig /> },
+  { to: '/hosts', label: '宿主', short: '宿主', icon: <Server /> },
+  { to: '/settings', label: '设置', short: '设置', icon: <Settings /> },
+];
+export const NAV: NavItem[] = IS_LOCAL ? NAV_LOCAL : NAV_HK;
 
 // 手机底部四格：会话、任务、决策、更多（运维、设置收进更多）
 const TABS: NavItem[] = [
@@ -48,7 +58,11 @@ const readFold = (): boolean => {
 
 function isOn(item: NavItem, path: string): boolean {
   if (item.to === '/') return path === '/' || path.startsWith('/s/');
-  if (item.to === '/more') return path === '/more' || path.startsWith('/ops') || path.startsWith('/settings');
+  if (item.to === '/more') {
+    return (
+      path === '/more' || path.startsWith('/ops') || path.startsWith('/settings') || path.startsWith('/hosts')
+    );
+  }
   return path === item.to || path.startsWith(`${item.to}/`);
 }
 

@@ -51,8 +51,8 @@ export interface KernelOptions {
   /** 每个节拍跑完给一份报告（真执行的认领跳过、outbox 条数靠它进日志）。 */
   onTick?(report: TickReport): void;
   tickMs?: number;
-  /** 只有测试换它；生产用 realShadowProbes。 */
-  probes?: ShadowProbes;
+  /** 测试换它；生产用 realShadowProbes。给 null 就不做影子自检（本机装法，#3858：没有会话用户和出网关，隔离档位另行读回）。 */
+  probes?: ShadowProbes | null;
   /**
    * 真执行（#3783，第 7 片）：给了才开。对冻结的真执行批次认领单、派工，工人交回后经 outbox 推分支、开 PR（不合并）。
    * 不给就是纯影子：outbox 一个处理器都不装，自检据此判。
@@ -195,16 +195,20 @@ export function createKernel(o: KernelOptions) {
             : {}),
         }),
         // 纯影子：outbox 一个真实处理器都不装；开了真执行：只装推分支和开 PR，别的种类（尤其合并）装了自检就不过
-        shadow:
-          o.probes ??
-          realShadowProbes({
-            home: o.workerHome,
-            ...(o.dispatcher.sandbox ? { sandbox: o.dispatcher.sandbox } : {}),
-            egressPort: o.egressPort,
-            realHandlers: () => (o.publish ? PUBLISH_KINDS : []),
-            allowedHandlers: PUBLISH_KINDS,
-            redact: o.redact,
-          }),
+        ...(o.probes === null
+          ? {}
+          : {
+              shadow:
+                o.probes ??
+                realShadowProbes({
+                  home: o.workerHome,
+                  ...(o.dispatcher.sandbox ? { sandbox: o.dispatcher.sandbox } : {}),
+                  egressPort: o.egressPort,
+                  realHandlers: () => (o.publish ? PUBLISH_KINDS : []),
+                  allowedHandlers: PUBLISH_KINDS,
+                  redact: o.redact,
+                }),
+            }),
         onError: (err) => o.onError('派工', err),
       });
       await dispatcher.init();

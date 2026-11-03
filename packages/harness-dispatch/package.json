@@ -4,6 +4,9 @@
   "private": true,
   "description": "新内核的派工层（决定 0124）：读派工请求、排进调度器、起工人、心跳续租、机械核验交回、记进指挥官收件箱",
   "type": "module",
+  "bin": {
+    "fleet2": "./src/bin/fleet2.ts"
+  },
   "exports": {
     ".": "./src/index.ts"
   },

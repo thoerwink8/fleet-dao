@@ -23,6 +23,8 @@
 - 场景脚本（#3775，`scenarios.ts`、入口 `src/bin/scenarios.ts`）：法国真机上把成功、超时、被杀、退回、重复提交、限流各跑一次、按会话号查整条事件链打成表。影子模式下 MCP 不注册 `spawn_worker`，所以脚本以指挥官身份直接写和它一样的 `worker.spawn.requested`（加影子目标，工作目录只会从它建）；每个场景一个只含一张假单的批次，并预先写好影子驱动的回执让驱动不替它读 GitHub 再派，跑完 `cleanupScenario` 删批次、影子产物、回执、已收尾的活，事件留作证据。短截止靠请求和活同一事务里排好（请求里没有截止字段）。限流在专用队列上自己领，不碰 `worker` 队列。重启接回只排一件 sleep 300 的活，重启 `fleet2-kernel` 由人手动做一次，脚本不碰系统服务；断网造不出（见 `MANUAL_SCENARIOS`）。
 - 提示词（`prompt.ts`）：指示类字段在块外，`context` 只出现在带随机标记的资料块里，块尾标记伪造不了（SEC1）。
 
+- 装配档案（#3858，决定 0125 第 1 条，`src/profiles/`）：`bin/kernel.ts` 只挑档案再 `runAssembly`。`FLEET2_PROFILE=france`（默认）是原来的装法，`france.ts` 从旧入口原样搬来（配置报错消息、默认值由 `test/profiles.test.ts` 守着）；`local` 是本机装法，入口 `pnpm fleet2 up [--open]`（`bin/fleet2.ts`，页面没构建先 `build:local` 一次）。local：PGlite 落文件（`harness-store/local-db`，数据目录 Windows 是 `%LOCALAPPDATA%\Fleet2`，`FLEET2_DATA_DIR` 可改，库在 `db/`、令牌在 `local-token`）、内核接口层口随机（`FLEET2_UI_PORT` 默认 7346 是页面口）、驾驶舱口和静态页并成一个口只听 127.0.0.1（`harness-api/src/local.ts`）、本机令牌鉴权、不装影子自检（`probes: null`，没有会话用户和出网关）、权限档默认 acceptEdits 且不许 bypassPermissions、进程里没有任何 GitHub 凭据（`taskFor`/`readMerged` 是明说"没接"的桩）。隔离档位由 `profiles/isolation.ts` 按真装了什么推（会话用户、出网关口），local 读回「弱」，页面「宿主」「设置」读 `/api/local/status` 显示。local 的任务来源、外送、指挥官派工（接口层仍是影子模式不注册 `spawn_worker`）、模型渠道代理是后续片。
+
 ## 没做的
 
 - 重启后上一代遗留的工人进程由 `harness-runner` 的孤儿清扫处理，这里不管。
