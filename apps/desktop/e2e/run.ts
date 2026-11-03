@@ -189,6 +189,21 @@ await settleWebview();
     `线索 0c：调试口文件 ${found === '' ? '没出现' : `出现了 ${found}`}（用户数据目录 ${udf}，存在 ${existsSync(udf)}）`,
   );
   if (found === '') {
+    // 组策略能把调试口关掉（RemoteDebuggingAllowed）：看这台机器上有没有 Edge、WebView2 的策略
+    for (const key of [
+      'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge',
+      'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2',
+      'HKLM:\\SOFTWARE\\Policies\\Microsoft\\EdgeWebView',
+      'HKCU:\\SOFTWARE\\Policies\\Microsoft\\Edge',
+      'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome',
+    ]) {
+      console.log(
+        `策略 ${key}：${psSafe(`if (Test-Path '${key}') { (Get-ItemProperty '${key}' | Out-String).Trim() } else { '（没有）' }`)}`,
+      );
+    }
+    console.log(
+      `WebView2 环境变量：${psSafe("Get-ChildItem Env: | Where-Object { $_.Name -like '*WEBVIEW2*' -or $_.Name -like '*EDGE*' } | Out-String")}`,
+    );
     console.log(
       psSafe(
         `Get-ChildItem -Recurse -Force -ErrorAction SilentlyContinue '${udf}' | Select-Object -First 40 FullName,Length | Format-Table -AutoSize | Out-String -Width 220`,
