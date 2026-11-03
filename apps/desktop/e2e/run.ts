@@ -378,7 +378,20 @@ try {
   }
 } catch (e) {
   record('跑到一半出错', false, e instanceof Error ? e.message.slice(0, 300) : String(e));
-  // 留线索：这一刻还在的 Edge、WebView2、外壳进程和它们的命令行
+  // 留线索：外壳自己写的启动日志（panic、起不来）、最近的应用崩溃事件
+  try {
+    console.log(
+      `外壳日志：${ps("Get-Content (Join-Path $env:TEMP 'fleet2-shell.log') -ErrorAction SilentlyContinue | Out-String") || '（没有）'}`,
+    );
+    console.log(
+      ps(
+        `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-10)} -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object { $_.LevelDisplayName -in 'Error','Warning' } | ForEach-Object { $_.TimeCreated.ToString('o') + ' ' + $_.ProviderName + ' ' + (($_.Message -replace '\\s+',' ').Substring(0, [Math]::Min(400, $_.Message.Length))) }`,
+      ),
+    );
+  } catch {
+    // 看不到就算了
+  }
+  // 这一刻还在的 Edge、WebView2、外壳进程和它们的命令行
   try {
     console.log(
       ps(

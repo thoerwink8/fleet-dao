@@ -323,7 +323,21 @@ fn selftest(app: &AppHandle, out: &str) -> i32 {
     }
 }
 
+/// A GUI program has no console, so a panic or a failed start would vanish without a trace. Both are written to
+/// fleet2-shell.log in the temp folder (the end-to-end run prints it when the window does not come up).
+fn log_to_temp(line: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("fleet2-shell.log"))
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 pub fn run() {
+    std::panic::set_hook(Box::new(|info| log_to_temp(&format!("panic: {info}"))));
     let app = tauri::Builder::default()
         // must be first: a second launch asks the first to show its window, then exits on its own
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -397,7 +411,10 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("failed to build the desktop shell");
+        .unwrap_or_else(|e| {
+            log_to_temp(&format!("build failed: {e}"));
+            std::process::exit(1);
+        });
 
     app.run(|app, event| {
         if let RunEvent::Exit = event {
