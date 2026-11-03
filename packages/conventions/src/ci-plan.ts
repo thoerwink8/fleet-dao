@@ -129,6 +129,7 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'web'] as const;
  * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）；
  * agents/test/rules/project-subagents.rules.test.ts 读 conventions 的 standard-paths.json（钉住标准路径清单盖着 agents/subagents/）：
  *   只记这一个文件——记成整个 conventions，改 conventions 的任何一行都要连 agents 的测试一起跑（本机一百多秒）。
+ * harness-contract/test/private-words.test.ts 扫 harness-web 的 src（给人看的文案）：契约不依赖界面，不进 package.json。
  * 值里带 / 的是仓内文件（以 / 结尾是目录），只有改到它才测读它的单元；不带 / 的是包，包的源码一改就测。
  * shared 的单价测试不再读路由骨架：没登记的模型按未知单价算（#1355），不要求每个目录模型都写进价表。
  */
@@ -152,6 +153,8 @@ export const TEST_READS: Record<string, string[]> = {
     'packages/store/src/pg-store.ts',
     'packages/engine/src/jobs/dispatch-issue.ts',
   ],
+  // 只扫 src：改到驾驶舱文案才重测契约，不把整个包算进本机选测。
+  'harness-contract': ['packages/harness-web/src/'],
   [AGENTS_UNIT]: [
     'db',
     'agents-sync',
