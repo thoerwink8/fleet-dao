@@ -1,5 +1,5 @@
 # 桌面第 0 片实测 ③（#3868）：启动一个桌面壳，闲置 N 秒后量整棵进程树的内存，再杀掉。
-# 用法：pwsh -File（要 PowerShell 7；5.1 读不了无 BOM 的 UTF-8 中文） scripts/desktop-probe/measure-idle.ps1 -Exe <壳 exe> [-Seconds 30] [-Sidecar <附带进程目录>]
+# 用法：pwsh -File（要 PowerShell 7；5.1 读不了无 BOM 的 UTF-8 中文） probes/desktop/measure-idle.ps1 -Exe <壳 exe> [-Seconds 30] [-Sidecar <附带进程目录>]
 # 量法：Win32_PerfFormattedData_PerfProc_Process 的 WorkingSetPrivate（进程私有工作集，不重复计共享页）和 WorkingSet；
 # 进程树＝壳 exe 的所有后代（含 WebView2 / Chromium 子进程、附带的 node.exe）。
 # 给 -Sidecar 时设 PROBE_SIDECAR=1，壳会起附带的内核（node.exe + kernel.mjs）。只在本机用户态起停，不改系统设置。

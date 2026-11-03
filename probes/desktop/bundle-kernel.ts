@@ -1,5 +1,5 @@
 // 桌面第 0 片实测 ①（#3868）：esbuild 把内核入口打成单文件 kernel.mjs，旁边放 node.exe 和 PGlite 的运行资源。
-// 用法：node scripts/desktop-probe/bundle-kernel.ts <输出目录> [node.exe 路径，默认当前 node]
+// 用法：node probes/desktop/bundle-kernel.ts <输出目录> [node.exe 路径，默认当前 node]
 // 输出目录里：kernel.mjs、node.exe、pglite.wasm/pglite.data/initdb.wasm；迁移目录放在输出目录的上一级 migrations/。
 // 不进内核运行代码；只是量"打成一个 JS 文件加官方 node.exe 能不能起来"。
 import { copyFileSync, cpSync, mkdirSync, readdirSync, statSync } from 'node:fs';
@@ -10,7 +10,7 @@ import { build } from 'esbuild';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 if (!process.argv[2]) {
-  console.error('用法：node scripts/desktop-probe/bundle-kernel.ts <输出目录> [node.exe]');
+  console.error('用法：node probes/desktop/bundle-kernel.ts <输出目录> [node.exe]');
   process.exit(2);
 }
 const out = resolve(process.argv[2]);
