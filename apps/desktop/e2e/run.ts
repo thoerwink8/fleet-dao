@@ -74,6 +74,20 @@ const quiet = (script: string): void => {
   }
 };
 
+/**
+ * 等上一个外壳留下的 WebView2 浏览器进程退干净（最多 15 秒，再不退就收掉）。它们占着外壳的 WebView2 用户数据目录：
+ * 下一个外壳（WebDriver 起的）要是撞上还活着的那个，会并进去、拿不到 msedgedriver 要的调试口，会话报 DevToolsActivePort file doesn't exist
+ * （CI 的 runner 上进程退得慢，本机退得快，所以只在 CI 红）。
+ */
+async function settleWebview(): Promise<void> {
+  const count = () => pidsWith('com.fleet2.desktop', 'msedgewebview2.exe').length;
+  for (let i = 0; i < 150 && count() > 0; i++) await sleep(100);
+  for (const p of pidsWith('com.fleet2.desktop', 'msedgewebview2.exe'))
+    quiet(`Stop-Process -Id ${p} -Force -ErrorAction SilentlyContinue`);
+  for (let i = 0; i < 50 && count() > 0; i++) await sleep(100);
+  await sleep(500);
+}
+
 // ---- 0. 托盘和开机自启 ----
 {
   const out = join(dataDir, 'selftest.json');
@@ -98,6 +112,8 @@ const quiet = (script: string): void => {
     },
   );
 }
+
+await settleWebview();
 
 // ---- 0b. 不经驱动直接起：外壳活着、有 WebView2 子进程、内核起来且 /health 通 ----
 // 这一步单独列出来，是为了驱动起不来会话时能分清「应用本身起不来」和「驱动没接上」。
@@ -142,7 +158,7 @@ const quiet = (script: string): void => {
   }
   quiet(`Stop-Process -Id ${app.pid} -Force -ErrorAction SilentlyContinue`);
   for (let i = 0; i < 40 && pidsWith('kernel.mjs', 'node.exe').length > 0; i++) await sleep(100);
-  await sleep(1000);
+  await settleWebview();
 }
 
 // ---- WebDriver 会话 ----
@@ -323,6 +339,7 @@ try {
       await sleep(250);
     // 地址经环境变量 FLEET2_REMOTE_URL 交给外壳（tauri-driver 不转交命令行参数）：另起一个 tauri-driver，环境里带它
     driver.kill();
+    await settleWebview();
     driver2 = spawn(tauriDriver, ['--native-driver', edgeDriver, '--port', '4445', '--native-port', '4446'], {
       stdio: 'inherit',
       env: { ...process.env, FLEET2_REMOTE_URL: remoteUrl },
@@ -360,7 +377,17 @@ try {
     quiet('Get-Process fleet-desktop -ErrorAction SilentlyContinue | Stop-Process -Force');
   }
 } catch (e) {
-  record('跑到一半出错', false, e instanceof Error ? e.message : String(e));
+  record('跑到一半出错', false, e instanceof Error ? e.message.slice(0, 300) : String(e));
+  // 留线索：这一刻还在的 Edge、WebView2、外壳进程和它们的命令行
+  try {
+    console.log(
+      ps(
+        `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'msedge|fleet-desktop|tauri-driver' } | ForEach-Object { "$($_.ProcessId) $($_.Name) " + ($_.CommandLine -replace '\\s+',' ').Substring(0, [Math]::Min(300, $_.CommandLine.Length)) }`,
+      ),
+    );
+  } catch {
+    // 看不到就算了
+  }
 } finally {
   driver.kill();
   driver2?.kill();
