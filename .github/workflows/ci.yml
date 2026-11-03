@@ -781,11 +781,22 @@ jobs:
           $p = Start-Process $setup -ArgumentList '/S', "/D=$inst" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "安装包静默安装退出码 $($p.ExitCode)" }
           Get-ChildItem $inst | Format-Table Name, Length
+          # 驱动带详细日志起（tauri-driver 只认一个可执行文件，用一个小批处理包一层），会话起不来时才看得到原因
+          $shots = "$env:RUNNER_TEMP\desktop-e2e"
+          New-Item -ItemType Directory -Force $shots | Out-Null
+          $wrap = "$env:RUNNER_TEMP\edgedriver\msedgedriver-logged.cmd"
+          Set-Content $wrap "@`"%~dp0msedgedriver.exe`" %* --verbose --log-path=`"$shots\msedgedriver.log`""
           node apps/desktop/e2e/run.ts `
             --app "$inst\fleet-desktop.exe" `
             --tauri-driver "$HOME\.cargo\bin\tauri-driver.exe" `
-            --edge-driver "$env:RUNNER_TEMP\edgedriver\msedgedriver.exe" `
-            --shots "$env:RUNNER_TEMP\desktop-e2e"
+            --edge-driver $wrap `
+            --shots $shots
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -and (Test-Path "$shots\msedgedriver.log")) {
+            Write-Host '--- msedgedriver.log（末尾 150 行）---'
+            Get-Content "$shots\msedgedriver.log" -Tail 150
+          }
+          exit $code
       # 总是留：窗口里的页面截图（1440、390）和每一步的结果
       - uses: actions/upload-artifact@v4
         if: always()

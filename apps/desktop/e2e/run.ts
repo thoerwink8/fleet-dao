@@ -8,7 +8,7 @@
 //   6. 强杀外壳，2 秒内内核进程号不在
 // 用法：node apps/desktop/e2e/run.ts --app <fleet-desktop.exe> --tauri-driver <exe> --edge-driver <msedgedriver.exe> [--shots <目录>]
 // 数据目录用临时目录（FLEET2_DATA_DIR），不碰用户真实的 %LOCALAPPDATA%\Fleet2。任何一步不成就退出码 1。
-import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -49,6 +49,13 @@ function ps(script: string): string {
   return execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
     encoding: 'utf8',
   }).trim();
+}
+/** 只为留线索：不抛，错误输出也一并带上。 */
+function psSafe(script: string): string {
+  const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+  });
+  return `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
 }
 /** 命令行里带 needle 的进程号（用 CIM 读命令行，Get-Process 读不到）。 */
 function pidsWith(needle: string, name: string): number[] {
@@ -379,28 +386,20 @@ try {
 } catch (e) {
   record('跑到一半出错', false, e instanceof Error ? e.message.slice(0, 300) : String(e));
   // 留线索：外壳自己写的启动日志（panic、起不来）、最近的应用崩溃事件
-  try {
-    console.log(
-      `外壳日志：${ps("Get-Content (Join-Path $env:TEMP 'fleet2-shell.log') -ErrorAction SilentlyContinue | Out-String") || '（没有）'}`,
-    );
-    console.log(
-      ps(
-        `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-10)} -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object { $_.LevelDisplayName -in 'Error','Warning' } | ForEach-Object { $_.TimeCreated.ToString('o') + ' ' + $_.ProviderName + ' ' + (($_.Message -replace '\\s+',' ').Substring(0, [Math]::Min(400, $_.Message.Length))) }`,
-      ),
-    );
-  } catch {
-    // 看不到就算了
-  }
+  console.log(
+    `外壳日志：${psSafe("Get-Content (Join-Path $env:TEMP 'fleet2-shell.log') -ErrorAction SilentlyContinue | Out-String") || '（没有）'}`,
+  );
+  console.log(
+    `应用事件：${psSafe(
+      `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-10)} -MaxEvents 40 -ErrorAction SilentlyContinue | Where-Object { $_.LevelDisplayName -in 'Error','Warning' } | ForEach-Object { $_.TimeCreated.ToString('o') + ' ' + $_.ProviderName + ' ' + (($_.Message -replace '\\s+',' ').Substring(0, [Math]::Min(400, $_.Message.Length))) }`,
+    )}`,
+  );
   // 这一刻还在的 Edge、WebView2、外壳进程和它们的命令行
-  try {
-    console.log(
-      ps(
-        `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'msedge|fleet-desktop|tauri-driver' } | ForEach-Object { "$($_.ProcessId) $($_.Name) " + ($_.CommandLine -replace '\\s+',' ').Substring(0, [Math]::Min(300, $_.CommandLine.Length)) }`,
-      ),
-    );
-  } catch {
-    // 看不到就算了
-  }
+  console.log(
+    psSafe(
+      `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'msedge|fleet-desktop|tauri-driver' } | ForEach-Object { "$($_.ProcessId) $($_.Name) " + ($_.CommandLine -replace '\\s+',' ').Substring(0, [Math]::Min(300, $_.CommandLine.Length)) }`,
+    ),
+  );
 } finally {
   driver.kill();
   driver2?.kill();
