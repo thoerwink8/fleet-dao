@@ -1301,7 +1301,7 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task correct-mer
 - 出网关名单**不变**：`deploy/france/fleet2-egress.allow` 不放 GitHub。推送是内核（`fleet` 用户，不在影子 slice 里）在自己建的临时目录里做的，工人整个过程拿不到任何 GitHub 凭据，也连不到 GitHub。
 - 认领：旧库 `tasks` 那一行（`owner = harness`，条件更新：没有行就插、只有 `queued` 且归引擎的行才改，旧系统手上有的不抢，下一轮再看）；外部动作带这一刻的 `tasks.fencing`，执行前再核，对不上进 dead。
 - 人手命令（在法国以 `fleet` 跑，配置同内核）：
-  - 冻结：`node packages/harness-dispatch/src/bin/real.ts freeze <批次号> <owner/仓#单号>…`（基线取主线现在的提交；单要开着、不是 PR）。
+  - 冻结：`node packages/harness-dispatch/src/bin/real.ts freeze [--dry-run] <批次号> <owner/仓#单号>…`（基线取主线现在的提交；单要开着、不是 PR）。`--dry-run` 只读试跑：读 GitHub，打印将冻结的清单（仓、单号、基线），不写 `fleet2.real_batch_items`；过后真冻结会再读一遍。有一张已关、是 PR 或读不到，试跑和真冻结都整批不冻（冻结后这一批不能改）。
   - 看一张单：`… real.ts status <owner/仓#单号>…`（走到切回表哪一行、外部动作状态、`issue:` 流上的事件）。
   - 按状态切回：`… real.ts release <owner/仓#单号> [--pr handoff|close]`。返回 `done`，或 `wait`（工人没收尾、检查在跑、结果未知）、`choose`（开了 PR：选交旧引擎接管还是关掉重派）、`alarm`（补偿失败，所有权不放）、`none`（已合并，不回退）。
 - 记账：`fleet2.real_batch_items`（批次清单）、`fleet2.publish_runs`（补丁、模型、核验、状态 ready/held/empty/released）、`fleet2.outbox`（`git.push`、`github.pr.open`）；`issue:<owner/仓>#<单号>` 流上有 `publish.pushed`、`publish.pr.opened`、`task.released`。核验没过、没有改动、工人没干净交活的产物只记 held/empty，不推。
