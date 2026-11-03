@@ -172,22 +172,37 @@ await settleWebview();
 {
   const local = process.env.LOCALAPPDATA ?? '';
   const udf = join(local, 'com.fleet2.desktop', 'EBWebView');
-  const probe = spawn(appExe, [], {
-    stdio: 'ignore',
-    env: {
-      ...process.env,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=0 --enable-logging --log-level=0',
-    },
-  });
+  // 几种给法各试一遍（每种 12 秒）：哪种出得了调试口，驱动那边就照哪种给（ms:edgeOptions.args 会并进这个环境变量）
   let found = '';
-  for (let i = 0; i < 100 && found === ''; i++) {
-    await sleep(250);
-    if (existsSync(join(udf, 'DevToolsActivePort')))
-      found = readFileSync(join(udf, 'DevToolsActivePort'), 'utf8').replace(/\s+/g, ' ');
+  for (const args of [
+    '--remote-debugging-port=0 --enable-logging --log-level=0',
+    '--remote-debugging-port=0 --no-sandbox',
+    '--remote-debugging-port=9222 --no-sandbox --disable-gpu',
+  ]) {
+    rmSync(join(udf, 'DevToolsActivePort'), { force: true });
+    const probe = spawn(appExe, [], {
+      stdio: 'ignore',
+      env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: args },
+    });
+    let got = '';
+    for (let i = 0; i < 48 && got === ''; i++) {
+      await sleep(250);
+      if (existsSync(join(udf, 'DevToolsActivePort')))
+        got = readFileSync(join(udf, 'DevToolsActivePort'), 'utf8').replace(/\s+/g, ' ');
+    }
+    console.log(`线索 0c：参数「${args}」→ 调试口文件 ${got === '' ? '没出现' : `出现了 ${got}`}`);
+    if (got === '' && found === '' && args.includes('--enable-logging')) {
+      // 第一种没出来时顺手留一张整个桌面的截图，看这台机器上窗口有没有真画出来
+      psSafe(
+        `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('${join(shots, 'desktop-0c.png')}')`,
+      );
+    }
+    found = found || got;
+    quiet(`Stop-Process -Id ${probe.pid} -Force -ErrorAction SilentlyContinue`);
+    for (let i = 0; i < 40 && pidsWith('kernel.mjs', 'node.exe').length > 0; i++) await sleep(100);
+    await settleWebview();
   }
-  console.log(
-    `线索 0c：调试口文件 ${found === '' ? '没出现' : `出现了 ${found}`}（用户数据目录 ${udf}，存在 ${existsSync(udf)}）`,
-  );
+  console.log(`线索 0c：用户数据目录 ${udf}，存在 ${existsSync(udf)}`);
   if (found === '') {
     // 组策略能把调试口关掉（RemoteDebuggingAllowed）：看这台机器上有没有 Edge、WebView2 的策略
     for (const key of [
@@ -213,9 +228,6 @@ await settleWebview();
       psSafe(`Get-Content '${join(udf, 'chrome_debug.log')}' -Tail 40 -ErrorAction SilentlyContinue`),
     );
   }
-  quiet(`Stop-Process -Id ${probe.pid} -Force -ErrorAction SilentlyContinue`);
-  for (let i = 0; i < 40 && pidsWith('kernel.mjs', 'node.exe').length > 0; i++) await sleep(100);
-  await settleWebview();
 }
 
 // ---- WebDriver 会话 ----
