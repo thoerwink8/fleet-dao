@@ -692,6 +692,34 @@ jobs:
           REPORT: ${{ runner.temp }}/fleet-test-out/report.json
         run: node packages/conventions/src/bin/ci-box.ts verify --box "$BOX" --mode "" --report "$REPORT"
 
+  # Windows 台（#3869，决定 0125 第 8 条）：Rust 的 jobrun（crates/jobrun，Job Object 进程树看守）在真 Windows 上编译、clippy、跑测试，
+  # 再跑 harness-runner 的测试，里面的 Windows 专属用例（叫停后整棵树 2 秒内不在、reapSession 回实数、进程号复用不误杀）要靠这里的 jobrun 可执行文件。
+  # 每个 PR 和主线推送都跑，不看改了什么；和 heavy 一样不在 check 的 needs 里（NON_BLOCKING_JOBS）：红了只让这个 job 红，不挡合并；
+  # 转成必过要同时改 ci-plan.ts（PLANNED_JOBS）和 check 的 needs，等跑稳了再定。
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # runner 自带 Rust 和 MSVC；rustfmt、clippy 是 rustup 组件，显式装一遍不依赖镜像带不带
+      - run: rustup component add rustfmt clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build -p jobrun
+      - run: pnpm exec vitest run packages/harness-runner
+
   # 必过检查：changes 必须绿；lint、test、web、e2e、deploy 各自该跑的必须绿、该跳过的必须是跳过（packages/conventions/src/bin/ci-verdict.ts 调 ciVerdict）。
   # lint 里面几步各报各的（哪一步红写在它的 job 日志和汇总步里）；汇总 job 认的是 lint 这个 job 的结论。
   check:

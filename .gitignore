@@ -3,6 +3,8 @@ dist/
 dist-local/
 coverage/
 *.tsbuildinfo
+# Rust 构建产物（crates/）
+target/
 *.local
 .DS_Store
 .playwright-mcp/

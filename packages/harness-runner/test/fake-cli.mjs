@@ -1,5 +1,6 @@
 // 假执行体：按 FAKE_MODE 吐 Claude Code stream-json 那样的行。测试里不起真的执行体。
 import { spawn } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 
 const mode = process.env.FAKE_MODE ?? 'work';
 const sid = process.env.FAKE_SESSION ?? 'sess-1';
@@ -68,6 +69,42 @@ switch (mode) {
     g.unref();
     init();
     text(`孙子 ${g.pid}`);
+    break;
+  }
+  case 'detached-tree': {
+    // 派生脱离的孙进程：两个直接的脱离子进程，其中一个自己再派生一个脱离的孙进程（三代）；
+    // 每个进程号一行写进 FAKE_PIDS_FILE（测试据此核对叫停后全都不在），然后挂住等人叫停
+    const pids = process.env.FAKE_PIDS_FILE;
+    const hold = 'setInterval(()=>{}, 1<<30)';
+    const note = (pid) => appendFileSync(pids, `${pid}\n`);
+    const sub = (code) => {
+      const c = spawn(process.execPath, ['-e', code], { detached: true, stdio: 'ignore', windowsHide: true });
+      c.unref();
+      note(c.pid);
+      return c;
+    };
+    sub(hold);
+    sub(
+      `const g = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(hold)}], {detached:true,stdio:'ignore',windowsHide:true});` +
+        `g.unref(); require('node:fs').appendFileSync(${JSON.stringify(pids)}, g.pid + '\\n');${hold}`,
+    );
+    note(process.pid);
+    init();
+    text('派生完了');
+    hang();
+    break;
+  }
+  case 'exit-leaving-orphan': {
+    // 自己先退，留一个脱离的孙进程
+    const c = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1<<30)'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    c.unref();
+    appendFileSync(process.env.FAKE_PIDS_FILE, `${c.pid}\n`);
+    init();
+    text('孙子留着');
     break;
   }
   default:

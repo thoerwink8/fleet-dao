@@ -4,18 +4,12 @@
 // - 截止是上层给的绝对时刻（A2、A4）：到点的原因写「总时限 N 用完、停在哪一步」，外层同时叫停也不盖掉它；
 // - init 里的会话号交给调用方登记，续会话时对不上就判冲突、停掉这一个（A3）；
 // - 输出、stderr 一律过脱敏器再交出去（H1）。
-import { spawn } from 'node:child_process';
+// 起、叫停、收尸都经 ProcessHost（host.ts）：Windows 且找得到 jobrun 时走 Job Object（host-jobrun.ts），别处走进程组加会话标记（host-local.ts）。
 import { type Budget, fmtMs } from './budget.ts';
 import { classifyClaudeLine, type Frame } from './frames.ts';
-import { LineSplitter } from './lines.ts';
-import {
-  type ProcSnapshot,
-  RUN_MARKER_KEY,
-  reapSession,
-  runMarker,
-  sessionSnapshot,
-  signalSnapshot,
-} from './procs.ts';
+import { type HostProcess, type ProcessHost, readLines } from './host.ts';
+import { jobrunBinary, makeJobrunHost } from './host-jobrun.ts';
+import { localHost } from './host-local.ts';
 import type { Redactor } from './redact.ts';
 import { stopCauseOf } from './stop-reason.ts';
 
@@ -39,6 +33,13 @@ export interface RunSpec {
   classify?: (line: string) => Frame;
   redact: Redactor;
   signal?: AbortSignal;
+  /** 起进程的实现；不给就按平台挑（defaultHost）。 */
+  host?: ProcessHost;
+}
+
+/** Windows 且找得到 jobrun 就走它；否则 local（没有 jobrun 的 Windows 上收完剩几个查不了，照实回 undefined）。 */
+export function defaultHost(): ProcessHost {
+  return jobrunBinary() ? makeJobrunHost() : localHost;
 }
 
 export interface RunHooks {
@@ -79,8 +80,8 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
     const t0 = Date.now();
     const startedAt = new Date(t0).toISOString();
     const classify = spec.classify ?? classifyClaudeLine;
-    const posix = process.platform !== 'win32';
-    const splitter = new LineSplitter();
+    const host = spec.host ?? defaultHost();
+    let proc: HostProcess | undefined;
     const timers: NodeJS.Timeout[] = [];
     let stderrTail = '';
     let lines = 0;
@@ -95,7 +96,7 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
     let reaped: { found: number; leftovers: number | undefined } | undefined;
     let closed = false;
     let finished = false;
-    let snapshot: ProcSnapshot = new Map();
+    let splitter: ReturnType<typeof readLines> | undefined;
     const record = (err: unknown) => {
       hookError ??= spec.redact(err instanceof Error ? err.message : String(err));
     };
@@ -105,7 +106,7 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       finished = true;
       for (const t of timers) clearTimeout(t);
       spec.signal?.removeEventListener('abort', onAbort);
-      for (const line of splitter.end()) handleLine(line);
+      for (const line of splitter?.end() ?? []) handleLine(line);
       resolve({
         exitCode: exitInfo?.code ?? null,
         signal: exitInfo?.signal ?? null,
@@ -114,7 +115,7 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
         lastStep,
         ...(firstProgressMs === undefined ? {} : { firstProgressMs }),
         lines,
-        droppedLines: splitter.dropped,
+        droppedLines: splitter?.dropped ?? 0,
         stderrTail: spec.redact(stderrTail),
         stragglers: reaped?.found ?? 0,
         leftovers: reaped?.leftovers,
@@ -133,9 +134,8 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
     const kill = (reason: KillReason, detail: string) => {
       if (killed || exitInfo || finished) return;
       killed = { reason, detail: spec.redact(detail), at: new Date().toISOString() };
-      if (child?.pid !== undefined) snapshot = sessionSnapshot(spec.runId, child.pid);
-      terminate('SIGTERM');
-      timers.push(setTimeout(() => terminate('SIGKILL'), spec.budget.killGraceMs));
+      proc?.stop('term');
+      timers.push(setTimeout(() => proc?.stop('kill'), spec.budget.killGraceMs));
     };
     const deadlineDetail = () => `总时限 ${fmtMs(spec.deadline.getTime() - t0)}用完、停在「${lastStep}」`;
     const onAbort = () => {
@@ -157,40 +157,20 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       finish();
       return;
     }
-    const [bin, ...args] = spec.command;
-    if (!bin) {
+    if (!spec.command[0]) {
       reaped = { found: 0, leftovers: 0 };
       finish({ spawnError: '没有给命令' });
       return;
     }
-
-    const child = spawn(bin, args, {
-      cwd: spec.cwd,
-      env: { ...spec.env, [RUN_MARKER_KEY]: runMarker(spec.runId) },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      // 自成一个进程组；脱离了组的子孙靠会话标记另外认
-      detached: posix,
-      windowsHide: true,
-    });
-
-    function terminate(sig: NodeJS.Signals) {
-      const pid = child.pid;
-      if (pid === undefined) return;
-      if (!posix) {
-        // Windows 只在本机跑测试：整棵树一起杀，异步起（A5 禁同步起子进程，会卡住整个内核）
-        spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on(
-          'error',
-          () => {},
-        );
-        return;
-      }
-      signalSnapshot(new Map([...snapshot, ...sessionSnapshot(spec.runId, pid)]), sig);
-      try {
-        process.kill(-pid, sig);
-      } catch {
-        // 组已经空了
-      }
+    let child: HostProcess;
+    try {
+      child = host.start({ command: spec.command, cwd: spec.cwd, env: spec.env, runId: spec.runId });
+    } catch (err) {
+      reaped = { found: 0, leftovers: 0 };
+      finish({ spawnError: spec.redact(err instanceof Error ? err.message : String(err)) });
+      return;
     }
+    proc = child;
 
     function handleLine(raw: string) {
       lines++;
@@ -232,7 +212,7 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       }
     }
 
-    child.on('error', (err) => {
+    child.onError((err) => {
       if (child.pid === undefined) {
         reaped = { found: 0, leftovers: 0 };
         finish({ spawnError: spec.redact(err.message) });
@@ -249,16 +229,14 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       // 执行体提前退出时写 stdin 会 EPIPE，结果以退出码和输出为准
     });
     child.stdin.end(spec.stdin);
-    child.stdout.on('data', (chunk: Buffer) => {
-      for (const line of splitter.push(chunk)) handleLine(line);
-    });
+    splitter = readLines(child.stdout, handleLine);
     child.stderr.on('data', (chunk: Buffer) => {
       stderrTail = (stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL);
     });
-    child.on('exit', (code, signal) => {
+    child.onExit((code, signal) => {
       exitInfo = { code, signal };
       // 执行体退了：会话里还活着的一律收掉；它们握着 stdout 的话 close 永远等不来
-      void reapSession(spec.runId, spec.budget.killGraceMs, snapshot).then(
+      void child.reap(spec.budget.killGraceMs).then(
         (r) => {
           reaped = r;
           timers.push(setTimeout(() => finish(), 2_000));
@@ -271,7 +249,7 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
         },
       );
     });
-    child.on('close', () => {
+    child.onClose(() => {
       closed = true;
       maybeFinish();
     });

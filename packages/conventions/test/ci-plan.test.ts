@@ -1399,7 +1399,7 @@ describe('ci.yml 和这里对得上', () => {
   it('heavy 是独立的 job：每个 PR 和主线都跑、串行、可重试、核对跑的 == 名单；不在 check 的 needs 里、不开单', () => {
     const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
     for (const j of NON_BLOCKING_JOBS) expect(ids, j).toContain(j);
-    expect([...NON_BLOCKING_JOBS]).toEqual(['heavy']);
+    expect([...NON_BLOCKING_JOBS]).toEqual(['heavy', 'windows']);
     const heavy = job('heavy');
     expect(heavy).not.toMatch(/^ {4}needs:/m);
     expect(heavy).not.toMatch(/^ {4}if:/m);
@@ -1414,6 +1414,21 @@ describe('ci.yml 和这里对得上', () => {
     // 别的 job 的 needs 里都没有它
     for (const id of ids.filter((i) => i !== 'heavy'))
       expect(job(id), id).not.toMatch(/needs:[^\n]*\bheavy\b/);
+  });
+
+  it('windows 台（#3869）是独立的不挡 job：windows-latest、cargo 的 fmt/clippy/test、harness-runner 的测试；别的 job 的 needs 里都没有它', () => {
+    const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
+    const win = job('windows');
+    expect(win).toContain('runs-on: windows-latest');
+    expect(win).not.toMatch(/^ {4}needs:/m);
+    expect(win).toContain('cargo fmt --all --check');
+    expect(win).toContain('cargo clippy --all-targets -- -D warnings');
+    expect(win).toContain('cargo test');
+    expect(win).toContain('cargo build -p jobrun');
+    expect(win).toContain('vitest run packages/harness-runner');
+    expect(win).not.toContain('secrets.');
+    for (const id of ids.filter((i) => i !== 'windows'))
+      expect(job(id), id).not.toMatch(/needs:[^\n]*\bwindows\b/);
   });
 
   it('没有 job 用仓库密钥；lint 里卫生检查一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到仓根只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
