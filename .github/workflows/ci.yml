@@ -710,7 +710,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
+          # 不开 cache: pnpm。这一台接着要跑 vitest（rolldown）；还原出来的 pnpm 仓里原生绑定对不上
+          # （optional dependencies 的安装坑，#3894 在桌面台已经碰到：没缓存、全新装才好）
       - run: pnpm install --frozen-lockfile
       # runner 自带 Rust 和 MSVC；rustfmt、clippy 是 rustup 组件，显式装一遍不依赖镜像带不带
       - run: rustup component add rustfmt clippy
