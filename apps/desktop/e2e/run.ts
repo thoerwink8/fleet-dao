@@ -168,6 +168,41 @@ await settleWebview();
   await settleWebview();
 }
 
+// ---- 0c. 线索：照驱动的办法（环境变量给 WebView2 一个调试口）不经驱动起一遍，看 DevToolsActivePort 落在哪 ----
+{
+  const local = process.env.LOCALAPPDATA ?? '';
+  const udf = join(local, 'com.fleet2.desktop', 'EBWebView');
+  const probe = spawn(appExe, [], {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=0 --enable-logging --log-level=0',
+    },
+  });
+  let found = '';
+  for (let i = 0; i < 100 && found === ''; i++) {
+    await sleep(250);
+    if (existsSync(join(udf, 'DevToolsActivePort')))
+      found = readFileSync(join(udf, 'DevToolsActivePort'), 'utf8').replace(/\s+/g, ' ');
+  }
+  console.log(
+    `线索 0c：调试口文件 ${found === '' ? '没出现' : `出现了 ${found}`}（用户数据目录 ${udf}，存在 ${existsSync(udf)}）`,
+  );
+  if (found === '') {
+    console.log(
+      psSafe(
+        `Get-ChildItem -Recurse -Force -ErrorAction SilentlyContinue '${udf}' | Select-Object -First 40 FullName,Length | Format-Table -AutoSize | Out-String -Width 220`,
+      ),
+    );
+    console.log(
+      psSafe(`Get-Content '${join(udf, 'chrome_debug.log')}' -Tail 40 -ErrorAction SilentlyContinue`),
+    );
+  }
+  quiet(`Stop-Process -Id ${probe.pid} -Force -ErrorAction SilentlyContinue`);
+  for (let i = 0; i < 40 && pidsWith('kernel.mjs', 'node.exe').length > 0; i++) await sleep(100);
+  await settleWebview();
+}
+
 // ---- WebDriver 会话 ----
 const driver: ChildProcess = spawn(tauriDriver, ['--native-driver', edgeDriver], { stdio: 'inherit' });
 let base = 'http://127.0.0.1:4444';
