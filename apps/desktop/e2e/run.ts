@@ -191,6 +191,19 @@ await settleWebview();
         got = readFileSync(join(udf, 'DevToolsActivePort'), 'utf8').replace(/\s+/g, ' ');
     }
     console.log(`线索 0c：参数「${args}」→ 调试口文件 ${got === '' ? '没出现' : `出现了 ${got}`}`);
+    if (got === '') {
+      // WebView2 的浏览器主进程（没有 --type= 的那个）命令行里到底有没有收到调试口参数；调试口文件有没有落到别处
+      console.log(
+        psSafe(
+          `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' } | ForEach-Object { 'BROWSER ' + $_.ProcessId + ' ' + $_.CommandLine }`,
+        ),
+      );
+      console.log(
+        psSafe(
+          `Get-ChildItem -Path $env:LOCALAPPDATA,$env:TEMP -Recurse -Force -Filter DevToolsActivePort -ErrorAction SilentlyContinue | ForEach-Object { 'FOUND ' + $_.FullName }`,
+        ),
+      );
+    }
     if (got === '' && found === '' && args.includes('--enable-logging')) {
       // 第一种没出来时顺手留一张整个桌面的截图，看这台机器上窗口有没有真画出来
       psSafe(
