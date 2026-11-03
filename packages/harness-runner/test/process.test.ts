@@ -16,6 +16,8 @@ import { StopReason } from '../src/stop-reason.ts';
 const FAKE = fileURLToPath(new URL('./fake-cli.mjs', import.meta.url));
 const FAST: Budget = { startupMs: 400, totalMs: 5_000, idleMs: 300, killGraceMs: 200 };
 let n = 0;
+/** 起子进程只在 ProcessHost 的实现里（host.ts 的接口、runProcess 经它起）；harness-* 别的包和别的文件一律走 runProcess。 */
+const SPAWN_FILES = new Set(['harness-runner/host-local.ts', 'harness-runner/host-jobrun.ts']);
 
 function spec(mode: string, over: Partial<RunSpec> = {}, env: Record<string, string> = {}): RunSpec {
   const budget = over.budget ?? FAST;
@@ -213,7 +215,7 @@ describe('A5 子进程只走一个起法、按会话收', () => {
         if (/\b(spawnSync|execSync|execFileSync)\b/.test(text)) offenders.push(`${pkg}/${f}：同步起子进程`);
         const where = `${pkg}/${f.replaceAll('\\', '/')}`;
         // 按引入认，不按调用名认：正则的 .exec( 不是起子进程
-        if (/from ['"](node:)?child_process['"]/.test(text) && where !== 'harness-runner/process.ts') {
+        if (/from ['"](node:)?child_process['"]/.test(text) && !SPAWN_FILES.has(where)) {
           offenders.push(`${where}：起子进程要走 harness-runner 的 runProcess`);
         }
       }

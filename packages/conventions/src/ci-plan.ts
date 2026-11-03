@@ -854,8 +854,10 @@ export const ALWAYS_JOBS = ['changes', 'lint'] as const;
  * 不挡的 job（#3597）：ci.yml 里有、但不在 check 的 needs 里，也不进上面两份名单——必过检查不看它。
  * `heavy`：重型 / 不确定测试（test-split.ts 的 HEAVY_TESTS），每个 PR 和主线推送都跑、串行、可重试，红了只让这个 job 红，不挡合并、
  * 不自动开单、不更新汇总单；发版车预检（release-train-lib.mjs）另外要求被发的提交上它是绿的。
+ * `windows`（#3869）：windows-latest 上跑 crates/jobrun 的 cargo fmt、clippy、test 和 harness-runner 的 Windows 专属测试；
+ * 每个 PR 和主线推送都跑，红了只让这个 job 红，不挡合并、不进发版预检。
  */
-export const NON_BLOCKING_JOBS = ['heavy'] as const;
+export const NON_BLOCKING_JOBS = ['heavy', 'windows'] as const;
 
 /**
  * CI 不管改了什么都跑的测试：lint job 里 docs 那一步（.github/workflows/ci.yml 写死同一份；test/test-changed.test.ts 现读

@@ -1,0 +1,20 @@
+[package]
+name = "jobrun"
+version = "0.1.0"
+edition = "2021"
+description = "Windows process-tree supervisor built on Job Objects: spawn suspended, assign to a kill-on-close job, resume, then reap what is left."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
+] }

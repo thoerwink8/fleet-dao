@@ -1,26 +1,13 @@
 // 认一个会话的进程、按会话收（旧坑 A5）：会话 = 带会话标记 FLEET_RUN_ID 的进程，加根进程、它的进程组、它的子孙。
 // 从旧 adapters/src/procs.ts 复制改写：记下每个进程的起始时刻，发信号前核对，PID 被别的进程复用了就不碰。
-// 只认 Linux 的 /proc；没有 /proc（Windows 本机跑测试）时查不了，调用方照实记「没查成」，不当成收干净了。
+// 只认 Linux 的 /proc；没有 /proc 时查不了，调用方照实记「没查成」，不当成收干净了。Windows 上这件事归 jobrun（host-jobrun.ts）。
 // 测试进程的标记值见 runMarker：同名 runId 不会被别的 Vitest 进程收掉。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { jobrunReap } from './host-jobrun.ts';
+import { RUN_MARKER_KEY, runMarker } from './marker.ts';
 
-/** 会话标记：每个会话一个值，子孙都继承，内核重启后也能按它认出上一代的进程。 */
-export const RUN_MARKER_KEY = 'FLEET_RUN_ID';
-
-/**
- * 写进 `FLEET_RUN_ID` 的值。生产就是 runId，重启后的新进程仍按它找到上一代的孤儿。
- * Vitest 每个文件一个进程、库里的事件号都从 1 起，runId 会撞成同一个（d1-a1）：
- * 测试里的标记带上本进程号，收尸不会误杀别的测试还在跑的工人。
- */
-export function runMarker(
-  runId: string,
-  env: Readonly<Record<string, string | undefined>> = process.env,
-  pid = process.pid,
-): string {
-  if (env.VITEST?.trim()) return `${pid}:${runId}`;
-  return runId;
-}
+export { RUN_MARKER_KEY, runMarker };
 
 export const HAS_PROC = existsSync('/proc/self/stat');
 
@@ -135,10 +122,19 @@ export function stillAlive(snapshot: ProcSnapshot): number {
 }
 
 /**
- * 收掉一个会话剩下的进程：先 SIGTERM，等 graceMs 还在就 SIGKILL。回收之前找到几个、收完还剩几个；
- * 没有 /proc 时 leftovers 是 undefined（没查成）。
+ * 收掉一个会话剩下的进程。回收之前找到几个、收完还剩几个（实数）；查不了时 leftovers 是 undefined（没查成）：
+ * Linux 看 /proc；Windows 看 jobrun 的 Job 和它留下的报告（host-jobrun.ts），没有 jobrun 就查不了。
  */
-export async function reapSession(
+export function reapSession(
+  runId: string,
+  graceMs: number,
+  extra: ProcSnapshot = new Map(),
+): Promise<{ found: number; leftovers: number | undefined }> {
+  return process.platform === 'win32' ? jobrunReap(runId, graceMs) : reapProcSession(runId, graceMs, extra);
+}
+
+/** 有 /proc 的系统上的收法：先 SIGTERM，等 graceMs 还在就 SIGKILL。local 实现用它。 */
+export async function reapProcSession(
   runId: string,
   graceMs: number,
   extra: ProcSnapshot = new Map(),
