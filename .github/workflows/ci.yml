@@ -738,10 +738,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
-      # 全局虚拟仓关掉：Windows runner 上它的链接目录（D:\.pnpm-store\…\links）读原生绑定偶发 EPERM（rolldown 的 .node 找不到，vite、vitest 都起不来）；
-      # 这一台要真跑 vite 构建页面，不要这个变量
-      - run: pnpm install --frozen-lockfile --config.enableGlobalVirtualStore=false
+          # 不开 cache: pnpm。这一台要真跑 vite 构建页面；还原出来的 pnpm 仓（D:\.pnpm-store\v11，含全局虚拟仓的链接目录）里 rolldown 的原生绑定
+          # 读起来是 EPERM（#3894 后第二、三次跑都栽在这，第一次没有缓存、全新装就好），直接装，多一两分钟
+      - run: pnpm install --frozen-lockfile
       - run: rustup component add rustfmt clippy
       # 外壳不含路由、不开命令的检查在 test 台里跑（packages/conventions/test/desktop-shell.test.ts，红了能拦），这里不重复
       # 备安装包要带的东西：本机版页面、打包后的内核加 node.exe、jobrun.exe
