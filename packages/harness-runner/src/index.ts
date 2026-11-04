@@ -1,6 +1,13 @@
 export * from './budget.ts';
 export * from './frames.ts';
 export * from './host.ts';
+export {
+  HostdError,
+  HostdProcessHost,
+  HostdVersionError,
+  hostdBinary,
+  makeHostdHost,
+} from './host-hostd.ts';
 export { jobName, jobrunBinary, jobrunReap, makeJobrunHost, reportPath } from './host-jobrun.ts';
 export { localHost } from './host-local.ts';
 export * from './orphans.ts';

@@ -80,7 +80,11 @@ fn usage(msg: &str) -> i32 {
 }
 
 pub fn main() -> i32 {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    main_with(std::env::args().skip(1).collect())
+}
+
+/// Same as `main` with an explicit argument list (without the program name).
+pub fn main_with(argv: Vec<String>) -> i32 {
     let Some((verb, rest)) = argv.split_first() else {
         return usage("expected one of: run, kill, list, check, reap");
     };
@@ -146,7 +150,7 @@ fn record(job: &Job, seen: &mut BTreeMap<u32, u64>) -> Vec<u32> {
     pids
 }
 
-fn wait_empty(job: &Job, grace: Duration) -> u32 {
+pub fn wait_empty(job: &Job, grace: Duration) -> u32 {
     let until = Instant::now() + grace;
     loop {
         let left = job.pids().map(|p| p.len() as u32).unwrap_or(0);

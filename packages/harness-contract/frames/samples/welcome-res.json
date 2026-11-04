@@ -1,0 +1,9 @@
+{
+  "type": "welcome",
+  "id": 1,
+  "protocol": 1,
+  "hostd": "0.1.0",
+  "os": "linux",
+  "arch": "x86_64",
+  "capabilities": ["spawn", "attach", "read", "stdin", "stop", "reap", "status", "forget"]
+}

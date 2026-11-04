@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./worker-state": "./src/worker-state.ts",
+    "./hostd-frames": "./src/hostd-frames.ts",
     "./work-graph": "./src/work-graph.ts"
   },
   "dependencies": {

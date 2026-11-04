@@ -225,6 +225,16 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
         record(err);
       }
     }
+    // 进程号晚到的实现（hostd）：拿到时再报一次起了
+    if (child.pid === undefined) {
+      child.onSpawned?.((pid) => {
+        try {
+          hooks.onSpawn?.({ pid, runId: spec.runId, startedAt });
+        } catch (err) {
+          record(err);
+        }
+      });
+    }
     child.stdin.on('error', () => {
       // 执行体提前退出时写 stdin 会 EPIPE，结果以退出码和输出为准
     });

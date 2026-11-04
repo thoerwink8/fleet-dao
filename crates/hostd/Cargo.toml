@@ -1,0 +1,21 @@
+[package]
+name = "hostd"
+version = "0.1.0"
+edition = "2021"
+description = "Host helper: starts workers detached from the session, keeps their output in files with line numbers, serves it over a stdio frame protocol, and reaps what is left. Same program locally and over SSH."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+jobrun = { path = "../jobrun" }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }

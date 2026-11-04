@@ -1,0 +1,8 @@
+{
+  "type": "spawn",
+  "id": 2,
+  "runId": "issue-3871-a1",
+  "command": ["/usr/bin/node", "worker.mjs", "--flag"],
+  "cwd": "/work/tree",
+  "env": { "PATH": "/usr/bin", "FLEET_RUN_ID": "issue-3871-a1" }
+}

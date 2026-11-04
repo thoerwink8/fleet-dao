@@ -17,7 +17,11 @@ const FAKE = fileURLToPath(new URL('./fake-cli.mjs', import.meta.url));
 const FAST: Budget = { startupMs: 400, totalMs: 5_000, idleMs: 300, killGraceMs: 200 };
 let n = 0;
 /** 起子进程只在 ProcessHost 的实现里（host.ts 的接口、runProcess 经它起）；harness-* 别的包和别的文件一律走 runProcess。 */
-const SPAWN_FILES = new Set(['harness-runner/host-local.ts', 'harness-runner/host-jobrun.ts']);
+const SPAWN_FILES = new Set([
+  'harness-runner/host-local.ts',
+  'harness-runner/host-jobrun.ts',
+  'harness-runner/host-hostd.ts',
+]);
 
 function spec(mode: string, over: Partial<RunSpec> = {}, env: Record<string, string> = {}): RunSpec {
   const budget = over.budget ?? FAST;

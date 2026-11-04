@@ -1,0 +1,9 @@
+{
+  "type": "state",
+  "id": 8,
+  "runId": "issue-3871-a1",
+  "known": true,
+  "alive": null,
+  "pid": 4242,
+  "exit": { "code": null, "signal": "SIGKILL" }
+}

@@ -856,8 +856,9 @@ export const ALWAYS_JOBS = ['changes', 'lint'] as const;
  * 不自动开单、不更新汇总单；发版车预检（release-train-lib.mjs）另外要求被发的提交上它是绿的。
  * `windows`（#3869）：windows-latest 上跑 crates/jobrun 的 cargo fmt、clippy、test 和 harness-runner 的 Windows 专属测试；
  * 每个 PR 和主线推送都跑，红了只让这个 job 红，不挡合并、不进发版预检。
+ * `linux`（#3871）：ubuntu 上跑 crates 的 cargo fmt、clippy、test 和 harness-runner 的测试（hostd 的 Unix 一侧、ProcessHost 一致性套件的 hostd 一份、强杀内核接回的故障用例），同样不挡合并。
  */
-export const NON_BLOCKING_JOBS = ['heavy', 'windows'] as const;
+export const NON_BLOCKING_JOBS = ['heavy', 'windows', 'linux'] as const;
 
 /**
  * CI 不管改了什么都跑的测试：lint job 里 docs 那一步（.github/workflows/ci.yml 写死同一份；test/test-changed.test.ts 现读

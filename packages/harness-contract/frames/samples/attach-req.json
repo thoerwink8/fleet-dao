@@ -1,0 +1,1 @@
+{ "type": "attach", "id": 3, "runId": "issue-3871-a1", "after": { "stdout": 17, "stderr": 0 } }

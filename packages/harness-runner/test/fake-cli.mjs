@@ -55,6 +55,18 @@ switch (mode) {
       text('还在干');
       await wait(50);
     }
+  case 'ticks': {
+    // 慢慢吐一串编号的行（故障用例：内核被杀时执行体还在写）：init、tick 1..N、result，共 N+2 行
+    const n = Number(process.env.FAKE_TICKS ?? 40);
+    const ms = Number(process.env.FAKE_TICK_MS ?? 50);
+    init();
+    for (let i = 1; i <= n; i++) {
+      out(`tick ${i}`);
+      await wait(ms);
+    }
+    out({ type: 'result', session_id: sid });
+    break;
+  }
   case 'leak-secret':
     init();
     text(`令牌是 ${process.env.FAKE_TOKEN}`);

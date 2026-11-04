@@ -1,0 +1,7 @@
+{
+  "type": "attached",
+  "id": 3,
+  "runId": "issue-3871-a1",
+  "alive": false,
+  "exit": { "code": 0, "signal": null }
+}
