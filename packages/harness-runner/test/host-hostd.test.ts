@@ -50,20 +50,24 @@ describe('hostd：版本握手', () => {
     await host.close();
   });
 
-  it('真 hostd 拒绝说别的协议版本的客户端', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'hostd-ver-'));
-    const child = spawn(BIN as string, ['--stdio', '--state-dir', dir], {
-      stdio: ['pipe', 'pipe', 'inherit'],
-    });
-    const first = new Promise<string>((resolve) =>
-      child.stdout?.once('data', (c: Buffer) => resolve(String(c))),
-    );
-    child.stdin?.write(`${JSON.stringify({ type: 'hello', id: 1, protocol: 99, client: 't' })}\n`);
-    const reply = JSON.parse(await first);
-    expect(reply).toMatchObject({ type: 'error', code: 'version_mismatch', id: 1 });
-    const code = await new Promise((r) => child.on('close', r));
-    expect(code).toBe(3);
-  }, 15_000);
+  it.skipIf(!BIN)(
+    '真 hostd 拒绝说别的协议版本的客户端',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'hostd-ver-'));
+      const child = spawn(BIN as string, ['--stdio', '--state-dir', dir], {
+        stdio: ['pipe', 'pipe', 'inherit'],
+      });
+      const first = new Promise<string>((resolve) =>
+        child.stdout?.once('data', (c: Buffer) => resolve(String(c))),
+      );
+      child.stdin?.write(`${JSON.stringify({ type: 'hello', id: 1, protocol: 99, client: 't' })}\n`);
+      const reply = JSON.parse(await first);
+      expect(reply).toMatchObject({ type: 'error', code: 'version_mismatch', id: 1 });
+      const code = await new Promise((r) => child.on('close', r));
+      expect(code).toBe(3);
+    },
+    15_000,
+  );
 }, 30_000);
 
 describe.skipIf(!BIN)(
