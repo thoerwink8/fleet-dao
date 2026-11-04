@@ -1,0 +1,1 @@
+{"type":"read","id":1,"runId":"r","stream":"pty","after":0,"max":10}

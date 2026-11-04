@@ -1,6 +1,7 @@
 // ProcessHost：起、接回、叫停、按行读、收尸五件事的接口（决定 0125 第 8 条，讨论稿 6.4a 的迁移路径）。
-// 实现：host-local.ts（进程组加会话标记，行为不变）、host-jobrun.ts（Windows Job Object，crates/jobrun）；以后 hostd 再加一个。
-// 三者跑同一套一致性测试（test/host-conformance.ts）。runProcess 只认这个接口，不知道下面是哪一种。
+// 实现：host-local.ts（进程组加会话标记，行为不变）、host-jobrun.ts（Windows Job Object，crates/jobrun）、
+// host-hostd.ts（宿主帮手 hostd，crates/hostd：脱离会话跑、输出落文件按行号接回，#3871）。
+// 三者跑同一套一致性测试（test/host-conformance.test.ts）。runProcess 只认这个接口，不知道下面是哪一种。
 import type { Readable, Writable } from 'node:stream';
 import { LineSplitter } from './lines.ts';
 
@@ -22,8 +23,10 @@ export interface HostReap {
 
 /** 一个已经起来的执行体。 */
 export interface HostProcess {
-  /** 本机进程号；没起来是 undefined（这时 onError 会来）。 */
+  /** 本机进程号；没起来是 undefined（这时 onError 会来）。hostd 实现的起是异步的，进程号晚一点才有，见 onSpawned。 */
   readonly pid: number | undefined;
+  /** 进程号晚到的实现（hostd）才有：起好拿到进程号时叫一次（已经有了就立刻叫）。 */
+  onSpawned?(cb: (pid: number) => void): void;
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
@@ -42,7 +45,7 @@ export interface HostProcess {
 }
 
 export interface ProcessHost {
-  readonly kind: 'local' | 'jobrun';
+  readonly kind: 'local' | 'jobrun' | 'hostd';
   /** 起。起不来时 pid 是 undefined、onError 会来。 */
   start(spec: HostSpawnSpec): HostProcess;
   /** 接回：内核重启后这个会话还有进程在吗；true / false，查不了回 undefined。 */

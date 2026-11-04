@@ -1,0 +1,9 @@
+{
+  "type": "lines",
+  "id": 4,
+  "runId": "issue-3871-a1",
+  "stream": "stdout",
+  "after": 17,
+  "lines": ["{\"type\":\"assistant\"}", "第二行"],
+  "eof": false
+}

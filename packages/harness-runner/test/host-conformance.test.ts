@@ -1,11 +1,12 @@
 // ProcessHost 一致性测试：起、按行读、叫停、收尸、接回，每个实现跑同一套（决定 0125 第 8 条）。
-// local 在哪都跑；jobrun 只在 Windows 跑（要先 cargo build -p jobrun，或设 FLEET_JOBRUN）。以后 hostd 加进 HOSTS 就行。
+// local 在哪都跑；jobrun 只在 Windows 跑（要先 cargo build -p jobrun，或设 FLEET_JOBRUN）；hostd 要先 cargo build -p hostd（或设 FLEET_HOSTD）。
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { type HostProcess, type ProcessHost, readLines } from '../src/host.ts';
+import { hostdBinary, makeHostdHost } from '../src/host-hostd.ts';
 import { jobrunBinary, makeJobrunHost } from '../src/host-jobrun.ts';
 import { localHost } from '../src/host-local.ts';
 import { HAS_PROC } from '../src/procs.ts';
@@ -16,9 +17,13 @@ let n = 0;
 interface Impl {
   name: string;
   host: ProcessHost | undefined;
-  /** 这个实现收完能数出实数吗（local 要 /proc，jobrun 要 Job）。 */
+  /** 这个实现收完能数出实数吗（local 要 /proc，jobrun 要 Job，hostd 在 Linux 读 /proc、Windows 用 Job）。 */
   counts: boolean;
 }
+
+const hostd = hostdBinary()
+  ? makeHostdHost({ stateDir: mkdtempSync(join(tmpdir(), 'conf-hostd-')) })
+  : undefined;
 
 const HOSTS: Impl[] = [
   { name: 'local', host: localHost, counts: HAS_PROC },
@@ -27,7 +32,13 @@ const HOSTS: Impl[] = [
     host: process.platform === 'win32' && jobrunBinary() ? makeJobrunHost() : undefined,
     counts: true,
   },
+  // 要先 cargo build -p hostd（或设 FLEET_HOSTD）；CI 的 linux 台和 windows 台都会建
+  { name: 'hostd', host: hostd, counts: true },
 ];
+
+afterAll(async () => {
+  await hostd?.close();
+});
 
 function begin(host: ProcessHost, mode: string, extra: Record<string, string> = {}) {
   const runId = `conf-${process.pid}-${++n}`;

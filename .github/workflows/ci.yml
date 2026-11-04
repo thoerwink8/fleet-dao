@@ -717,8 +717,31 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      - run: cargo build -p jobrun
-      - run: pnpm exec vitest run packages/harness-runner
+      - run: cargo build -p jobrun -p hostd
+      - run: pnpm exec vitest run packages/harness-runner packages/harness-contract/test/hostd-frames.test.ts
+
+  # Linux 台（#3871）：宿主帮手 hostd（crates/hostd）的 Unix 一侧（setsid 看守进程、/proc 收尸）只有在真 Linux 上才跑得到：
+  # cargo fmt/clippy/test，再跑 harness-runner 的测试（ProcessHost 一致性套件的 hostd 一份、强杀内核后按行号接回的故障用例）和帧协议对拍。
+  # 和 windows 一样不在 check 的 needs 里（NON_BLOCKING_JOBS）：红了只让这个 job 红，不挡合并。
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: rustup component add rustfmt clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build -p hostd
+      - run: pnpm exec vitest run packages/harness-runner packages/harness-contract/test/hostd-frames.test.ts
 
   # 桌面外壳台（#3870，决定 0125 第 8 条）：Windows 上编译 apps/desktop（Tauri 2）、出 NSIS 安装包（不签名，作产物上传）、静默装一遍，
   # 再用 WebDriver（tauri-driver + 和 WebView2 同版本的 msedgedriver）真开窗口核对：五块导航都通、页面调不了外壳命令、托盘和开机自启、

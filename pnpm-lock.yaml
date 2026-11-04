@@ -277,7 +277,11 @@ importers:
 
   packages/harness-egress: {}
 
-  packages/harness-runner: {}
+  packages/harness-runner:
+    dependencies:
+      '@fleet-dao/harness-contract':
+        specifier: workspace:*
+        version: link:../harness-contract
 
   packages/harness-store:
     dependencies:
