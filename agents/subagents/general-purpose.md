@@ -1,6 +1,6 @@
 ---
 name: general-purpose
-description: 工人（Sonnet 5.5，可写）：写代码、改文件、改文档、修 bug、部署、开 PR；界面活也归它（照仓里的界面规范做，本机装了 ego-browser 就用它真点页面、没有再用 playwright-cli，PR 带截图）。难的活派它时传 model 升档；窄改动、派前定好机器核对、规矩写全的编码可传 haiku 降档。
+description: 工人（Sonnet 5.5，可写）：写代码、改文件、改文档、修 bug、部署、开 PR；界面活也归它（照仓里的界面规范做，本机装了 ego-browser 就用它真点页面、没有再用 playwright-cli，PR 带截图）。同一件连着两次交不出能用的结果才传 model 升档；窄改动、派前定好机器核对、规矩写全的编码可传 haiku 降档。
 model: claude-sonnet-5-5
 effort: medium
 maxTurns: 200
