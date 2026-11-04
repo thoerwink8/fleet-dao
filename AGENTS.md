@@ -17,6 +17,7 @@
 | 表结构 | `packages/db/AGENTS.md` |
 | Store | `packages/store/AGENTS.md` |
 | 检查、pnpm 脚本 | `packages/conventions/AGENTS.md` |
+| 桌面外壳（Tauri 2） | `apps/desktop/AGENTS.md` |
 | 为什么 | `docs/design.md` |
 | 运维 | `docs/ops.md` |
 | 决定 | `docs/decisions/README.md` |

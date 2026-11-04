@@ -5,6 +5,9 @@
       "path": "agents"
     },
     {
+      "path": "apps/desktop"
+    },
+    {
       "path": "packages/shared"
     },
     {

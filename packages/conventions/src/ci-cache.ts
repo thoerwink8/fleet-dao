@@ -231,6 +231,8 @@ export const EXTERNAL_INPUT_DIRS: readonly string[] = [
   'docs/decisions',
   // specs-index.test.ts 通读 specs/ 各目录主文件的头部（#3498），头部改了键要变，不然复用旧的绿结果
   'specs',
+  // desktop-shell.test.ts 通读桌面外壳的源码、配置、启动页（#3870），外壳改了键要变
+  'apps/desktop',
 ];
 
 /**

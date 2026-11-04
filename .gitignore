@@ -5,6 +5,10 @@ coverage/
 *.tsbuildinfo
 # Rust 构建产物（crates/）
 target/
+# 桌面外壳：安装包要带的东西（apps/desktop/scripts/stage.ts 备出来的）
+apps/desktop/build/
+# Tauri 构建时生成的授权清单和 schema（每次构建重出，不进仓）
+apps/desktop/src-tauri/gen/
 *.local
 .DS_Store
 .playwright-mcp/

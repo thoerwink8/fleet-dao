@@ -142,6 +142,8 @@ export const TEST_READS: Record<string, string[]> = {
     '.github/workflows/query-metadata.yml',
     '.github/workflows/managed-feedback.yml',
     'packages/shared/src/private-quotes.ts',
+    // desktop-shell.test.ts 拿真仓的桌面外壳（Rust 源码、Cargo.toml、tauri.conf.json、授权目录、启动页）核对「不含路由、不开命令」（#3870）
+    'apps/desktop/',
   ],
   db: [
     'adapters',
@@ -463,6 +465,12 @@ export const PATH_RULES: readonly Rule[] = [
     match: under('.githooks/'),
     units: ['hygiene', AGENTS_UNIT],
     why: '推前钩子调卫生检查、查认领（agents 的测试直接跑这个钩子）',
+  },
+  // 桌面外壳（#3870）：只有 conventions 的 desktop-shell.test.ts 读它；真编译和端到端在 CI 的 desktop 台（Windows）
+  {
+    match: under('apps/desktop/'),
+    units: ['conventions'],
+    why: 'desktop-shell.test.ts 核对外壳不含路由、不开命令；编译和端到端在 CI 的 desktop 台',
   },
   { match: under('docs/'), units: [], why: '文档' },
   { match: under('specs/'), units: [], why: '需求文档' },
@@ -857,8 +865,10 @@ export const ALWAYS_JOBS = ['changes', 'lint'] as const;
  * `windows`（#3869）：windows-latest 上跑 crates/jobrun 的 cargo fmt、clippy、test 和 harness-runner 的 Windows 专属测试；
  * 每个 PR 和主线推送都跑，红了只让这个 job 红，不挡合并、不进发版预检。
  * `linux`（#3871）：ubuntu 上跑 crates 的 cargo fmt、clippy、test 和 harness-runner 的测试（hostd 的 Unix 一侧、ProcessHost 一致性套件的 hostd 一份、强杀内核接回的故障用例），同样不挡合并。
+ * `desktop`（#3870）：windows-latest 上编译桌面外壳（apps/desktop，Tauri 2）、出 NSIS 安装包（不签名，作产物上传）、静默装一遍，
+ * 再用 WebDriver 真开窗口核对五块导航、托盘和自启、单实例、强杀外壳后内核 2 秒内不在；规矩同 windows 台。
  */
-export const NON_BLOCKING_JOBS = ['heavy', 'windows', 'linux'] as const;
+export const NON_BLOCKING_JOBS = ['heavy', 'windows', 'desktop', 'linux'] as const;
 
 /**
  * CI 不管改了什么都跑的测试：lint job 里 docs 那一步（.github/workflows/ci.yml 写死同一份；test/test-changed.test.ts 现读

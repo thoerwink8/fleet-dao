@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fleet2</title>
+    <style>
+      :root { color-scheme: light dark; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: grid; place-items: center; padding: 24px; box-sizing: border-box;
+        font: 14px/1.6 system-ui, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+        background: Canvas; color: CanvasText;
+      }
+      main { max-width: 560px; width: 100%; }
+      h1 { font-size: 16px; font-weight: 600; margin: 0 0 12px; display: flex; align-items: center; gap: 10px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: GrayText; flex: none; }
+      .dot.busy { animation: pulse 1.2s ease-in-out infinite; }
+      .dot.bad { background: #d33; }
+      pre {
+        white-space: pre-wrap; word-break: break-word; margin: 0; padding: 12px;
+        border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 6px;
+        font: 12px/1.5 ui-monospace, Consolas, monospace; display: none;
+      }
+      p { margin: 0 0 12px; color: GrayText; }
+      @keyframes pulse { 50% { opacity: 0.3; } }
+      @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1><span id="dot" class="dot busy"></span><span id="title">正在启动…</span></h1>
+      <p id="hint">窗口会在内核就绪后自动打开。</p>
+      <pre id="detail"></pre>
+    </main>
+    <script>
+      // The shell tells this page what is going on through the URL fragment (#status:… or #error:…).
+      // The page has no way to call the shell, and nothing here talks to a server.
+      function render() {
+        const raw = decodeURIComponent(location.hash.slice(1));
+        const i = raw.indexOf(':');
+        const kind = i > 0 ? raw.slice(0, i) : 'status';
+        const text = i > 0 ? raw.slice(i + 1) : raw;
+        const dot = document.getElementById('dot');
+        const title = document.getElementById('title');
+        const hint = document.getElementById('hint');
+        const detail = document.getElementById('detail');
+        if (kind === 'error') {
+          const nl = text.indexOf('\n');
+          title.textContent = nl < 0 ? text : text.slice(0, nl);
+          detail.textContent = nl < 0 ? '' : text.slice(nl + 1);
+          detail.style.display = nl < 0 ? 'none' : 'block';
+          hint.textContent = '可以在托盘图标的菜单里重启内核、切换连接方式或打开设置文件夹。';
+          dot.className = 'dot bad';
+        } else {
+          title.textContent = text || '正在启动…';
+          detail.style.display = 'none';
+          hint.textContent = '窗口会在内核就绪后自动打开。';
+          dot.className = 'dot busy';
+        }
+      }
+      window.addEventListener('hashchange', render);
+      render();
+    </script>
+  </body>
+</html>
