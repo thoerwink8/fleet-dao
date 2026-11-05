@@ -23,6 +23,7 @@ import {
 import {
   autoModelRosterChannels,
   type Db,
+  disabledPoolReasons,
   finishScheduleRun,
   modelRosterDue,
   type PoolRunUsage,
@@ -107,6 +108,7 @@ export function quotaReadJob(w: QuotaReadWiring): () => QuotaReadJobDeps {
       ),
     save: (snapshot, at) => savePoolQuota(w.db, snapshot, { now: at }),
     lastReadOk: (ids) => poolLastReadOk(w.db, ids),
+    disabledPools: (ids) => disabledPoolReasons(w.db, ids),
     raise: (a) =>
       upsertAlert(w.db, {
         dedupeKey: a.key,
