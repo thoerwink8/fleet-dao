@@ -270,15 +270,23 @@ export function completeJob(db: Db, job: Job): Promise<void> {
   return settleJob(db, job, { state: 'done', lastError: null });
 }
 
-/** 没做成：退避后再排；次数到顶进 dead。 */
+/**
+ * 没做成：退避后再排；次数到顶进 dead。
+ * 退避大于 0 时，在传入的毫秒上再加一段 [0, 退避] 的抖动（库里的 random()，时刻仍是数据库 now()），
+ * 同一时刻失败的一批不会挤在同一个到期点。退避为 0 时不加抖动，到期就是 now()，马上能再领。
+ */
 export function retryJob(db: Db, job: Job, why: string, backoffMs: number): Promise<void> {
   if (job.attempts >= job.maxAttempts) {
     return settleJob(db, job, { state: 'dead', lastError: `做了 ${job.attempts} 次都没成：${why}` });
   }
+  const secs = backoffMs / 1000;
+  const dueAt = (backoffMs > 0
+    ? sql`now() + make_interval(secs => ${secs}) + make_interval(secs => (${secs} * random()))`
+    : sql`now()`) as unknown as Date;
   return settleJob(db, job, {
     state: 'pending',
     lastError: why,
-    dueAt: sql`now() + make_interval(secs => ${backoffMs / 1000})` as unknown as Date,
+    dueAt,
   });
 }
 
