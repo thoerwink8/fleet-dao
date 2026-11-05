@@ -36,11 +36,17 @@ function entryEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return env;
 }
 
+function procMissing(err: unknown): boolean {
+  // 进程正在退出时读 /proc/<pid>/status 会抛 ESRCH；目录已经没了是 ENOENT。都是这个进程不在了。
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ESRCH';
+}
+
 function procState(pid: number): string | undefined {
   try {
     return /^State:\s+(\S+)/m.exec(readFileSync(`/proc/${pid}/status`, 'utf8'))?.[1];
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if (procMissing(err)) return undefined;
     throw err;
   }
 }
@@ -50,7 +56,7 @@ function procPpid(pid: number): number | undefined {
     const n = Number(/^PPid:\s+(\d+)/m.exec(readFileSync(`/proc/${pid}/status`, 'utf8'))?.[1]);
     return Number.isInteger(n) ? n : undefined;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if (procMissing(err)) return undefined;
     throw err;
   }
 }
@@ -435,7 +441,17 @@ setInterval(() => {}, 1000);
       reapIfSameStart(pid, start);
       expect(waitUntil(() => procState(pid) === undefined, 3000)).toBe(true);
     } finally {
-      launcher.kill('SIGTERM');
+      // 孩子已收掉时，父进程会跟着 child exit 自己退出 0。马上再 SIGTERM 会和这次退出撞上，
+      // close 的 code 变成 null（内核按信号收场）。还活着才发，用来收失败路径留下的进程。
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const natural = await Promise.race([
+        exited,
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), 1000);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (natural === undefined) launcher.kill('SIGTERM');
       expect(await exited).toBe(0);
     }
   });
