@@ -106,17 +106,18 @@ export function fetchWithFallback(git, cwd, args, h) {
 const MIN_TRY_MS = 1_000;
 
 /**
- * 起子代理前取远端的时间预算：调工具前钩子总共只有 10 秒（targets.ts），三条路加起来要留出余量，总预算 9 秒（只有建工作树的派工才取，次数已大降；预算太小环境代理一超时，直连和备用两条路都会被跳过）。
- * 首选路（环境里的代理，reclaude 的口）给 6 秒——同时起了十来个子代理，代理瞬时慢过 4 秒，三个带工作树的子代理被误拦；
+ * 起子代理前取远端的时间预算：调工具前钩子总共只有 10 秒（targets.ts），超了按拦处理，所以总预算 7.5 秒，给起进程、判容量、取完失败后再读一次 git log 留 2.5 秒
+ * （2026-11-05 实测：总预算 9 秒时取远端要 6.5 秒的机器上，带工作树的派工整批超时被拦；取不成只提示、不拦，超时却是拦）。
+ * 首选路（环境里的代理，reclaude 的口）给 4.5 秒；
  * 直连只是兜底给 3 秒（这台机器直连常常要 20 多秒才报超时）；
  * 备用代理（~/.fleet-dao/fallback-proxy，本机的 Clash 口）给 3 秒——第三条路，为什么有它见文件头「第三条路」那段。
  * 三个数加起来是 12 秒，所以靠总预算压：环境代理被拒当场失败的（0 毫秒）不占预算，直连和备用代理都拿得满；
- * 环境代理拖满 6 秒时，直连让位（只拿「9 − 6 − 3」，不足 1 秒就不试），留 3 秒给备用代理；没配备用代理时直连照旧拿满 3 秒。
+ * 环境代理拖满 4.5 秒时，直连让位（只拿「7.5 − 4.5 − 3」，不足 1 秒就不试），留 3 秒给备用代理；没配备用代理时直连照旧拿满 3 秒。
  */
-export const SUBAGENT_FETCH_MS = 6_000;
+export const SUBAGENT_FETCH_MS = 4_500;
 export const SUBAGENT_DIRECT_MS = 3_000;
 export const SUBAGENT_FALLBACK_MS = 3_000;
-export const SUBAGENT_BUDGET_MS = 9_000;
+export const SUBAGENT_BUDGET_MS = 7_500;
 /** 这个仓刚取成 origin 的有效期。和开会话钩子的 QUIET_MS 一样是 3 分钟。 */
 export const FETCH_QUIET_MS = 3 * 60_000;
 
