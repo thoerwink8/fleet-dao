@@ -32,7 +32,7 @@ const router = createBrowserRouter(
           element: (
             <BlockPlaceholder
               title="决策"
-              slice="决策卡：母单 #3770 的第 6 片（指挥官会话能说话、决策卡、推送）。"
+              slice="决策卡：会话能说话、决策卡、推送，这一块还没接上。"
               note="要你拍板的事会汇到这里，一张卡一件事。"
             />
           ),
