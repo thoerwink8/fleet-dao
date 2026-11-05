@@ -1,3 +1,10 @@
 {
-  "tests": []
+  "tests": [
+    {
+      "file": "02c-home-narrow.e2e.ts",
+      "title": "宽屏：开关和标题同一行，也不和状态、刷新重叠",
+      "issue": 3433,
+      "until": "2026-10-28"
+    }
+  ]
 }
