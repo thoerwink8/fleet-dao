@@ -6,10 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const xterm = vi.hoisted(() => {
   let dataCb: ((data: string) => void) | undefined;
-  const opened: { options: { windowsPty?: { backend?: string; buildNumber?: number } } }[] = [];
+  type TermOptions = {
+    theme?: unknown;
+    windowsPty?: { backend?: string; buildNumber?: number };
+  };
+  const opened: { options: TermOptions }[] = [];
   class Terminal {
-    options: { theme?: unknown } = {};
-    constructor(options: { windowsPty?: { backend?: string; buildNumber?: number } }) {
+    options: TermOptions = {};
+    constructor(options: TermOptions) {
       this.options = options;
       opened.push({ options });
     }
