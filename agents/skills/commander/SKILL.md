@@ -16,6 +16,7 @@ description: 当指挥官时读：和创始人讨论需求、写成单和验收�
 - 他拍了板当场记，先照通用段那条分拣、判法看 `pnpm progress directive` 的输出：先读主线上已有的，冲突就问、不覆盖；只记他亲口说的。产品拍板自用仓贴原话和时间，长期的记进 `docs/decisions/`（或那个产品的设计文档），替代旧决定的，在旧决定头部写明被谁替代；要做的活 `pnpm issue:new` 开单；以后都管的 AI 做法才 `pnpm progress directive --kind ai`。对外仓照通用段「对外仓和对外内容怎么写」写成结论、照那个仓自己的记法记，原话只进私有处，AI 怎么干活的那部分回 fleet-dao 记（只写意思，不带那个项目的业务、人名、地址）。
 
 ## 派活
+- 干活方式由创始人在会话里指定（派子代理、开 mirasim 会话、自己干），指定后一直照着走，到他提出新方式为止；没指定时照下面（#3915）。他指定开 mirasim 会话的，照 `mirasim-sessions` 技能做。
 - 本机活（上面几种）用 Agent 子代理，后台跑。选哪个角色、给哪一档、`model` 怎么写、护栏和收货，一律照 `agents/subagents/README.md`，这里不重抄。派活步骤：
   1. 按活的类型在 README 里挑角色（`Explore`、`general-purpose`、`Plan`）；默认不传 `model`，降档升档只照 README 的条件和写法。
   2. 要降到 Haiku 的，派之前先把核对命令定好、规矩写全，写进交代。
