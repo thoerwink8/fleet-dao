@@ -24,8 +24,9 @@ use windows_sys::Win32::System::JobObjects::{
 const JOB_OBJECT_TERMINATE: u32 = 0x0008;
 const JOB_OBJECT_QUERY: u32 = 0x0004;
 use windows_sys::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, OpenThread, ResumeThread, TerminateProcess,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, THREAD_SUSPEND_RESUME,
+    GetProcessTimes, OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread,
+    TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    THREAD_SUSPEND_RESUME,
 };
 
 /// `Local\` keeps the name inside the current logon session, so it needs no extra privilege.
@@ -161,6 +162,35 @@ pub fn alive_matching(pid: u32, start: u64) -> bool {
     creation_time(pid) == Some(start)
 }
 
+/// Windows puts `conhost.exe` in the job of a console process (`CREATE_NO_WINDOW` still
+/// allocates a console). It is not a process the command started.
+pub fn is_console_host(pid: u32) -> bool {
+    image_name(pid).is_some_and(|path| {
+        path.rsplit(['\\', '/'])
+            .next()
+            .is_some_and(|file| file.eq_ignore_ascii_case("conhost.exe"))
+    })
+}
+
+fn image_name(pid: u32) -> Option<String> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    // Long enough for `C:\Windows\System32\conhost.exe`; a longer path is not a console host.
+    let mut buf = [0u16; 260];
+    let mut len = buf.len() as u32;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len)
+    };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+    let n = (len as usize).min(buf.len());
+    Some(String::from_utf16_lossy(&buf[..n]))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Reaped {
     Terminated,
@@ -257,6 +287,12 @@ pub fn spawn_in_job(
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn this_process_is_not_the_console_host() {
+        assert!(!is_console_host(std::process::id()));
+        assert!(!is_console_host(u32::MAX));
+    }
 
     #[test]
     fn spawn_in_job_runs_the_child_and_dropping_the_job_kills_it() {
