@@ -79,8 +79,12 @@ describe('模型与账号', () => {
   it('未登录写出来，型号列出来；额度空着就是读不到，不补 0 或 100%', async () => {
     render(<AccountsPanel />);
     await waitFor(() => expect(screen.getByText('grok-4.7')).toBeTruthy());
-    expect(screen.getByTestId('account-card-codex').textContent).toContain('未登录');
+    const codex = screen.getByTestId('account-card-codex').textContent ?? '';
+    expect(codex).toContain('未登录');
+    expect(codex).not.toContain('账号 未登录');
     expect(screen.getByTestId('account-card-pi').textContent).toContain('未登录');
+    expect(screen.getByTestId('account-card-claude').textContent).toContain('a@b.c');
+    expect(screen.getByTestId('account-card-claude').textContent).not.toContain('已登录账号');
     expect(screen.getByText('CLI 没有型号名单，这是别名')).toBeTruthy();
     expect(screen.getByTestId('quota-claude').textContent).toBe('额度 读不到');
     expect(screen.getByTestId('quota-grok').textContent).toBe('额度 读不到');

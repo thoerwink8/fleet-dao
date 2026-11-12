@@ -6,12 +6,34 @@ export const UNREAD = '读不到';
 
 const AGENTS = ['claude', 'grok', 'codex', 'pi'] as const;
 
+const KNOWN_QUOTA: Record<string, string> = {
+  weekly_all: '本周全部',
+  session: '5 小时',
+  extra_usage: '额外用量',
+};
+
+/** 认得出的额度字段换成短中文；认不出的留原名。 */
+export function quotaLabel(label: string): string {
+  const raw = label.trim();
+  const scoped = /^(weekly_scoped):([^#]+?)(#\d+)?$/.exec(raw);
+  if (scoped?.[2]) {
+    const name = scoped[2];
+    const shown = /^[a-z]/.test(name) ? `${name.charAt(0).toUpperCase()}${name.slice(1)}` : name;
+    return `本周 ${shown}${scoped[3] ?? ''}`;
+  }
+  const marked = /^(.*?)(#\d+)$/.exec(raw);
+  const base = marked?.[1] ?? raw;
+  const suffix = marked?.[2] ?? '';
+  const known = KNOWN_QUOTA[base];
+  return known ? `${known}${suffix}` : raw || '额度';
+}
+
 export function formatQuota(
   windows: readonly Pick<QuotaReading, 'label' | 'used' | 'limit' | 'unit' | 'utilization'>[],
 ): string | null {
   const parts: string[] = [];
   for (const w of windows) {
-    const name = w.label?.trim() || '额度';
+    const name = quotaLabel(w.label?.trim() || '额度');
     if (typeof w.used === 'number' && typeof w.limit === 'number') {
       parts.push(w.unit === 'percent' ? `${name} ${w.used}%` : `${name} ${w.used}/${w.limit}`);
     } else if (typeof w.utilization === 'number' && Number.isFinite(w.utilization)) {

@@ -66,6 +66,18 @@ describe('用尽判定和额度显示', () => {
     expect(formatQuota([{ label: '7d', unit: 'points' }])).toBeNull();
   });
 
+  it('认得出的额度字段写成短中文，认不出的留原名', () => {
+    expect(
+      formatQuota([
+        { label: 'weekly_all', unit: 'percent', used: 31, limit: 100 },
+        { label: 'weekly_scoped:fable', unit: 'percent', used: 28, limit: 100 },
+      ]),
+    ).toBe('本周全部 31% · 本周 Fable 28%');
+    expect(formatQuota([{ label: 'new_bucket', unit: 'percent', used: 4, limit: 100 }])).toBe(
+      'new_bucket 4%',
+    );
+  });
+
   it('账号只认名叫 email 的字段', () => {
     expect(claudeAccount('{"loggedIn":true,"email":"a@b.c"}')).toBe('a@b.c');
     expect(emailField({ token: 'secret', profile: { email: 'g@x.ai' } })).toBe('g@x.ai');

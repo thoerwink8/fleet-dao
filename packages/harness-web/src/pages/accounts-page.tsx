@@ -132,9 +132,9 @@ export function AccountsPanel() {
                 {a.login}
               </Badge>
             </div>
-            <p className="text-xs break-all text-ink-2">
-              账号 <span className="text-ink">{a.account}</span>
-            </p>
+            {a.account && a.account !== a.login ? (
+              <p className="text-xs break-all text-ink">{a.account}</p>
+            ) : null}
             <div className="flex min-w-0 flex-wrap gap-1">
               {a.models.length ? (
                 a.models.map((m) => (
