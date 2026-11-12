@@ -210,6 +210,13 @@ fn pump(
     ptys.lock().unwrap().remove(&run_id);
 }
 
+/// ConPTY emits a fast native command's last frame after the shell has already
+/// continued, so the next prompt and the first output line share a row.
+/// Sleeping at the start of `prompt` lets that frame land on its own row.
+/// A breakpoint is used so this still runs after the user replaces `prompt`.
+/// 20ms still lost the race; 80ms cleared it.
+const WINDOWS_SHELL_COMMAND: &str = "[Console]::InputEncoding=[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding $false; Set-PSBreakpoint -Command prompt -Action { Start-Sleep -Milliseconds 80 } | Out-Null";
+
 /// Windows: PowerShell (`pwsh` if it is on PATH, otherwise Windows PowerShell) with a UTF-8 console.
 /// Unix: `$SHELL`, or `/bin/sh`.
 fn shell() -> (String, Vec<String>) {
@@ -225,8 +232,7 @@ fn shell() -> (String, Vec<String>) {
                 "-NoLogo".into(),
                 "-NoExit".into(),
                 "-Command".into(),
-                "[Console]::InputEncoding=[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding $false"
-                    .into(),
+                WINDOWS_SHELL_COMMAND.into(),
             ],
         )
     } else {
@@ -263,4 +269,26 @@ fn track_job(child: &dyn Child) -> Option<jobrun::win::Job> {
         return None;
     }
     Some(job)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_shell_command_waits_before_the_prompt() {
+        assert!(WINDOWS_SHELL_COMMAND
+            .contains("Set-PSBreakpoint -Command prompt -Action { Start-Sleep -Milliseconds 80 }"));
+        assert!(WINDOWS_SHELL_COMMAND.contains("UTF8Encoding $false"));
+        assert!(!WINDOWS_SHELL_COMMAND.contains("-NoProfile"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_installs_the_prompt_wait() {
+        let (exe, args) = shell();
+        assert!(exe == "pwsh.exe" || exe == "powershell.exe");
+        assert_eq!(args.last().map(String::as_str), Some(WINDOWS_SHELL_COMMAND));
+        assert!(!args.iter().any(|arg| arg == "-NoProfile"));
+    }
 }

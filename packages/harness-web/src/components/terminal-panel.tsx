@@ -157,7 +157,9 @@ export function TerminalPanel({ sessionId, onClose }: { sessionId: string; onClo
           fontSize: 13,
           theme: terminalTheme(),
           cursorBlink: true,
-          ...(win ? { windowsPty: { backend: 'conpty' as const, buildNumber: 19041 } } : {}),
+          // 低于 21376 时 xterm 套用旧的 winpty 换行启发式。现在的 ConPTY 改宽度时自己重画整屏，
+          // 这套启发式会把更长那一行的尾巴粘在短行后面。21376 起关掉它，并由 xterm 自己重排。
+          ...(win ? { windowsPty: { backend: 'conpty' as const, buildNumber: 21376 } } : {}),
         });
         term.loadAddon(fit);
         term.open(host);

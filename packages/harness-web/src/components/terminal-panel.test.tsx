@@ -6,8 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const xterm = vi.hoisted(() => {
   let dataCb: ((data: string) => void) | undefined;
+  const opened: { options: { windowsPty?: { backend?: string; buildNumber?: number } } }[] = [];
   class Terminal {
     options: { theme?: unknown } = {};
+    constructor(options: { windowsPty?: { backend?: string; buildNumber?: number } }) {
+      this.options = options;
+      opened.push({ options });
+    }
     loadAddon() {}
     open() {}
     write() {}
@@ -26,6 +31,7 @@ const xterm = vi.hoisted(() => {
   return {
     Terminal,
     FitAddon,
+    opened,
     fire(data: string) {
       dataCb?.(data);
     },
@@ -73,6 +79,7 @@ const calls: { url: string; method: string; body: unknown }[] = [];
 
 beforeEach(() => {
   calls.length = 0;
+  xterm.opened.length = 0;
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
     value: (query: string) => ({
@@ -134,5 +141,27 @@ describe('终端格', () => {
       const input = calls.find((c) => c.url.endsWith('/terminal/input'));
       expect(input?.body).toEqual({ type: 'pty.input', runId: 'pty-1', data: btoa(bin) });
     });
+  });
+
+  it('Windows 上 ConPTY 从 21376 起算宽度，不套旧的换行启发式', async () => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    });
+    render(
+      <MemoryRouter initialEntries={['/s/s1']}>
+        <Routes>
+          <Route path="/s/:id" element={<Workbench />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByTestId('terminal-open'));
+    expect(await screen.findByTestId('terminal-panel')).toBeTruthy();
+    await waitFor(() => {
+      expect(xterm.opened.length).toBeGreaterThan(0);
+    });
+    const pty = xterm.opened.at(-1)?.options.windowsPty;
+    expect(pty?.backend).toBe('conpty');
+    expect(pty?.buildNumber).toBeGreaterThanOrEqual(21376);
   });
 });
