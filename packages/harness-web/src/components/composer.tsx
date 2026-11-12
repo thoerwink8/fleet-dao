@@ -13,6 +13,7 @@ import {
   adeSend,
   agentChoices,
   defaultModelFor,
+  modelLabel,
   queueOf,
 } from '../lib/ade';
 import { pollNote } from '../lib/poll-note';
@@ -31,11 +32,13 @@ const TIERS = [
 export function useAdeHome(): {
   workspaces: AdeWorkspace[];
   agents: AdeAgent[];
+  pref: { agent: string; tier: string } | null;
   error: string;
   reload: () => void;
 } {
   const [workspaces, setWorkspaces] = useState<AdeWorkspace[]>([]);
   const [agents, setAgents] = useState<AdeAgent[]>([]);
+  const [pref, setPref] = useState<{ agent: string; tier: string } | null>(null);
   const [error, setError] = useState('');
   const reload = useCallback(() => {
     let dead = false;
@@ -43,11 +46,13 @@ export function useAdeHome(): {
     Promise.all([
       adeGet<{ workspaces: AdeWorkspace[] }>('/workspaces'),
       adeGet<{ agents: AdeAgent[] }>('/agents'),
+      adeGet<{ agent: string; tier: string }>('/accounts').catch(() => null),
     ])
-      .then(([w, a]) => {
+      .then(([w, a, accounts]) => {
         if (dead) return;
         setWorkspaces(w.workspaces);
         setAgents(a.agents);
+        if (accounts?.agent && accounts.tier) setPref({ agent: accounts.agent, tier: accounts.tier });
       })
       .catch((err: unknown) => {
         if (!dead) setError(err instanceof Error ? err.message : '读不到工作区');
@@ -57,7 +62,7 @@ export function useAdeHome(): {
     };
   }, []);
   useEffect(() => reload(), [reload]);
-  return { workspaces, agents, error, reload };
+  return { workspaces, agents, pref, error, reload };
 }
 
 function pickedModel(models: string[], model: string, tier: string): string {
@@ -157,7 +162,7 @@ function Picker({
 
 export function EmptyComposer() {
   const nav = useNavigate();
-  const { workspaces, agents, error, reload } = useAdeHome();
+  const { workspaces, agents, pref, error, reload } = useAdeHome();
   const [wsId, setWsId] = useState('');
   const [agent, setAgent] = useState('claude');
   const [model, setModel] = useState('sonnet');
@@ -167,6 +172,18 @@ export function EmptyComposer() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [addOpen, setAddOpen] = useState(false);
+  const appliedPref = useRef(false);
+  useEffect(() => {
+    if (appliedPref.current || !pref) return;
+    const info = agents.find((a) => a.id === pref.agent && a.ready !== false);
+    if (!info && agents.length === 0) return;
+    appliedPref.current = true;
+    if (info) {
+      setAgent(info.id);
+      setModel(defaultModelFor(info));
+    }
+    if (pref.tier === 'default' || pref.tier === 'low' || pref.tier === 'high') setTier(pref.tier);
+  }, [agents, pref]);
   const ws = workspaces.find((w) => w.id === wsId) ?? workspaces[0];
   const agentInfo =
     agents.find((a) => a.id === agent && a.ready !== false) ?? agents.find((a) => a.ready !== false);
@@ -245,7 +262,7 @@ export function EmptyComposer() {
             <Picker
               label="模型"
               value={models.includes(model) ? model : (models[0] ?? '')}
-              options={models.map((m) => ({ id: m, label: m }))}
+              options={models.map((m) => ({ id: m, label: modelLabel(m) }))}
               onChange={setModel}
             />
             <Picker

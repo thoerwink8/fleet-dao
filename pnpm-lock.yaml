@@ -246,6 +246,9 @@ importers:
 
   packages/harness-dispatch:
     dependencies:
+      '@fleet-dao/adapters':
+        specifier: workspace:*
+        version: link:../adapters
       '@fleet-dao/harness-api':
         specifier: workspace:*
         version: link:../harness-api
