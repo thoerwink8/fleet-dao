@@ -160,6 +160,23 @@
     --fleet-composer: var(--fleet-layer-raised);
     --fleet-bubble: var(--fleet-layer-selected);
     --fleet-menu: var(--fleet-layer-raised);
+    /* 终端 ANSI 16 色，只对着 --fleet-layer-inset。浅色全部压暗，白底上的黄、灰、青才看得清。 */
+    --fleet-term-black: #282828;
+    --fleet-term-red: #932312;
+    --fleet-term-green: #0e583d;
+    --fleet-term-yellow: #6d4408;
+    --fleet-term-blue: #1a44af;
+    --fleet-term-magenta: #89206a;
+    --fleet-term-cyan: #0c5463;
+    --fleet-term-white: #50545e;
+    --fleet-term-bright-black: #616161;
+    --fleet-term-bright-red: #b92c17;
+    --fleet-term-bright-green: #126f4d;
+    --fleet-term-bright-yellow: #86550a;
+    --fleet-term-bright-blue: #2156dd;
+    --fleet-term-bright-magenta: #ad2986;
+    --fleet-term-bright-cyan: #0f697a;
+    --fleet-term-bright-white: #5d626d;
     /* 旧名继续指向上面的语义层，已有页面的 bg-surface、text-ink 不用改。 */
     --fleet-canvas: var(--fleet-layer-surface);
     --fleet-surface: var(--fleet-layer-raised);
@@ -227,6 +244,23 @@
     --fleet-act-hover: #9bb8ff;
     --fleet-act-strong: #d6e2ff;
     --fleet-badge: #243456;
+    /* 深色底上同一套名字全部提亮，黑和暗色也离开背景。 */
+    --fleet-term-black: #9f9f9f;
+    --fleet-term-red: #ee8473;
+    --fleet-term-green: #1eb87f;
+    --fleet-term-yellow: #e79111;
+    --fleet-term-blue: #82a0ec;
+    --fleet-term-magenta: #e281c5;
+    --fleet-term-cyan: #1ab4d2;
+    --fleet-term-white: #c6c8ce;
+    --fleet-term-bright-black: #b6b6b6;
+    --fleet-term-bright-red: #f4b2a7;
+    --fleet-term-bright-green: #25dc99;
+    --fleet-term-bright-yellow: #f2b14f;
+    --fleet-term-bright-blue: #aec1f3;
+    --fleet-term-bright-magenta: #ecb0da;
+    --fleet-term-bright-cyan: #47cee8;
+    --fleet-term-bright-white: #e9eaec;
   }
   *,
   ::before,

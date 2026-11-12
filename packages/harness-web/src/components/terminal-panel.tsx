@@ -31,12 +31,45 @@ function terminalTheme(): {
   foreground: string;
   cursor: string;
   selectionBackground: string;
+  black: string;
+  red: string;
+  green: string;
+  yellow: string;
+  blue: string;
+  magenta: string;
+  cyan: string;
+  white: string;
+  brightBlack: string;
+  brightRed: string;
+  brightGreen: string;
+  brightYellow: string;
+  brightBlue: string;
+  brightMagenta: string;
+  brightCyan: string;
+  brightWhite: string;
 } {
+  const ansi = (name: string) => cssColor(`--fleet-term-${name}`);
   return {
     background: cssColor('--fleet-layer-inset'),
     foreground: cssColor('--fleet-fg-1'),
     cursor: cssColor('--fleet-brand'),
     selectionBackground: cssColor('--fleet-layer-selected'),
+    black: ansi('black'),
+    red: ansi('red'),
+    green: ansi('green'),
+    yellow: ansi('yellow'),
+    blue: ansi('blue'),
+    magenta: ansi('magenta'),
+    cyan: ansi('cyan'),
+    white: ansi('white'),
+    brightBlack: ansi('bright-black'),
+    brightRed: ansi('bright-red'),
+    brightGreen: ansi('bright-green'),
+    brightYellow: ansi('bright-yellow'),
+    brightBlue: ansi('bright-blue'),
+    brightMagenta: ansi('bright-magenta'),
+    brightCyan: ansi('bright-cyan'),
+    brightWhite: ansi('bright-white'),
   };
 }
 
@@ -124,7 +157,9 @@ export function TerminalPanel({ sessionId, onClose }: { sessionId: string; onClo
           fontSize: 13,
           theme: terminalTheme(),
           cursorBlink: true,
-          ...(win ? { windowsPty: { backend: 'conpty' as const, buildNumber: 19041 } } : {}),
+          // 低于 21376 时 xterm 套用旧的 winpty 换行启发式。现在的 ConPTY 改宽度时自己重画整屏，
+          // 这套启发式会把更长那一行的尾巴粘在短行后面。21376 起关掉它，并由 xterm 自己重排。
+          ...(win ? { windowsPty: { backend: 'conpty' as const, buildNumber: 21376 } } : {}),
         });
         term.loadAddon(fit);
         term.open(host);
@@ -216,7 +251,9 @@ export function TerminalPanel({ sessionId, onClose }: { sessionId: string; onClo
           关闭
         </Button>
       </div>
-      <div ref={ref} className="min-h-0 flex-1 bg-inset" />
+      <div className="min-h-0 flex-1 bg-inset px-3">
+        <div ref={ref} className="h-full" />
+      </div>
       {msg ? <p className="shrink-0 px-3 py-1 text-2xs text-danger">{msg}</p> : null}
     </aside>
   );
