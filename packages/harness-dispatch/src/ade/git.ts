@@ -165,11 +165,15 @@ export async function branchInfo(cwd: string): Promise<{
   upstream: string | null;
   ahead: number | null;
   behind: number | null;
+  head: string;
 }> {
   const branch = await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const name = branch.code === 0 ? branch.out.trim() : '';
+  const full = await git(cwd, ['rev-parse', 'HEAD']);
+  const head = full.code === 0 ? full.out.trim() : '';
   const up = await git(cwd, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
-  if (up.code !== 0 || !up.out.trim()) return { branch: name, upstream: null, ahead: null, behind: null };
+  if (up.code !== 0 || !up.out.trim())
+    return { branch: name, upstream: null, ahead: null, behind: null, head };
   const counts = await git(cwd, ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}']);
   const m = /^(\d+)\s+(\d+)/.exec(counts.out.trim());
   return {
@@ -177,6 +181,7 @@ export async function branchInfo(cwd: string): Promise<{
     upstream: up.out.trim(),
     ahead: m ? Number(m[1]) : null,
     behind: m ? Number(m[2]) : null,
+    head,
   };
 }
 

@@ -27,6 +27,7 @@ interface WorktreeInfo {
 interface Snapshot {
   git: boolean;
   branch: string;
+  head?: string;
   upstream: string | null;
   ahead: number | null;
   behind: number | null;
@@ -98,6 +99,8 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
   const [diff, setDiff] = useState<FileDiff | null>(null);
   const [checks, setChecks] = useState<Checks | null>(null);
   const [preview, setPreview] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeHead, setMergeHead] = useState('');
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
 
@@ -214,6 +217,7 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
           <>
             <p className="text-ink-2">
               <span className="font-mono">{data.branch || '游离'}</span>
+              {data.head ? <span className="text-muted"> · {data.head.slice(0, 7)}</span> : null}
               <span className="text-muted"> · {tracked}</span>
               {data.forge ? <span className="text-muted"> · {data.forge}</span> : null}
             </p>
@@ -227,7 +231,19 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
               <Button variant="outline" size="sm" disabled={busy} onClick={() => void act('pr')}>
                 开 PR
               </Button>
-              <Button variant="outline" size="sm" disabled={busy} onClick={() => void act('merge')}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy || (data.forge === 'github' && !data.head)}
+                onClick={() => {
+                  if (data.forge === 'github') {
+                    setMergeHead(data.head ?? '');
+                    setMergeOpen(true);
+                    return;
+                  }
+                  void act('merge');
+                }}
+              >
                 合并
               </Button>
               <Button variant="ghost" size="sm" disabled={busy} onClick={() => void loadChecks()}>
@@ -436,6 +452,35 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
               }}
             >
               删除
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={mergeOpen} onOpenChange={setMergeOpen}>
+        <DialogContent
+          title="合并这个 PR"
+          description="按你看到的这次提交合并。确认时再对一次：分支上又有新提交就不会合。"
+        >
+          <p className="break-all font-mono text-2xs text-ink-2" data-testid="merge-head">
+            {mergeHead}
+          </p>
+          <div className="mt-3 flex justify-end gap-2">
+            <DialogClose asChild>
+              <Button variant="ghost" size="sm">
+                取消
+              </Button>
+            </DialogClose>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={busy || mergeHead === ''}
+              onClick={() => {
+                void act('merge', { confirm: true, head: mergeHead }).then((ok) => {
+                  if (ok) setMergeOpen(false);
+                });
+              }}
+            >
+              合并
             </Button>
           </div>
         </DialogContent>
