@@ -53,6 +53,23 @@ describe('porcelain 和 CI 解析', () => {
     });
     expect(parseGhPr({ state: 'open' })).toBeNull();
   });
+
+  it('同一个检查只留开始时间最新的一次，列表里排在后面的旧运行不算', () => {
+    expect(
+      parseGhPr({
+        number: 1,
+        state: 'OPEN',
+        statusCheckRollup: [
+          { name: 'ping', status: 'QUEUED', startedAt: '2026-11-12T20:32:59Z' },
+          { name: 'ping', status: 'COMPLETED', conclusion: 'SUCCESS', startedAt: '2026-11-12T20:32:50Z' },
+          { name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE', startedAt: '2026-11-12T20:32:40Z' },
+        ],
+      })?.checks,
+    ).toEqual([
+      { name: 'ping', state: 'QUEUED' },
+      { name: 'lint', state: 'FAILURE' },
+    ]);
+  });
 });
 
 const host: ProcessHost = {

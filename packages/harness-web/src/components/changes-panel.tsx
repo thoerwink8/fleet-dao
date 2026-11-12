@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { adeGet, adeSend } from '../lib/ade';
+import { checkStatusView } from '../lib/check-status';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogClose, DialogContent } from '../ui/dialog';
@@ -269,11 +270,17 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
                       <p className="text-muted">没有检查</p>
                     ) : (
                       <ul>
-                        {checks.pr.checks.map((c) => (
-                          <li key={`${c.name}-${c.state}`}>
-                            {c.name} · {c.state}
-                          </li>
-                        ))}
+                        {checks.pr.checks.map((c) => {
+                          const view = checkStatusView(c.state);
+                          return (
+                            <li key={c.name} className="mt-1 flex items-center gap-1.5">
+                              <span className={`size-1.5 shrink-0 rounded-full ${view.dot}`} />
+                              <span>
+                                {c.name} · {view.label}
+                              </span>
+                            </li>
+                          );
+                        })}
                       </ul>
                     )}
                   </>

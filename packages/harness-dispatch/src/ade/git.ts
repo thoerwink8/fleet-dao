@@ -327,15 +327,27 @@ export interface GhPr {
   checks: GhCheck[];
 }
 
-/** `gh pr view --json number,url,state,statusCheckRollup` 的正文。认不出就 null。 */
+/** 这次检查什么时候开始的。没有开始时间就用完成时间。都没有是 0。 */
+function checkStamp(c: Record<string, unknown>): number {
+  for (const key of ['startedAt', 'createdAt', 'completedAt', 'updatedAt'] as const) {
+    const value = c[key];
+    if (typeof value !== 'string' || value === '') continue;
+    const n = Date.parse(value);
+    if (!Number.isNaN(n)) return n;
+  }
+  return 0;
+}
+
+/** `gh pr view --json number,url,state,statusCheckRollup` 的正文。认不出就 null。同名检查只留最新一次。 */
 export function parseGhPr(json: unknown): GhPr | null {
   if (!json || typeof json !== 'object') return null;
   const o = json as Record<string, unknown>;
   if (typeof o.number !== 'number') return null;
-  const checks: GhCheck[] = [];
+  const checks: { name: string; state: string; at: number; index: number }[] = [];
+  const seen = new Map<string, number>();
   if (Array.isArray(o.statusCheckRollup)) {
-    for (const item of o.statusCheckRollup) {
-      if (!item || typeof item !== 'object') continue;
+    o.statusCheckRollup.forEach((item, index) => {
+      if (!item || typeof item !== 'object') return;
       const c = item as Record<string, unknown>;
       const name = typeof c.name === 'string' ? c.name : typeof c.context === 'string' ? c.context : '检查';
       const state =
@@ -346,13 +358,22 @@ export function parseGhPr(json: unknown): GhPr | null {
             : typeof c.state === 'string'
               ? c.state
               : 'unknown';
-      checks.push({ name, state });
-    }
+      const at = checkStamp(c);
+      const prev = seen.get(name);
+      if (prev === undefined) {
+        seen.set(name, checks.length);
+        checks.push({ name, state, at, index });
+        return;
+      }
+      const had = checks[prev];
+      if (!had || at > had.at || (at === had.at && index > had.index))
+        checks[prev] = { name, state, at, index };
+    });
   }
   return {
     number: o.number,
     url: typeof o.url === 'string' ? o.url : '',
     state: typeof o.state === 'string' ? o.state : '',
-    checks,
+    checks: checks.map(({ name, state }) => ({ name, state })),
   };
 }
