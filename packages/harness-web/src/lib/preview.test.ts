@@ -25,4 +25,15 @@ describe('会话标题和预览', () => {
       }),
     ).toBe('你好');
   });
+
+  it('只有 stderr、没有正文时预览不含 stderr', () => {
+    const preview = previewText('session.turn.settled', {
+      outcome: 'stopped',
+      text: '',
+      stderr: '同步配置…',
+    });
+    expect(preview).not.toContain('同步配置');
+    expect(preview).toBe('已停止');
+    expect(previewText('session.message', { text: '把第二行改掉' })).toBe('把第二行改掉');
+  });
 });

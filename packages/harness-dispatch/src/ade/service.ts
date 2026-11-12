@@ -121,7 +121,10 @@ export interface AdeOptions {
 interface Live {
   runId: string;
   stopped: boolean;
+  /** 模型正文，只从标准输出收。 */
   lastText: string;
+  /** 标准错误，给调试视图。不进正文、不进预览。 */
+  stderr: string;
   stop: () => void;
 }
 
@@ -562,6 +565,7 @@ export class AdeService {
       runId,
       stopped: false,
       lastText: '',
+      stderr: '',
       stop: () => {
         live.stopped = true;
         proc.stop('term');
@@ -572,14 +576,17 @@ export class AdeService {
     const done = (outcome: 'completed' | 'stopped' | 'failed') => {
       if (once) return;
       once = true;
-      void this.#lock(row.id, () => this.#finish(row.id, runId, outcome, live.lastText, writer));
+      void this.#lock(row.id, () => this.#finish(row.id, runId, outcome, live.lastText, live.stderr, writer));
     };
     readLines(proc.stdout, (line) => {
       live.lastText = remember(line, live.lastText);
       writer.pushLine(line);
     });
+    // 标准错误不进过程流，也不当成模型说的话。调试视图读收场事件上的 stderr。
     readLines(proc.stderr, (line) => {
-      live.lastText = remember(line, live.lastText);
+      const t = line.trim();
+      if (!t) return;
+      live.stderr = `${live.stderr}${live.stderr ? '\n' : ''}${t}`.slice(-2000);
     });
     proc.onError(() => done('failed'));
     proc.onExit((code) => done(live.stopped ? 'stopped' : code === 0 ? 'completed' : 'failed'));
@@ -592,6 +599,7 @@ export class AdeService {
     runId: string,
     outcome: 'completed' | 'stopped' | 'failed' | 'lost',
     lastText: string,
+    stderr: string,
     writer: TranscriptWriter,
   ): Promise<void> {
     this.#live.delete(id);
@@ -603,6 +611,7 @@ export class AdeService {
       runId,
       outcome,
       text: lastText.slice(-500),
+      ...(stderr ? { stderr } : {}),
     });
     const queue = adeQueue(row.queue);
     // 用户点停止会先置 hold，队列停在那儿。插队只停掉进程、不置 hold，收场后接着跑队首。

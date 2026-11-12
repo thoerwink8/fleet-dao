@@ -33,6 +33,8 @@ export const RESULT_STATUS_LABEL: Record<string, string> = {
 /** 交回的结局（派工器的 OutcomeKind，`packages/harness-dispatch/src/dispatcher.ts`）。 */
 export const OUTCOME_LABEL: Record<string, string> = {
   completed: '已完成',
+  stopped: '已停止',
+  failed: '失败',
   killed: '被叫停',
   'failed-to-start': '起不来',
   cancelled: '已取消',

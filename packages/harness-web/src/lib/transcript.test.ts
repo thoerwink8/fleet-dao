@@ -4,6 +4,7 @@ import { eventsUrl, historyUrl } from './api';
 import {
   buildSteps,
   buildTimeline,
+  endLine,
   runIdOfSession,
   summarizeToolRun,
   turnRunIds,
@@ -114,6 +115,19 @@ describe('buildTimeline：折叠和串联', () => {
     const run = items[0];
     expect(run?.kind === 'toolrun' && run.summary).toBe('调了 3 个工具：Read×2、Bash×1 · 1 个出错');
     expect(run?.kind === 'toolrun' && run.failed).toBe(1);
+  });
+
+  it('被停的一轮留一行已停止，用时从这一轮开始算，stderr 不在这行里', () => {
+    const start = ev('session.turn.started', { runId: 'r1' });
+    const settled = {
+      ...ev('session.turn.settled', { runId: 'r1', outcome: 'stopped', stderr: '同步配置…' }),
+      createdAt: new Date(Date.parse(start.createdAt) + 4000).toISOString(),
+    };
+    const items = buildTimeline([start, settled], []);
+    const end = items.find((i) => i.kind === 'end');
+    expect(end?.kind === 'end' && endLine(end.step)).toBe('已停止 · 用时 4.0 秒');
+    expect(end?.kind === 'end' && end.step.text).toBe('');
+    expect(items.some((i) => i.kind === 'event' && i.ev.type === 'session.turn.settled')).toBe(true);
   });
 
   it('会话里的进度和过程按事件号交错；进度把两串工具调用隔开，各自折叠', () => {

@@ -228,10 +228,19 @@ function body(ev: FeedEvent): { title: ReactNode; chips?: ReactNode; detail?: Re
         ),
       };
     }
-    case 'session.turn.started':
+    case 'session.turn.started': {
+      const text = str(p.text) ?? str(p.summary);
+      return { title: clamp(text, '会话轮次开始') };
+    }
     case 'session.turn.settled': {
       const text = str(p.text) ?? str(p.summary);
-      return { title: clamp(text, ev.type === 'session.turn.started' ? '会话轮次开始' : '会话轮次结束') };
+      const outcome = outcomeLabel(str(p.outcome));
+      const err = str(p.stderr);
+      return {
+        title: clamp(text, '会话轮次结束'),
+        chips: outcome ? <Chip title={outcome.raw}>{outcome.text}</Chip> : undefined,
+        detail: err ? <OutputBlock label="错误输出" text={err} /> : undefined,
+      };
     }
     default:
       return { title: <span title={ev.type}>{typeLabel(ev.type).text}</span>, detail: <Raw value={p} /> };

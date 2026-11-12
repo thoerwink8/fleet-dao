@@ -1,5 +1,6 @@
 // 会话列表的标题和预览。标题用会话自己的名字，不用会话号。
-// 预览只取人能读的最后一句，不拿「轮次开始」这类内部事件名来充。编码被当成 Latin-1 的 UTF-8 在这里修回来。
+// 预览只取模型正文。没有正文时：这一轮被停就显示「已停止」，否则用人的最后一句。
+// 标准错误不进预览。内部事件名也不拿来充。编码被当成 Latin-1 的 UTF-8 在这里修回来。
 
 const INTERNAL = new Set([
   'session.created',
@@ -74,11 +75,29 @@ function pullText(payload: unknown): string {
   return '';
 }
 
+function clip(line: string): string {
+  return [...line].slice(0, 80).join('');
+}
+
+function asRecord(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+}
+
 /** 列表副行。内部事件返回空串，调用方不要再补事件名。 */
 export function previewText(type: string, payload: unknown): string {
   if (INTERNAL.has(type)) return '';
+  const p = asRecord(payload);
+  if (type === 'session.turn.settled') {
+    const stderr = typeof p.stderr === 'string' ? p.stderr.replace(/\s+/g, ' ').trim() : '';
+    let body = unwrapJson(repairMojibake(pullText(payload)))
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!body || body === type || body === stderr) body = '';
+    if (body) return clip(body);
+    return p.outcome === 'stopped' ? '已停止' : '';
+  }
   const raw = unwrapJson(repairMojibake(pullText(payload)));
   const line = raw.replace(/\s+/g, ' ').trim();
   if (!line || line === type) return '';
-  return [...line].slice(0, 80).join('');
+  return clip(line);
 }

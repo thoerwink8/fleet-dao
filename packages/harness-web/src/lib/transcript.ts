@@ -4,6 +4,7 @@
 // - cc-haha 的 activityGroupModel.ts：工具调用和工具结果按 toolUseId 配对（先建 resultMap，再逐个调用去查）；连续的工具调用折叠成
 //   「读了 N 个文件、跑了 M 条命令」这样的一句话摘要，按首次出现的顺序排；出错的单独计数。
 // - T3 Code 的历史页：行数和字节数两道上限、按游标往老的翻（服务端在 harness-api 的 readStreamHistory）。
+import { formatDuration } from './format';
 import { MIN_RUN, summarizeTools, TOOL_OF_EVENT } from './tool-runs';
 import type { FeedEvent } from './types';
 
@@ -53,6 +54,21 @@ export interface EndStep {
   truncated: boolean;
   durationMs: number | null;
   numTurns: number | null;
+  /** 这一轮是被人停掉的，不是模型自己跑完。 */
+  stopped?: boolean;
+}
+
+/** 运行结束 / 已停止那一行小字。两种结局同一个句子，只换开头。 */
+export function endLine(step: EndStep): string {
+  const bits = step.stopped
+    ? ['已停止', step.durationMs !== null ? `用时 ${formatDuration(step.durationMs)}` : null]
+    : [
+        '运行结束',
+        step.isError ? '出错' : '正常',
+        step.numTurns !== null ? `${step.numTurns} 轮` : null,
+        step.durationMs !== null ? formatDuration(step.durationMs) : null,
+      ];
+  return bits.filter((part): part is string => part !== null).join(' · ');
 }
 
 export interface DroppedStep {
@@ -172,6 +188,33 @@ export function summarizeToolRun(steps: readonly ToolStep[]): string {
   return `调了 ${steps.length} 个工具：${parts.join('、')}${failed > 0 ? ` · ${failed} 个出错` : ''}`;
 }
 
+/** 被人停掉的一轮：主视图用和「运行结束」同一行。用时是这一轮开始到收场。 */
+export function stoppedTurn(ev: FeedEvent, events: readonly FeedEvent[]): EndStep | null {
+  if (ev.type !== 'session.turn.settled' || ev.payload.outcome !== 'stopped') return null;
+  const runId = ev.payload.runId;
+  const start =
+    typeof runId === 'string'
+      ? events.find((e) => e.type === 'session.turn.started' && e.payload.runId === runId)
+      : undefined;
+  const endMs = Date.parse(ev.createdAt);
+  const startMs = start ? Date.parse(start.createdAt) : Number.NaN;
+  const durationMs =
+    Number.isFinite(endMs) && Number.isFinite(startMs) && endMs >= startMs ? endMs - startMs : null;
+  return {
+    kind: 'end',
+    id: ev.id,
+    at: ev.createdAt,
+    subtype: 'stopped',
+    isError: false,
+    text: '',
+    chars: 0,
+    truncated: false,
+    durationMs,
+    numTurns: null,
+    stopped: true,
+  };
+}
+
 export type TimelineItem =
   | { kind: 'event'; ev: FeedEvent }
   /** 连续的 MCP 工具事件（派工、进度、交结果……），#3836 已有的折叠。 */
@@ -238,6 +281,8 @@ export function buildTimeline(
       else {
         flushMcp();
         out.push({ kind: 'event', ev: m.ev });
+        const stopped = stoppedTurn(m.ev, sessionEvents);
+        if (stopped) out.push({ kind: 'end', step: stopped });
       }
     } else if (m.step) {
       flushMcp();

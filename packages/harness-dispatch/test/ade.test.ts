@@ -18,7 +18,7 @@ import { createAdeHandler } from '../src/ade/http.ts';
 import { AdeService, adeCommand } from '../src/ade/service.ts';
 
 const TOKEN = 'b'.repeat(64);
-let mode: 'fake' | 'hang' = 'fake';
+let mode: 'fake' | 'hang' | 'stderr' = 'fake';
 
 class ScriptProc implements HostProcess {
   pid = 42;
@@ -63,6 +63,11 @@ const host: ProcessHost = {
     queueMicrotask(() => {
       if (proc.ended) return;
       if (spec.command[0] === 'hang') return;
+      if (mode === 'stderr') {
+        proc.stderr.write('同步配置…\n');
+        proc.finish(0, null);
+        return;
+      }
       proc.say('你好');
     });
     return proc;
@@ -215,6 +220,27 @@ describe('会话', () => {
     const settled = evs.find((e) => e.type === 'session.turn.settled');
     expect(settled?.payload.outcome).toBe('stopped');
     expect((await svc.getSession(s.id)).hold).toBe(true);
+  });
+
+  it('只有 stderr、没有正文时，stderr 不进过程流也不进收场正文', async () => {
+    mode = 'stderr';
+    const dir = mkdtempSync(join(root, 'ws-'));
+    const ws = await svc.addWorkspace('错', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+      text: '看文件',
+    });
+    await waitIdle(s.id);
+    const evs = await readStream(t.db, `session:${s.id}`, 0, 20);
+    const settled = evs.find((e) => e.type === 'session.turn.settled');
+    expect(String(settled?.payload.text ?? '')).not.toContain('同步配置');
+    expect(settled?.payload.stderr).toContain('同步配置');
+    const runId = evs.find((e) => e.type === 'session.turn.started')?.payload.runId;
+    const transcript = typeof runId === 'string' ? await readStream(t.db, `transcript:${runId}`, 0, 20) : [];
+    expect(JSON.stringify(transcript)).not.toContain('同步配置');
   });
 
   it('跑着的时候可以撤回队列，插队会停掉当前轮再跑那一句', async () => {

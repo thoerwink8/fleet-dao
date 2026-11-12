@@ -15,8 +15,8 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '../lib/cn';
-import { formatClock, formatDuration } from '../lib/format';
-import type { DroppedStep, EndStep, SayStep, ToolStep } from '../lib/transcript';
+import { formatClock } from '../lib/format';
+import { type DroppedStep, type EndStep, endLine, type SayStep, type ToolStep } from '../lib/transcript';
 import { Chip } from './chip';
 import { OutputBlock } from './clamped';
 
@@ -132,15 +132,9 @@ export function ToolRow({ step }: { step: ToolStep }) {
 }
 
 export function EndRow({ step }: { step: EndStep }) {
-  const bits = [
-    '运行结束',
-    step.isError ? '出错' : '正常',
-    step.numTurns !== null ? `${step.numTurns} 轮` : null,
-    step.durationMs !== null ? formatDuration(step.durationMs) : null,
-  ].filter((part): part is string => part !== null);
   return (
     <li data-step-id={step.id} data-step-kind="end" className="pb-1 pl-9 text-2xs text-muted">
-      {bits.join(' · ')}
+      {endLine(step)}
     </li>
   );
 }
