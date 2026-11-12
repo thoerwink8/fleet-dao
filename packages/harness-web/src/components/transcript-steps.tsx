@@ -77,7 +77,7 @@ export function ToolRow({ step }: { step: ToolStep }) {
       data-step-kind="tool"
       data-tool-status={step.status}
       data-open={open}
-      className="animate-fade-in pb-2 pl-9"
+      className="pb-2 pl-9"
     >
       <button
         type="button"
