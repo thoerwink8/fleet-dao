@@ -16,7 +16,7 @@ import { enqueueOp, getOp, listOpsForTask, updateAdeSession } from '@fleet-dao/h
 import { createTestDb, type TestDb } from '@fleet-dao/harness-store/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseGhPr, parsePorcelain } from '../src/ade/git.ts';
-import { gitAct } from '../src/ade/git-panel.ts';
+import { gitAct, gitSnapshot } from '../src/ade/git-panel.ts';
 import type { CmdResult, CmdRun } from '../src/ade/github-ops.ts';
 import { createAdeHandler } from '../src/ade/http.ts';
 import { AdeService } from '../src/ade/service.ts';
@@ -264,6 +264,81 @@ describe('git 面板', () => {
     git(s.cwd, 'clean', '-q', '-f');
     await svc.gitOp(s.id, { op: 'worktree-remove', paths: [s.cwd], confirm: true });
     expect(existsSync(s.cwd)).toBe(false);
+  });
+
+  it('squash 合并后工作树算已合并，有没提交的改动或会话在跑仍不删', async () => {
+    const { dir } = makeRepo('squash');
+    const ws = await svc.addWorkspace('squash', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: true,
+    });
+    writeFileSync(join(s.cwd, 'b.txt'), 'two\n');
+    git(s.cwd, 'add', 'b.txt');
+    git(s.cwd, 'commit', '-q', '-m', 'branch');
+    const before = await svc.changes(s.id);
+    const ahead = before.worktrees.find((w) => w.branch === `fleet2/${s.id}`);
+    expect(ahead?.merged).toBe(false);
+    expect(ahead?.reason).toContain('还没合并');
+
+    git(dir, 'merge', '--squash', `fleet2/${s.id}`);
+    git(dir, 'commit', '-q', '-m', 'squash');
+    writeFileSync(join(dir, 'c.txt'), 'later\n');
+    git(dir, 'add', 'c.txt');
+    git(dir, 'commit', '-q', '-m', 'later');
+
+    const after = await svc.changes(s.id);
+    const mine = after.worktrees.find((w) => w.branch === `fleet2/${s.id}`);
+    expect(mine?.merged).toBe(true);
+    expect(mine?.removable).toBe(true);
+    expect(mine?.reason).not.toContain('还没合并');
+
+    writeFileSync(join(s.cwd, 'dirty.txt'), 'x\n');
+    const dirty = (await svc.changes(s.id)).worktrees.find((w) => w.branch === `fleet2/${s.id}`);
+    expect(dirty?.merged).toBe(true);
+    expect(dirty?.removable).toBe(false);
+    expect(dirty?.reason).toContain('有没提交的改动');
+
+    git(s.cwd, 'clean', '-q', '-f');
+    await updateAdeSession(t.db, s.id, { status: 'running', runId: 'run-squash' });
+    const running = (await svc.changes(s.id)).worktrees.find((w) => w.branch === `fleet2/${s.id}`);
+    expect(running?.merged).toBe(true);
+    expect(running?.removable).toBe(false);
+    expect(running?.reason).toContain('还在跑');
+  });
+
+  it('GitHub 上 PR 已合并就算已合并，开着的 PR 或没有 PR 不靠这个', async () => {
+    const { dir } = makeRepo('pr-merged');
+    git(dir, 'remote', 'set-url', 'origin', 'https://github.com/example/widget.git');
+    const ws = await svc.addWorkspace('pr-merged', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: true,
+    });
+    writeFileSync(join(s.cwd, 'b.txt'), 'two\n');
+    git(s.cwd, 'add', 'b.txt');
+    git(s.cwd, 'commit', '-q', '-m', 'only here');
+    const row = await svc.getSession(s.id);
+    const look =
+      (state: string | null): CmdRun =>
+      async () =>
+        state
+          ? { ran: true, exitCode: 0, stdout: JSON.stringify({ state }), stderrTail: '' }
+          : { ran: true, exitCode: 1, stdout: '', stderrTail: 'no pull requests found' };
+    const merged = await gitSnapshot({ db: t.db, dataDir: root, run: look('MERGED') }, row);
+    const mine = merged.worktrees.find((w) => w.branch === `fleet2/${s.id}`);
+    expect(mine?.merged).toBe(true);
+    expect(mine?.reason).not.toContain('还没合并');
+
+    const open = await gitSnapshot({ db: t.db, dataDir: root, run: look('OPEN') }, row);
+    expect(open.worktrees.find((w) => w.branch === `fleet2/${s.id}`)?.merged).toBe(false);
+
+    const none = await gitSnapshot({ db: t.db, dataDir: root, run: look(null) }, row);
+    expect(none.worktrees.find((w) => w.branch === `fleet2/${s.id}`)?.merged).toBe(false);
   });
 
   it('gitlab 直接拒绝，不新增完成的行', async () => {

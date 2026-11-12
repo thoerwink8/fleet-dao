@@ -304,6 +304,19 @@ export async function isAncestorOf(cwd: string, base: string): Promise<boolean> 
   return r.code === 0;
 }
 
+/** 分支上的改动已经在 base 里。树一样，或每个提交的补丁都能在 base 上找到（squash 合进去也算）。 */
+export async function changesLanded(cwd: string, base: string): Promise<boolean> {
+  const diff = await git(cwd, ['diff', '--quiet', base, 'HEAD']);
+  if (diff.code === 0) return true;
+  const cherry = await git(cwd, ['cherry', base, 'HEAD']);
+  if (cherry.code !== 0) return false;
+  const lines = cherry.out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  return lines.every((line) => line.startsWith('-'));
+}
+
 export async function isClean(cwd: string): Promise<boolean> {
   const r = await git(cwd, ['status', '--porcelain']);
   return r.code === 0 && r.out.trim() === '';

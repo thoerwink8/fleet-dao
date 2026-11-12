@@ -1,7 +1,8 @@
 // 会话页的 git 面板（#3926、#3948）。暂存、提交、拉取是本机 git。
 // 推、开 PR、合并先入 change.* outbox，不另写一条绕过 outbox 的推送。
 // forge=github 由这次点击领走并做完（gh）；合并要带上看到的 head。GitLab 领到就停。
-// 删工作树要人确认，running 或有没提交的改动就不删。
+// 删工作树要人确认。分支有已合并的 PR 就算已合并；没有 PR 再看是不是祖先，或改动已经在 main 上。
+// running 或有没提交的改动就不删。
 import { randomBytes } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -23,6 +24,7 @@ import { localOutboxDeps, processOutbox } from '../publish.ts';
 import {
   branchInfo,
   type ChangeKind,
+  changesLanded,
   commitStaged,
   defaultBase,
   fileDiffs,
@@ -155,7 +157,48 @@ async function workspaceOf(ctx: GitCtx, session: AdeSessionRow) {
   return ws;
 }
 
-async function describeWorktrees(ctx: GitCtx, repo: string, primaryPath: string): Promise<WorktreeInfo[]> {
+async function pullRequestState(run: CmdRun, cwd: string): Promise<string | null> {
+  const r = await run(cwd, ['gh', 'pr', 'view', '--json', 'state']);
+  if (!r.ran || r.exitCode !== 0) return null;
+  const line = r.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.startsWith('{'))
+    .at(-1);
+  if (!line) return null;
+  try {
+    const value: unknown = JSON.parse(line);
+    if (!value || typeof value !== 'object' || !('state' in value)) return null;
+    const state = value.state;
+    return typeof state === 'string' && state ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 有对应 PR 且已合并就算已合并。没有 PR 时再看祖先，以及改动是不是已经在 base 上。 */
+async function worktreeMerged(
+  path: string,
+  branch: string,
+  base: string | null,
+  forge: string,
+  run: CmdRun,
+): Promise<boolean> {
+  if (forge === 'github' && branch && branch !== 'main' && branch !== 'master') {
+    const state = await pullRequestState(run, path);
+    if (state) return state === 'MERGED';
+  }
+  if (!base) return false;
+  if (await isAncestorOf(path, base).catch(() => false)) return true;
+  return changesLanded(path, base).catch(() => false);
+}
+
+async function describeWorktrees(
+  ctx: GitCtx,
+  repo: string,
+  primaryPath: string,
+  forge: string,
+): Promise<WorktreeInfo[]> {
   const [listed, base, sessions] = await Promise.all([
     listWorktrees(repo),
     defaultBase(repo),
@@ -176,7 +219,7 @@ async function describeWorktrees(ctx: GitCtx, repo: string, primaryPath: string)
       const running = here.find((s) => s.status === 'running');
       const primary = key === primaryKey;
       const clean = await isClean(wt.path).catch(() => false);
-      const merged = base ? await isAncestorOf(wt.path, base).catch(() => false) : false;
+      const merged = await worktreeMerged(wt.path, wt.branch, base, forge, ctx.run ?? defaultGithubRun);
       const idle = !running;
       const bits: string[] = [];
       if (primary) bits.push('主检出');
@@ -213,7 +256,7 @@ export async function gitSnapshot(ctx: GitCtx, session: AdeSessionRow): Promise<
       files = [];
     }
   }
-  const worktrees = ws.isGit ? await describeWorktrees(ctx, ws.path, ws.path) : [];
+  const worktrees = ws.isGit ? await describeWorktrees(ctx, ws.path, ws.path, ws.forge) : [];
   const issue = session.taskId && session.taskId > 0 ? session.taskId : 1;
   let ops: GitSnapshot['ops'] = [];
   try {
