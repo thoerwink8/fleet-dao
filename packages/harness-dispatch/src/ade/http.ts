@@ -1,9 +1,11 @@
 // 本机 ADE 的 HTTP（#3914）。只挂在本机网关上，要本机令牌；写请求必须是 JSON。
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { localTokenOk } from '@fleet-dao/harness-api';
+import { readJson } from './body.ts';
 import { AdeError, type AdeService } from './service.ts';
+import { routeTerminal } from './terminal.ts';
 
-const MAX_BODY = 64 * 1024;
+export { readJson } from './body.ts';
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
@@ -12,30 +14,6 @@ function send(res: ServerResponse, status: number, body: unknown): void {
     'cache-control': 'no-store',
   });
   res.end(text);
-}
-
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const ct = String(req.headers['content-type'] ?? '');
-  if (!ct.toLowerCase().startsWith('application/json')) throw new AdeError('要 application/json', 415);
-  const chunks: Buffer[] = [];
-  let n = 0;
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    n += buf.length;
-    if (n > MAX_BODY) throw new AdeError('请求体太大', 413);
-    chunks.push(buf);
-  }
-  const raw = Buffer.concat(chunks).toString('utf8').trim();
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
-      throw new AdeError('请求体要是对象', 400);
-    return parsed as Record<string, unknown>;
-  } catch (err) {
-    if (err instanceof AdeError) throw err;
-    throw new AdeError('请求体不是 JSON', 400);
-  }
 }
 
 function str(v: unknown): string {
@@ -133,6 +111,7 @@ async function route(
     send(res, 201, { session: row });
     return true;
   }
+  if (await routeTerminal(ade, req, res, path)) return true;
   const session = /^\/api\/ade\/sessions\/([^/]+)(?:\/(messages|stop|changes|deliver|queue|git))?$/.exec(
     path,
   );

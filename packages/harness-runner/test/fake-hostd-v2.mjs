@@ -6,7 +6,7 @@ rl.on('line', (line) => {
   const f = JSON.parse(line);
   if (f.type === 'hello') {
     process.stdout.write(
-      `${JSON.stringify({ type: 'welcome', id: f.id, protocol: 2, hostd: '9.9.9', os: 'x', arch: 'y', capabilities: [] })}\n`,
+      `${JSON.stringify({ type: 'welcome', id: f.id, protocol: 99, hostd: '9.9.9', os: 'x', arch: 'y', capabilities: [] })}\n`,
     );
   }
 });

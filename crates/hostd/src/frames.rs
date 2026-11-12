@@ -8,7 +8,7 @@ use std::num::NonZeroU64;
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a frame gains, loses or changes a field. hostd refuses a client that speaks another one.
-pub const PROTOCOL_VERSION: u64 = 1;
+pub const PROTOCOL_VERSION: u64 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -17,7 +17,7 @@ pub enum ReadStream {
     Stderr,
 }
 
-/// `Pty` is reserved for the terminal panel; this version never produces it.
+/// `Pty` is the terminal. `text` is standard base64 of the raw bytes (no extra newline), and `line` counts chunks from 1.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutStream {
@@ -112,11 +112,12 @@ pub enum Frame {
     Status { id: u64, run_id: String },
     #[serde(rename = "forget")]
     Forget { id: u64, run_id: String },
-    // Terminal (reserved): always answered with `unsupported` in this version.
+    // Terminal: a real pty in `cwd`. Bytes come back as `out` frames with `stream: pty`.
     #[serde(rename = "pty.open")]
     PtyOpen {
         id: u64,
         run_id: String,
+        cwd: String,
         cols: u64,
         rows: u64,
     },
@@ -214,6 +215,20 @@ fn check_run_id(run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn check_cwd(cwd: &str) -> Result<(), String> {
+    if cwd.is_empty() || cwd.chars().count() > 4096 {
+        return Err("cwd must be 1..=4096 characters".into());
+    }
+    Ok(())
+}
+
+fn check_pty_size(cols: u64, rows: u64) -> Result<(), String> {
+    if !(1..=1000).contains(&cols) || !(1..=1000).contains(&rows) {
+        return Err("cols and rows must be 1..=1000".into());
+    }
+    Ok(())
+}
+
 impl Frame {
     /// The checks the JSON Schema expresses beyond field shapes.
     fn validate(&self) -> Result<(), String> {
@@ -230,6 +245,23 @@ impl Frame {
                 }
                 Ok(())
             }
+            Frame::PtyOpen {
+                run_id,
+                cwd,
+                cols,
+                rows,
+                ..
+            } => {
+                check_run_id(run_id)?;
+                check_cwd(cwd)?;
+                check_pty_size(*cols, *rows)
+            }
+            Frame::PtyResize {
+                run_id, cols, rows, ..
+            } => {
+                check_run_id(run_id)?;
+                check_pty_size(*cols, *rows)
+            }
             Frame::Attach { run_id, .. }
             | Frame::Read { run_id, .. }
             | Frame::Stdin { run_id, .. }
@@ -237,9 +269,7 @@ impl Frame {
             | Frame::Reap { run_id, .. }
             | Frame::Status { run_id, .. }
             | Frame::Forget { run_id, .. }
-            | Frame::PtyOpen { run_id, .. }
             | Frame::PtyInput { run_id, .. }
-            | Frame::PtyResize { run_id, .. }
             | Frame::PtyClose { run_id, .. }
             | Frame::Spawned { run_id, .. }
             | Frame::Attached { run_id, .. }

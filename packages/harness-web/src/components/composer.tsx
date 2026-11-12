@@ -353,9 +353,11 @@ function QueueBar({
 export function AdeComposer({
   sessionId,
   onToggleChanges,
+  onToggleTerminal,
 }: {
   sessionId: string;
   onToggleChanges?: () => void;
+  onToggleTerminal?: () => void;
 }) {
   const [text, setText] = useState('');
   const [msg, setMsg] = useState('');
@@ -472,6 +474,17 @@ export function AdeComposer({
           }}
         />
         <div className="flex items-center gap-1 px-2 pb-2">
+          {onToggleTerminal ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              data-testid="terminal-open"
+              onClick={onToggleTerminal}
+            >
+              终端
+            </Button>
+          ) : null}
           {onToggleChanges ? (
             <Button variant="ghost" size="sm" onClick={onToggleChanges}>
               改动

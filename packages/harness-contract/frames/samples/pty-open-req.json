@@ -1,1 +1,1 @@
-{ "type": "pty.open", "id": 10, "runId": "term-1", "cols": 120, "rows": 30 }
+{ "type": "pty.open", "id": 10, "runId": "term-1", "cwd": "/work/tree", "cols": 120, "rows": 30 }

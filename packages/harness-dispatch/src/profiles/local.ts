@@ -10,10 +10,17 @@ import {
   ensureLocalToken,
   localAuthorize,
 } from '@fleet-dao/harness-api';
-import { defaultHost, makeHostdHost, makeRedactor } from '@fleet-dao/harness-runner';
+import {
+  defaultHost,
+  HostdProcessHost,
+  HostdPty,
+  hostdBinary,
+  makeHostdHost,
+  makeRedactor,
+} from '@fleet-dao/harness-runner';
 import { openLocalDb } from '@fleet-dao/harness-store/local-db';
 import { CLAUDE_PERMISSION_MODES, type ClaudePermissionMode } from '@fleet-dao/harness-workers';
-import { AdeService, createAdeHandler } from '../ade/index.ts';
+import { AdeService, bindPtyHost, createAdeHandler, lazyPtyHost } from '../ade/index.ts';
 import { restrictToCurrentUserWindows } from './acl.ts';
 import { type Assembly, ConfigError, type Env, log, port } from './config.ts';
 import { readIsolation } from './isolation.ts';
@@ -63,6 +70,17 @@ export async function assembleLocal(
   );
   const host = env.FLEET2_HOST === 'hostd' ? makeHostdHost() : defaultHost();
   const ade = new AdeService({ db: store.db, dataDir, host, env: { ...process.env, ...env } });
+  // 工人已经在用 hostd 就共用那一个进程；否则等第一次开终端再单独起，缺二进制只让终端 503。
+  bindPtyHost(
+    ade,
+    host instanceof HostdProcessHost
+      ? new HostdPty(host)
+      : lazyPtyHost(() => {
+          const bin = hostdBinary();
+          if (!bin) return null;
+          return new HostdPty(makeHostdHost({ bin, stateDir: join(dataDir, 'hostd') }));
+        }),
+  );
   await ade.recover();
   const cockpit = createCockpitApi({
     db: store.db,
