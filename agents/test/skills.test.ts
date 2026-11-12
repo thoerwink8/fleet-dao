@@ -12,7 +12,7 @@ const SKILLS = join(ROOT, 'agents', 'skills');
 const VENDOR = join(ROOT, 'agents', 'skills-vendor');
 /**
  * 长得像 skill 名（小写字母、数字加连字符）、其实不是的词：仓名、英文原文里的普通词、例子里的链名、unattended.mjs 的子命令、Claude Code 内置子代理的类型名
- * （三个角色里的 general-purpose，决定 0087）、子代理三个角色的模型 id。
+ * （三个角色里的 general-purpose，决定 0087）、子代理三个角色的模型 id、讨论默认模型 gpt-6-luna。
  */
 const NOT_SKILLS = new Set([
   'fleet-dao',
@@ -24,6 +24,7 @@ const NOT_SKILLS = new Set([
   'claude-haiku-5-5',
   'claude-sonnet-5-5',
   'claude-opus-5-5',
+  'gpt-6-luna',
 ]);
 
 /** 紧挨着这些字的不算一个词的开头（只看 ASCII：中文和英文之间常不留空格）。 */

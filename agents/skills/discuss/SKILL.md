@@ -21,7 +21,7 @@ description: 重大方案拍板前让别家挑错时读（默认 GPT，没收敛
 
 `node $S/ask.mjs --text 题面.md --round <0|1|2…> [--models gpt] [--gpt-model 型号]`
 
-- GPT 优先走本机 `~/.fleet-dao/discuss.env` 里的 `DISCUSS_GPT_BASE_URL` 和 `DISCUSS_GPT_API_KEY`（进程里已有的同名变量优先）。两个都有才走 OpenAI 兼容的 `chat/completions`，默认模型 `gpt-6.1-sol`（`--gpt-model` 可换）。没配再走 Cursor。
+- GPT 优先走本机 `~/.fleet-dao/discuss.env` 里的 `DISCUSS_GPT_BASE_URL` 和 `DISCUSS_GPT_API_KEY`（进程里已有的同名变量优先）。两个都有才走 OpenAI 兼容的 `chat/completions`，默认模型 `gpt-6-luna`（`--gpt-model` 可换）。没配再走 Cursor。
 - 别家，以及没配上面两个变量时的 GPT，仍要本机装好并登录，先跑 `cursor-agent status`。没装、没登录就照实报「这台没装、没讨论成」，不拿别的工具或自己再想一遍冒充。
 - 默认只问 GPT；盲设计或 GPT 答不上才加别家（`--models gpt,kimi,glm`，最多 3 家）。界面类的题换 Kimi 或 GLM。
 - 每家有硬超时，默认 180 秒（`--limit` 最多 300）。超时、非 2xx、空回答、退出码非 0、没输出都记成「没答上」。配了中转却失败，不改走 Cursor。退出码 2 = 没讨论成，别拿自己的方案冒充结论。

@@ -333,10 +333,10 @@ describe('ask.mjs：配了就问中转，没配才问 Cursor', SLOW, () => {
       },
     );
     expect(r.code).toBe(0);
-    expect(r.out).toContain('## gpt（gpt-6.1-sol，');
+    expect(r.out).toContain('## gpt（gpt-6-luna，');
     expect(r.out).toContain('四');
     expect(relay.hits()[0]?.content).toContain('两倍');
-    expect(relay.hits()[0]?.model).toBe('gpt-6.1-sol');
+    expect(relay.hits()[0]?.model).toBe('gpt-6-luna');
     expectClean(r.all);
   });
 
@@ -446,7 +446,7 @@ describe('second-opinion.mjs：反方轮到 GPT 走同一条', SLOW, () => {
       { home, path: sentinel(marker), env: relayEnv(relay.baseUrl) },
     );
     expect(r.code).toBe(0);
-    expect(relay.hits()[0]?.model).toBe('gpt-6.1-sol');
+    expect(relay.hits()[0]?.model).toBe('gpt-6-luna');
     expect(existsSync(marker)).toBe(false);
     expectClean(r.all);
   });
