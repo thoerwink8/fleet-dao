@@ -1,6 +1,7 @@
 // 本机 ADE 的 HTTP（#3914）。只挂在本机网关上，要本机令牌；写请求必须是 JSON。
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { localTokenOk } from '@fleet-dao/harness-api';
+import { routeAccounts } from './accounts-http.ts';
 import { readJson } from './body.ts';
 import { AdeError, type AdeService } from './service.ts';
 import { routeTerminal } from './terminal.ts';
@@ -58,6 +59,7 @@ async function route(
   githubToken: string | null,
 ): Promise<boolean> {
   const method = req.method ?? 'GET';
+  if (await routeAccounts(ade, req, res, path)) return true;
   if (path === '/api/ade/workspaces' && method === 'GET') {
     send(res, 200, { workspaces: await ade.listWorkspaces() });
     return true;
