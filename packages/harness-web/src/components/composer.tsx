@@ -16,6 +16,7 @@ import {
   modelLabel,
   queueOf,
 } from '../lib/ade';
+import { pollNote } from '../lib/poll-note';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent } from '../ui/dialog';
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '../ui/dropdown-menu';
@@ -382,13 +383,21 @@ export function AdeComposer({
   const [session, setSession] = useState<AdeSession | null>(null);
   const [drafts, setDrafts] = useState<string[]>([]);
   const [wsName, setWsName] = useState('');
+  const pollSeq = useRef(0);
 
   const reload = useCallback(() => {
     let dead = false;
+    const seq = ++pollSeq.current;
+    const apply = (failed: string | null) => {
+      if (dead) return;
+      const next = pollNote(pollSeq.current, seq, failed);
+      if (next !== undefined) setMsg(next);
+    };
     adeGet<{ session: AdeSession }>(`/sessions/${encodeURIComponent(sessionId)}`)
       .then((r) => {
-        if (dead) return;
+        if (dead || seq !== pollSeq.current) return;
         setSession(r.session);
+        apply(null);
         if (r.session.workspaceId) {
           adeGet<{ workspaces: AdeWorkspace[] }>('/workspaces')
             .then((w) => {
@@ -398,7 +407,7 @@ export function AdeComposer({
         }
       })
       .catch((err: unknown) => {
-        if (!dead) setMsg(err instanceof Error ? err.message : '读不到会话');
+        apply(err instanceof Error ? err.message : '读不到会话');
       });
     return () => {
       dead = true;

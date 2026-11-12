@@ -530,6 +530,38 @@ export async function claimDueOps(db: Db, limit: number, leaseMs: number): Promi
   });
 }
 
+/** 只领这一条（本机面板点的那一下）。没到期、被人领着、或已经收尾，回 null。 */
+export async function claimOpByKey(db: Db, key: string, leaseMs: number): Promise<OutboxOp | null> {
+  const token = randomUUID();
+  return db.transaction(async (tx) => {
+    const [due] = await tx
+      .select({ id: outbox.id })
+      .from(outbox)
+      .where(
+        and(
+          eq(outbox.opKey, key),
+          sql`(${outbox.state} in ('pending', 'unknown') and ${outbox.nextAt} <= now())
+            or (${outbox.state} = 'claimed' and ${outbox.leaseUntil} < now())`,
+        ),
+      )
+      .limit(1)
+      .for('update');
+    if (!due) return null;
+    const [row] = await tx
+      .update(outbox)
+      .set({
+        state: 'claimed',
+        claimToken: token,
+        leaseUntil: sql`now() + make_interval(secs => ${leaseMs / 1000})`,
+        attempts: sql`${outbox.attempts} + 1`,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(outbox.id, due.id))
+      .returning();
+    return row ? toOp(row) : null;
+  });
+}
+
 /** 收尾时这条已经不归你了（租约过了被别人领走）：什么都不改。 */
 export class LostClaimError extends Error {
   constructor(id: number) {

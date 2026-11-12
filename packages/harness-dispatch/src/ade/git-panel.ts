@@ -1,6 +1,7 @@
-// 会话页的 git 面板（#3926）。暂存、提交、拉取是本机 git。
-// 推、开 PR、合并只新增 change.* 行，不另写一条绕过 outbox 的推送。
-// GitLab 领到就停。删工作树要人确认，running 或有没提交的改动就不删。
+// 会话页的 git 面板（#3926、#3948）。暂存、提交、拉取是本机 git。
+// 推、开 PR、合并先入 change.* outbox，不另写一条绕过 outbox 的推送。
+// forge=github 由这次点击领走并做完（gh）；合并要带上看到的 head。GitLab 领到就停。
+// 删工作树要人确认，running 或有没提交的改动就不删。
 import { randomBytes } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -8,14 +9,16 @@ import { type Forge, type OutboxKind, opKey } from '@fleet-dao/harness-contract'
 import { makeRedactor } from '@fleet-dao/harness-runner';
 import {
   type AdeSessionRow,
+  claimOpByKey,
+  completeOp,
   type Db,
   enqueueOp,
+  failOp,
   getAdeWorkspace,
   getOp,
   listAdeSessions,
   listOpsForTask,
 } from '@fleet-dao/harness-store';
-import { runCommand } from '../command.ts';
 import { localOutboxDeps, processOutbox } from '../publish.ts';
 import {
   branchInfo,
@@ -36,6 +39,13 @@ import {
   unstagePaths,
   worktreeDiff,
 } from './git.ts';
+import {
+  type CmdRun,
+  defaultGithubRun,
+  mergePullRequest,
+  openPullRequest,
+  pushCurrentBranch,
+} from './github-ops.ts';
 
 export class GitPanelError extends Error {
   readonly status: number;
@@ -49,6 +59,8 @@ export class GitPanelError extends Error {
 export interface GitCtx {
   db: Db;
   dataDir: string;
+  /** 测试注入。不给就走 runCommand。 */
+  run?: CmdRun;
 }
 
 export interface WorktreeInfo {
@@ -67,6 +79,7 @@ export interface GitSnapshot {
   status: string;
   diff: string;
   branch: string;
+  head: string;
   upstream: string | null;
   ahead: number | null;
   behind: number | null;
@@ -191,7 +204,7 @@ export async function gitSnapshot(ctx: GitCtx, session: AdeSessionRow): Promise<
   const diff = await worktreeDiff(session.cwd);
   const info = diff.git
     ? await branchInfo(session.cwd)
-    : { branch: '', upstream: null, ahead: null, behind: null };
+    : { branch: '', upstream: null, ahead: null, behind: null, head: '' };
   let files: GitSnapshot['files'] = [];
   if (diff.git) {
     try {
@@ -217,6 +230,7 @@ export async function gitSnapshot(ctx: GitCtx, session: AdeSessionRow): Promise<
     status: diff.status,
     diff: diff.diff,
     branch: info.branch,
+    head: info.head,
     upstream: info.upstream,
     ahead: info.ahead,
     behind: info.behind,
@@ -262,6 +276,42 @@ async function enqueueChange(
   return { opKey: key, state: 'done' };
 }
 
+/** GitHub 这一下：先入 outbox，只领这一条，做成再标完成。对不上 head 就 409，行进 dead。 */
+async function runGithub(
+  ctx: GitCtx,
+  session: AdeSessionRow,
+  kind: OutboxKind,
+  extra: Record<string, unknown>,
+  exec: (run: CmdRun) => Promise<Record<string, unknown>>,
+): Promise<Record<string, unknown>> {
+  const ws = await workspaceOf(ctx, session);
+  const issue = session.taskId && session.taskId > 0 ? session.taskId : 1;
+  const ref = { repo: `local/${ws.id}`, issue };
+  const key = opKey(kind, ref, 0, `${session.id}-${randomBytes(4).toString('hex')}`);
+  await enqueueOp(ctx.db, {
+    opKey: key,
+    kind,
+    ref,
+    fencing: 0,
+    payload: { forge: 'github', sessionId: session.id, adeCwd: session.cwd, ...extra },
+  });
+  const claimed = await claimOpByKey(ctx.db, key, 60_000);
+  if (!claimed) throw new GitPanelError('外送没领到', 500);
+  try {
+    const result = await exec(ctx.run ?? defaultGithubRun);
+    await completeOp(ctx.db, claimed, result);
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '没做成';
+    try {
+      await failOp(ctx.db, claimed, msg.slice(0, 1000), 0, 0);
+    } catch {
+      // 租约已经没了，不再改这条
+    }
+    throw new GitPanelError(msg, msg.includes('新提交') ? 409 : 400);
+  }
+}
+
 export async function gitAct(
   ctx: GitCtx,
   session: AdeSessionRow,
@@ -297,45 +347,72 @@ export async function gitAct(
       const path = typeof body.path === 'string' ? body.path : '';
       return await fileDiffs(session.cwd, path);
     }
-    if (op === 'checks') return readChecks(session.cwd);
+    if (op === 'checks') return readChecks(session.cwd, ctx.run);
     if (op === 'worktree-remove') return removeSome(ctx, session, ws.path, body);
     if (forge === 'gitlab') throw new GitPanelError('gitlab 还没实现', 501);
     const info = await branchInfo(session.cwd);
     rejectBranch(info.branch);
     if (op === 'push') {
       const diff = await worktreeDiff(session.cwd);
-      const pushed = await enqueueChange(ctx, session, forge, 'change.push', {
-        patch: diff.diff,
-        branch: info.branch,
-        ...(forge === 'local' ? { adeCwd: session.cwd } : {}),
-      });
-      const notice = pushed.state === 'done' ? '已推送' : '已排进 outbox';
-      return { ...(await gitSnapshot(ctx, session)), notice };
+      if (forge === 'github') {
+        await runGithub(ctx, session, 'change.push', { patch: diff.diff, branch: info.branch }, (run) =>
+          pushCurrentBranch(run, session.cwd, info.branch),
+        );
+      } else {
+        await enqueueChange(ctx, session, forge, 'change.push', {
+          patch: diff.diff,
+          branch: info.branch,
+          adeCwd: session.cwd,
+        });
+      }
+      return { ...(await gitSnapshot(ctx, session)), notice: '已推送' };
     }
     if (op === 'pr') {
       const title = (typeof body.title === 'string' ? body.title.trim() : '') || session.title || info.branch;
-      const opened = await enqueueChange(ctx, session, forge, 'change.pr.open', {
-        branch: info.branch,
-        title,
-      });
-      const notice = opened.state === 'done' ? '已记下开 PR' : '开 PR 已排进 outbox';
-      return { ...(await gitSnapshot(ctx, session)), notice };
+      if (forge === 'github') {
+        const opened = await runGithub(
+          ctx,
+          session,
+          'change.pr.open',
+          { branch: info.branch, title },
+          (run) => openPullRequest(run, session.cwd, info.branch, title),
+        );
+        const notice =
+          opened.opened === false ? `这个分支已经有 PR #${opened.number}` : `已开 PR #${opened.number}`;
+        return { ...(await gitSnapshot(ctx, session)), notice };
+      }
+      await enqueueChange(ctx, session, forge, 'change.pr.open', { branch: info.branch, title });
+      return { ...(await gitSnapshot(ctx, session)), notice: '已记下开 PR' };
     }
-    const merged = await enqueueChange(ctx, session, forge, 'change.merge', { branch: info.branch });
-    const notice = merged.state === 'done' ? '已记下合并，没有在本地合并' : '合并已排进 outbox';
-    return { ...(await gitSnapshot(ctx, session)), notice };
+    if (op !== 'merge') throw new GitPanelError('不认识的操作', 400);
+    if (forge === 'github') {
+      if (body.confirm !== true) return { ...(await gitSnapshot(ctx, session)), notice: '还没合并，先确认' };
+      const head = typeof body.head === 'string' ? body.head.trim() : '';
+      if (!/^[0-9a-f]{40}$/.test(head)) throw new GitPanelError('要带上看到的 head', 400);
+      const merged = await runGithub(
+        ctx,
+        session,
+        'change.merge',
+        { branch: info.branch, expectedHead: head },
+        (run) => mergePullRequest(run, session.cwd, head),
+      );
+      return { ...(await gitSnapshot(ctx, session)), notice: `已合并 PR #${merged.number}` };
+    }
+    await enqueueChange(ctx, session, forge, 'change.merge', { branch: info.branch });
+    return { ...(await gitSnapshot(ctx, session)), notice: '已记下合并，没有在本地合并' };
   } catch (err) {
     lift(err);
   }
 }
 
-async function readChecks(cwd: string): Promise<{ pr: GhPr | null; reason: string }> {
-  const r = await runCommand({
-    command: ['gh', 'pr', 'view', '--json', 'number,url,state,statusCheckRollup'],
-    cwd,
-    timeoutMs: 20_000,
-    redact: makeRedactor([]),
-  });
+async function readChecks(cwd: string, run?: CmdRun): Promise<{ pr: GhPr | null; reason: string }> {
+  const r = await (run ?? defaultGithubRun)(cwd, [
+    'gh',
+    'pr',
+    'view',
+    '--json',
+    'number,url,state,statusCheckRollup',
+  ]);
   if (!r.ran || r.exitCode !== 0) {
     const why = (r.stderrTail || r.stdout || r.spawnError || '没有 PR').trim().slice(-200);
     return { pr: null, reason: why || '没有 PR' };

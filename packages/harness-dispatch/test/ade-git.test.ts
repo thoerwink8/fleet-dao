@@ -16,6 +16,8 @@ import { enqueueOp, getOp, listOpsForTask, updateAdeSession } from '@fleet-dao/h
 import { createTestDb, type TestDb } from '@fleet-dao/harness-store/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseGhPr, parsePorcelain } from '../src/ade/git.ts';
+import { gitAct } from '../src/ade/git-panel.ts';
+import type { CmdResult, CmdRun } from '../src/ade/github-ops.ts';
 import { createAdeHandler } from '../src/ade/http.ts';
 import { AdeService } from '../src/ade/service.ts';
 import type { GitHubWriter } from '../src/github-write.ts';
@@ -50,6 +52,23 @@ describe('porcelain 和 CI 解析', () => {
       checks: [{ name: 'ci', state: 'success' }],
     });
     expect(parseGhPr({ state: 'open' })).toBeNull();
+  });
+
+  it('同一个检查只留开始时间最新的一次，列表里排在后面的旧运行不算', () => {
+    expect(
+      parseGhPr({
+        number: 1,
+        state: 'OPEN',
+        statusCheckRollup: [
+          { name: 'ping', status: 'QUEUED', startedAt: '2026-11-12T20:32:59Z' },
+          { name: 'ping', status: 'COMPLETED', conclusion: 'SUCCESS', startedAt: '2026-11-12T20:32:50Z' },
+          { name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE', startedAt: '2026-11-12T20:32:40Z' },
+        ],
+      })?.checks,
+    ).toEqual([
+      { name: 'ping', state: 'QUEUED' },
+      { name: 'lint', state: 'FAILURE' },
+    ]);
   });
 });
 
@@ -176,6 +195,7 @@ describe('git 面板', () => {
     await svc.gitOp(s.id, { op: 'commit', message: '改一行' });
     const after = await svc.changes(s.id);
     expect(after.branch).toBe(`fleet2/${s.id}`);
+    expect(after.head).toMatch(/^[0-9a-f]{40}$/);
     expect(after.files).toEqual([]);
   });
 
@@ -261,25 +281,169 @@ describe('git 面板', () => {
     expect(ops.filter((o) => o.payload.sessionId === s.id)).toEqual([]);
   });
 
-  it('github 只排 change.push，不在这条路上推', async () => {
-    const { dir } = makeRepo('gh');
+  function githubSession(name: string, remote = 'https://github.com/example/widget.git') {
+    const { dir } = makeRepo(name);
     git(dir, 'checkout', '-q', '-b', 'feature');
-    git(dir, 'remote', 'set-url', 'origin', 'https://github.com/example/widget.git');
-    const ws = await svc.addWorkspace('gh', dir);
+    git(dir, 'remote', 'set-url', 'origin', remote);
+    return dir;
+  }
+
+  function fakeGithub(opts: { remote?: string; head?: string; prHead?: string; prState?: string }): {
+    run: CmdRun;
+    calls: string[][];
+  } {
+    const calls: string[][] = [];
+    let opened = false;
+    let merged = false;
+    const ok = (stdout: string): CmdResult => ({ ran: true, exitCode: 0, stdout, stderrTail: '' });
+    const no = (stderr: string): CmdResult => ({ ran: true, exitCode: 1, stdout: '', stderrTail: stderr });
+    const run: CmdRun = async (_cwd, command) => {
+      calls.push([...command]);
+      const text = command.join(' ');
+      if (text.includes('get-url')) return ok(`${opts.remote ?? 'https://github.com/example/widget.git'}\n`);
+      if (text.includes('--abbrev-ref')) return ok('feature\n');
+      if (command.includes('rev-parse') && command.includes('HEAD'))
+        return ok(`${opts.head ?? 'a'.repeat(40)}\n`);
+      if (command.includes('push')) {
+        if (command.includes('--force') || command.includes('--force-with-lease')) return no('不许强推');
+        return ok('ok\n');
+      }
+      if (command[0] === 'gh' && command[2] === 'view') {
+        if (!opened && !opts.prState && !merged) return no('no pull requests found');
+        const state = merged ? 'MERGED' : (opts.prState ?? 'OPEN');
+        return ok(
+          JSON.stringify({
+            number: 4,
+            url: 'https://github.com/example/widget/pull/4',
+            state,
+            headRefOid: opts.prHead ?? opts.head ?? 'a'.repeat(40),
+            headRefName: 'feature',
+          }),
+        );
+      }
+      if (command[0] === 'gh' && command[2] === 'create') {
+        opened = true;
+        return ok('https://github.com/example/widget/pull/4\n');
+      }
+      if (command[0] === 'gh' && command[2] === 'merge') {
+        merged = true;
+        return ok('merged\n');
+      }
+      return no(`没想到的命令 ${text}`);
+    };
+    return { run, calls };
+  }
+
+  it('github 推送入 outbox 后真推当前分支，不强推、不碰 fleet-dao', async () => {
+    const dir = githubSession('gh-push');
+    const ws = await svc.addWorkspace('gh-push', dir);
     const s = await svc.createSession({
       workspaceId: ws.id,
       agent: 'claude',
       model: 'default',
       worktree: false,
     });
-    const out = await svc.gitOp(s.id, { op: 'push' });
-    if (!('ops' in out)) throw new Error('没有外送状态');
-    expect(out.notice).toBe('已排进 outbox');
+    const fake = fakeGithub({});
+    const out = await gitAct({ db: t.db, dataDir: root, run: fake.run }, s, { op: 'push' });
+    if (!('notice' in out)) throw new Error('没有回执');
+    expect(out.notice).toBe('已推送');
+    const push = fake.calls.find((c) => c.includes('push'));
+    expect(push).toContain('HEAD:refs/heads/feature');
+    expect(push).not.toContain('--force');
     const ops = await listOpsForTask(t.db, { repo: `local/${ws.id}`, issue: 1 });
     const mine = ops.filter((o) => o.payload.sessionId === s.id);
     expect(mine).toHaveLength(1);
-    expect(mine[0]).toMatchObject({ kind: 'change.push', state: 'pending' });
-    expect(mine[0]?.payload.adeCwd).toBeUndefined();
+    expect(mine[0]).toMatchObject({ kind: 'change.push', state: 'done' });
+    expect(mine[0]?.payload.adeCwd).toBe(s.cwd);
+
+    const blockedDir = githubSession('gh-fleet', 'https://github.com/thoerwink8/fleet-dao.git');
+    const blockedWs = await svc.addWorkspace('gh-fleet', blockedDir);
+    const blocked = await svc.createSession({
+      workspaceId: blockedWs.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+    });
+    const blockedFake = fakeGithub({ remote: 'https://github.com/thoerwink8/fleet-dao.git' });
+    await expect(
+      gitAct({ db: t.db, dataDir: root, run: blockedFake.run }, blocked, { op: 'push' }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(blockedFake.calls.some((c) => c.includes('push'))).toBe(false);
+    const dead = await listOpsForTask(t.db, { repo: `local/${blockedWs.id}`, issue: 1 });
+    expect(dead.filter((o) => o.payload.sessionId === blocked.id)[0]?.state).toBe('dead');
+  });
+
+  it('github 开 PR 真调用 gh，已有 PR 就不再开', async () => {
+    const dir = githubSession('gh-pr');
+    const ws = await svc.addWorkspace('gh-pr', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+    });
+    const fake = fakeGithub({});
+    const opened = await gitAct({ db: t.db, dataDir: root, run: fake.run }, s, { op: 'pr', title: '看一眼' });
+    if (!('notice' in opened)) throw new Error('没有回执');
+    expect(opened.notice).toBe('已开 PR #4');
+    expect(fake.calls.some((c) => c[0] === 'gh' && c[2] === 'create')).toBe(true);
+
+    const again = fakeGithub({ prState: 'OPEN' });
+    const had = await gitAct({ db: t.db, dataDir: root, run: again.run }, s, { op: 'pr', title: '看一眼' });
+    if (!('notice' in had)) throw new Error('没有回执');
+    expect(had.notice).toBe('这个分支已经有 PR #4');
+    expect(again.calls.some((c) => c[2] === 'create')).toBe(false);
+  });
+
+  it('github 合并要确认和看到的 head，对不上就拒', async () => {
+    const dir = githubSession('gh-merge');
+    const ws = await svc.addWorkspace('gh-merge', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+    });
+    const head = 'a'.repeat(40);
+    const preview = await gitAct({ db: t.db, dataDir: root, run: fakeGithub({}).run }, s, { op: 'merge' });
+    if (!('notice' in preview)) throw new Error('没有回执');
+    expect(preview.notice).toBe('还没合并，先确认');
+    expect(
+      (await listOpsForTask(t.db, { repo: `local/${ws.id}`, issue: 1 })).filter(
+        (o) => o.kind === 'change.merge',
+      ),
+    ).toEqual([]);
+
+    await expect(
+      gitAct({ db: t.db, dataDir: root, run: fakeGithub({ head }).run }, s, {
+        op: 'merge',
+        confirm: true,
+        head: 'b'.repeat(40),
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    const remoteMoved = fakeGithub({ head, prHead: 'c'.repeat(40), prState: 'OPEN' });
+    await expect(
+      gitAct({ db: t.db, dataDir: root, run: remoteMoved.run }, s, { op: 'merge', confirm: true, head }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(remoteMoved.calls.some((c) => c[2] === 'merge')).toBe(false);
+
+    const ok = fakeGithub({ head, prState: 'OPEN' });
+    const merged = await gitAct({ db: t.db, dataDir: root, run: ok.run }, s, {
+      op: 'merge',
+      confirm: true,
+      head,
+    });
+    if (!('notice' in merged)) throw new Error('没有回执');
+    expect(merged.notice).toBe('已合并 PR #4');
+    const mergeCmd = ok.calls.find((c) => c[2] === 'merge');
+    expect(mergeCmd).toContain('--match-head-commit');
+    expect(mergeCmd).toContain(head);
+    expect(mergeCmd).not.toContain('--force');
+    const ops = await listOpsForTask(t.db, { repo: `local/${ws.id}`, issue: 1 });
+    const mine = ops.filter((o) => o.payload.sessionId === s.id && o.kind === 'change.merge');
+    expect(mine.at(-1)).toMatchObject({ state: 'done' });
+    expect(mine.at(-1)?.payload.expectedHead).toBe(head);
   });
 
   it('gitlab 的行领到仍然 dead', async () => {
