@@ -170,7 +170,8 @@ fn process_alive(pid: u32) -> bool {
             .expect("tasklist");
         let text = String::from_utf8_lossy(&out.stdout);
         text.lines().any(|line| {
-            line.split(',').any(|col| col.trim().trim_matches('"') == pid.to_string())
+            line.split(',')
+                .any(|col| col.trim().trim_matches('"') == pid.to_string())
         })
     }
     #[cfg(not(windows))]
@@ -211,7 +212,9 @@ fn marker_input(pid_file: &Path) -> String {
 
 fn reply_for(s: &mut Session, id: u64) -> Value {
     loop {
-        let frame = s.recv().unwrap_or_else(|| panic!("eof waiting for id {id}"));
+        let frame = s
+            .recv()
+            .unwrap_or_else(|| panic!("eof waiting for id {id}"));
         if frame.get("id").and_then(Value::as_u64) == Some(id) {
             return frame;
         }
@@ -279,7 +282,9 @@ fn a_pty_prints_utf8_resizes_and_the_shell_is_dead_after_close() {
         });
         if frame["type"] == "out" && frame["stream"] == "pty" {
             let text = frame["text"].as_str().expect("out text");
-            let bytes = STANDARD.decode(text).unwrap_or_else(|e| panic!("out is not base64: {e}"));
+            let bytes = STANDARD
+                .decode(text)
+                .unwrap_or_else(|e| panic!("out is not base64: {e}"));
             assert!(frame["line"].as_u64().unwrap() >= 1);
             acc.extend(bytes);
         }

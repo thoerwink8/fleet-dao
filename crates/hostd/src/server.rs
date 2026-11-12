@@ -195,7 +195,14 @@ impl Conn {
                 cwd,
                 cols,
                 rows,
-            } => match pty::start(self.out.clone(), self.ptys.clone(), run_id, &cwd, cols, rows) {
+            } => match pty::start(
+                self.out.clone(),
+                self.ptys.clone(),
+                run_id,
+                &cwd,
+                cols,
+                rows,
+            ) {
                 Ok(()) => Frame::Ok { id },
                 Err(pty::StartError::Exists) => {
                     error(Some(id), "run_exists", "this terminal is already open")
