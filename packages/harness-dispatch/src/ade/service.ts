@@ -36,6 +36,7 @@ import {
 import { localOutboxDeps, processOutbox } from '../publish.ts';
 import { type AdeAgentInfo, discoverAgents, findAgentBin } from './agents.ts';
 import { addWorktree, existingDir, inspectRepo, worktreeDiff } from './git.ts';
+import { GitPanelError, gitAct, gitSnapshot } from './git-panel.ts';
 
 export type { AdeAgentInfo } from './agents.ts';
 
@@ -450,7 +451,21 @@ export class AdeService {
   }
 
   changes(id: string) {
-    return this.getSession(id).then((s) => worktreeDiff(s.cwd));
+    return this.#git(id, (s) => gitSnapshot({ db: this.#db, dataDir: this.#dataDir }, s));
+  }
+
+  gitOp(id: string, body: Record<string, unknown>) {
+    return this.#git(id, (s) => gitAct({ db: this.#db, dataDir: this.#dataDir }, s, body));
+  }
+
+  async #git<T>(id: string, fn: (s: AdeSessionRow) => Promise<T>): Promise<T> {
+    const s = await this.getSession(id);
+    try {
+      return await fn(s);
+    } catch (err) {
+      if (err instanceof GitPanelError) throw new AdeError(err.message, err.status);
+      throw err;
+    }
   }
 
   /** 把工作区里的 diff 排进 outbox（forge 跟工作区走），并立刻处理 local。 */
