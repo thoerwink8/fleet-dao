@@ -23,11 +23,30 @@ export interface AdeTask {
   status: string;
 }
 
+export interface AdeQueueItem {
+  text: string;
+  from?: { kind?: string; id?: string | null };
+  kind?: string;
+}
+
 export interface AdeSession {
   id: string;
   title: string;
   status: string;
   workspaceId: string;
+  agent?: string;
+  model?: string;
+  worktree?: boolean;
+  cwd?: string;
+  hold?: boolean;
+  queue?: AdeQueueItem[];
+  updatedAt?: string;
+}
+
+export function queueOf(session: AdeSession | undefined): AdeQueueItem[] {
+  const raw = session?.queue;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((x): x is AdeQueueItem => !!x && typeof x.text === 'string' && x.text.trim() !== '');
 }
 
 async function fail(res: Response): Promise<never> {
@@ -46,6 +65,10 @@ export async function adeGet<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}/ade${path}`, { headers: { accept: 'application/json' } });
   if (!res.ok) return fail(res);
   return (await res.json()) as T;
+}
+
+export function adeQueueAct(id: string, index: number, op: 'drop' | 'jump'): Promise<{ ok: boolean }> {
+  return adeSend(`/sessions/${encodeURIComponent(id)}/queue`, 'POST', { index, op });
 }
 
 export async function adeSend<T>(path: string, method: 'POST' | 'DELETE', body?: unknown): Promise<T> {

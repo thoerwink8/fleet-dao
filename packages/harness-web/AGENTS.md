@@ -8,7 +8,7 @@
 
 - `src/main.tsx`：路由表。五块一级信息架构（会话、任务、决策、法国运维、设置，见 `specs/3752-cockpit-rewrite/讨论稿.md`）都在导航里，这一片只有会话块有内容，其余四块是写明「哪一片做」的占位页。
 - `src/components/shell.tsx`：外壳。侧栏 208px（收起 64px，记在 localStorage），768px 以下换底部四格标签栏，顶栏 `PageBar` 56px，间距 4px。
-- `src/pages/workbench.tsx`：会话工作台。桌面左列会话列表、右边事件流；手机两个画面（`/` 列表，`/s/<号>` 事件流，左上角返回）。
+- `src/pages/workbench.tsx`：会话工作台。桌面左列会话列表、右边事件流；手机两个画面（`/` 列表，`/s/<号>` 事件流，左上角返回）。本机（`IS_LOCAL`）改成对话页：列表按置顶、最近、工作区分组，中间是对话（人的话右侧气泡、模型正文、工具一行可折叠），内部事件进「调试」；没选会话时是居中的新会话输入。香港 `/next/` 仍是事件流和按工人状态分组，e2e 走这一条。
 - `src/components/session-stream.tsx`、`event-card.tsx`：事件流和每种事件的展示（会话轮次、派工请求、叫停、工人起止、进度、交结果、交回核验，不认识的类型落到折叠的原始内容，不丢）。
 - 第二轮（#3781）：长输出和工具调用折叠、列表按状态排序。
   - 契约里没有单独的“工具调用”事件，这里的“工具调用”＝接口层 MCP 工具落成的四种事件（`worker.spawn.requested`、`worker.stop.requested`、`worker.progress.reported`、`worker.result.submitted`，对应 `spawn_worker`、`stop_worker`、`report_progress`、`submit_result`）。连续 3 条起折叠成一行「调了 N 次工具：report_progress×5…」（`src/lib/tool-runs.ts`），收起时卡片仍在页面里（`hidden`），事件号对账和展开都不重新取。
@@ -32,12 +32,14 @@
   - 点卡片：电脑在右侧开面板标签页（一次运行一个标签，里面就是工人会话详情 `SessionStream`，会话号 `worker-<runId>`；重试过的在面板头切第几次），手机整页跳 `/s/worker-<runId>`。窄屏（768 以下）默认列表（`work-list.tsx`），图/列表的选择存 localStorage（键 `fleet.next.work.view`，读写包 try/catch）。
   - 样例：`dev/seed.ts` 的 `seedWork`（两批：`demo-batch-2` 10 单，排队、在跑、做完、失败、重试、暂停、放弃、卡住都有；`demo-batch-1` 3 单），`seedWorkBatch` 可灌任意形状的批次。e2e：`e2e/specs/work.e2e.ts`；截图：`node e2e/shots-work.ts <标签>`。
 - `src/lib/feed.ts`：`SessionFeed`，实时流的全部逻辑，见下面「实时流怎么保证」。
-- `src/app.css`：设计令牌（页底 `#f0f3fa`、品牌色 `#2962ff`、1px 发丝线、白卡片、正常态不上绿）。
+- `src/app.css`：设计令牌只在这一份。颜色是 `--fleet-*` 变量，`:root` 浅色、`:root.dark` 深色，`@theme inline` 把 `bg-canvas` 这类工具类指到变量。间距 4px 网格，圆角 4/8/12。正常态不上绿，运行中的点用 `success`。组件在 `src/ui/`（按钮、输入、菜单、对话框、折叠、提示），页面用这些，不写裸的 select 和 button；批次切换保留 `NativeSelect`，因为 e2e 用 `selectOption`。`chip.tsx` 转出 `Badge`。
 - `dev/`：本机开发和 e2e 用的整套后端。`dev/stack.ts` = PGlite 跑 fleet2 真迁移（外加最小的 `public.users`，放一位创始人）+ **真的驾驶舱口**（`harness-api` 的 `createCockpitApi`，部署用的就是这份代码）+ 一个只转发 `/next/api/*`、放 `dist/` 的前门（相当于香港 nginx）；`dev/seed.ts` 灌样例事件；`dev/serve.ts` 是一条命令的入口。前门不带任何凭据、不认识会话令牌。
 
 ## 本机装法的页面（#3858）
 
 `vite build --mode desktop`（`pnpm --filter @fleet-dao/harness-web build:local`，vite 不许把模式叫 local）出 `dist-local/`：`base=/`，接口在 `/api`，`src/lib/profile.ts` 的 `IS_LOCAL` 为真。导航换成会话、任务、待我、宿主、设置（`shell.tsx` 的 `NAV_LOCAL`；待我取代决策，宿主取代法国运维），三块新页面在 `src/pages/local-pages.tsx`：待我（卡住的排前、其次做完没看的；待拍板、待验收等验收闸接进来再出）、宿主（隔离档位和读回的事实）、设置（当前配置，只读）；数据来自 `/api/local/status`（`src/lib/local-status.ts`）。没登录时 `LoginPrompt` 换成粘贴本机令牌的表单。由 `pnpm fleet2 up` 起的单口服务放出来，见 `packages/harness-api/AGENTS.md`「本机单口服务」。香港那份（`/next/`）的导航和路由不变。
+
+本机会话页（#3918，设计在 `specs/3918-fleet2-session-ui/方案.md`）：参考了 mirasim 的分层思路和 token 分组（文字五档、surface/raised/panel/inset、running/idle），以及 cc-haha README 里的工作台交互（多会话、worktree、右栏 diff）。代码全部自写，或来自 MIT 的 Radix 与 shadcn/ui 的写法。没有从这两家拷代码、样式、色值或 class。色值和对照表在 `src/app.css` 和那份方案里。组件在 `src/ui/`，页面在 `composer.tsx`（新会话、底部输入、排队条、任务页开单）、`chat-timeline.tsx`、`local-sessions.tsx`、`changes-panel.tsx`。标题用会话上存的第一句，预览用 `src/lib/preview.ts`（跳过内部事件、解开 JSON、修把 UTF-8 当成 latin1 的乱码）。深浅色记在 `localStorage` 键 `fleet.next.theme`，侧栏可切。右栏改动走 `GET /api/ade/sessions/:id/changes`。排队的插队和撤回走 `POST /api/ade/sessions/:id/queue`。
 
 ## 本机跑起来看
 

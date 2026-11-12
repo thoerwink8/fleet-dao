@@ -217,6 +217,35 @@ describe('会话', () => {
     expect((await svc.getSession(s.id)).hold).toBe(true);
   });
 
+  it('跑着的时候可以撤回队列，插队会停掉当前轮再跑那一句', async () => {
+    mode = 'hang';
+    const dir = mkdtempSync(join(root, 'ws-'));
+    const ws = await svc.addWorkspace('队', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+      text: '一直跑',
+    });
+    const msg = {
+      from: { kind: 'user' as const, id: null },
+      kind: 'chat' as const,
+      expectReply: true,
+      hops: 0,
+    };
+    await svc.postMessage(s.id, { ...msg, text: '等一下', mode: 'queue' });
+    await svc.postMessage(s.id, { ...msg, text: '先做这个', mode: 'queue' });
+    expect((await svc.getSession(s.id)).queue).toMatchObject([{ text: '等一下' }, { text: '先做这个' }]);
+    await svc.editQueue(s.id, 0, 'drop');
+    expect((await svc.getSession(s.id)).queue).toMatchObject([{ text: '先做这个' }]);
+    mode = 'fake';
+    await svc.editQueue(s.id, 0, 'jump');
+    await waitIdle(s.id);
+    expect((await svc.getSession(s.id)).status).toBe('idle');
+    expect((await svc.getSession(s.id)).queue).toEqual([]);
+  });
+
   it('重启时接不回的一轮记成 lost', async () => {
     const dir = mkdtempSync(join(root, 'ws-'));
     const ws = await svc.addWorkspace('掉', dir);

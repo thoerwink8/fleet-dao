@@ -1,25 +1,32 @@
-import { ChevronLeft, MessagesSquare } from 'lucide-react';
-import { Link, useParams } from 'react-router';
-import { AdePanel } from '../components/ade-panel';
+import { ChevronLeft } from 'lucide-react';
+import { useState } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router';
+import { ChangesPanel } from '../components/changes-panel';
+import { EmptyComposer } from '../components/composer';
 import { SessionList } from '../components/session-list';
 import { SessionStream } from '../components/session-stream';
 import { PageBar } from '../components/shell';
 import { cn } from '../lib/cn';
 import { IS_LOCAL } from '../lib/profile';
+import { useMediaQuery } from '../lib/work-hooks';
 
 /**
- * 会话工作台（只读）。电脑：左列会话列表、右边选中会话的事件流；手机（768 以下）：两个画面，
- * `/` 只有列表，`/s/<号>` 只有事件流，左上角返回。
+ * 会话工作台。电脑：左列会话、右边对话；手机两个画面。
+ * 本机没选中会话时，右边是居中的新会话输入。香港那份仍是只读事件流。
  */
 export function Workbench() {
   const { id } = useParams();
+  const [params] = useSearchParams();
   const sessionId = id ? decodeURIComponent(id) : undefined;
+  const narrow = useMediaQuery('(max-width: 767px)');
+  const composing = IS_LOCAL && !sessionId && (!narrow || params.get('new') === '1');
+  const [changes, setChanges] = useState(false);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <PageBar
-        title={sessionId ? <span className="font-mono text-sm">{sessionId}</span> : '会话'}
+        title={sessionId ? <span className="truncate text-sm">{IS_LOCAL ? '对话' : sessionId}</span> : '会话'}
         leading={
-          sessionId ? (
+          sessionId || composing ? (
             <Link
               to="/"
               aria-label="返回会话列表"
@@ -30,38 +37,43 @@ export function Workbench() {
           ) : null
         }
       />
-      <div className="grid min-h-0 flex-1 md:flex-none md:h-[calc(100dvh-var(--bar-h))] md:grid-cols-[320px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
+      <div className="grid min-h-0 flex-1 md:h-[calc(100dvh-var(--bar-h))] md:grid-cols-[280px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
         <div
           className={cn(
-            'min-h-0 flex-col border-line md:border-r',
-            sessionId ? 'hidden md:flex' : 'flex',
+            'min-h-0 flex-col border-line md:flex md:border-r',
+            sessionId || composing ? 'hidden' : 'flex',
             'h-[calc(100dvh-var(--bar-h)*2)] md:h-auto',
           )}
         >
-          {IS_LOCAL ? <AdePanel /> : null}
           <SessionList className="min-h-0 flex-1" />
         </div>
         <div
           className={cn(
-            'min-h-0 min-w-0 flex-col',
-            sessionId ? 'flex h-[calc(100dvh-var(--bar-h)*2)] md:h-auto' : 'hidden md:flex',
+            'min-h-0 min-w-0 md:flex',
+            sessionId || composing ? 'flex h-[calc(100dvh-var(--bar-h)*2)] md:h-auto' : 'hidden',
           )}
         >
-          {sessionId ? (
-            <SessionStream key={sessionId} sessionId={sessionId} />
-          ) : (
-            <div className="grid flex-1 place-items-center p-6 text-center">
-              <div>
-                <MessagesSquare className="mx-auto size-8 text-line-strong" />
-                <p className="mt-3 text-sm font-medium text-ink-2">选一个会话看它的事件流</p>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {sessionId ? (
+              <SessionStream
+                key={sessionId}
+                sessionId={sessionId}
+                {...(IS_LOCAL ? { onToggleChanges: () => setChanges((v) => !v) } : {})}
+              />
+            ) : composing ? (
+              <EmptyComposer />
+            ) : (
+              <div className="grid flex-1 place-items-center p-6 text-center">
+                <p className="text-sm font-medium text-ink-2">选一个会话看它的事件流</p>
                 <p className="mt-1 text-2xs text-muted">
-                  {IS_LOCAL
-                    ? '左边开一个新会话，发出去就能看到回答。'
-                    : '只读：这里看得到派工、工人起止、交回核验，新事件实时出现。'}
+                  只读：这里看得到派工、工人起止、交回核验，新事件实时出现。
                 </p>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+          {IS_LOCAL && sessionId && changes ? (
+            <ChangesPanel sessionId={sessionId} onClose={() => setChanges(false)} />
+          ) : null}
         </div>
       </div>
     </div>

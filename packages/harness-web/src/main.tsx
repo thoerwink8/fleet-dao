@@ -4,6 +4,11 @@ import { createBrowserRouter, RouterProvider } from 'react-router';
 import './app.css';
 import { BlockPlaceholder, MorePage, Shell } from './components/shell';
 import { IS_LOCAL } from './lib/profile';
+import { applyTheme, readTheme } from './lib/theme';
+import { TooltipProvider } from './ui/tooltip';
+
+applyTheme(readTheme());
+
 import { HostsPage, InboxPage, LocalSettingsPage } from './pages/local-pages';
 import { Work } from './pages/work';
 import { Workbench } from './pages/workbench';
@@ -76,7 +81,9 @@ const root = document.getElementById('root');
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <RouterProvider router={router} />
+      <TooltipProvider>
+        <RouterProvider router={router} />
+      </TooltipProvider>
     </StrictMode>,
   );
 }
