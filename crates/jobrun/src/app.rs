@@ -137,6 +137,28 @@ fn write_report(path: &str, report: &Report) {
     }
 }
 
+/// Processes still running in `pids` that the command left behind.
+/// The root has already exited (its pid can linger in the job until its handle closes) and
+/// `conhost.exe` is the console Windows attached, not a child the command spawned.
+fn escaped(pids: &[u32], root: u32) -> u32 {
+    pids.iter()
+        .filter(|pid| {
+            **pid != root && win::creation_time(**pid).is_some() && !win::is_console_host(**pid)
+        })
+        .count() as u32
+}
+
+fn wait_escaped(job: &Job, root: u32, grace: Duration) -> u32 {
+    let until = Instant::now() + grace;
+    loop {
+        let left = escaped(&job.pids().unwrap_or_default(), root);
+        if left == 0 || Instant::now() >= until {
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Adds every pid currently in the job that has not been recorded yet.
 fn record(job: &Job, seen: &mut BTreeMap<u32, u64>) -> Vec<u32> {
     let pids = job.pids().unwrap_or_default();
@@ -189,18 +211,30 @@ fn run(name: &str, report_path: &str, command: &[String], grace_ms: u64) -> i32 
             return 127;
         }
     };
-    let started = job
-        .assign(&child)
-        .and_then(|_| win::resume_process(child.id()));
-    if let Err(e) = started {
-        let _ = child.kill();
-        eprintln!("jobrun: cannot place {} in the job: {e}", command[0]);
-        report.spawn_error = Some(format!("cannot place the command in the job: {e}"));
-        write_report(report_path, &report);
-        return 127;
-    }
+    let root = child.id();
+    // Still suspended, so it cannot exit before we learn its creation time. `cmd /c exit 7`
+    // can finish before the first poll; without this the report would miss the root.
+    let placed = job.assign(&child).and_then(|_| {
+        let start = win::creation_time(root);
+        win::resume_process(root).map(|_| start)
+    });
+    let root_start = match placed {
+        Ok(start) => start,
+        Err(e) => {
+            let _ = child.kill();
+            eprintln!("jobrun: cannot place {} in the job: {e}", command[0]);
+            report.spawn_error = Some(format!("cannot place the command in the job: {e}"));
+            write_report(report_path, &report);
+            return 127;
+        }
+    };
 
     let mut seen: BTreeMap<u32, u64> = BTreeMap::new();
+    if let Some(start) = root_start {
+        seen.insert(root, start);
+    }
+    // Read the exit code before any TerminateJobObject. That call ends every member with
+    // code 1, which would replace a clean exit (0, or `exit 7`) if it ran first.
     let status = loop {
         record(&job, &mut seen);
         match child.try_wait() {
@@ -209,13 +243,12 @@ fn run(name: &str, report_path: &str, command: &[String], grace_ms: u64) -> i32 
             Err(_) => break None,
         }
     };
-    // The root is gone. Whatever is still in the job escaped its parent: count it, then stop it.
     let remaining = record(&job, &mut seen);
-    report.stragglers = remaining.len() as u32;
-    if !remaining.is_empty() {
+    report.stragglers = escaped(&remaining, root);
+    if report.stragglers > 0 {
         let _ = job.terminate();
     }
-    report.leftovers = wait_empty(&job, Duration::from_millis(grace_ms));
+    report.leftovers = wait_escaped(&job, root, Duration::from_millis(grace_ms));
     report.exit_code = status;
     report.descendants = seen
         .into_iter()
