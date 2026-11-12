@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@fleet-dao/adapters": "workspace:*",
     "@fleet-dao/harness-api": "workspace:*",
     "@fleet-dao/harness-contract": "workspace:*",
     "@fleet-dao/harness-runner": "workspace:*",

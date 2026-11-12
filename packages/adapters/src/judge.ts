@@ -3,6 +3,7 @@
 import type { RunOutcome } from '@fleet-dao/shared';
 import type { DeliveryCheck } from './delivery.ts';
 import { STOP_KIND_TEXT, type StopCause } from './stop-reason.ts';
+import { looksLikeQuotaExhausted, relayQuotaNotice } from './stream-kit.ts';
 import type { KillReason, RunUsage } from './types.ts';
 
 export interface RunFacts {
@@ -160,4 +161,27 @@ export function abortedText(cause: StopCause | undefined): string {
   if (!cause) return `${KILL_TEXT.aborted}（原因没传）`;
   const detail = cause.detail.trim();
   return `${KILL_TEXT.aborted}（${STOP_KIND_TEXT[cause.kind]}${detail ? `：${detail}` : ''}）`;
+}
+
+/**
+ * 本机 ADE 要不要换下一个账号。判法就是 judgeRun：
+ * 退出不是 0，且原文像额度用尽（「not your usage limit」先抹掉，和 Claude 插头同一条）→ quota_exhausted；
+ * 整段回答就是中转的欠费通知 → relay_quota_exhausted。其余不换。
+ */
+export function accountExhaustedReason(
+  text: string,
+  exitCode: number | null,
+): 'quota_exhausted' | 'relay_quota_exhausted' | null {
+  const relay = relayQuotaNotice(text);
+  const failed = exitCode !== 0 && exitCode !== null;
+  const quotaText = text.replace(/\bnot (?:your |a |the )?usage limit/gi, '');
+  const verdict = judgeRun({
+    exitCode,
+    quotaExhausted: failed && looksLikeQuotaExhausted(quotaText),
+    ...(relay ? { relayQuota: relay } : {}),
+    ...(!failed && !relay ? { terminal: { isError: false, detail: '' } } : {}),
+  });
+  if (verdict.reason === 'quota_exhausted' || verdict.reason === 'relay_quota_exhausted')
+    return verdict.reason;
+  return null;
 }

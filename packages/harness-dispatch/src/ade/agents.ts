@@ -15,6 +15,10 @@ export interface AdeAgentInfo {
   ready?: boolean;
   /** 跟在名字后面的说明，例如「未登录」。 */
   note?: string;
+  /** 当前登录的邮箱。读不到就不带，页面写「读不到」，不编一个。 */
+  account?: string;
+  /** 型号不是从 CLI 列出来的时候，给人看的一句说明。 */
+  modelsNote?: string;
 }
 
 const ORDER = ['claude', 'grok', 'codex', 'pi'] as const;
@@ -62,17 +66,53 @@ export function parseGrokModels(text: string): { loggedIn: boolean; models: stri
   return { loggedIn, models: orderModels(models, 'grok-4.7') };
 }
 
-/** `reclaude auth status` 打出来的 JSON。认不出就 null，不当成已登录。 */
-export function claudeLoggedIn(text: string): boolean | null {
+function jsonSlice(text: string): unknown {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start < 0 || end <= start) return null;
   try {
-    const j = JSON.parse(text.slice(start, end + 1)) as { loggedIn?: unknown };
-    return typeof j.loggedIn === 'boolean' ? j.loggedIn : null;
+    return JSON.parse(text.slice(start, end + 1)) as unknown;
   } catch {
     return null;
   }
+}
+
+/** `reclaude auth status` 打出来的 JSON。认不出就 null，不当成已登录。 */
+export function claudeLoggedIn(text: string): boolean | null {
+  const j = jsonSlice(text);
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return null;
+  const logged = (j as { loggedIn?: unknown }).loggedIn;
+  return typeof logged === 'boolean' ? logged : null;
+}
+
+/** 只认名叫 email 的字段。不扫别的字符串，免得把令牌当成账号。 */
+export function emailField(value: unknown, depth = 0): string | null {
+  if (!value || typeof value !== 'object' || depth > 5) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = emailField(item, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (
+      key === 'email' &&
+      typeof item === 'string' &&
+      item.includes('@') &&
+      item.length <= 80 &&
+      !/\s/.test(item)
+    ) {
+      return item;
+    }
+    const hit = emailField(item, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export function claudeAccount(text: string): string | null {
+  return emailField(jsonSlice(text));
 }
 
 /** codex login status 一类的短输出。 */
@@ -96,13 +136,14 @@ export function piAuthReady(raw: string | null): 'in' | 'out' | 'unknown' {
   }
 }
 
-function claudeModels(env: NodeJS.ProcessEnv): string[] {
+function claudeModels(env: NodeJS.ProcessEnv): { models: string[]; modelsNote?: string } {
   const models = (env.FLEET2_MODELS ?? env.FLEET2_MODEL ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  // `default` 不是 reclaude 认的模型名，空名单用 sonnet 这个别名。
-  return models.length > 0 ? models : ['sonnet'];
+  // `default` 不是 reclaude 认的模型名。CLI 没有型号名单，空的时候用 sonnet 这个别名，并写明。
+  if (models.length > 0) return { models };
+  return { models: ['sonnet'], modelsNote: 'CLI 没有型号名单，这是别名' };
 }
 
 function homeOf(env: NodeJS.ProcessEnv): string {
@@ -201,8 +242,14 @@ export const realRun: AgentRun = async (bin, args, timeoutMs, env) => {
   return { code: r.killed ? null : r.exitCode, out, timedOut: Boolean(r.killed) };
 };
 
-function offline(id: string, resume: boolean, how: 'in' | 'out' | 'unknown', models: string[]): AdeAgentInfo {
-  if (how === 'in') return { id, resume, models, ready: true };
+function offline(
+  id: string,
+  resume: boolean,
+  how: 'in' | 'out' | 'unknown',
+  models: string[],
+  extra?: Pick<AdeAgentInfo, 'account' | 'modelsNote'>,
+): AdeAgentInfo {
+  if (how === 'in') return { id, resume, models, ready: true, ...extra };
   return { id, resume, models: [], ready: false, note: how === 'out' ? '未登录' : '没查成登录' };
 }
 
@@ -218,14 +265,20 @@ async function describe(
     const r = await run(bin, ['auth', 'status'], PROBE_MS, envp);
     const logged = r.timedOut ? null : claudeLoggedIn(r.out);
     const how = logged === true ? 'in' : logged === false ? 'out' : 'unknown';
-    return offline(id, true, how, claudeModels(env));
+    const models = claudeModels(env);
+    const account = r.timedOut ? null : claudeAccount(r.out);
+    return offline(id, true, how, models.models, {
+      ...(account ? { account } : {}),
+      ...(models.modelsNote ? { modelsNote: models.modelsNote } : {}),
+    });
   }
   if (id === 'grok') {
     const r = await run(bin, ['models'], PROBE_MS, envp);
     if (r.timedOut) return offline(id, true, 'unknown', []);
     const parsed = parseGrokModels(r.out);
     if (!parsed.loggedIn || parsed.models.length === 0) return offline(id, true, 'out', []);
-    return { id, resume: true, models: parsed.models, ready: true };
+    const account = emailField(jsonSlice((await readText(join(homeOf(env), '.grok', 'auth.json'))) ?? ''));
+    return { id, resume: true, models: parsed.models, ready: true, ...(account ? { account } : {}) };
   }
   if (id === 'codex') {
     const r = await run(bin, ['login', 'status'], PROBE_MS, envp);

@@ -7,6 +7,7 @@ import { formatRelative, shortId } from '../lib/format';
 import { useSessions } from '../lib/hooks';
 import { LEVEL_LABEL, useLocalStatus } from '../lib/local-status';
 import { deriveWorkerState } from '../lib/session-state';
+import { AccountsPanel } from './accounts-page';
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -120,6 +121,7 @@ export function LocalSettingsPage() {
     <>
       <PageBar title="设置" />
       <div className="flex flex-col gap-3 p-3 md:p-6">
+        <AccountsPanel />
         {unauthorized ? <LoginPrompt /> : null}
         {error ? (
           <p role="alert" className="text-sm text-warning">
