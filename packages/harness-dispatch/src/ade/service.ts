@@ -338,7 +338,7 @@ export class AdeService {
     const text = msg.text.trim();
     if (!text) throw new AdeError('话不能空', 400);
     await this.#lock(id, async () => {
-      const row = await this.getSession(id);
+      await this.getSession(id);
       const item: AdeQueueItem = {
         text,
         from: msg.from,
@@ -346,18 +346,21 @@ export class AdeService {
         hops: msg.hops,
         kind: msg.kind,
       };
-      await appendToSession(this.#db, id, 'session.message', {
-        from: msg.from,
-        to: id,
-        text,
-        kind: msg.kind,
-        expectReply: msg.expectReply,
-        hops: msg.hops,
-        mode: row.status === 'running' && msg.mode !== 'jump' ? 'queue' : msg.mode,
-      });
       const deliverOnly =
         msg.kind === 'report' || (msg.from.kind === 'session' && (!msg.expectReply || msg.hops >= 1));
-      if (deliverOnly) return;
+      // 还在排队的不进对话。真开跑时由 #begin 写 session.message。转发和 report 不跑一轮，这里就记。
+      if (deliverOnly) {
+        await appendToSession(this.#db, id, 'session.message', {
+          from: msg.from,
+          to: id,
+          text,
+          kind: msg.kind,
+          expectReply: msg.expectReply,
+          hops: msg.hops,
+          mode: msg.mode,
+        });
+        return;
+      }
       if (msg.from.kind === 'user') await updateAdeSession(this.#db, id, { hold: false });
       const fresh = await this.getSession(id);
       if (fresh.status === 'running') {
@@ -456,6 +459,15 @@ export class AdeService {
 
   /** 调用方拿着这会话的锁。 */
   async #begin(row: AdeSessionRow, item: AdeQueueItem): Promise<void> {
+    await appendToSession(this.#db, row.id, 'session.message', {
+      from: item.from,
+      to: row.id,
+      text: item.text,
+      kind: item.kind,
+      expectReply: item.expectReply,
+      hops: item.hops,
+      mode: 'send',
+    });
     const runId = `ade-${row.id}-${randomBytes(4).toString('hex')}`;
     const resume = row.agentSessionId !== null;
     const agentSessionId = row.agentSessionId ?? randomUUID();
