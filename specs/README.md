@@ -28,6 +28,7 @@
 | [3842-fleet2-session-split](<3842-fleet2-session-split/讨论稿.md>) | 新内核环节都用 Grok：会话怎么拆、核验怎么保持独立（2026-10-31，讨论稿） | 讨论中 | — |
 | [3849-multi-model-shell](<3849-multi-model-shell/讨论稿.md>) | 新内核的多模型壳：放到另一个工作环境、按环节搭配模型（2026-11-03，讨论稿） | 讨论中 | — |
 | [3851-harness-shape](<3851-harness-shape/讨论稿.md>) | 新 harness 整体形态（2026-11-03，讨论稿） | 已定 | — |
+| [3914-fleet2-ade](<3914-fleet2-ade/方案.md>) | Fleet2 做成 ADE：脱钩 GitHub（#3914） | 在做 | — |
 
 ## 历史
 

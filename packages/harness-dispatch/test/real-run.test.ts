@@ -183,7 +183,7 @@ describe('真执行一整条', () => {
           (await listOpsForTask(t.db, { repo: 'o/r', issue })).map(
             (o) => `${o.kind}:${o.state}:${o.fencing}`,
           ),
-        ).toEqual(['git.push:done:5', 'github.pr.open:done:5']);
+        ).toEqual(['change.push:done:5', 'change.pr.open:done:5']);
       }
       const handbacks = reqs.filter((e) => e.type === 'handback.recorded');
       expect(handbacks).toHaveLength(2);
@@ -242,7 +242,7 @@ describe('真执行一整条', () => {
       await drain(k, 3);
       expect(
         (await listOpsForTask(t.db, { repo: 'o/r', issue: 1 })).map((o) => `${o.kind}:${o.state}`),
-      ).toEqual(['git.push:dead']);
+      ).toEqual(['change.push:dead']);
       expect(git(remote, 'branch', '--list', 'fleet2/*').trim()).toBe('');
       expect(gh.prs).toEqual([]);
     } finally {

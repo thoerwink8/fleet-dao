@@ -15,7 +15,8 @@ export const CATEGORY_LABEL: Record<Category, string> = {
 
 export function categoryOf(type: string): Category {
   if (type.startsWith('transcript.')) return 'process';
-  if (type.startsWith('session.turn.')) return 'turn';
+  if (type === 'session.created' || type === 'session.message' || type.startsWith('session.turn.'))
+    return 'turn';
   if (type === 'worker.spawn.requested' || type === 'worker.stop.requested') return 'dispatch';
   if (type === 'worker.spawned' || type === 'worker.settled' || type.startsWith('worker.')) return 'worker';
   if (type === 'handback.recorded') return 'handback';
@@ -62,6 +63,10 @@ export function summaryOf(type: string, p: Record<string, unknown>): string {
       return `工人启动 ${str(p.model) ?? ''}`.trim();
     case 'worker.settled':
       return `工人结束 退出码 ${num(p.exitCode) ?? '—'}`;
+    case 'session.created':
+      return `${str(p.agent) ?? '会话'} · ${str(p.model) ?? ''}`.trim();
+    case 'session.message':
+      return str(p.text) ?? '会话消息';
     case 'session.turn.started':
     case 'session.turn.settled':
       return str(p.text) ?? str(p.summary) ?? TYPE_LABEL[type] ?? type;

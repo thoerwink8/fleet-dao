@@ -7,6 +7,7 @@ import { summaryOf } from '../lib/describe';
 import { formatRelative, shortId } from '../lib/format';
 import { useSessions } from '../lib/hooks';
 import { typeLabel } from '../lib/labels';
+import { IS_LOCAL } from '../lib/profile';
 import { deriveWorkerState, groupByState, STATE_LABEL, type WorkerState } from '../lib/session-state';
 import type { SessionSummary } from '../lib/types';
 import { Chip } from './chip';
@@ -122,7 +123,9 @@ export function SessionList({ className }: { className?: string }) {
           <div className="p-4 text-sm text-ink-2">
             <p className="font-medium">还没有会话</p>
             <p className="mt-1 text-2xs text-muted">
-              新内核里有指挥官会话产生事件后，这里就会出现。开发环境见包里的 AGENTS.md。
+              {IS_LOCAL
+                ? '加一个本机文件夹当工作区，再开新会话。'
+                : '新内核里有指挥官会话产生事件后，这里就会出现。开发环境见包里的 AGENTS.md。'}
             </p>
           </div>
         ) : (

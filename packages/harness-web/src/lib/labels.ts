@@ -9,6 +9,8 @@ export interface Labeled {
 }
 
 export const TYPE_LABEL: Record<string, string> = {
+  'session.created': '会话建立',
+  'session.message': '会话消息',
   'session.turn.started': '轮次开始',
   'session.turn.settled': '轮次结束',
   'worker.spawn.requested': '派工请求',

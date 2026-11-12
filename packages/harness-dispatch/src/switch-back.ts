@@ -126,16 +126,16 @@ async function gather(d: SwitchBackDeps, ref: TaskRef): Promise<Facts> {
   }
   const ops = await listOpsForTask(d.db, ref);
   const run = await latestPublishRun(d.db, ref);
-  const last = (kind: string) =>
-    ops.filter((o) => o.kind === kind && (!run || o.opKey.endsWith(`:${run.runId}`))).at(-1);
+  const lastOf = (...kinds: string[]) =>
+    ops.filter((o) => kinds.includes(o.kind) && (!run || o.opKey.endsWith(`:${run.runId}`))).at(-1);
   return {
     fencing,
     eventId,
     jobState,
     workerAlive,
     run,
-    push: last('git.push'),
-    prOp: last('github.pr.open'),
+    push: lastOf('change.push', 'git.push'),
+    prOp: lastOf('change.pr.open', 'github.pr.open'),
   };
 }
 

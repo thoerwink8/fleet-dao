@@ -12,7 +12,7 @@
 
 ## 驾驶舱口（`src/cockpit.ts`、`src/bin/cockpit.ts`，#3818）
 
-新驾驶舱（`packages/harness-web`，公网 `/next/`）只读读会话的口，和令牌口是两个进程里的两个服务，共用 `session-http.ts` 里的历史页和 SSE 实现（各传各的「还准不准看」函数）。
+新驾驶舱（`packages/harness-web`）和令牌口是两个进程里的两个服务，共用 `session-http.ts` 里的历史页和 SSE 实现（各传各的「还准不准看」函数）。公网 `/next/` 只读。本机装法（`vite --mode desktop`）同一套页面可以建工作区、开会话、发消息、停止，走本机网关上的 `/api/ade`（#3914），不在这个包里起进程。
 
 - 身份：浏览器带旧驾驶舱签的登录 Cookie `__Host-fleet_session`。格式从 `packages/api/src/tokens.ts`（`signPayload`/`verifyPayload`）和 `session.ts`（`SessionClaims`、purpose `fleet-session/v1`）拷来，不 import 旧包（决定 0124）；密钥是环境变量 `FLEET_SESSION_SECRET`（和旧后端同一把）。旧格式变了这里要跟着改。
 - 固定向量（`test/cockpit.test.ts` 第一条守着）：密钥 `test-secret-0123456789abcdef-test`，声明 `{"uid":"00000000-0000-4000-8000-000000000001","sid":"sid-fixed-0001","iat":1700000000,"exp":1700001000,"m":"password","v":3}`（键按这个顺序），签出 `eyJ1aWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJzaWQiOiJzaWQtZml4ZWQtMDAwMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAxMDAwLCJtIjoicGFzc3dvcmQiLCJ2IjozfQ.SYQh9-AG4-IRnvv19uvj3TUD8TLOVeO1acgwfqwrI58`。这条是拿旧包的 `signPayload` 生成的。
@@ -26,7 +26,7 @@
 
 ## 本机单口服务（`src/local.ts`，#3858）
 
-本机装法（装配档案 local）把驾驶舱口、`/api/local/*`、静态页并成一个口，`listen` 里写死 127.0.0.1。驾驶舱口加了两个选项让它能复用：`authorize`（换掉 Cookie 核验）、`apiPrefix`（`/api`，页面挂根路径），并多暴露 `handler`、`endStreams`。鉴权是本机令牌：32 字节随机、存用户数据目录的 `local-token`（`ensureLocalToken`：posix 0600；Windows 没有权限位，由调用方传 `restrictWindows`，装配档案里用 `icacls` 去继承只授本用户，没传就拒绝；本包不起子进程），请求头 `X-Fleet-Local-Token` 或 Cookie `fleet_local`（HttpOnly、SameSite=Strict）。`pnpm fleet2 up` 打印的登录链接带一次性登录码（5 分钟、用一次就废，`/local-login?code=`），页面上也可 `POST /api/local/login` 粘贴令牌；令牌本身不进网址（网址带 token 字样的参数一律 400）。Host 头不是回环名 421（防 DNS 重绑）。静态页不要令牌，`/api` 下全要。`GET /health` 不要令牌，回 `{"ok":true}`（口通了的探针，不带版本和路径；桌面外壳等它 200 才开窗口，#3870）。`/api/local/status` 是装配档案填的状态（隔离档位、对外写、宿主、设置），页面「宿主」「设置」读它。测试 `test/local.test.ts`。
+本机装法（装配档案 local）把驾驶舱口、`/api/local/*`、静态页并成一个口，`listen` 里写死 127.0.0.1。驾驶舱口加了两个选项让它能复用：`authorize`（换掉 Cookie 核验）、`apiPrefix`（`/api`，页面挂根路径），并多暴露 `handler`、`endStreams`。鉴权是本机令牌：32 字节随机、存用户数据目录的 `local-token`（`ensureLocalToken`：posix 0600；Windows 没有权限位，由调用方传 `restrictWindows`，装配档案里用 `icacls` 去继承只授本用户，没传就拒绝；本包不起子进程），请求头 `X-Fleet-Local-Token` 或 Cookie `fleet_local`（HttpOnly、SameSite=Strict）。`pnpm fleet2 up` 打印的登录链接带一次性登录码（5 分钟、用一次就废，`/local-login?code=`），页面上也可 `POST /api/local/login` 粘贴令牌；令牌本身不进网址（网址带 token 字样的参数一律 400）。Host 头不是回环名 421（防 DNS 重绑）。静态页不要令牌，`/api` 下全要。`GET /health` 不要令牌，回 `{"ok":true}`（口通了的探针，不带版本和路径；桌面外壳等它 200 才开窗口，#3870）。`/api/local/status` 是装配档案填的状态（隔离档位、对外写、宿主、设置），页面「宿主」「设置」读它。`/api/ade` 由装配档案注入（本包不实现会话运行）；没注入就 404。测试 `test/local.test.ts`。
 
 ## 测试
 

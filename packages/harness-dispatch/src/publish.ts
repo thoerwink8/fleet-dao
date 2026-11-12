@@ -1,14 +1,22 @@
 // 真执行的发布（#3783，第 7 片，决定 0124）：工人交回后，内核经 outbox 把补丁推成分支、开 PR。不合并。
-// 一条线：交回抓到补丁 → recordPublish（记 publish_runs，该推的排 git.push）→ processOutbox 领到期的动作 →
+// 一条线：交回抓到补丁 → recordPublish（记 publish_runs，该推的排 change.push）→ processOutbox 领到期的动作 →
 // 先核所有权令牌（旧库 tasks.fencing，对不上进 dead 不做）→ 执行 → 查证 → 写结果。
 // 每一步都先看外面已经有什么再动手（预留、执行、查证）：分支在不在、这个分支有没有 PR、这张单有没有别的开着的 PR。
 // 所以崩了重来、响应丢了结果不知道（unknown）、两个领取者撞上，都不会推第二次、开第二个 PR（旧坑 S4、GH1、GH2、GH3）。
 // 工人整个过程拿不到任何 GitHub 凭据：补丁只存库里，推送由内核在自己建的临时目录里做，认证头只放进那条 git 命令的环境变量。
-// 只有 git.push 和 github.pr.open 两种处理器；github.merge、github.comment 没有（合并闸和人决定合不合）。
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+// GitHub 上只有推分支和开 PR 两种处理器（change.push / change.pr.open，过渡期仍认旧名）；合并、评论没有。
+// forge=local 不连平台，把补丁写成文件；forge=gitlab 直接失败。缺省 forge 按 github。
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { appendToStream } from '@fleet-dao/harness-api';
-import { issueStream, type OutboxKind, opKey, type TaskRef } from '@fleet-dao/harness-contract';
+import {
+  type Forge,
+  forgeOf,
+  issueStream,
+  type OutboxKind,
+  opKey,
+  type TaskRef,
+} from '@fleet-dao/harness-contract';
 import { makeRedactor, type Redactor } from '@fleet-dao/harness-runner';
 import {
   checkFencing,
@@ -23,14 +31,30 @@ import {
   type OutboxOp,
   type PublishRun,
   recordPublishRun,
+  releaseOp,
 } from '@fleet-dao/harness-store';
 import { WORKER_BASE_KEYS } from '@fleet-dao/harness-workers';
 import { type CommandResult, type CommandSpec, runCommand } from './command.ts';
 import { GitHubDefiniteError, type GitHubWriter, type PrInfo } from './github-write.ts';
 import type { RealTarget } from './prompt.ts';
 
-/** 装了处理器的外部动作种类。合并、评论不在里面：没有处理器的种类领到就进 dead。 */
-export const PUBLISH_KINDS: readonly OutboxKind[] = ['git.push', 'github.pr.open'];
+/**
+ * 装了 GitHub 处理器的种类：新名和过渡期旧名的「推分支、开 PR」。
+ * 合并、评论不在里面（装了影子自检就不过）。local / gitlab 在 processOutbox 里另走，不算装了 GitHub 处理器。
+ */
+export const PUBLISH_KINDS: readonly OutboxKind[] = [
+  'change.push',
+  'change.pr.open',
+  'git.push',
+  'github.pr.open',
+];
+
+/** 旧名和新名指到同一件外送。合并、评论回 null。 */
+export function publishAction(kind: string): 'push' | 'open' | null {
+  if (kind === 'git.push' || kind === 'change.push') return 'push';
+  if (kind === 'github.pr.open' || kind === 'change.pr.open') return 'open';
+  return null;
+}
 
 /** 真执行的分支名：fleet2/ 前缀（旧引擎是 fleet/），带单号和运行号，同一次运行永远是同一个名字。 */
 export const publishBranch = (issue: number, runId: string): string => `fleet2/${issue}-${runId}`;
@@ -105,11 +129,11 @@ export async function recordPublish(db: Db, r: RecordPublishInput): Promise<Publ
     if (run.state === 'ready') {
       const ref = { repo: run.repo, issue: run.issue };
       await enqueueOp(tx, {
-        opKey: opKey('git.push', ref, run.fencing, run.runId),
-        kind: 'git.push',
+        opKey: opKey('change.push', ref, run.fencing, run.runId),
+        kind: 'change.push',
         ref,
         fencing: run.fencing,
-        payload: { runId: run.runId },
+        payload: { runId: run.runId, forge: 'github' },
       });
     }
     return run;
@@ -142,6 +166,8 @@ export interface PublishDeps {
   gitTimeoutMs?: number;
   run?: (spec: CommandSpec) => Promise<CommandResult>;
   onError?(err: unknown, op?: OutboxOp): void;
+  /** 设了就只做这一个 forge，别的领到立刻退回 pending（本机 ADE 不碰 GitHub 那几条）。 */
+  onlyForge?: Forge;
 }
 
 export interface OutboxReport {
@@ -163,12 +189,30 @@ export async function processOutbox(d: PublishDeps): Promise<OutboxReport> {
     const retryMs = d.retryMs ?? 30_000;
     const maxAttempts = d.maxAttempts ?? 8;
     try {
-      if (!PUBLISH_KINDS.includes(op.kind)) {
+      const forge = forgeOf(op.payload);
+      if (d.onlyForge && forge !== d.onlyForge) {
+        await releaseOp(d.db, op);
+        continue;
+      }
+      if (forge === 'gitlab') {
+        await failOp(d.db, op, 'gitlab 还没实现', 0, 0);
+        report.dead++;
+        continue;
+      }
+      if (forge === 'local') {
+        const result = await runLocal(d, op);
+        await completeOp(d.db, op, result);
+        report.done++;
+        continue;
+      }
+      const action = publishAction(op.kind);
+      if (!action) {
         await failOp(d.db, op, `没有 ${op.kind} 的处理器（合并、评论不归内核自动做）`, 0, 0);
         report.dead++;
         continue;
       }
-      // 执行前核所有权令牌：这张单已经易手（切回旧系统、被别人拿走）就不做。读不到按没做成退避，不当成对得上
+      // 执行前核所有权令牌：这张单已经易手（切回旧系统、被别人拿走）就不做。读不到按没做成退避，不当成对得上。
+      // local 在上面已经写完文件，不核 GitHub 令牌。
       let ok: boolean;
       try {
         ok = await checkFencing(d.db, op, d.fencingOf);
@@ -182,7 +226,7 @@ export async function processOutbox(d: PublishDeps): Promise<OutboxReport> {
         report.dead++;
         continue;
       }
-      const result = op.kind === 'git.push' ? await pushOp(d, op) : await openPrOp(d, op);
+      const result = action === 'push' ? await pushOp(d, op) : await openPrOp(d, op);
       await completeOp(d.db, op, result);
       report.done++;
     } catch (err) {
@@ -256,11 +300,11 @@ async function pushOp(d: PublishDeps, op: OutboxOp): Promise<Record<string, unkn
     }
     // 先排开 PR 的动作再收这条（都是幂等的）：这里崩了重来，会再排一次、同一个键，不出第二条
     await enqueueOp(d.db, {
-      opKey: opKey('github.pr.open', ref, run.fencing, run.runId),
-      kind: 'github.pr.open',
+      opKey: opKey('change.pr.open', ref, run.fencing, run.runId),
+      kind: 'change.pr.open',
       ref,
       fencing: run.fencing,
-      payload: { runId: run.runId, branch: run.branch, sha: commit },
+      payload: { runId: run.runId, branch: run.branch, sha: commit, forge: 'github' },
     });
     await appendToStream(d.db, issueStream(ref), 'publish.pushed', {
       runId: run.runId,
@@ -489,6 +533,56 @@ function git(
     trustedEnv: env,
     ...(o.stdin !== undefined ? { stdin: o.stdin } : {}),
   });
+}
+
+/** 不连平台：补丁、开单、评论、合并各自落一个文件。空补丁直接失败。 */
+async function runLocal(d: PublishDeps, op: OutboxOp): Promise<Record<string, unknown>> {
+  const dir = join(d.tmpRoot, 'local-changes');
+  await mkdir(dir, { recursive: true });
+  const safe = op.opKey.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 140);
+  const file = (ext: string) => join(dir, `${safe}${ext}`);
+  if (op.kind === 'change.push' || op.kind === 'git.push') {
+    const patch = String(op.payload.patch ?? '');
+    if (!patch.trim()) throw new PermanentError('补丁是空的');
+    const patchFile = file('.patch');
+    await writeFile(patchFile, patch, 'utf8');
+    return { patchFile };
+  }
+  if (op.kind === 'change.pr.open' || op.kind === 'github.pr.open') {
+    const side = file('.json');
+    await writeFile(side, JSON.stringify(op.payload), 'utf8');
+    return { file: side };
+  }
+  if (op.kind.endsWith('.comment')) {
+    const side = file('.comment.txt');
+    await writeFile(side, String(op.payload.text ?? op.payload.body ?? ''), 'utf8');
+    return { file: side };
+  }
+  // 旧名 github.* 与新名 change.* 同一后缀。这里不写出合并调用，只把「已经合并」记成文件。
+  if (op.kind.endsWith('.merge')) {
+    const side = file('.done');
+    await writeFile(side, 'recorded\n', 'utf8');
+    return { file: side };
+  }
+  throw new PermanentError(`local 没有 ${op.kind} 的处理器`);
+}
+
+const refuseGitHub = (): never => {
+  throw new Error('本机这条路不连 GitHub');
+};
+
+/** 本机 ADE 用的外送依赖：只处理 forge=local，GitHub 客户端一碰就拒。 */
+export function localOutboxDeps(db: Db, tmpRoot: string, redact: Redactor): PublishDeps {
+  return {
+    db,
+    tmpRoot,
+    mirrorRoot: tmpRoot,
+    redact,
+    onlyForge: 'local',
+    tokenFor: async () => refuseGitHub(),
+    fencingOf: async () => -1,
+    github: new Proxy({} as GitHubWriter, { get: () => refuseGitHub }),
+  };
 }
 
 async function must(what: string, r: Promise<CommandResult>): Promise<CommandResult> {

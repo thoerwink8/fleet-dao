@@ -1,0 +1,184 @@
+// 本机 ADE 的 HTTP（#3914）。只挂在本机网关上，要本机令牌；写请求必须是 JSON。
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { localTokenOk } from '@fleet-dao/harness-api';
+import { AdeError, type AdeService } from './service.ts';
+
+const MAX_BODY = 64 * 1024;
+
+function send(res: ServerResponse, status: number, body: unknown): void {
+  const text = JSON.stringify(body);
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  res.end(text);
+}
+
+async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const ct = String(req.headers['content-type'] ?? '');
+  if (!ct.toLowerCase().startsWith('application/json')) throw new AdeError('要 application/json', 415);
+  const chunks: Buffer[] = [];
+  let n = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    n += buf.length;
+    if (n > MAX_BODY) throw new AdeError('请求体太大', 413);
+    chunks.push(buf);
+  }
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+      throw new AdeError('请求体要是对象', 400);
+    return parsed as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof AdeError) throw err;
+    throw new AdeError('请求体不是 JSON', 400);
+  }
+}
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
+
+function numOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) ? v : null;
+}
+
+export function createAdeHandler(
+  ade: AdeService,
+  token: string,
+  /** null 表示没连 GitHub。不传则读 FLEET2_GITHUB_TOKEN。 */
+  githubToken: string | null = process.env.FLEET2_GITHUB_TOKEN ?? null,
+) {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
+    if (!localTokenOk(req, token)) {
+      send(res, 401, { error: '没登录：缺本机令牌' });
+      return true;
+    }
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const path = url.pathname;
+    if (path !== '/api/ade' && !path.startsWith('/api/ade/')) return false;
+    try {
+      const hit = await route(ade, req, res, path, githubToken);
+      if (!hit) send(res, 404, { error: '没有这个接口' });
+    } catch (err) {
+      const status = err instanceof AdeError ? err.status : 500;
+      const message = err instanceof Error ? err.message : '内部错误';
+      if (!res.headersSent) send(res, status, { error: message });
+    }
+    return true;
+  };
+}
+
+async function route(
+  ade: AdeService,
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  githubToken: string | null,
+): Promise<boolean> {
+  const method = req.method ?? 'GET';
+  if (path === '/api/ade/workspaces' && method === 'GET') {
+    send(res, 200, { workspaces: await ade.listWorkspaces() });
+    return true;
+  }
+  if (path === '/api/ade/workspaces' && method === 'POST') {
+    const body = await readJson(req);
+    const row = await ade.addWorkspace(str(body.name), str(body.path));
+    send(res, 201, { workspace: row });
+    return true;
+  }
+  const wsDel = /^\/api\/ade\/workspaces\/([^/]+)$/.exec(path);
+  if (wsDel && method === 'DELETE') {
+    await ade.removeWorkspace(decodeURIComponent(wsDel[1] ?? ''));
+    send(res, 204, {});
+    return true;
+  }
+  if (path === '/api/ade/agents' && method === 'GET') {
+    send(res, 200, { agents: await ade.listAgents() });
+    return true;
+  }
+  if (path === '/api/ade/tasks' && method === 'GET') {
+    send(res, 200, { tasks: await ade.listTasks() });
+    return true;
+  }
+  if (path === '/api/ade/tasks' && method === 'POST') {
+    const body = await readJson(req);
+    const row = await ade.addTask(str(body.workspaceId), str(body.title), str(body.body));
+    send(res, 201, { task: row });
+    return true;
+  }
+  if (path === '/api/ade/tasks/import-github' && method === 'POST') {
+    await readJson(req);
+    if (!githubToken) throw new AdeError('没连 GitHub', 400);
+    throw new AdeError('导入还没做', 501);
+  }
+  if (path === '/api/ade/sessions' && method === 'GET') {
+    send(res, 200, { sessions: await ade.listSessions() });
+    return true;
+  }
+  if (path === '/api/ade/sessions' && method === 'POST') {
+    const body = await readJson(req);
+    const row = await ade.createSession({
+      workspaceId: str(body.workspaceId),
+      agent: str(body.agent),
+      model: str(body.model),
+      worktree: body.worktree === true,
+      taskId: numOrNull(body.taskId),
+      parentId: str(body.parentId) || null,
+      text: str(body.text),
+    });
+    send(res, 201, { session: row });
+    return true;
+  }
+  const session = /^\/api\/ade\/sessions\/([^/]+)(?:\/(messages|stop|changes|deliver))?$/.exec(path);
+  if (!session) return false;
+  const id = decodeURIComponent(session[1] ?? '');
+  const action = session[2];
+  if (!action && method === 'GET') {
+    send(res, 200, { session: await ade.getSession(id) });
+    return true;
+  }
+  if (action === 'messages' && method === 'POST') {
+    const body = await readJson(req);
+    const fromRaw = body.from;
+    const from =
+      fromRaw && typeof fromRaw === 'object' && !Array.isArray(fromRaw)
+        ? {
+            kind:
+              (fromRaw as { kind?: unknown }).kind === 'session' ? ('session' as const) : ('user' as const),
+            id: str((fromRaw as { id?: unknown }).id) || null,
+          }
+        : { kind: 'user' as const, id: null };
+    const mode = body.mode === 'queue' || body.mode === 'jump' ? body.mode : 'send';
+    const kind = body.kind === 'report' ? 'report' : 'chat';
+    await ade.postMessage(id, {
+      text: str(body.text),
+      from,
+      mode,
+      kind,
+      expectReply: body.expectReply !== false,
+      hops: typeof body.hops === 'number' && body.hops >= 0 ? Math.floor(body.hops) : 0,
+    });
+    send(res, 202, { ok: true });
+    return true;
+  }
+  if (action === 'stop' && method === 'POST') {
+    await readJson(req);
+    await ade.stop(id);
+    send(res, 202, { ok: true });
+    return true;
+  }
+  if (action === 'changes' && method === 'GET') {
+    send(res, 200, await ade.changes(id));
+    return true;
+  }
+  if (action === 'deliver' && method === 'POST') {
+    await readJson(req);
+    send(res, 200, await ade.deliver(id));
+    return true;
+  }
+  return false;
+}

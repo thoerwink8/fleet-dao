@@ -552,6 +552,19 @@ async function settle(
   if (rows.length === 0) throw new LostClaimError(op.id);
 }
 
+/**
+ * 领到了但这次不归这条路做（例如本机只处理 forge=local）：退回 pending，尝试次数还回去。
+ * 不记错，下次该谁领还谁领。
+ */
+export function releaseOp(db: Db, op: OutboxOp): Promise<void> {
+  return settle(db, op, {
+    state: 'pending',
+    attempts: sql`${outbox.attempts} - 1` as unknown as number,
+    nextAt: sql`now()` as unknown as Date,
+    lastError: null,
+  });
+}
+
 /** 做成并查证过。 */
 export function completeOp(db: Db, op: OutboxOp, result: Record<string, unknown>): Promise<void> {
   return settle(db, op, { state: 'done', result, lastError: null });

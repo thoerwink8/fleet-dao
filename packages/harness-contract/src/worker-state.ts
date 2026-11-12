@@ -61,7 +61,9 @@ function deadlineBefore(tail: readonly TailEvent[], i: number): number | undefin
  * - worker.spawned / progress.reported / stop.requested：在跑；过了截止时间又超出宽限 → 卡住
  * - worker.spawn.requested：已请求还没起 → 等待
  * - session.turn.started：在跑
- * 轮次结束、收尾、不认识的类型不说明状态，跳过；一条都没有就是等待。
+ * - session.turn.settled 带了 outcome（ADE 会话，#3914）：lost 算卡住，其余算空闲。
+ *   没有 outcome 的旧轮次结束不说明状态，跳过（法国会话的「做完」不被它盖掉）。
+ * 收尾、不认识的类型不说明状态，跳过；一条都没有就是等待。
  */
 export function deriveWorkerState(tail: readonly TailEvent[], now: number = Date.now()): WorkerState {
   for (let i = tail.length - 1; i >= 0; i--) {
@@ -88,6 +90,10 @@ export function deriveWorkerState(tail: readonly TailEvent[], now: number = Date
       }
       case 'session.turn.started':
         return 'running';
+      case 'session.turn.settled':
+        if (e.outcome === 'lost') return 'stuck';
+        if (typeof e.outcome === 'string' && e.outcome !== '') return 'waiting';
+        break;
       default:
     }
   }

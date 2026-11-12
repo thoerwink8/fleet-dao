@@ -98,7 +98,9 @@ export function Shell() {
           {fold ? null : (
             <div className="min-w-0">
               <div className="truncate text-sm font-medium leading-5">驾驶舱</div>
-              <div className="truncate text-2xs leading-4 text-muted">新内核 · 只读</div>
+              <div className="truncate text-2xs leading-4 text-muted">
+                {IS_LOCAL ? '本机' : '新内核 · 只读'}
+              </div>
             </div>
           )}
         </div>

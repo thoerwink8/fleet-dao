@@ -194,7 +194,7 @@ export function createKernel(o: KernelOptions) {
               }
             : {}),
         }),
-        // 纯影子：outbox 一个真实处理器都不装；开了真执行：只装推分支和开 PR，别的种类（尤其合并）装了自检就不过
+        // 纯影子：outbox 一个真实处理器都不装；开了真执行：只装推分支和开 PR（含过渡期旧名），别的种类（尤其合并）装了自检就不过
         ...(o.probes === null
           ? {}
           : {
