@@ -1,3 +1,4 @@
+export * from './ade.ts';
 export * from './cockpit.ts';
 export * from './events.ts';
 export * from './local.ts';

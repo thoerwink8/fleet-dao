@@ -108,17 +108,23 @@ export function Work() {
               [
                 ['graph', '图', <Network key="g" className="size-3.5" />],
                 ['list', '列表', <LayoutList key="l" className="size-3.5" />],
+                ['wave', '方案2波次', <Workflow key="w" className="size-3.5" />],
               ] as const
             ).map(([v, text, icon]) => (
               <button
                 key={v}
                 type="button"
                 data-testid={`view-${v}`}
-                aria-pressed={view === v}
-                onClick={() => setView(v)}
+                aria-pressed={view === (v as WorkView)}
+                onClick={() => {
+                  if (v === 'wave') navigate('/waves');
+                  else setView(v);
+                }}
                 className={cn(
                   'inline-flex h-7 cursor-pointer items-center gap-1 rounded-sm px-2 text-2xs',
-                  view === v ? 'bg-brand-soft font-medium text-brand-strong' : 'text-muted hover:text-ink',
+                  view === (v as WorkView)
+                    ? 'bg-brand-soft font-medium text-brand-strong'
+                    : 'text-muted hover:text-ink',
                 )}
               >
                 {icon}

@@ -151,9 +151,21 @@ for (const s of sizes) {
     { timeout: 30_000 },
   );
 
-  await page.goto(`${stack.url}/next/work`);
+  await page.goto(`${stack.url}/next/waves`);
   await settle(page);
-  await shot('placeholder-work');
+  await shot('work-wave');
+
+  await page.goto(`${stack.url}/next/decide`);
+  await settle(page);
+  await shot('decide-funnel');
+
+  await page.goto(`${stack.url}/next/ops`);
+  await settle(page);
+  await shot('ops-hosts');
+
+  await page.goto(`${stack.url}/next/settings`);
+  await settle(page);
+  await shot('settings-matrix');
 
   // 没登录：清掉 Cookie，列表给登录入口
   await ctx.clearCookies();

@@ -16,6 +16,7 @@ import { Chip } from './chip';
 import { EventCard } from './event-card';
 import { LoginPrompt } from './login-prompt';
 import { DroppedRow, EndRow, SayRow, ToolRow, ToolRunRow } from './transcript-steps';
+import { SessionSteerBar } from './ysk-heads-up';
 
 const CATS: Category[] = ['turn', 'dispatch', 'worker', 'process', 'handback', 'other'];
 
@@ -367,6 +368,7 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
           </button>
         ) : null}
       </div>
+      <SessionSteerBar sessionId={sessionId} />
     </div>
   );
 }

@@ -1,0 +1,10 @@
+[package]
+name = "fleet-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust 核心原语：四维路由与 reclaude 防封校验、模型专属 Prompt 编译器、YSK (swe-2) 旁路盯梢、波次 DAG 与跨会话黑板、四道可信验收漏斗"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -3,6 +3,32 @@
 version = 4
 
 [[package]]
+name = "fleet-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fleet-daemon"
+version = "0.1.0"
+dependencies = [
+ "fleet-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fleet-hostd"
+version = "0.1.0"
+dependencies = [
+ "fleet-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hostd"
 version = "0.1.0"
 dependencies = [

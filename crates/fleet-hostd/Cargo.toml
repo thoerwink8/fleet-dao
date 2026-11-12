@@ -1,0 +1,11 @@
+[package]
+name = "fleet-hostd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "零依赖远端宿主特工（VPS / 本机 / 公司内网 SSH 反向隧道）：Git Worktree 隔离、PTY 终端流、JobObject/进程组零孤儿清理"
+
+[dependencies]
+fleet-core = { path = "../fleet-core" }
+serde.workspace = true
+serde_json.workspace = true

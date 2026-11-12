@@ -18,6 +18,7 @@ import {
 } from '@fleet-dao/harness-store';
 import { and, desc, eq, lt, type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { createAdeStore, handleAdeRoute } from './ade.ts';
 import { sessionStream } from './events.ts';
 import { type HarnessApi, hasTokenInQuery, wrapServer } from './server.ts';
 import { reply, serveHistory, serveSse } from './session-http.ts';
@@ -278,6 +279,7 @@ export function createCockpitApi(options: CockpitOptions): CockpitApi {
   const cookieName = options.cookieName ?? COCKPIT_COOKIE;
   const clock = options.now ?? (() => new Date());
   const open = new Set<() => void>();
+  const adeStore = createAdeStore();
   const sseOptions = {
     db,
     replayCap: options.replayCap ?? 1000,
@@ -347,6 +349,19 @@ export function createCockpitApi(options: CockpitOptions): CockpitApi {
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (hasTokenInQuery(url)) return reply(res, 400, '令牌只能放请求头或 cookie，不能放网址');
+    if (url.pathname.startsWith(`${prefix}/`)) {
+      const subpath = url.pathname.slice(prefix.length);
+      if (
+        subpath.startsWith('/ade/') ||
+        subpath === '/cluster' ||
+        subpath.startsWith('/cluster/') ||
+        /^\/sessions\/[^/]+\/steer$/.test(subpath)
+      ) {
+        const verdict = await authorize(req);
+        if (!verdict.ok) return reply(res, verdict.status, verdict.message);
+        if (await handleAdeRoute(db, adeStore, req, res, subpath)) return;
+      }
+    }
     // 任务波次图（#3784）：/work/batches 批次列表，/work/batches/<批次号> 一批的整份快照
     const w = workRe.exec(url.pathname);
     if (w) return await handleWork(req, res, url, w[1] === undefined ? undefined : decodeURIComponent(w[1]));

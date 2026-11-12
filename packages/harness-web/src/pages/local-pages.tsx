@@ -7,6 +7,8 @@ import { formatRelative, shortId } from '../lib/format';
 import { useSessions } from '../lib/hooks';
 import { LEVEL_LABEL, useLocalStatus } from '../lib/local-status';
 import { deriveWorkerState } from '../lib/session-state';
+import { OpsPage } from './ops';
+import { SettingsPage } from './settings';
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -110,6 +112,7 @@ export function HostsPage() {
           </>
         ) : null}
       </div>
+      <OpsPage hideBar />
     </>
   );
 }
@@ -147,6 +150,7 @@ export function LocalSettingsPage() {
           </Card>
         ) : null}
       </div>
+      <SettingsPage hideBar />
     </>
   );
 }

@@ -26,16 +26,16 @@ interface NavItem {
 const NAV_HK: NavItem[] = [
   { to: '/', label: '会话', short: '会话', icon: <MessagesSquare />, end: false },
   { to: '/work', label: '任务', short: '任务', icon: <Workflow /> },
-  { to: '/decide', label: '决策', short: '决策', icon: <CircleCheckBig /> },
-  { to: '/ops', label: '法国运维', short: '运维', icon: <Server /> },
+  { to: '/decide', label: '待确认', short: '确认', icon: <CircleCheckBig /> },
+  { to: '/ops', label: '机器', short: '机器', icon: <Server /> },
   { to: '/settings', label: '设置', short: '设置', icon: <Settings /> },
 ];
-// 本机装法（#3858，决定 0125 第 7 条）：会话、任务、待我、宿主、设置；待我取代决策，宿主取代法国运维。
+// 本机装法（#3858，决定 0125 第 7 条）：会话、任务、待我、宿主、设置。
 const NAV_LOCAL: NavItem[] = [
   { to: '/', label: '会话', short: '会话', icon: <MessagesSquare />, end: false },
   { to: '/work', label: '任务', short: '任务', icon: <Workflow /> },
   { to: '/inbox', label: '待我', short: '待我', icon: <CircleCheckBig /> },
-  { to: '/hosts', label: '宿主', short: '宿主', icon: <Server /> },
+  { to: '/hosts', label: '机器', short: '机器', icon: <Server /> },
   { to: '/settings', label: '设置', short: '设置', icon: <Settings /> },
 ];
 export const NAV: NavItem[] = IS_LOCAL ? NAV_LOCAL : NAV_HK;
@@ -97,8 +97,8 @@ export function Shell() {
           </div>
           {fold ? null : (
             <div className="min-w-0">
-              <div className="truncate text-sm font-medium leading-5">驾驶舱</div>
-              <div className="truncate text-2xs leading-4 text-muted">新内核 · 只读</div>
+              <div className="truncate text-sm font-semibold leading-5">驾驶舱</div>
+              <div className="truncate text-2xs leading-4 text-muted">智能研发工作台</div>
             </div>
           )}
         </div>

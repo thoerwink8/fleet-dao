@@ -139,7 +139,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     };
   }
 
-  /** 原样转给驾驶舱口，只带 cookie / accept / last-event-id 三个头。 */
+  /** 原样转给驾驶舱口，只带 cookie / accept / last-event-id / content-type 头，并转发请求体。 */
   function proxy(req: IncomingMessage, res: ServerResponse, path: string): void {
     const h = req.headers;
     const up = httpRequest(
@@ -151,6 +151,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
         headers: {
           ...(h.cookie ? { cookie: String(h.cookie) } : {}),
           accept: String(h.accept ?? '*/*'),
+          ...(h['content-type'] ? { 'content-type': String(h['content-type']) } : {}),
           ...(h['last-event-id'] ? { 'last-event-id': String(h['last-event-id']) } : {}),
         },
       },
@@ -167,7 +168,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       else res.destroy();
     });
     res.on('close', () => up.destroy());
-    up.end();
+    req.pipe(up);
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {

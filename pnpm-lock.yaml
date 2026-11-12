@@ -418,6 +418,8 @@ importers:
         specifier: workspace:*
         version: link:../hygiene
 
+  packages/omp-bridge: {}
+
   packages/shared:
     dependencies:
       zod:

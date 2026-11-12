@@ -35,6 +35,9 @@
       "path": "packages/harness-egress"
     },
     {
+      "path": "packages/omp-bridge"
+    },
+    {
       "path": "packages/core"
     },
     {

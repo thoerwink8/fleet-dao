@@ -1,0 +1,11 @@
+[package]
+name = "fleet-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust 守护内核：双常驻流进程监管器（reclaude 官方本体 stream-json + pi 常驻流）、Magpie 额度桥、本地波次合流与单 PR 出站闸"
+
+[dependencies]
+fleet-core = { path = "../fleet-core" }
+serde.workspace = true
+serde_json.workspace = true

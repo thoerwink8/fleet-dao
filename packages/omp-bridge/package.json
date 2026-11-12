@@ -1,0 +1,17 @@
+{
+  "name": "@fleet-dao/omp-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "方案 2：统一 Agent 执行桥（reclaude 官方常驻流 + pi 常驻流）+ 四维路由 + 模型提示词自进化 + swe-2 YSK 旁路盯梢 + 省 Token 脱水器 + 黑板通信",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./matrix": "./src/matrix.ts",
+    "./prompt": "./src/prompt-compiler.ts",
+    "./ysk": "./src/ysk-watcher.ts",
+    "./compactor": "./src/token-compactor.ts",
+    "./blackboard": "./src/blackboard.ts",
+    "./funnel": "./src/trust-funnel.ts",
+    "./pi-extension": "./src/pi-extension.ts"
+  }
+}
