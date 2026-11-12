@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // 讨论用的「反方」：经本机 Mirasim 起一个全新会话（默认 codex 的 gpt-6-luna、走 Mirasim 云端额度），拿一份分析去问反方（--text），
-// 拿回结论。只在 VPS 引擎接活之前用（讨论的一问一答另有 ask.mjs，走 cursor-agent）。
+// 拿回结论。只在 VPS 引擎接活之前用（讨论的一问一答另有 ask.mjs：GPT 配了本机 discuss.env 走 OpenAI 兼容接口，没配走 cursor-agent）。
 // 结论和过程存在 ~/.local/share/second-opinion/runs/（本机，不进任何仓；也不放技能目录，同步会把它换掉）。
 // 帧协议照 fleet-dao docs/reference/adapters.md 第八节。完工判据借旧仓 windsurf-dao 的 scripts/lib/mirasim-runtime.mjs
 // judgeCompletion：phase 到 done 且没有 error、没有 incomplete；走中继的还要账本里起针后有 2xx 行。
 //
 //   node second-opinion.mjs --text 分析.md --author-family <族[,族…]> [--name 短名] [--budget-sec 秒，不给就是 --timeout-min 那一套]
-//     [--blind] [--agent <profile>] [--ui] [--effort medium] [--timeout-min 15] [--stall-min 4] [--keep-session]
+//     [--blind] [--agent <profile>] [--ui] [--effort medium] [--gpt-model 型号] [--timeout-min 15] [--stall-min 4] [--keep-session]
 //     拍板前的反方：按 GPT→Grok→Claude→DeepSeek→Kimi 选不同族，退出码 0 同意 / 1 有异议 / 2 没查成。
 //     --timeout-min 是几家加起来的整轮总上限（默认 15）；一家起了会话后连续 --stall-min 分钟（默认 4）没有任何新输出就换下一家。
 //   node second-opinion.mjs --sessions | --stop-stale：列本机 Mirasim 上的会话 / 清掉已停的反方会话。
@@ -23,6 +23,7 @@
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_GPT_MODEL, gptRelayConfig } from './gpt-relay.mjs';
 import {
   DEFAULT_STALL_MIN,
   DEFAULT_TIMEOUT_MIN,
@@ -129,6 +130,13 @@ async function critique(o) {
     throw new NotChecked(`读不到 ${src}（${errCode(e) ?? messageOf(e)}）`);
   }
   if (!material.trim()) throw new NotChecked(`${src} 是空的`);
+  const relay = gptRelayConfig();
+  if (o.gptModel !== undefined && (!o.gptModel.trim() || o.gptModel.startsWith('--')))
+    throw new NotChecked('--gpt-model 要带型号');
+  if (o.gptModel !== undefined && !relay)
+    throw new NotChecked(
+      '配了 --gpt-model，但这台没配讨论用的 GPT 接口（~/.fleet-dao/discuss.env 的 DISCUSS_GPT_BASE_URL 和 DISCUSS_GPT_API_KEY）',
+    );
   if (!o.blind) {
     const why = missingWalkthrough(material);
     if (why) throw new NotChecked(why);
@@ -140,7 +148,10 @@ async function critique(o) {
   const name = (o.name ?? 'critique').replace(/[^\w一-鿿-]/g, '-');
   const out = join(RUNS, `critique-${name}-${stamp}.md`);
   try {
-    const chain = discussionProfiles(o);
+    const model = (o.gptModel ?? '').trim() || DEFAULT_GPT_MODEL;
+    const chain = discussionProfiles(o).map((p) =>
+      relay && p.family === 'gpt' ? { family: 'gpt', agent: 'gpt-relay', model, route: 'local' } : p,
+    );
     const budgetSec = discussionBudgetSec(o);
     if (!Number.isFinite(budgetSec) || budgetSec <= 0)
       throw new NotChecked('--budget-sec 必须是正数（不给就是 --timeout-min 那一套，默认 15 分钟）');
@@ -159,6 +170,7 @@ async function critique(o) {
           stallMin: o.stallMin ?? DEFAULT_STALL_MIN,
           effort: o.effort,
           discussion: true,
+          gptModel: o.gptModel,
         }),
       { budgetMs },
     );
@@ -209,6 +221,7 @@ export function args(argv) {
     else if (a === '--author-family') o.authorFamily = [o.authorFamily, argv[++i]].filter(Boolean).join(',');
     else if (a === '--exclude-family') o.excludeFamily = argv[++i];
     else if (a === '--budget-sec') o.budgetSec = Number(argv[++i]);
+    else if (a === '--gpt-model') o.gptModel = argv[++i] ?? '';
     else if (a === '--blind') o.blind = true;
     else throw new NotChecked(`不认识的参数 ${a}`);
   }

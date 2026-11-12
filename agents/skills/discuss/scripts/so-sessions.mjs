@@ -1,9 +1,16 @@
 // second-opinion.mjs 拆出来的：起会话、等它答完。走本机 Mirasim 的（帧协议照 fleet-dao docs/reference/adapters.md 第八节：
-// 连口、订阅快照、核账本、跑完删会话），和不经 Mirasim 的两家（reclaude、cursor-agent）。
+// 连口、订阅快照、核账本、跑完删会话），和不经 Mirasim 的几家（reclaude、cursor-agent，以及配了本机 discuss.env 时的 GPT）。
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  completeChat,
+  DEFAULT_GPT_MODEL,
+  gptRelayConfig,
+  judgeCursorText,
+  relayFailureWhy,
+} from './gpt-relay.mjs';
 import {
   DEFAULT_STALL_MIN,
   errCode,
@@ -443,22 +450,14 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
       const secs = ((Date.now() - started) / 1000).toFixed(1);
       if (code !== 0)
         return rejectP(new NotChecked(`cursor-agent 退出码 ${code}：${(err || out).trim().slice(0, 400)}`));
-      const trimmed = out.trim();
-      if (!trimmed)
+      const judged = judgeCursorText(out, nonce, 400);
+      if (judged.kind === 'empty')
         return rejectP(new NotChecked(`cursor-agent 退出码 0 但没有输出：${err.trim().slice(0, 400)}`));
-      if (!trimmed.includes(nonce))
-        return rejectP(
-          new NotChecked(`cursor-agent 没读到题面（答案里没有核对码）：${trimmed.slice(0, 400)}`),
-        );
-      // 读到了：把核对码那一行从记下的答案里去掉，只留真正的答案
-      const stripped = trimmed
-        .split(/\r?\n/)
-        .filter((line) => !line.includes(nonce))
-        .join('\n')
-        .trim();
+      if (judged.kind === 'nonce')
+        return rejectP(new NotChecked(`cursor-agent 没读到题面（答案里没有核对码）：${judged.sample}`));
       log(`[${secs}s] done（cursor ${profile.model}）`);
       resolveP({
-        text: stripped,
+        text: judged.text,
         sessionKey: `cursor:${process.pid}`,
         model: profile.model,
         ledgerNote: '走 Cursor 订阅（本机 cursor-agent），不经 Mirasim 账本',
@@ -469,9 +468,35 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
 }
 
 /**
- * @param {SessionOpts} opts
+ * 反方轮到 GPT 且本机配了中转：直接问，不经 Mirasim、也不经 Cursor。失败抛 NotChecked，由换家逻辑换下一家厂商，不改回 Cursor。
+ * @param {Pick<SessionOpts, 'prompt' | 'timeoutMin' | 'log' | 'gptModel'>} opts
+ * @param {{ baseUrl: string, apiKey: string }} relay
  * @returns {Promise<SessionResult>}
  */
+async function runGptRelay({ prompt, timeoutMin, log, gptModel }, relay) {
+  const model = String(gptModel ?? '').trim() || DEFAULT_GPT_MODEL;
+  const started = Date.now();
+  log(`[0.0s] gpt 走 OpenAI 兼容接口（${model}）`);
+  const timeoutMs = Math.max(1, timeoutMin * 60_000);
+  const r = await completeChat({
+    baseUrl: relay.baseUrl,
+    apiKey: relay.apiKey,
+    model,
+    prompt,
+    timeoutMs,
+  });
+  const secs = ((Date.now() - started) / 1000).toFixed(1);
+  if (!r.ok) throw new NotChecked(relayFailureWhy(r, Math.round(timeoutMs / 1000)));
+  log(`[${secs}s] done（gpt ${model}）`);
+  return {
+    text: r.text,
+    sessionKey: `gpt-relay:${process.pid}`,
+    model,
+    ledgerNote: '走本机 discuss.env 配的 OpenAI 兼容接口（chat/completions），不经 Cursor、不经 Mirasim',
+    usage: `${secs} 秒`,
+  };
+}
+
 export async function runSession({
   prompt,
   profile,
@@ -482,7 +507,12 @@ export async function runSession({
   stallMin = DEFAULT_STALL_MIN,
   effort,
   discussion = false,
+  gptModel,
 }) {
+  if (profile.family === 'gpt') {
+    const relay = gptRelayConfig();
+    if (relay) return runGptRelay({ prompt, timeoutMin, log, gptModel }, relay);
+  }
   requireCloudCapability(profile);
   if (profile.agent === 'reclaude') return runClaude({ prompt, workdir, timeoutMin, log });
   if (profile.agent === 'cursor-cli') return runCursor({ prompt, profile, workdir, timeoutMin, log });

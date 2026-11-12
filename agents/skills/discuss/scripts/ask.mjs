@@ -1,6 +1,9 @@
 #!/usr/bin/env node
-// 讨论用的一问一答：同一段题面并行问几家，每家一个 cursor-agent 只读会话（空目录、不读仓），每家有硬超时。
-// 超时、退出码非 0、没有输出都照实记成「没答上」，不当成答了。这台机器没装 cursor-agent、没登录，一家都不问，直接说清。
+// 讨论用的一问一答：同一段题面并行问几家，每家有硬超时。
+// GPT 配了本机 ~/.fleet-dao/discuss.env（DISCUSS_GPT_BASE_URL 和 DISCUSS_GPT_API_KEY，进程环境变量优先）
+// 就走 OpenAI 兼容的 chat/completions，默认模型 gpt-6.1-sol（--gpt-model 可换）。没配，或问的不是 GPT，
+// 才走 cursor-agent 只读会话（空目录、不读仓）。配了中转却超时、非 2xx、空回答，记成没答上，不改走 Cursor。
+// 超时、退出码非 0、没有输出都照实记成「没答上」，不当成答了。要走 Cursor 的那几家，这台没装、没登录，一家都不问，直接说清。
 //
 // 超时：默认 DEFAULT_LIMIT_SEC、硬顶 MAX_LIMIT_SEC。决定 0006 里的 30 秒是创始人的「短讨论预算」，不是实测出来的
 // 上限（超时/空输出不算成功那一条保留）。2026-10-30 本机实测：cursor-agent 回一个字就要 26–29 秒（--version 7 秒、
@@ -8,11 +11,11 @@
 // 并发上限 MAX_PAR、超时杀整棵进程树、收尾等管道关闭、核对码这些防护都不动。最坏整轮耗时 = 轮数 × 单家上限
 // （ceil(家数 / MAX_PAR) 轮），硬顶下 4 家最多 2 × 300 秒。
 //
-//   node ask.mjs --text 题面.md --round <0|1|2…> [--models gpt[,kimi,glm,grok]] [--limit 180] [--out 目录]
+//   node ask.mjs --text 题面.md --round <0|1|2…> [--models gpt[,kimi,glm,grok]] [--gpt-model 型号] [--limit 180] [--out 目录]
 //   --round 0 是各自独立答；1 起是挑错，题面必须带【推演】段（walkthrough.mjs），缺了不发、退出码 2。
 //   不给 --models 只问 GPT（「和 gpt 讨论就够了」）。结论落在 ~/.local/share/second-opinion/runs/。
 //
-// 退出码：0 至少一家答上；2 一家都没答上、参数不对，或这台机器缺 cursor-agent。
+// 退出码：0 至少一家答上；2 一家都没答上、参数不对，或要走 Cursor 的那几家这台机器缺 cursor-agent。
 // 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；五家齐跑 + 工人把进程数顶满、宿主崩过）。
 
 import { spawn } from 'node:child_process';
@@ -32,6 +35,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MODELS, readCursorModels, resolveModel } from './cursor-models.mjs';
 import { stopProcessTree } from './cursor-process.mjs';
+import {
+  completeChat,
+  DEFAULT_GPT_MODEL,
+  gptRelayConfig,
+  judgeCursorText,
+  relayFailureWhy,
+} from './gpt-relay.mjs';
 import { cursorAgentEnv, cursorAgentProblem, dataDir } from './tools.mjs';
 import { missingWalkthrough } from './walkthrough.mjs';
 
@@ -80,6 +90,7 @@ function args(argv) {
     if (a === '--text') o.text = argv[++i];
     else if (a === '--round') o.round = argv[++i];
     else if (a === '--models') o.models = argv[++i];
+    else if (a === '--gpt-model') o.gptModel = argv[++i] ?? '';
     else if (a === '--limit') o.limit = Number(argv[++i]);
     else if (a === '--out') o.out = argv[++i];
     else throw new Error(`不认识的参数 ${a}`);
@@ -94,7 +105,8 @@ function args(argv) {
 // 不踩这个坑的办法是压根不用文件：不给位置参数，题面从 stdin 喂给它，模型不用调任何工具就能看到题面、直接作答
 // （实测 6KB 中文题面走 stdin 正常作答）。cursorAgentEnv() 留着一起用（不影响，多一层保险）。
 // 不管是哪种读不到的原因，都用同一招防蒙混：题面最前面塞一行随机核对码，要求原样抄进答案；输出里找不到这个
-// 核对码就一律判没答上，不会再被「退出码 0、有输出」当成答了。
+// 核对码就一律判没答上，不会再被「退出码 0、有输出」当成答了。空、没核对码、去掉核对码行这三步在
+// judgeCursorText，和反方的 runCursor 共用。中转那条路题面在请求正文里，不用核对码。
 // 只处理本次讨论创建的子树。Windows 的 shell 子孙不受 child.kill() 管；
 // POSIX 用独立进程组，超时时一起终止，不能留下占工作区/管道的执行体。
 export function askOne(
@@ -169,19 +181,40 @@ export function askOne(
       if (timedOut) return done(false, `超过 ${limitSec} 秒，已终止进程树并关闭输出`);
       if (startError) return done(false, `起不来：${startError}`);
       if (code !== 0) return done(false, `退出码 ${code}：${(err || out).trim().slice(0, 200)}`);
-      const trimmed = out.trim();
-      if (!trimmed) return done(false, '退出码 0 但没有输出');
-      if (!trimmed.includes(nonce))
-        return done(false, `没读到题面（答案里没有题面里的核对码）：${trimmed.slice(0, 200)}`);
-      // 读到了：把核对码那一行从记下的答案里去掉，只留真正的答案
-      const stripped = trimmed
-        .split(/\r?\n/)
-        .filter((line) => !line.includes(nonce))
-        .join('\n')
-        .trim();
-      done(true, undefined, stripped);
+      const judged = judgeCursorText(out, nonce);
+      if (judged.kind === 'empty') return done(false, '退出码 0 但没有输出');
+      if (judged.kind === 'nonce')
+        return done(false, `没读到题面（答案里没有题面里的核对码）：${judged.sample}`);
+      done(true, undefined, judged.text);
     });
   });
+}
+
+/**
+ * GPT 走 OpenAI 兼容接口。失败就这一条结果，不改去起 cursor-agent。
+ * @param {string} key
+ * @param {string} model
+ * @param {string} prompt
+ * @param {number} limitSec
+ * @param {{ baseUrl: string, apiKey: string }} relay
+ */
+async function askRelay(key, model, prompt, limitSec, relay) {
+  const started = Date.now();
+  const r = await completeChat({
+    baseUrl: relay.baseUrl,
+    apiKey: relay.apiKey,
+    model,
+    prompt,
+    timeoutMs: limitSec * 1000,
+  });
+  return {
+    key,
+    model,
+    ok: r.ok,
+    secs: (Date.now() - started) / 1000,
+    text: r.ok ? r.text : '',
+    why: r.ok ? undefined : relayFailureWhy(r, limitSec),
+  };
 }
 
 async function main() {
@@ -202,10 +235,30 @@ async function main() {
     .filter(Boolean);
   for (const k of keys)
     if (!Object.hasOwn(MODELS, k)) throw new Error(`不认识的模型 ${k}（${Object.keys(MODELS).join(' / ')}）`);
-  // 每家都走本机的 cursor-agent：没装、没登录就一家都不问（不然每家都报同一个错，还得等超时）
-  const problem = cursorAgentProblem();
-  if (problem) throw new Error(problem);
-  const available = await readCursorModels();
+  const relay = gptRelayConfig();
+  if (o.gptModel !== undefined && (!String(o.gptModel).trim() || String(o.gptModel).startsWith('--')))
+    throw new Error('--gpt-model 要带型号');
+  if (o.gptModel !== undefined && !keys.includes('gpt')) throw new Error('--gpt-model 只对 gpt 生效');
+  if (o.gptModel !== undefined && !relay)
+    throw new Error(
+      '配了 --gpt-model，但这台没配讨论用的 GPT 接口（~/.fleet-dao/discuss.env 的 DISCUSS_GPT_BASE_URL 和 DISCUSS_GPT_API_KEY）',
+    );
+  // 配了中转的 GPT 不碰 cursor-agent。其余几家仍要本机装好并登录，缺了就一家都不问
+  // （不然每家都报同一个错，还得等超时）。中转和 Cursor 同时问时，Cursor 起不来只记那几家没答上。
+  const relayGpt = Boolean(relay && keys.includes('gpt'));
+  const cursorKeys = relayGpt ? keys.filter((k) => k !== 'gpt') : keys;
+  let cursorProblem = cursorKeys.length ? cursorAgentProblem() : null;
+  if (cursorProblem && !relayGpt) throw new Error(cursorProblem);
+  /** @type {string[]} */
+  let available = [];
+  if (cursorKeys.length && !cursorProblem) {
+    try {
+      available = await readCursorModels();
+    } catch (e) {
+      if (!relayGpt) throw e;
+      cursorProblem = e instanceof Error ? e.message : String(e);
+    }
+  }
   // 题面放进自己建的临时目录（也是 cursor-agent 的工作区）：问完、中途出错都删掉，不在 /tmp 里越攒越多
   const dir = mkdtempSync(join(tmpdir(), 'ask-'));
   let cleanupFailed = false;
@@ -216,6 +269,27 @@ async function main() {
       Array.from({ length: Math.min(MAX_PAR, queue.length) }, async () => {
         while (queue.length) {
           const k = queue.shift();
+          if (k === 'gpt' && relay) {
+            const result = await askRelay(
+              k,
+              String(o.gptModel ?? DEFAULT_GPT_MODEL).trim(),
+              prompt,
+              o.limit,
+              relay,
+            );
+            results.push(result);
+            continue;
+          }
+          if (cursorProblem) {
+            results.push({
+              key: k,
+              model: '无可用型号',
+              ok: false,
+              secs: 0,
+              why: cursorProblem,
+            });
+            continue;
+          }
           const model = resolveModel(k, available);
           if (!model) {
             results.push({

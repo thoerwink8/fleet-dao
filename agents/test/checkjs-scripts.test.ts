@@ -18,6 +18,7 @@ const CHECKED = [
   'skills/commander/scripts/patrol.mjs',
   'skills/commander/scripts/wait.mjs',
   'skills/discuss/scripts/tools.mjs',
+  'skills/discuss/scripts/gpt-relay.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
   'skills/discussion-draft/scripts/draft.mjs',
   'hooks/pretool.mjs',
