@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export const DEFAULT_GPT_MODEL = 'gpt-6.1-sol';
+export const DEFAULT_GPT_MODEL = 'gpt-6-luna';
 const URL_KEY = 'DISCUSS_GPT_BASE_URL';
 const API_KEY = 'DISCUSS_GPT_API_KEY';
 

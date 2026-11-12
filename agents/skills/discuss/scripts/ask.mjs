@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 讨论用的一问一答：同一段题面并行问几家，每家有硬超时。
 // GPT 配了本机 ~/.fleet-dao/discuss.env（DISCUSS_GPT_BASE_URL 和 DISCUSS_GPT_API_KEY，进程环境变量优先）
-// 就走 OpenAI 兼容的 chat/completions，默认模型 gpt-6.1-sol（--gpt-model 可换）。没配，或问的不是 GPT，
+// 就走 OpenAI 兼容的 chat/completions，默认模型 gpt-6-luna（--gpt-model 可换）。没配，或问的不是 GPT，
 // 才走 cursor-agent 只读会话（空目录、不读仓）。配了中转却超时、非 2xx、空回答，记成没答上，不改走 Cursor。
 // 超时、退出码非 0、没有输出都照实记成「没答上」，不当成答了。要走 Cursor 的那几家，这台没装、没登录，一家都不问，直接说清。
 //
