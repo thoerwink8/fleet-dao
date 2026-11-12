@@ -19,7 +19,22 @@ import { RUN_MARKER_KEY, runMarker } from './marker.ts';
 
 type RequestFrame = Extract<
   HostdFrame,
-  { type: 'hello' | 'spawn' | 'attach' | 'read' | 'stdin' | 'stop' | 'reap' | 'status' | 'forget' }
+  {
+    type:
+      | 'hello'
+      | 'spawn'
+      | 'attach'
+      | 'read'
+      | 'stdin'
+      | 'stop'
+      | 'reap'
+      | 'status'
+      | 'forget'
+      | 'pty.open'
+      | 'pty.input'
+      | 'pty.resize'
+      | 'pty.close';
+  }
 >;
 /** 请求去掉 id（连接替它编号）。 */
 type RequestBody = RequestFrame extends infer R ? (R extends unknown ? Omit<R, 'id'> : never) : never;
@@ -68,7 +83,7 @@ interface RunSink {
 }
 
 /** 到一个 hostd 的一条 stdio 连接：握手、请求按编号对回复、推送的行和结局按 runId 分发。 */
-class HostdConnection {
+export class HostdConnection {
   readonly #child: ChildProcess;
   readonly #pending = new Map<number, { resolve: (r: Response) => void; reject: (e: Error) => void }>();
   readonly #sinks = new Map<string, RunSink>();
@@ -178,7 +193,7 @@ class HostdConnection {
     this.#sinks.delete(runId);
   }
 
-  /** 礼貌地关：关掉 hostd 的 stdin，它就退；执行体不受影响。 */
+  /** 礼貌地关：关掉 hostd 的 stdin，它就退。工人不受影响；这条连接上打开的终端会被 hostd 杀掉，不能接回。 */
   close() {
     this.#child.stdin?.end();
     this.#close(new Error('连接已关'));
@@ -304,6 +319,7 @@ class HostdProcess implements HostProcess {
   }
 
   #onOut(stream: 'stdout' | 'stderr' | 'pty', line: number, text: string) {
+    // 终端字节走自己的 sink。这里丢掉，也不要补换行：pty 的 text 是原始字节的 base64，不是一行文本。
     if (stream === 'pty') return;
     // 重连后同一行不会再来（接的是行号之后），这里再守一道：不是下一行就丢，不重复交
     if (line !== this.cursor[stream] + 1) return;

@@ -96,9 +96,11 @@ function ReconnectBanner({ state }: { state: FeedState }) {
 export function SessionStream({
   sessionId,
   onToggleChanges,
+  onToggleTerminal,
 }: {
   sessionId: string;
   onToggleChanges?: () => void;
+  onToggleTerminal?: () => void;
 }) {
   const { feed, state } = useSessionFeed(sessionId);
   // 工人会话（worker-<runId>）：把这次运行 stream-json 的每一步（transcript:<runId> 流）和会话里的进度、交结果按事件号串在一起
@@ -399,11 +401,11 @@ export function SessionStream({
         ) : null}
       </div>
       {IS_LOCAL ? (
-        onToggleChanges ? (
-          <AdeComposer sessionId={sessionId} onToggleChanges={onToggleChanges} />
-        ) : (
-          <AdeComposer sessionId={sessionId} />
-        )
+        <AdeComposer
+          sessionId={sessionId}
+          {...(onToggleChanges ? { onToggleChanges } : {})}
+          {...(onToggleTerminal ? { onToggleTerminal } : {})}
+        />
       ) : null}
     </div>
   );

@@ -6,12 +6,14 @@
 import { z } from 'zod';
 
 /** 现在的协议版本。握手时内核报自己的版本，hostd 不等于这个值就回 version_mismatch 并退出。 */
-export const HOSTD_PROTOCOL_VERSION = 1;
+export const HOSTD_PROTOCOL_VERSION = 2;
 
 const ReqId = z.number().int().nonnegative();
 const RunId = z.string().min(1).max(200);
 const Count = z.number().int().nonnegative();
-/** 输出流。`pty` 给终端面板（#3857）留的位：这一版 hostd 不产生，也不接 pty.* 请求（回 unsupported）。 */
+/** 终端行列。0 和超过 1000 的在解析时拒（bad_frame），不进 pty。 */
+const PtySize = z.number().int().min(1).max(1000);
+/** 输出流。`pty` 是终端的原始字节：`text` 为标准 base64，`line` 从 1 数块，内核不另加换行。 */
 const OutStream = z.enum(['stdout', 'stderr', 'pty']);
 const ReadStream = z.enum(['stdout', 'stderr']);
 
@@ -60,11 +62,16 @@ export const StatusReq = req('status', { runId: RunId });
 /** 删掉这个 runId 的输出文件和记录（只在执行体已经结束时；还活着回 run_alive）。 */
 export const ForgetReq = req('forget', { runId: RunId });
 
-// 终端（#3857）：这一版只占位，hostd 一律回 unsupported；形状先定下来，那一片做的时候不用改握手。
-export const PtyOpenReq = req('pty.open', { runId: RunId, cols: Count, rows: Count });
-/** data 是 base64（终端输入是字节，不是文本）。 */
+// 终端（#3927）：cwd 由服务端填，客户端不能选。关掉页面再开不会接回；连接一断 hostd 就杀掉这个 pty。
+export const PtyOpenReq = req('pty.open', {
+  runId: RunId,
+  cwd: z.string().min(1).max(4096),
+  cols: PtySize,
+  rows: PtySize,
+});
+/** data 是 base64（终端输入是字节，不是文本）。非法 base64 或解码后超过 256KB 由 hostd 回 bad_input，不把原文写进错误。 */
 export const PtyInputReq = req('pty.input', { runId: RunId, data: z.string() });
-export const PtyResizeReq = req('pty.resize', { runId: RunId, cols: Count, rows: Count });
+export const PtyResizeReq = req('pty.resize', { runId: RunId, cols: PtySize, rows: PtySize });
 export const PtyCloseReq = req('pty.close', { runId: RunId });
 
 // —— hostd → 内核 ——
@@ -202,7 +209,7 @@ export const HOSTD_FRAME_SAMPLES: Record<string, HostdFrame> = {
   'reap-req': { type: 'reap', id: 7, runId: 'issue-3871-a1', graceMs: 500 },
   'status-req': { type: 'status', id: 8, runId: 'issue-3871-a1' },
   'forget-req': { type: 'forget', id: 9, runId: 'issue-3871-a1' },
-  'pty-open-req': { type: 'pty.open', id: 10, runId: 'term-1', cols: 120, rows: 30 },
+  'pty-open-req': { type: 'pty.open', id: 10, runId: 'term-1', cwd: '/work/tree', cols: 120, rows: 30 },
   'pty-input-req': { type: 'pty.input', id: 11, runId: 'term-1', data: 'bHMK' },
   'pty-resize-req': { type: 'pty.resize', id: 12, runId: 'term-1', cols: 80, rows: 24 },
   'pty-close-req': { type: 'pty.close', id: 13, runId: 'term-1' },
@@ -213,7 +220,7 @@ export const HOSTD_FRAME_SAMPLES: Record<string, HostdFrame> = {
     hostd: '0.1.0',
     os: 'linux',
     arch: 'x86_64',
-    capabilities: ['spawn', 'attach', 'read', 'stdin', 'stop', 'reap', 'status', 'forget'],
+    capabilities: ['spawn', 'attach', 'read', 'stdin', 'stop', 'reap', 'status', 'forget', 'pty'],
   },
   'spawned-res': { type: 'spawned', id: 2, runId: 'issue-3871-a1', pid: 4242 },
   'attached-res': { type: 'attached', id: 3, runId: 'issue-3871-a1', alive: true, exit: null },

@@ -1,6 +1,7 @@
 //! One connection: read request frames from `input`, answer on `output`, and push `out` / `exit` events for
-//! the runs the client attached to. Nothing here keeps a worker alive or dead: when the connection ends,
-//! workers carry on and the client can attach again from the line numbers it already has.
+//! the runs the client attached to. When the connection ends, workers carry on and the client can attach
+//! again from the line numbers it already has. Terminals do not: dropping the connection kills every pty
+//! this connection opened, and a later connection cannot reattach one.
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -13,17 +14,18 @@ use crate::frames::{
     parse_frame, peek_id, to_line, Exit, Frame, OutStream, ReadStream, PROTOCOL_VERSION,
 };
 use crate::platform::{self, marker_for, SpawnSpec};
+use crate::pty;
 use crate::store::{log_path, write_json_atomic, LogReader, Meta, Store};
 
 const FOLLOW_POLL: Duration = Duration::from_millis(15);
-const CAPABILITIES: [&str; 8] = [
-    "spawn", "attach", "read", "stdin", "stop", "reap", "status", "forget",
+const CAPABILITIES: [&str; 9] = [
+    "spawn", "attach", "read", "stdin", "stop", "reap", "status", "forget", "pty",
 ];
 
-type Output = Arc<Mutex<Box<dyn Write + Send>>>;
+pub(crate) type Output = Arc<Mutex<Box<dyn Write + Send>>>;
 
 /// Writes one frame as a line. False when the client is gone.
-fn send(out: &Output, frame: &Frame) -> bool {
+pub(crate) fn send(out: &Output, frame: &Frame) -> bool {
     let line = to_line(frame);
     let Ok(mut w) = out.lock() else {
         return false;
@@ -64,6 +66,7 @@ struct Conn {
     greeted: bool,
     stdins: HashMap<String, ChildStdin>,
     followers: HashMap<String, Arc<AtomicBool>>,
+    ptys: pty::Ptys,
 }
 
 enum Flow {
@@ -186,14 +189,55 @@ impl Conn {
                 },
             },
             Frame::Forget { id, run_id } => self.forget(id, &run_id),
-            Frame::PtyOpen { id, .. }
-            | Frame::PtyInput { id, .. }
-            | Frame::PtyResize { id, .. }
-            | Frame::PtyClose { id, .. } => error(
-                Some(id),
-                "unsupported",
-                "terminals are not available in this version of hostd",
-            ),
+            Frame::PtyOpen {
+                id,
+                run_id,
+                cwd,
+                cols,
+                rows,
+            } => match pty::start(self.out.clone(), self.ptys.clone(), run_id, &cwd, cols, rows) {
+                Ok(()) => Frame::Ok { id },
+                Err(pty::StartError::Exists) => {
+                    error(Some(id), "run_exists", "this terminal is already open")
+                }
+                Err(pty::StartError::Failed(msg)) => error(Some(id), "spawn_failed", msg),
+            },
+            Frame::PtyInput { id, run_id, data } => {
+                let slot = self.ptys.lock().unwrap().get(&run_id).cloned();
+                match slot {
+                    None => not_found(id, &run_id),
+                    Some(slot) => match pty::write_input(&slot, &data) {
+                        Ok(()) => Frame::Ok { id },
+                        Err(pty::InputError::Rejected(msg)) => error(Some(id), "bad_input", msg),
+                        Err(pty::InputError::Failed(msg)) => error(Some(id), "bad_input", msg),
+                    },
+                }
+            }
+            Frame::PtyResize {
+                id,
+                run_id,
+                cols,
+                rows,
+            } => {
+                let slot = self.ptys.lock().unwrap().get(&run_id).cloned();
+                match slot {
+                    None => not_found(id, &run_id),
+                    Some(slot) => match pty::resize(&slot, cols, rows) {
+                        Ok(()) => Frame::Ok { id },
+                        Err(msg) => error(Some(id), "bad_input", msg),
+                    },
+                }
+            }
+            Frame::PtyClose { id, run_id } => {
+                let slot = self.ptys.lock().unwrap().get(&run_id).cloned();
+                match slot {
+                    None => not_found(id, &run_id),
+                    Some(slot) => {
+                        pty::kill(&slot);
+                        Frame::Ok { id }
+                    }
+                }
+            }
             other => error(
                 request_id(&other),
                 "bad_frame",
@@ -367,6 +411,13 @@ impl Conn {
     }
 }
 
+fn shutdown_ptys(ptys: &pty::Ptys) {
+    let slots: Vec<_> = ptys.lock().unwrap().values().cloned().collect();
+    for slot in slots {
+        pty::kill(&slot);
+    }
+}
+
 fn not_found(id: u64, run_id: &str) -> Frame {
     error(Some(id), "run_not_found", format!("no run {run_id}"))
 }
@@ -467,6 +518,7 @@ pub fn serve(store: Arc<Store>, mut input: impl BufRead, output: Box<dyn Write +
         greeted: false,
         stdins: HashMap::new(),
         followers: HashMap::new(),
+        ptys: Arc::new(Mutex::new(HashMap::new())),
     };
     let mut line = String::new();
     let code = loop {
@@ -502,9 +554,11 @@ pub fn serve(store: Arc<Store>, mut input: impl BufRead, output: Box<dyn Write +
         }
     };
     // Stop following; closing the workers' stdin tells them the client is gone. The workers themselves carry on.
+    // Terminals do not: the client disconnecting kills every pty this connection opened.
     for flag in conn.followers.values() {
         flag.store(true, Ordering::SeqCst);
     }
+    shutdown_ptys(&conn.ptys);
     drop(conn);
     code
 }

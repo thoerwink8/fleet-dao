@@ -6,6 +6,7 @@ import { EmptyComposer } from '../components/composer';
 import { SessionList } from '../components/session-list';
 import { SessionStream } from '../components/session-stream';
 import { PageBar } from '../components/shell';
+import { TerminalPanel } from '../components/terminal-panel';
 import { cn } from '../lib/cn';
 import { IS_LOCAL } from '../lib/profile';
 import { useMediaQuery } from '../lib/work-hooks';
@@ -21,6 +22,7 @@ export function Workbench() {
   const narrow = useMediaQuery('(max-width: 767px)');
   const composing = IS_LOCAL && !sessionId && (!narrow || params.get('new') === '1');
   const [changes, setChanges] = useState(false);
+  const [terminal, setTerminal] = useState(false);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <PageBar
@@ -53,12 +55,17 @@ export function Workbench() {
             sessionId || composing ? 'flex h-[calc(100dvh-var(--bar-h)*2)] md:h-auto' : 'hidden',
           )}
         >
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             {sessionId ? (
               <SessionStream
                 key={sessionId}
                 sessionId={sessionId}
-                {...(IS_LOCAL ? { onToggleChanges: () => setChanges((v) => !v) } : {})}
+                {...(IS_LOCAL
+                  ? {
+                      onToggleChanges: () => setChanges((v) => !v),
+                      onToggleTerminal: () => setTerminal((v) => !v),
+                    }
+                  : {})}
               />
             ) : composing ? (
               <EmptyComposer />
@@ -70,6 +77,9 @@ export function Workbench() {
                 </p>
               </div>
             )}
+            {IS_LOCAL && sessionId && terminal ? (
+              <TerminalPanel sessionId={sessionId} onClose={() => setTerminal(false)} />
+            ) : null}
           </div>
           {IS_LOCAL && sessionId && changes ? (
             <ChangesPanel sessionId={sessionId} onClose={() => setChanges(false)} />
