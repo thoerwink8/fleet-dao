@@ -16,6 +16,9 @@ const EXIT_CLEAN = 0;
 const EXIT_CREDENTIAL = 10;
 const EXIT_UNKNOWN = 11;
 
+/** 法国现场是 /bin/sh。Windows 没有这条路径，Node 报 ENOENT，探测只能回 unknown；本机和测试用 PATH 里的 sh。 */
+export const PROBE_SHELL = process.platform === 'win32' ? 'sh' : '/bin/sh';
+
 /**
  * 不打印文件内容，只用退出码答；路径都相对 HOME。写成一行：它要上 sudo 命令行，帮手那一层不许带控制字符（含换行）。
  * 倒数第二段：全局 git 配置里挂着凭据助手，工人的 git push 一样会去拿。
@@ -60,7 +63,7 @@ export function realShadowProbes(deps: ShadowProbeDeps): ShadowProbes {
 
   return {
     async noWriteAccess(): Promise<ProbeResult> {
-      const script = ['/bin/sh', '-c', NO_WRITE_SCRIPT];
+      const script = [PROBE_SHELL, '-c', NO_WRITE_SCRIPT];
       const r = deps.sandbox
         ? await deps.sandbox.runAsWorker(script, timeoutMs)
         : await run({

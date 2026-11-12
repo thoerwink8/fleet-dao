@@ -259,6 +259,18 @@ export function runIdOfSession(sessionId: string): string | null {
   return m?.[1] ?? null;
 }
 
+/** 这个会话里每一次轮次的 runId，按开始顺序，重复的不要。 */
+export function turnRunIds(events: readonly { type: string; payload: { runId?: unknown } }[]): string[] {
+  const ids: string[] = [];
+  for (const ev of events) {
+    const runId = ev.payload.runId;
+    if (ev.type === 'session.turn.started' && typeof runId === 'string' && runId && !ids.includes(runId)) {
+      ids.push(runId);
+    }
+  }
+  return ids;
+}
+
 /** ADE 会话号不是 worker-<runId>。过程流挂在最近一次 session.turn.started 的 runId 上。 */
 export function latestTurnRunId(
   events: readonly { type: string; payload: { runId?: unknown } }[],

@@ -29,5 +29,7 @@ describe('对话主视图', () => {
     expect(summarizeDiff(diff)).toMatchObject({ files: 1, add: 2, del: 1 });
     expect(toolPhrase([{ name: 'Read' }, { name: 'Read' }])).toBe('读了 2 个文件');
     expect(toolPhrase([{ name: 'Edit' }])).toBe('改了 1 个文件');
+    expect(toolPhrase([{ name: 'read_file' }])).toBe('读了 1 个文件');
+    expect(toolPhrase([{ name: 'search_replace' }])).toBe('改了 1 个文件');
   });
 });

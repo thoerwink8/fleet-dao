@@ -13,6 +13,29 @@ export interface AdeAgent {
   id: string;
   resume: boolean;
   models: string[];
+  /** 缺省当能选。false 时下拉里看得见但不能选。 */
+  ready?: boolean;
+  /** 跟在名字后面，例如「未登录」。 */
+  note?: string;
+}
+
+export function agentChoices(
+  agents: readonly AdeAgent[],
+): { id: string; label: string; disabled: boolean }[] {
+  const list: readonly AdeAgent[] = agents.length
+    ? agents
+    : [{ id: 'claude', resume: true, models: ['sonnet'] }];
+  return list.map((a) => {
+    const off = a.ready === false;
+    const label = off ? `${a.id} · ${a.note || '未登录'}` : a.resume ? a.id : `${a.id} · 无原生续接`;
+    return { id: a.id, label, disabled: off };
+  });
+}
+
+/** grok 默认 grok-4.7（在名单里才用）；别的用名单第一项。 */
+export function defaultModelFor(agent: Pick<AdeAgent, 'id' | 'models'>): string {
+  if (agent.id === 'grok' && agent.models.includes('grok-4.7')) return 'grok-4.7';
+  return agent.models[0] ?? 'sonnet';
 }
 
 export interface AdeTask {

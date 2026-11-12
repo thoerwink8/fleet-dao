@@ -1,7 +1,14 @@
 // 工人过程的展示模型（#3781）：调用和结果按 toolUseId 配对、折叠、和会话事件按事件号串起来、跳转编号。
 import { describe, expect, it } from 'vitest';
 import { eventsUrl, historyUrl } from './api';
-import { buildSteps, buildTimeline, runIdOfSession, summarizeToolRun, workerSessionOf } from './transcript';
+import {
+  buildSteps,
+  buildTimeline,
+  runIdOfSession,
+  summarizeToolRun,
+  turnRunIds,
+  workerSessionOf,
+} from './transcript';
 import type { FeedEvent } from './types';
 
 let id = 0;
@@ -147,6 +154,14 @@ describe('buildTimeline：折叠和串联', () => {
 
 describe('跳转：指挥会话 ↔ 工人会话', () => {
   it('工人会话号 worker-<runId> 取出 runId；别的会话没有', () => {
+    expect(
+      turnRunIds([
+        { type: 'session.turn.started', payload: { runId: 'a' } },
+        { type: 'session.turn.started', payload: { runId: 'a' } },
+        { type: 'session.message', payload: {} },
+        { type: 'session.turn.started', payload: { runId: 'b' } },
+      ]),
+    ).toEqual(['a', 'b']);
     expect(runIdOfSession('worker-d12-a1')).toBe('d12-a1');
     expect(runIdOfSession('cmd-demo-login-fix')).toBeNull();
   });

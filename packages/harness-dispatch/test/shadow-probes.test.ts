@@ -11,7 +11,7 @@ import { shadowSelfCheck } from '@fleet-dao/harness-workers';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type CommandResult, type CommandSpec, runCommand } from '../src/command.ts';
 import { scopeSandbox } from '../src/scope-sandbox.ts';
-import { realShadowProbes } from '../src/shadow-probes.ts';
+import { PROBE_SHELL, realShadowProbes } from '../src/shadow-probes.ts';
 
 const HELPER = fileURLToPath(new URL('./fake-scope-helper.mjs', import.meta.url));
 const redact = makeRedactor([]);
@@ -154,7 +154,7 @@ describe('有 sandbox：以工人身份看（内核用户进不去工人的家�
       '/tmp',
       '--',
     ]);
-    expect(run?.slice(9, 11)).toEqual(['/bin/sh', '-c']);
+    expect(run?.slice(9, 11)).toEqual([PROBE_SHELL, '-c']);
   });
 
   it('工人家里有凭据文件、或挂着凭据助手：没过', async () => {

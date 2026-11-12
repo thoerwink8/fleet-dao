@@ -61,6 +61,68 @@ export function useTranscriptFeed(runId: string | null): { feed: SessionFeed | n
   return { feed, state };
 }
 
+/**
+ * 一个会话里每一轮的过程流都要留着。只订最近一轮的话，下一句发出去，上一轮的字和工具行就从对话里消失。
+ */
+export function useTranscriptFeeds(runIds: readonly string[]): {
+  loadOlder: () => Promise<void>;
+  state: FeedState;
+} {
+  const key = runIds.join('\n');
+  const feeds = useMemo(() => {
+    const ids = key ? key.split('\n') : [];
+    return ids.map((id) => new SessionFeed(id, { base: API_BASE, kind: 'transcripts' }));
+  }, [key]);
+  useEffect(() => {
+    const releases = feeds.map((feed) => {
+      feed.start();
+      return releaseWhenHidden(feed, document);
+    });
+    return () => {
+      for (const release of releases) release();
+      for (const feed of feeds) feed.stop();
+    };
+  }, [feeds]);
+  const cache = useRef<{ snaps: FeedState[]; merged: FeedState } | null>(null);
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      const unsubs = feeds.map((feed) => feed.subscribe(onChange));
+      return () => {
+        for (const unsub of unsubs) unsub();
+      };
+    },
+    [feeds],
+  );
+  const getSnapshot = useCallback(() => {
+    const snaps = feeds.map((feed) => feed.getSnapshot());
+    const prev = cache.current;
+    if (prev && prev.snaps.length === snaps.length && prev.snaps.every((snap, i) => snap === snaps[i])) {
+      return prev.merged;
+    }
+    const last = snaps[snaps.length - 1];
+    const merged: FeedState = last
+      ? {
+          status: last.status,
+          events: snaps.flatMap((snap) => snap.events).sort((a, b) => a.id - b.id),
+          hasOlder: snaps.some((snap) => snap.hasOlder),
+          attempt: last.attempt,
+          retryInMs: last.retryInMs,
+          resyncs: snaps.reduce((n, snap) => n + snap.resyncs, 0),
+          error: last.error,
+          errorStatus: last.errorStatus,
+        }
+      : NO_FEED_STATE;
+    cache.current = { snaps, merged };
+    return merged;
+  }, [feeds]);
+  const state = useSyncExternalStore(feeds.length ? subscribe : noSubscribe, getSnapshot);
+  const loadOlder = useCallback(
+    () => Promise.all(feeds.map((feed) => feed.loadOlder())).then(() => undefined),
+    [feeds],
+  );
+  return { loadOlder, state };
+}
+
 export const SESSIONS_POLL_MS = 10_000;
 
 export interface SessionsState {

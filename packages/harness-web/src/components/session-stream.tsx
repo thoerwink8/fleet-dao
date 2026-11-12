@@ -4,14 +4,14 @@ import { splitConversation } from '../lib/chat-view';
 import { cn } from '../lib/cn';
 import { CATEGORY_LABEL, type Category, categoryOf, taskIdOf } from '../lib/describe';
 import { dayKey, formatDay } from '../lib/format';
-import { useSessionFeed, useTranscriptFeed } from '../lib/hooks';
+import { useSessionFeed, useTranscriptFeeds } from '../lib/hooks';
 import { IS_LOCAL } from '../lib/profile';
 import {
   buildSteps,
   buildTimeline,
-  latestTurnRunId,
   runIdOfSession,
   type TimelineItem,
+  turnRunIds,
   workerSessionOf,
 } from '../lib/transcript';
 import type { FeedEvent, FeedState } from '../lib/types';
@@ -102,8 +102,11 @@ export function SessionStream({
 }) {
   const { feed, state } = useSessionFeed(sessionId);
   // 工人会话（worker-<runId>）：把这次运行 stream-json 的每一步（transcript:<runId> 流）和会话里的进度、交结果按事件号串在一起
-  const runId = runIdOfSession(sessionId) ?? latestTurnRunId(state.events);
-  const { feed: tFeed, state: tState } = useTranscriptFeed(runId);
+  const runIds = useMemo(() => {
+    const one = runIdOfSession(sessionId);
+    return one ? [one] : turnRunIds(state.events);
+  }, [sessionId, state.events]);
+  const { loadOlder: loadOlderTranscripts, state: tState } = useTranscriptFeeds(runIds);
   const [off, setOff] = useState<Set<Category>>(new Set());
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -180,7 +183,7 @@ export function SessionStream({
     setLoadingOlder(true);
     stick.current = false;
     try {
-      await Promise.all([feed.loadOlder(), tFeed?.loadOlder()]);
+      await Promise.all([feed.loadOlder(), loadOlderTranscripts()]);
     } finally {
       setLoadingOlder(false);
       requestAnimationFrame(() => {
