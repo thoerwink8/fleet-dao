@@ -133,7 +133,7 @@ async function route(
     send(res, 201, { session: row });
     return true;
   }
-  const session = /^\/api\/ade\/sessions\/([^/]+)(?:\/(messages|stop|changes|deliver))?$/.exec(path);
+  const session = /^\/api\/ade\/sessions\/([^/]+)(?:\/(messages|stop|changes|deliver|queue))?$/.exec(path);
   if (!session) return false;
   const id = decodeURIComponent(session[1] ?? '');
   const action = session[2];
@@ -162,6 +162,15 @@ async function route(
       expectReply: body.expectReply !== false,
       hops: typeof body.hops === 'number' && body.hops >= 0 ? Math.floor(body.hops) : 0,
     });
+    send(res, 202, { ok: true });
+    return true;
+  }
+  if (action === 'queue' && method === 'POST') {
+    const body = await readJson(req);
+    const index = body.index;
+    const op = body.op === 'drop' || body.op === 'jump' ? body.op : null;
+    if (op === null || typeof index !== 'number') throw new AdeError('要 index 和 op', 400);
+    await ade.editQueue(id, index, op);
     send(res, 202, { ok: true });
     return true;
   }

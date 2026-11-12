@@ -11,6 +11,7 @@ import { IS_LOCAL } from '../lib/profile';
 import { deriveWorkerState, groupByState, STATE_LABEL, type WorkerState } from '../lib/session-state';
 import type { SessionSummary } from '../lib/types';
 import { Chip } from './chip';
+import { LocalSessions } from './local-sessions';
 import { LoginPrompt } from './login-prompt';
 
 /** 每 15 秒让「N 分钟前」自己走字，不依赖数据刷新。 */
@@ -63,7 +64,7 @@ function SessionRow({ s, state, now }: { s: SessionSummary; state: WorkerState; 
   );
 }
 
-export function SessionList({ className }: { className?: string }) {
+function RemoteSessionList({ className }: { className?: string }) {
   const { sessions, stuckCount, error, failures, unauthorized, hasMore, loadingMore, loadMore } =
     useSessions();
   const now = useNow();
@@ -194,4 +195,9 @@ export function SessionList({ className }: { className?: string }) {
       </div>
     </section>
   );
+}
+
+export function SessionList({ className }: { className?: string }) {
+  const props = className === undefined ? {} : { className };
+  return IS_LOCAL ? <LocalSessions {...props} /> : <RemoteSessionList {...props} />;
 }

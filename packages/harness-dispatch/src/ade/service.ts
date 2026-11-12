@@ -372,6 +372,26 @@ export class AdeService {
     });
   }
 
+  /** 队列里的一条：drop 拿掉；jump 放到最前并停掉当前轮（不置 hold，收场后接着跑它）。 */
+  async editQueue(id: string, index: number, op: 'drop' | 'jump'): Promise<void> {
+    await this.#lock(id, async () => {
+      const row = await this.getSession(id);
+      const q = adeQueue(row.queue);
+      if (!Number.isInteger(index) || index < 0 || index >= q.length)
+        throw new AdeError('队列里没有这一条', 404);
+      const [item] = q.splice(index, 1);
+      if (!item) throw new AdeError('队列里没有这一条', 404);
+      if (op === 'jump' && row.status === 'running') {
+        q.unshift(item);
+        await updateAdeSession(this.#db, id, { queue: q });
+        this.#live.get(id)?.stop();
+        return;
+      }
+      await updateAdeSession(this.#db, id, { queue: q });
+      if (op === 'jump') await this.#begin(row, item);
+    });
+  }
+
   async stop(id: string): Promise<void> {
     await this.#lock(id, async () => {
       const row = await this.getSession(id);
@@ -511,7 +531,8 @@ export class AdeService {
       text: lastText.slice(-500),
     });
     const queue = adeQueue(row.queue);
-    const next = row.hold || outcome === 'stopped' ? undefined : queue.shift();
+    // 用户点停止会先置 hold，队列停在那儿。插队只停掉进程、不置 hold，收场后接着跑队首。
+    const next = row.hold ? undefined : queue.shift();
     await updateAdeSession(this.#db, id, { status: 'idle', runId: null, queue });
     if (next) {
       const again = await this.getSession(id);

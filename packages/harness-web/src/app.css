@@ -1,36 +1,68 @@
-/* 新驾驶舱的设计令牌：浅色工作台（页底 #f0f3fa、品牌蓝 #2962ff、1px 发丝线、白卡片）。
-   尺寸规矩：间距只用 4 的倍数（--spacing: 4px）；条高 56px（--bar-h）；侧栏 208px，收起 64px；768px 以下换底部标签栏；
-   正文 14px、说明 12px；数字一律 .num。颜色只用下面的令牌，异常才上红黄，正常态不上绿。 */
+/* 新驾驶舱的设计令牌，只在这一份里定。浅色是原来的值，深色是同一套名字加深，不是从别的产品取的色值。
+   颜色走 CSS 变量，深浅两套；Tailwind 的 bg-canvas 这类工具类引用变量，切换 .dark 即生效。
+   尺寸：间距只用 4 的倍数；条高 56px；侧栏 208px，收起 64px；768px 以下换底部标签栏；
+   正文 14px、说明 12px；数字一律 .num。异常才上红黄。运行中的绿点用 success，不拿来做装饰。 */
 @import "tailwindcss";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/noto-sans-sc/wght.css";
 
-@theme {
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
   --color-*: initial;
   --color-white: #ffffff;
   --color-black: #000000;
   --color-transparent: transparent;
   --color-current: currentColor;
-  --color-canvas: #f0f3fa;
-  --color-surface: #ffffff;
-  --color-subtle: #f8f9fd;
-  --color-line: #e0e3eb;
-  --color-line-strong: #c3c7d1;
-  --color-ink: #131722;
-  --color-ink-2: #434651;
-  --color-muted: #6a6d78;
-  --color-brand: #2962ff;
-  --color-brand-hover: #1e53e5;
-  --color-brand-strong: #1848cc;
-  --color-brand-soft: #e3ebff;
-  --color-success: #067d69;
-  --color-success-soft: #e0f3ef;
-  --color-warning: #a85300;
-  --color-warning-soft: #fff3e0;
-  --color-danger: #d61f2f;
-  --color-danger-soft: #fde8ea;
-  --color-neutral-soft: #eef0f5;
+  --color-canvas: var(--fleet-canvas);
+  --color-surface: var(--fleet-surface);
+  --color-subtle: var(--fleet-subtle);
+  --color-line: var(--fleet-line);
+  --color-line-strong: var(--fleet-line-strong);
+  --color-ink: var(--fleet-ink);
+  --color-ink-2: var(--fleet-ink-2);
+  --color-muted: var(--fleet-muted);
+  --color-brand: var(--fleet-brand);
+  --color-brand-hover: var(--fleet-brand-hover);
+  --color-brand-strong: var(--fleet-brand-strong);
+  --color-brand-soft: var(--fleet-brand-soft);
+  --color-success: var(--fleet-success);
+  --color-success-soft: var(--fleet-success-soft);
+  --color-warning: var(--fleet-warning);
+  --color-warning-soft: var(--fleet-warning-soft);
+  --color-danger: var(--fleet-danger);
+  --color-danger-soft: var(--fleet-danger-soft);
+  --color-neutral-soft: var(--fleet-neutral-soft);
+  --color-fg-1: var(--fleet-fg-1);
+  --color-fg-2: var(--fleet-fg-2);
+  --color-fg-3: var(--fleet-fg-3);
+  --color-fg-4: var(--fleet-fg-4);
+  --color-fg-5: var(--fleet-fg-5);
+  --color-raised: var(--fleet-layer-raised);
+  --color-panel: var(--fleet-layer-panel);
+  --color-inset: var(--fleet-layer-inset);
+  --color-control: var(--fleet-layer-control);
+  --color-edge: var(--fleet-layer-edge);
+  --color-selected: var(--fleet-layer-selected);
+  --color-sidebar: var(--fleet-region-sidebar);
+  --color-header: var(--fleet-region-header);
+  --color-rail: var(--fleet-region-rail);
+  --color-modal: var(--fleet-region-modal);
+  --color-overlay: var(--fleet-region-overlay);
+  --color-dropdown: var(--fleet-region-dropdown);
+  --color-card: var(--fleet-region-card);
+  --color-ok: var(--fleet-ok);
+  --color-warn: var(--fleet-warn);
+  --color-err: var(--fleet-err);
+  --color-info: var(--fleet-info);
+  --color-running: var(--fleet-running);
+  --color-idle: var(--fleet-idle);
+  --color-act: var(--fleet-act);
+  --color-badge: var(--fleet-badge);
+  --color-composer: var(--fleet-composer);
+  --color-bubble: var(--fleet-bubble);
+  --color-menu: var(--fleet-menu);
 
   --font-sans: "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-number: "Inter Variable", "Noto Sans SC Variable", system-ui, sans-serif;
@@ -88,6 +120,113 @@
 @layer base {
   :root {
     --bar-h: 56px;
+    --fleet-dur-fast: 120ms;
+    --fleet-dur: 150ms;
+    --fleet-ease: cubic-bezier(0.2, 0, 0, 1);
+    /* 语义色。浅色是本仓原有的值；fg-4、fg-5 是在原有两级灰之间补的，不是从别处取的。 */
+    --fleet-fg-1: #131722;
+    --fleet-fg-2: #434651;
+    --fleet-fg-3: #6a6d78;
+    --fleet-fg-4: #8b8f9a;
+    --fleet-fg-5: #a7acb8;
+    --fleet-layer-surface: #f0f3fa;
+    --fleet-layer-raised: #ffffff;
+    --fleet-layer-panel: #ffffff;
+    --fleet-layer-inset: #f8f9fd;
+    --fleet-layer-control: #eef0f5;
+    --fleet-layer-edge: #e0e3eb;
+    --fleet-layer-edge-strong: #c3c7d1;
+    --fleet-layer-selected: #e3ebff;
+    --fleet-region-sidebar: var(--fleet-layer-raised);
+    --fleet-region-header: var(--fleet-layer-raised);
+    --fleet-region-rail: var(--fleet-layer-surface);
+    --fleet-region-modal: var(--fleet-layer-raised);
+    --fleet-region-overlay: rgb(19 23 34 / 0.45);
+    --fleet-region-dropdown: var(--fleet-layer-raised);
+    --fleet-region-card: var(--fleet-layer-raised);
+    --fleet-ok: #067d69;
+    --fleet-ok-soft: #e0f3ef;
+    --fleet-warn: #a85300;
+    --fleet-warn-soft: #fff3e0;
+    --fleet-err: #d61f2f;
+    --fleet-err-soft: #fde8ea;
+    --fleet-info: #2962ff;
+    --fleet-running: #067d69;
+    --fleet-idle: var(--fleet-fg-4);
+    --fleet-act: #2962ff;
+    --fleet-act-hover: #1e53e5;
+    --fleet-act-strong: #1848cc;
+    --fleet-badge: #e3ebff;
+    --fleet-composer: var(--fleet-layer-raised);
+    --fleet-bubble: var(--fleet-layer-selected);
+    --fleet-menu: var(--fleet-layer-raised);
+    /* 旧名继续指向上面的语义层，已有页面的 bg-surface、text-ink 不用改。 */
+    --fleet-canvas: var(--fleet-layer-surface);
+    --fleet-surface: var(--fleet-layer-raised);
+    --fleet-subtle: var(--fleet-layer-inset);
+    --fleet-line: var(--fleet-layer-edge);
+    --fleet-line-strong: var(--fleet-layer-edge-strong);
+    --fleet-ink: var(--fleet-fg-1);
+    --fleet-ink-2: var(--fleet-fg-2);
+    --fleet-muted: var(--fleet-fg-3);
+    --fleet-brand: var(--fleet-act);
+    --fleet-brand-hover: var(--fleet-act-hover);
+    --fleet-brand-strong: var(--fleet-act-strong);
+    --fleet-brand-soft: var(--fleet-badge);
+    --fleet-success: var(--fleet-ok);
+    --fleet-success-soft: var(--fleet-ok-soft);
+    --fleet-warning: var(--fleet-warn);
+    --fleet-warning-soft: var(--fleet-warn-soft);
+    --fleet-danger: var(--fleet-err);
+    --fleet-danger-soft: var(--fleet-err-soft);
+    --fleet-neutral-soft: var(--fleet-layer-control);
+    --color-canvas: var(--fleet-canvas);
+    --color-surface: var(--fleet-surface);
+    --color-subtle: var(--fleet-subtle);
+    --color-line: var(--fleet-line);
+    --color-line-strong: var(--fleet-line-strong);
+    --color-ink: var(--fleet-ink);
+    --color-ink-2: var(--fleet-ink-2);
+    --color-muted: var(--fleet-muted);
+    --color-brand: var(--fleet-brand);
+    --color-brand-hover: var(--fleet-brand-hover);
+    --color-brand-strong: var(--fleet-brand-strong);
+    --color-brand-soft: var(--fleet-brand-soft);
+    --color-success: var(--fleet-success);
+    --color-success-soft: var(--fleet-success-soft);
+    --color-warning: var(--fleet-warning);
+    --color-warning-soft: var(--fleet-warning-soft);
+    --color-danger: var(--fleet-danger);
+    --color-danger-soft: var(--fleet-danger-soft);
+    --color-neutral-soft: var(--fleet-neutral-soft);
+  }
+  :root.dark {
+    --fleet-fg-1: #e8eef6;
+    --fleet-fg-2: #c5d0de;
+    --fleet-fg-3: #8b98ab;
+    --fleet-fg-4: #6d7b90;
+    --fleet-fg-5: #556274;
+    --fleet-layer-surface: #10141a;
+    --fleet-layer-raised: #171c24;
+    --fleet-layer-panel: #171c24;
+    --fleet-layer-inset: #1e2530;
+    --fleet-layer-control: #262d3a;
+    --fleet-layer-edge: #2c3544;
+    --fleet-layer-edge-strong: #455066;
+    --fleet-layer-selected: #243456;
+    --fleet-region-overlay: rgb(0 0 0 / 0.55);
+    --fleet-ok: #3ecf8e;
+    --fleet-ok-soft: #14352a;
+    --fleet-warn: #e0a15a;
+    --fleet-warn-soft: #3a2a14;
+    --fleet-err: #ff6b78;
+    --fleet-err-soft: #3f1c22;
+    --fleet-info: #7aa2ff;
+    --fleet-running: #3ecf8e;
+    --fleet-act: #7aa2ff;
+    --fleet-act-hover: #9bb8ff;
+    --fleet-act-strong: #d6e2ff;
+    --fleet-badge: #243456;
   }
   *,
   ::before,

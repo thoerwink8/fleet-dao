@@ -71,12 +71,16 @@ export async function addWorktree(repo: string, dest: string, branch: string): P
 }
 
 /** 已跟踪文件的改动。未跟踪的文件不进补丁，状态行里仍能看见。 */
-export async function worktreeDiff(cwd: string): Promise<{ git: boolean; status: string; diff: string }> {
+export async function worktreeDiff(
+  cwd: string,
+): Promise<{ git: boolean; status: string; diff: string; branch: string }> {
   const inside = await git(cwd, ['rev-parse', '--is-inside-work-tree']);
-  if (inside.code !== 0 || inside.out.trim() !== 'true') return { git: false, status: '', diff: '' };
+  if (inside.code !== 0 || inside.out.trim() !== 'true')
+    return { git: false, status: '', diff: '', branch: '' };
   const status = await git(cwd, ['status', '--porcelain']);
   const unstaged = await git(cwd, ['diff', 'HEAD']);
   const staged = await git(cwd, ['diff', '--cached']);
   const diff = [unstaged.out, staged.code === 0 ? staged.out : ''].filter((s) => s.trim() !== '').join('\n');
-  return { git: true, status: status.out, diff };
+  const branch = await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  return { git: true, status: status.out, diff, branch: branch.code === 0 ? branch.out.trim() : '' };
 }

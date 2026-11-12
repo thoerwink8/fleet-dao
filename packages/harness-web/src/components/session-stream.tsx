@@ -1,5 +1,6 @@
 import { ArrowDown, ChevronDown, ChevronRight, LoaderCircle, RefreshCw, WifiOff, Wrench } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { splitConversation } from '../lib/chat-view';
 import { cn } from '../lib/cn';
 import { CATEGORY_LABEL, type Category, categoryOf, taskIdOf } from '../lib/describe';
 import { dayKey, formatDay } from '../lib/format';
@@ -14,7 +15,9 @@ import {
   workerSessionOf,
 } from '../lib/transcript';
 import type { FeedEvent, FeedState } from '../lib/types';
+import { Button } from '../ui/button';
 import { AdeComposer } from './ade-panel';
+import { ChatTimeline } from './chat-timeline';
 import { Chip } from './chip';
 import { EventCard } from './event-card';
 import { LoginPrompt } from './login-prompt';
@@ -90,7 +93,13 @@ function ReconnectBanner({ state }: { state: FeedState }) {
   );
 }
 
-export function SessionStream({ sessionId }: { sessionId: string }) {
+export function SessionStream({
+  sessionId,
+  onToggleChanges,
+}: {
+  sessionId: string;
+  onToggleChanges?: () => void;
+}) {
   const { feed, state } = useSessionFeed(sessionId);
   // 工人会话（worker-<runId>）：把这次运行 stream-json 的每一步（transcript:<runId> 流）和会话里的进度、交结果按事件号串在一起
   const runId = runIdOfSession(sessionId) ?? latestTurnRunId(state.events);
@@ -101,6 +110,7 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
   const [unseen, setUnseen] = useState(0);
   const lastCount = useRef(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [debug, setDebug] = useState(false);
   const total = state.events.length + tState.events.length;
 
   const counts = useMemo(() => {
@@ -122,6 +132,7 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
   const shownSteps = useMemo(() => (off.has('process') ? [] : steps), [steps, off]);
 
   const items = useMemo(() => buildTimeline(shown, shownSteps), [shown, shownSteps]);
+  const parts = useMemo(() => splitConversation(items), [items]);
   const [openRuns, setOpenRuns] = useState<ReadonlySet<number>>(new Set());
   const toggleRun = (key: number) =>
     setOpenRuns((prev) => {
@@ -200,26 +211,38 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
         <span className="shrink-0 pr-1">
           <StatusPill state={state} />
         </span>
-        {CATS.filter((c) => counts[c] > 0).map((c) => {
-          const on = !off.has(c);
-          return (
-            <button
-              key={c}
-              type="button"
-              aria-pressed={on}
-              onClick={() => toggle(c)}
-              className={cn(
-                'inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2.5 text-2xs transition-colors',
-                on
-                  ? 'border-brand/30 bg-brand-soft text-brand-strong'
-                  : 'border-line bg-surface text-muted hover:text-ink',
-              )}
-            >
-              {CATEGORY_LABEL[c]}
-              <span className="num">{counts[c]}</span>
-            </button>
-          );
-        })}
+        {IS_LOCAL ? (
+          <Button
+            variant={debug ? 'default' : 'ghost'}
+            size="sm"
+            aria-pressed={debug}
+            onClick={() => setDebug((v) => !v)}
+          >
+            调试
+            <span className="num">{parts.debug.length}</span>
+          </Button>
+        ) : null}
+        {!IS_LOCAL &&
+          CATS.filter((c) => counts[c] > 0).map((c) => {
+            const on = !off.has(c);
+            return (
+              <button
+                key={c}
+                type="button"
+                aria-pressed={on}
+                onClick={() => toggle(c)}
+                className={cn(
+                  'inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2.5 text-2xs transition-colors',
+                  on
+                    ? 'border-brand/30 bg-brand-soft text-brand-strong'
+                    : 'border-line bg-surface text-muted hover:text-ink',
+                )}
+              >
+                {CATEGORY_LABEL[c]}
+                <span className="num">{counts[c]}</span>
+              </button>
+            );
+          })}
         <span className="num ml-auto shrink-0 pl-2 text-2xs text-muted">共 {total} 条</span>
       </div>
       <div className="relative min-h-0 flex-1">
@@ -255,9 +278,11 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
             </div>
           ) : items.length === 0 && total > 0 ? (
             <p className="py-10 text-center text-sm text-muted">筛选把事件全藏起来了，点上面的类别条恢复。</p>
+          ) : IS_LOCAL && !debug ? (
+            <ChatTimeline items={parts.main} />
           ) : (
             <ol className="mx-auto max-w-3xl" data-testid="events">
-              {items.map((item) => {
+              {(IS_LOCAL ? parts.debug : items).map((item) => {
                 const startedAt = itemStart(item);
                 if (!startedAt) return null;
                 const day = dayKey(startedAt);
@@ -370,7 +395,13 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
           </button>
         ) : null}
       </div>
-      {IS_LOCAL ? <AdeComposer sessionId={sessionId} /> : null}
+      {IS_LOCAL ? (
+        onToggleChanges ? (
+          <AdeComposer sessionId={sessionId} onToggleChanges={onToggleChanges} />
+        ) : (
+          <AdeComposer sessionId={sessionId} />
+        )
+      ) : null}
     </div>
   );
 }

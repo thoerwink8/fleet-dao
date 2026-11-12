@@ -22,6 +22,8 @@ import {
   type WorkView,
   writeView,
 } from '../lib/work-hooks';
+import { Button } from '../ui/button';
+import { NativeSelect } from '../ui/native-select';
 
 // 画布连同 elk 比较大，只有看图的时候才加载
 const WorkCanvas = lazy(() => import('../components/work-canvas').then((m) => ({ default: m.WorkCanvas })));
@@ -112,39 +114,40 @@ export function Work() {
                 ['list', '列表', <LayoutList key="l" className="size-3.5" />],
               ] as const
             ).map(([v, text, icon]) => (
-              <button
+              <Button
                 key={v}
-                type="button"
+                variant="ghost"
+                size="sm"
                 data-testid={`view-${v}`}
                 aria-pressed={view === v}
                 onClick={() => setView(v)}
                 className={cn(
-                  'inline-flex h-7 cursor-pointer items-center gap-1 rounded-sm px-2 text-2xs',
-                  view === v ? 'bg-brand-soft font-medium text-brand-strong' : 'text-muted hover:text-ink',
+                  'rounded-sm',
+                  view === v ? 'bg-brand-soft font-medium text-brand-strong' : 'text-muted',
                 )}
               >
                 {icon}
                 {text}
-              </button>
+              </Button>
             ))}
           </fieldset>
         }
       >
         {list.length > 0 ? (
-          <label className="flex min-w-0 items-center gap-2 text-2xs text-muted">
+          <label htmlFor="batch-select" className="flex min-w-0 items-center gap-2 text-2xs text-muted">
             <span className="shrink-0 max-sm:sr-only">批次</span>
-            <select
+            <NativeSelect
+              id="batch-select"
               data-testid="batch-select"
               value={batchId ?? ''}
               onChange={(e) => pickBatch(e.target.value)}
-              className="h-8 min-w-0 max-w-full cursor-pointer rounded-md border border-line bg-surface px-2 text-xs text-ink"
             >
               {list.map((b) => (
                 <option key={b.batchId} value={b.batchId}>
                   {b.batchId} · {b.items} 单 · 做完 {b.counts.completed ?? 0}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
         ) : null}
       </PageBar>
