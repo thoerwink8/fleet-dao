@@ -1,9 +1,10 @@
 // 本机 ADE 下拉里有哪些 agent（#3924）。只看本机 CLI 装没装、登录了没有，不负责登录。
 // claude 经 reclaude；grok 用家里的 ~/.grok/bin/grok（不在 PATH 上也认）。codex、pi 没登录就标出来，不能选。
-import { spawn } from 'node:child_process';
 import { access, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { localHost, makeRedactor } from '@fleet-dao/harness-runner';
+import { runCommand } from '../command.ts';
 
 export interface AdeAgentInfo {
   id: string;
@@ -171,51 +172,34 @@ export function probeLaunch(
   return { file: bin, args: [...args], verbatim: false };
 }
 
-function stringEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const next: NodeJS.ProcessEnv = {};
+function stringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const next: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
     if (typeof v === 'string') next[k] = v;
   }
   return next;
 }
 
-export const realRun: AgentRun = (bin, args, timeoutMs, env) =>
-  new Promise((resolve) => {
-    let out = '';
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (r: AgentRunResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(r);
-    };
-    const clean = stringEnv(env);
-    const spec = probeLaunch(bin, args, clean);
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(spec.file, spec.args, {
-        windowsHide: true,
-        env: clean,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsVerbatimArguments: spec.verbatim,
-      });
-    } catch (e) {
-      finish({ code: null, out: e instanceof Error ? e.message : String(e), timedOut: false });
-      return;
-    }
-    const take = (b: Buffer) => {
-      if (out.length < 16_000) out += b.toString('utf8');
-    };
-    child.stdout?.on('data', take);
-    child.stderr?.on('data', take);
-    timer = setTimeout(() => {
-      child.kill();
-      finish({ code: null, out, timedOut: true });
-    }, timeoutMs);
-    child.on('error', (e) => finish({ code: null, out: e.message, timedOut: false }));
-    child.on('close', (code) => finish({ code, out, timedOut: false }));
+const probeRedact = makeRedactor([]);
+
+export const realRun: AgentRun = async (bin, args, timeoutMs, env) => {
+  const clean = stringEnv(probeEnv(env));
+  const spec = probeLaunch(bin, args, clean);
+  // 登录探测是短命令。Windows 的 .cmd 要原样命令行；jobrun 会再包一层引号，所以走 localHost。
+  const r = await runCommand({
+    command: [spec.file, ...spec.args],
+    cwd: tmpdir(),
+    timeoutMs,
+    redact: probeRedact,
+    trustedEnv: clean,
+    maxOutputChars: 16_000,
+    host: localHost,
+    ...(spec.verbatim ? { windowsVerbatimArguments: true } : {}),
   });
+  const out = [r.stdout, r.stderrTail].filter((part) => part !== '').join('\n');
+  if (r.spawnError) return { code: null, out: r.spawnError, timedOut: false };
+  return { code: r.killed ? null : r.exitCode, out, timedOut: Boolean(r.killed) };
+};
 
 function offline(id: string, resume: boolean, how: 'in' | 'out' | 'unknown', models: string[]): AdeAgentInfo {
   if (how === 'in') return { id, resume, models, ready: true };
