@@ -18,7 +18,7 @@ import { cn } from '../lib/cn';
 import { formatClock, formatDuration } from '../lib/format';
 import type { DroppedStep, EndStep, SayStep, ToolStep } from '../lib/transcript';
 import { Chip } from './chip';
-import { ClampedText, OutputBlock } from './clamped';
+import { OutputBlock } from './clamped';
 
 const ICON: Record<string, LucideIcon> = {
   Bash: SquareTerminal,
@@ -77,7 +77,7 @@ export function ToolRow({ step }: { step: ToolStep }) {
       data-step-kind="tool"
       data-tool-status={step.status}
       data-open={open}
-      className="animate-fade-in pb-2 pl-9"
+      className="pb-2 pl-9"
     >
       <button
         type="button"
@@ -92,7 +92,7 @@ export function ToolRow({ step }: { step: ToolStep }) {
         )}
         <Icon className="size-3.5 shrink-0 text-muted" />
         <span className="shrink-0 font-medium text-ink">{step.name}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-2xs text-muted">{step.summary}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-2xs text-ink">{step.summary}</span>
         {step.status === 'error' ? <Chip tone="danger">出错</Chip> : null}
         {step.status === 'running' ? (
           <Chip tone="brand" className="gap-1">
@@ -101,7 +101,7 @@ export function ToolRow({ step }: { step: ToolStep }) {
           </Chip>
         ) : null}
         {step.status === 'noresult' ? <Chip>无结果</Chip> : null}
-        <span className="num hidden shrink-0 text-2xs text-muted sm:inline">{formatClock(step.at)}</span>
+        <span className="num hidden shrink-0 text-2xs text-ink sm:inline">{formatClock(step.at)}</span>
       </button>
       {open ? (
         <div className="mt-1 rounded-lg border border-line bg-surface px-3 py-2" data-testid="tool-detail">
@@ -132,24 +132,15 @@ export function ToolRow({ step }: { step: ToolStep }) {
 }
 
 export function EndRow({ step }: { step: EndStep }) {
+  const bits = [
+    '运行结束',
+    step.isError ? '出错' : '正常',
+    step.numTurns !== null ? `${step.numTurns} 轮` : null,
+    step.durationMs !== null ? formatDuration(step.durationMs) : null,
+  ].filter((part): part is string => part !== null);
   return (
-    <li data-step-id={step.id} data-step-kind="end" className="animate-fade-in pb-3 pl-9">
-      <div className="rounded-lg border border-line bg-subtle px-3 py-2.5">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-2xs font-medium text-muted">运行结束</span>
-          <Chip tone={step.isError ? 'danger' : 'neutral'}>{step.isError ? '出错' : '正常'}</Chip>
-          {step.numTurns !== null ? <Chip>{step.numTurns} 轮</Chip> : null}
-          {step.durationMs !== null ? <Chip>{formatDuration(step.durationMs)}</Chip> : null}
-          <span className="num ml-auto text-2xs text-muted">
-            #{step.id} · {formatClock(step.at)}
-          </span>
-        </div>
-        {step.text ? (
-          <div className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">
-            <ClampedText text={step.text} />
-          </div>
-        ) : null}
-      </div>
+    <li data-step-id={step.id} data-step-kind="end" className="pb-1 pl-9 text-2xs text-muted">
+      {bits.join(' · ')}
     </li>
   );
 }

@@ -246,6 +246,42 @@ describe('会话', () => {
     expect((await svc.getSession(s.id)).queue).toEqual([]);
   });
 
+  it('排队的话先不进对话，真开始跑才记一条，撤回的不记', async () => {
+    mode = 'hang';
+    const dir = mkdtempSync(join(root, 'ws-'));
+    const ws = await svc.addWorkspace('排队', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+      text: '一直跑',
+    });
+    const msg = {
+      from: { kind: 'user' as const, id: null },
+      kind: 'chat' as const,
+      expectReply: true,
+      hops: 0,
+    };
+    await svc.postMessage(s.id, { ...msg, text: '等一下', mode: 'queue' });
+    await svc.postMessage(s.id, { ...msg, text: '先做这个', mode: 'queue' });
+    const messageTexts = async () => {
+      const evs = await readStream(t.db, `session:${s.id}`, 0, 40);
+      return evs.filter((e) => e.type === 'session.message').map((e) => e.payload.text);
+    };
+    expect(await messageTexts()).not.toContain('等一下');
+    expect(await messageTexts()).not.toContain('先做这个');
+    expect((await svc.getSession(s.id)).queue).toMatchObject([{ text: '等一下' }, { text: '先做这个' }]);
+    await svc.editQueue(s.id, 0, 'drop');
+    expect(await messageTexts()).not.toContain('等一下');
+    mode = 'fake';
+    await svc.editQueue(s.id, 0, 'jump');
+    await waitIdle(s.id);
+    const texts = await messageTexts();
+    expect(texts.filter((text) => text === '先做这个')).toHaveLength(1);
+    expect(texts).not.toContain('等一下');
+  });
+
   it('重启时接不回的一轮记成 lost', async () => {
     const dir = mkdtempSync(join(root, 'ws-'));
     const ws = await svc.addWorkspace('掉', dir);
