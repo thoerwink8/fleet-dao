@@ -49,7 +49,7 @@ export function Workbench() {
         </div>
         <div
           className={cn(
-            'min-h-0 min-w-0 md:flex',
+            'relative min-h-0 min-w-0 md:flex',
             sessionId || composing ? 'flex h-[calc(100dvh-var(--bar-h)*2)] md:h-auto' : 'hidden',
           )}
         >

@@ -299,9 +299,12 @@ function QueueBar({
   return (
     <ul className="mb-2 flex flex-col gap-1" data-testid="ade-queue-bar">
       {drafts.map((text, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: 撤回和插队按队列位置，下标就是身份
-        <li key={`d${i}`} className="flex items-center gap-1 rounded-md bg-subtle px-2 py-1 text-xs">
-          <span className="min-w-0 flex-1 truncate">{text}</span>
+        <li
+          // biome-ignore lint/suspicious/noArrayIndexKey: 撤回和插队按队列位置，下标就是身份
+          key={`d${i}`}
+          className="flex flex-wrap items-center gap-1 rounded-md bg-subtle px-2 py-1 text-xs"
+        >
+          <span className="min-w-0 basis-full truncate md:flex-1 md:basis-auto">{text}</span>
           <Button data-testid="ade-queue" variant="ghost" size="sm" onClick={() => onGuide(text, i)}>
             引导
           </Button>
@@ -314,9 +317,12 @@ function QueueBar({
         </li>
       ))}
       {queued.map((item, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: 撤回和插队按队列位置，下标就是身份
-        <li key={`q${i}`} className="flex items-center gap-1 rounded-md bg-subtle px-2 py-1 text-xs">
-          <span className="min-w-0 flex-1 truncate">{item.text}</span>
+        <li
+          // biome-ignore lint/suspicious/noArrayIndexKey: 撤回和插队按队列位置，下标就是身份
+          key={`q${i}`}
+          className="flex flex-wrap items-center gap-1 rounded-md bg-subtle px-2 py-1 text-xs"
+        >
+          <span className="min-w-0 basis-full truncate md:flex-1 md:basis-auto">{item.text}</span>
           <span className="text-2xs text-muted">已排队</span>
           <Button variant="ghost" size="sm" onClick={() => onJumpQueued(i)}>
             插队

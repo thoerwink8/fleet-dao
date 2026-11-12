@@ -38,7 +38,10 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
     }
   };
   return (
-    <aside className="flex w-80 shrink-0 flex-col border-l border-edge bg-panel" data-testid="changes-panel">
+    <aside
+      className="absolute inset-0 z-20 flex flex-col bg-panel md:static md:z-auto md:w-80 md:shrink-0 md:border-l md:border-edge"
+      data-testid="changes-panel"
+    >
       <div className="flex h-10 items-center justify-between border-b border-line px-3">
         <span className="text-xs font-medium">改动{data?.branch ? ` · ${data.branch}` : ''}</span>
         <Button variant="ghost" size="sm" onClick={onClose}>
