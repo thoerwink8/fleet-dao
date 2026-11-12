@@ -3,6 +3,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { accountExhaustedReason } from '@fleet-dao/adapters/judge';
 import { appendToSession } from '@fleet-dao/harness-api';
 import { type Forge, opKey } from '@fleet-dao/harness-contract';
 import { makeRedactor, type ProcessHost, readLines } from '@fleet-dao/harness-runner';
@@ -34,9 +35,27 @@ import {
   TranscriptWriter,
 } from '@fleet-dao/harness-workers';
 import { localOutboxDeps, processOutbox } from '../publish.ts';
+import {
+  type AccountsFile,
+  type AccountsView,
+  addAccount,
+  addRelay,
+  loadAccounts,
+  mergeAccountEnv,
+  modelList,
+  planSpawn,
+  removeAccount,
+  removeRelay,
+  saveAccounts,
+  toView,
+  withActive,
+  withRelayModels,
+  withSelection,
+} from './accounts.ts';
 import { type AdeAgentInfo, discoverAgents, findAgentBin } from './agents.ts';
 import { addWorktree, existingDir, inspectRepo, worktreeDiff } from './git.ts';
 import { GitPanelError, gitAct, gitSnapshot } from './git-panel.ts';
+import { readLocalQuota, unreadQuota } from './quota-view.ts';
 
 export type { AdeAgentInfo } from './agents.ts';
 
@@ -117,6 +136,8 @@ export interface AdeOptions {
   commandFor?: typeof adeCommand;
   flushMs?: number;
   agents?: () => Promise<AdeAgentInfo[]>;
+  /** 测试注入。缺省读本机 CLI 的额度，读不成是「读不到」。 */
+  quotaFor?: (env: NodeJS.ProcessEnv) => Promise<Record<string, string>>;
 }
 
 interface Live {
@@ -127,6 +148,9 @@ interface Live {
   /** 标准错误，给调试视图。不进正文、不进预览。 */
   stderr: string;
   stop: () => void;
+  item: AdeQueueItem;
+  /** 这一句已经用过的账号。空串是机器上 CLI 自己的登录。 */
+  tried: string[];
 }
 
 function textParser(runId: string): TranscriptParser {
@@ -195,6 +219,7 @@ export class AdeService {
   readonly #commandFor: typeof adeCommand;
   readonly #flushMs: number;
   readonly #agents?: () => Promise<AdeAgentInfo[]>;
+  readonly #quotaFor?: (env: NodeJS.ProcessEnv) => Promise<Record<string, string>>;
   readonly #live = new Map<string, Live>();
   readonly #locks = new Map<string, Promise<void>>();
 
@@ -206,6 +231,7 @@ export class AdeService {
     this.#commandFor = o.commandFor ?? adeCommand;
     this.#flushMs = o.flushMs ?? 200;
     if (o.agents) this.#agents = o.agents;
+    if (o.quotaFor) this.#quotaFor = o.quotaFor;
   }
 
   async recover(): Promise<number> {
@@ -263,9 +289,80 @@ export class AdeService {
     await deleteAdeWorkspace(this.#db, id);
   }
 
-  async listAgents(): Promise<AdeAgentInfo[]> {
+  async #baseAgents(): Promise<AdeAgentInfo[]> {
     if (this.#agents) return this.#agents();
     return discoverAgents(this.#env);
+  }
+
+  async listAgents(): Promise<AdeAgentInfo[]> {
+    const [list, file] = await Promise.all([this.#baseAgents(), this.#accountsFile()]);
+    return withRelayModels(list, file);
+  }
+
+  async accountsView(): Promise<AccountsView> {
+    const [file, agents] = await Promise.all([this.#accountsFile(), this.#baseAgents()]);
+    return toView(file, agents);
+  }
+
+  async quotaView(): Promise<Record<string, string>> {
+    try {
+      return await (this.#quotaFor ?? readLocalQuota)(this.#env);
+    } catch {
+      return unreadQuota();
+    }
+  }
+
+  async selectAccount(agent: string, tier: string): Promise<AccountsView> {
+    return this.#change((file) => withSelection(file, agent, tier));
+  }
+
+  async activateAccount(agent: string, activeId: string | null): Promise<AccountsView> {
+    return this.#change((file) => withActive(file, agent, activeId));
+  }
+
+  async createAccount(agent: string, label: string, env: Record<string, string>): Promise<AccountsView> {
+    return this.#change((file) => addAccount(file, agent, label, env));
+  }
+
+  async deleteAccount(agent: string, id: string): Promise<AccountsView> {
+    return this.#change((file) => removeAccount(file, agent, id));
+  }
+
+  async createRelay(input: {
+    name: string;
+    baseUrl: string;
+    key: string;
+    models: unknown;
+  }): Promise<AccountsView> {
+    return this.#change((file) => addRelay(file, { ...input, models: modelList(input.models) }));
+  }
+
+  async deleteRelay(id: string): Promise<AccountsView> {
+    return this.#change((file) => removeRelay(file, id));
+  }
+
+  async #accountsFile() {
+    try {
+      return await loadAccounts(this.#dataDir);
+    } catch (err) {
+      throw new AdeError(err instanceof Error ? err.message : '账号配置读不到', 500);
+    }
+  }
+
+  async #change(fn: (file: AccountsFile) => AccountsFile): Promise<AccountsView> {
+    const file = await this.#accountsFile();
+    let next: AccountsFile;
+    try {
+      next = fn(file);
+    } catch (err) {
+      throw new AdeError(err instanceof Error ? err.message : '账号配置不对', 400);
+    }
+    try {
+      await saveAccounts(this.#dataDir, next);
+    } catch (err) {
+      throw new AdeError(err instanceof Error ? err.message : '账号配置写不了', 500);
+    }
+    return this.accountsView();
   }
 
   listTasks() {
@@ -515,17 +612,29 @@ export class AdeService {
     }
   }
 
-  /** 调用方拿着这会话的锁。 */
-  async #begin(row: AdeSessionRow, item: AdeQueueItem): Promise<void> {
-    await appendToSession(this.#db, row.id, 'session.message', {
-      from: item.from,
-      to: row.id,
-      text: item.text,
-      kind: item.kind,
-      expectReply: item.expectReply,
-      hops: item.hops,
-      mode: 'send',
-    });
+  /** 调用方拿着这会话的锁。tried 是这一句已经用过的账号，用尽了才带。 */
+  async #begin(row: AdeSessionRow, item: AdeQueueItem, tried: string[] = []): Promise<void> {
+    // 换账号重跑同一句时不再写一遍，避免对话里出现两条一样的用户消息。
+    if (tried.length === 0) {
+      await appendToSession(this.#db, row.id, 'session.message', {
+        from: item.from,
+        to: row.id,
+        text: item.text,
+        kind: item.kind,
+        expectReply: item.expectReply,
+        hops: item.hops,
+        mode: 'send',
+      });
+    }
+    const file = await this.#accountsFile();
+    const info = (await this.#baseAgents()).find((a) => a.id === row.agent);
+    let plan: ReturnType<typeof planSpawn>;
+    try {
+      plan = planSpawn(file, row.agent, row.model, info?.models ?? [], tried);
+    } catch (err) {
+      throw new AdeError(err instanceof Error ? err.message : '账号配置起不了会话', 400);
+    }
+    if (!plan) throw new AdeError('没有下一个账号', 409);
     const runId = `ade-${row.id}-${randomBytes(4).toString('hex')}`;
     const resume = row.agentSessionId !== null;
     const agentSessionId = row.agentSessionId ?? randomUUID();
@@ -536,23 +645,26 @@ export class AdeService {
       nativeResume || !resume ? item.text : `（这个 agent 没有原生续接，上文在会话页里）\n${item.text}`;
     const promptFile = join(tmp, 'prompt.md');
     if (row.agent === 'grok') await writeFile(promptFile, prompt, 'utf8');
+    const env = mergeAccountEnv(
+      buildWorkerEnv({
+        base: this.#env,
+        tmpDir: tmp,
+        ...(row.agent === 'grok' ? { extra: grokExtraEnv(this.#env) } : {}),
+      }),
+      plan.env,
+    );
     await updateAdeSession(this.#db, row.id, { status: 'running', runId, agentSessionId, hold: false });
     await appendToSession(this.#db, row.id, 'session.turn.started', {
       turnId: runId,
       text: item.text,
       runId,
       agent: row.agent,
-      model: row.model,
-    });
-    const env = buildWorkerEnv({
-      base: this.#env,
-      tmpDir: tmp,
-      ...(row.agent === 'grok' ? { extra: grokExtraEnv(this.#env) } : {}),
+      model: plan.model,
     });
     const command = [
       ...this.#commandFor(
         row.agent,
-        row.model,
+        plan.model,
         agentSessionId,
         resume,
         row.agent === 'grok' ? { promptFile, cwd: row.cwd } : {},
@@ -581,6 +693,8 @@ export class AdeService {
       stopped: false,
       lastText: '',
       stderr: '',
+      item,
+      tried: [...tried, plan.accountId],
       stop: () => {
         live.stopped = true;
         proc.stop('term');
@@ -609,6 +723,37 @@ export class AdeService {
     proc.stdin.end();
   }
 
+  async #switchAccount(
+    row: AdeSessionRow,
+    live: Live | undefined,
+    outcome: 'completed' | 'stopped' | 'failed' | 'lost',
+    lastText: string,
+    stderr: string,
+  ): Promise<boolean> {
+    if (!live || live.stopped || row.hold || outcome === 'stopped' || outcome === 'lost') return false;
+    // 额度用尽的句子常在标准错误。正文仍只收标准输出，判定两边都看。
+    const reason = accountExhaustedReason(`${lastText}\n${stderr}`, outcome === 'failed' ? 1 : 0);
+    if (!reason) return false;
+    const file = await this.#accountsFile();
+    const info = (await this.#baseAgents()).find((a) => a.id === row.agent);
+    let plan: ReturnType<typeof planSpawn>;
+    try {
+      plan = planSpawn(file, row.agent, row.model, info?.models ?? [], live.tried);
+    } catch {
+      return false;
+    }
+    if (!plan?.accountId || plan.accountId === live.tried[live.tried.length - 1]) return false;
+    await appendToSession(this.#db, row.id, 'session.turn.settled', {
+      turnId: live.runId,
+      runId: live.runId,
+      outcome: 'failed',
+      text: '额度用尽，换下一个账号',
+    });
+    await saveAccounts(this.#dataDir, withActive(file, row.agent, plan.accountId));
+    await this.#begin(await this.getSession(row.id), live.item, live.tried);
+    return true;
+  }
+
   async #finish(
     id: string,
     runId: string,
@@ -617,10 +762,12 @@ export class AdeService {
     stderr: string,
     writer: TranscriptWriter,
   ): Promise<void> {
+    const live = this.#live.get(id);
     this.#live.delete(id);
     await writer.close();
     const row = await this.getSession(id);
     if (row.runId !== runId) return;
+    if (await this.#switchAccount(row, live, outcome, lastText, stderr)) return;
     await appendToSession(this.#db, id, 'session.turn.settled', {
       turnId: runId,
       runId,

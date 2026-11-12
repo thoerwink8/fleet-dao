@@ -32,6 +32,12 @@ export function agentChoices(
   });
 }
 
+/** 中转模型在下拉里带前缀，显示时只留型号。 */
+export function modelLabel(id: string): string {
+  const hit = /^relay\.[^.]+\.(.+)$/.exec(id);
+  return hit?.[1] ? `中转 · ${hit[1]}` : id;
+}
+
 /** grok 默认 grok-4.7（在名单里才用）；别的用名单第一项。 */
 export function defaultModelFor(agent: Pick<AdeAgent, 'id' | 'models'>): string {
   if (agent.id === 'grok' && agent.models.includes('grok-4.7')) return 'grok-4.7';
