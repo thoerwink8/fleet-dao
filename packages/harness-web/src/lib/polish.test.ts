@@ -19,6 +19,7 @@ describe('枚举中文映射（只有 labels.ts 一处）', () => {
     expect(taskStatusLabel('claimed')).toEqual({ text: '已领取', raw: 'claimed' });
     expect(resultStatusLabel('blocked')).toEqual({ text: '被卡住', raw: 'blocked' });
     expect(outcomeLabel('retry')?.text).toBe('退回重试');
+    expect(outcomeLabel('stopped')?.text).toBe('已停止');
     expect(verdictLabel('passed')?.text).toBe('通过');
     expect(sessionModeLabel('resume')?.text).toBe('接着上次');
   });

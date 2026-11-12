@@ -1,8 +1,8 @@
 // 本机 ADE 会话（#3914）：工作区、单、会话都在 fleet2 库里。一轮一个进程，经 ProcessHost 起。
 // 人的话开跑；子会话结束只给父会话投一条 report，不自动把父会话再开起来。
 import { randomBytes, randomUUID } from 'node:crypto';
-import { access, mkdir } from 'node:fs/promises';
-import { delimiter, join } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { appendToSession } from '@fleet-dao/harness-api';
 import { type Forge, opKey } from '@fleet-dao/harness-contract';
 import { makeRedactor, type ProcessHost, readLines } from '@fleet-dao/harness-runner';
@@ -26,13 +26,27 @@ import {
   listRunningAdeSessions,
   updateAdeSession,
 } from '@fleet-dao/harness-store';
-import { buildWorkerEnv, type TranscriptParser, TranscriptWriter } from '@fleet-dao/harness-workers';
+import {
+  buildWorkerEnv,
+  GROK_UNATTENDED_ENV,
+  GrokTranscriptParser,
+  type TranscriptParser,
+  TranscriptWriter,
+} from '@fleet-dao/harness-workers';
 import { localOutboxDeps, processOutbox } from '../publish.ts';
+import { type AdeAgentInfo, discoverAgents, findAgentBin } from './agents.ts';
 import { addWorktree, existingDir, inspectRepo, worktreeDiff } from './git.ts';
 
+export type { AdeAgentInfo } from './agents.ts';
+
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:=,[\]-]{0,80}$/;
-const AGENTS = ['claude', 'codex', 'pi'] as const;
+const AGENTS = ['claude', 'codex', 'pi', 'grok'] as const;
 type AgentId = (typeof AGENTS)[number];
+
+export interface AdeCommandExtra {
+  promptFile?: string;
+  cwd?: string;
+}
 
 export class AdeError extends Error {
   readonly status: number;
@@ -43,7 +57,13 @@ export class AdeError extends Error {
   }
 }
 
-export function adeCommand(agent: string, model: string, agentSessionId: string, resume: boolean): string[] {
+export function adeCommand(
+  agent: string,
+  model: string,
+  agentSessionId: string,
+  resume: boolean,
+  extra: AdeCommandExtra = {},
+): string[] {
   if (!MODEL.test(model)) throw new AdeError(`模型名不合法：${model}`, 400);
   if (agent === 'claude') {
     return [
@@ -61,15 +81,31 @@ export function adeCommand(agent: string, model: string, agentSessionId: string,
       ...(resume ? ['--resume', agentSessionId] : ['--session-id', agentSessionId]),
     ];
   }
+  if (agent === 'grok') {
+    // grok 有 --permission-mode acceptEdits（改文件不问）。--always-approve 就是 bypassPermissions，本机不用。
+    // 续跑用 -r 点名同一个会话号；-c/--continue 只接「最近一个」，这里不用。
+    if (!extra.promptFile || !extra.cwd) throw new AdeError('grok 要先写好提示词文件和工作目录', 500);
+    return [
+      'grok',
+      '--prompt-file',
+      extra.promptFile,
+      '--output-format',
+      'streaming-json',
+      '--permission-mode',
+      'acceptEdits',
+      '--no-plan',
+      '-m',
+      model,
+      '--cwd',
+      extra.cwd,
+      resume ? '-r' : '-s',
+      agentSessionId,
+    ];
+  }
+  // codex、pi 没有接到它们自己的续跑旗标，接口仍标 resume: false。
   if (agent === 'codex') return ['codex', 'exec', '--skip-git-repo-check', '-m', model];
   if (agent === 'pi') return ['pi', '-p', model];
   throw new AdeError(`不认识的 agent：${agent}`, 400);
-}
-
-export interface AdeAgentInfo {
-  id: string;
-  resume: boolean;
-  models: string[];
 }
 
 export interface AdeOptions {
@@ -85,7 +121,10 @@ export interface AdeOptions {
 interface Live {
   runId: string;
   stopped: boolean;
+  /** 模型正文，只从标准输出收。 */
   lastText: string;
+  /** 标准错误，给调试视图。不进正文、不进预览。 */
+  stderr: string;
   stop: () => void;
 }
 
@@ -108,11 +147,17 @@ function remember(line: string, prev: string): string {
     const m = JSON.parse(t) as {
       type?: string;
       result?: unknown;
+      data?: unknown;
+      toolName?: unknown;
       message?: { content?: { type?: string; text?: string }[] };
     };
     if (m.type === 'assistant' && Array.isArray(m.message?.content)) {
       const texts = m.message.content.filter((b) => b.type === 'text' && b.text).map((b) => b.text ?? '');
       if (texts.length) return texts.join('\n');
+    }
+    if (m.type === 'text' && typeof m.data === 'string' && m.data) return prev + m.data;
+    if (m.type === 'tool_call' && typeof m.toolName === 'string' && m.toolName) {
+      return `${prev}${prev ? '\n' : ''}[${m.toolName}]`;
     }
     if (m.type === 'result' && typeof m.result === 'string' && m.result) return m.result;
   } catch {
@@ -121,21 +166,24 @@ function remember(line: string, prev: string): string {
   return prev;
 }
 
-async function onPath(cmd: string, env: NodeJS.ProcessEnv): Promise<boolean> {
-  const path = env.PATH ?? env.Path ?? '';
-  const exts = process.platform === 'win32' ? (env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
-  for (const dir of path.split(delimiter)) {
-    if (!dir) continue;
-    for (const ext of exts) {
-      try {
-        await access(join(dir, cmd + ext));
-        return true;
-      } catch {
-        /* 下一个目录 */
-      }
-    }
+const AGENT_BIN: Record<string, string> = { claude: 'reclaude', grok: 'grok', codex: 'codex', pi: 'pi' };
+
+function grokExtraEnv(base: NodeJS.ProcessEnv): Record<string, string> {
+  const extra: Record<string, string> = { ...GROK_UNATTENDED_ENV };
+  for (const k of [
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'all_proxy',
+    'no_proxy',
+  ]) {
+    const v = base[k];
+    if (v) extra[k] = v;
   }
-  return false;
+  return extra;
 }
 
 export class AdeService {
@@ -216,16 +264,7 @@ export class AdeService {
 
   async listAgents(): Promise<AdeAgentInfo[]> {
     if (this.#agents) return this.#agents();
-    const models = (this.#env.FLEET2_MODELS ?? this.#env.FLEET2_MODEL ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const list = models.length > 0 ? models : ['default'];
-    const found: AdeAgentInfo[] = [];
-    if (await onPath('reclaude', this.#env)) found.push({ id: 'claude', resume: true, models: list });
-    if (await onPath('codex', this.#env)) found.push({ id: 'codex', resume: false, models: list });
-    if (await onPath('pi', this.#env)) found.push({ id: 'pi', resume: false, models: list });
-    return found;
+    return discoverAgents(this.#env);
   }
 
   listTasks() {
@@ -260,6 +299,10 @@ export class AdeService {
   }) {
     if (!AGENTS.includes(input.agent as AgentId)) throw new AdeError(`不认识的 agent：${input.agent}`, 400);
     if (!MODEL.test(input.model)) throw new AdeError(`模型名不合法：${input.model}`, 400);
+    const listed = (await this.listAgents()).find((a) => a.id === input.agent);
+    if (listed?.ready === false) {
+      throw new AdeError(listed.note ? `${input.agent} ${listed.note}` : `${input.agent} 现在不能用`, 400);
+    }
     const ws = await getAdeWorkspace(this.#db, input.workspaceId);
     if (!ws) throw new AdeError('没有这个工作区', 404);
     let taskTitle = '';
@@ -471,12 +514,13 @@ export class AdeService {
     const runId = `ade-${row.id}-${randomBytes(4).toString('hex')}`;
     const resume = row.agentSessionId !== null;
     const agentSessionId = row.agentSessionId ?? randomUUID();
+    const nativeResume = row.agent === 'claude' || row.agent === 'grok';
     const tmp = join(this.#dataDir, 'tmp', runId);
     await mkdir(tmp, { recursive: true });
     const prompt =
-      row.agent === 'claude' || !resume
-        ? item.text
-        : `（这个 agent 没有原生续接，上文在会话页里）\n${item.text}`;
+      nativeResume || !resume ? item.text : `（这个 agent 没有原生续接，上文在会话页里）\n${item.text}`;
+    const promptFile = join(tmp, 'prompt.md');
+    if (row.agent === 'grok') await writeFile(promptFile, prompt, 'utf8');
     await updateAdeSession(this.#db, row.id, { status: 'running', runId, agentSessionId, hold: false });
     await appendToSession(this.#db, row.id, 'session.turn.started', {
       turnId: runId,
@@ -485,8 +529,24 @@ export class AdeService {
       agent: row.agent,
       model: row.model,
     });
-    const env = buildWorkerEnv({ base: this.#env, tmpDir: tmp });
-    const command = this.#commandFor(row.agent, row.model, agentSessionId, resume);
+    const env = buildWorkerEnv({
+      base: this.#env,
+      tmpDir: tmp,
+      ...(row.agent === 'grok' ? { extra: grokExtraEnv(this.#env) } : {}),
+    });
+    const command = [
+      ...this.#commandFor(
+        row.agent,
+        row.model,
+        agentSessionId,
+        resume,
+        row.agent === 'grok' ? { promptFile, cwd: row.cwd } : {},
+      ),
+    ];
+    if (command[0] === AGENT_BIN[row.agent]) {
+      const resolved = await findAgentBin(row.agent, this.#env);
+      if (resolved) command[0] = resolved;
+    }
     const proc = this.#host.start({ command, cwd: row.cwd, env, runId });
     const writer = new TranscriptWriter({
       db: this.#db,
@@ -494,12 +554,18 @@ export class AdeService {
       redact: makeRedactor([]),
       flushMs: this.#flushMs,
       maxBatch: 1,
-      ...(row.agent === 'claude' ? {} : { parser: textParser(runId) }),
+      ...(row.agent === 'claude'
+        ? {}
+        : {
+            parser:
+              row.agent === 'grok' ? new GrokTranscriptParser(runId, makeRedactor([])) : textParser(runId),
+          }),
     });
     const live: Live = {
       runId,
       stopped: false,
       lastText: '',
+      stderr: '',
       stop: () => {
         live.stopped = true;
         proc.stop('term');
@@ -510,18 +576,21 @@ export class AdeService {
     const done = (outcome: 'completed' | 'stopped' | 'failed') => {
       if (once) return;
       once = true;
-      void this.#lock(row.id, () => this.#finish(row.id, runId, outcome, live.lastText, writer));
+      void this.#lock(row.id, () => this.#finish(row.id, runId, outcome, live.lastText, live.stderr, writer));
     };
     readLines(proc.stdout, (line) => {
       live.lastText = remember(line, live.lastText);
       writer.pushLine(line);
     });
+    // 标准错误不进过程流，也不当成模型说的话。调试视图读收场事件上的 stderr。
     readLines(proc.stderr, (line) => {
-      live.lastText = remember(line, live.lastText);
+      const t = line.trim();
+      if (!t) return;
+      live.stderr = `${live.stderr}${live.stderr ? '\n' : ''}${t}`.slice(-2000);
     });
     proc.onError(() => done('failed'));
     proc.onExit((code) => done(live.stopped ? 'stopped' : code === 0 ? 'completed' : 'failed'));
-    proc.stdin.write(prompt);
+    if (row.agent !== 'grok') proc.stdin.write(prompt);
     proc.stdin.end();
   }
 
@@ -530,6 +599,7 @@ export class AdeService {
     runId: string,
     outcome: 'completed' | 'stopped' | 'failed' | 'lost',
     lastText: string,
+    stderr: string,
     writer: TranscriptWriter,
   ): Promise<void> {
     this.#live.delete(id);
@@ -541,6 +611,7 @@ export class AdeService {
       runId,
       outcome,
       text: lastText.slice(-500),
+      ...(stderr ? { stderr } : {}),
     });
     const queue = adeQueue(row.queue);
     // 用户点停止会先置 hold，队列停在那儿。插队只停掉进程、不置 hold，收场后接着跑队首。

@@ -22,6 +22,7 @@ class LocalProcess implements HostProcess {
       // 自成一个进程组；脱离了组的子孙靠会话标记另外认
       detached: POSIX,
       windowsHide: true,
+      ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     });
   }
 

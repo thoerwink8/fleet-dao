@@ -35,6 +35,8 @@ export interface RunSpec {
   signal?: AbortSignal;
   /** 起进程的实现；不给就按平台挑（defaultHost）。 */
   host?: ProcessHost;
+  /** 传给 ProcessHost：Windows 命令行已经是原样，不要再包引号。 */
+  windowsVerbatimArguments?: boolean;
 }
 
 /** Windows 且找得到 jobrun 就走它；否则 local（没有 jobrun 的 Windows 上收完剩几个查不了，照实回 undefined）。 */
@@ -164,7 +166,13 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
     }
     let child: HostProcess;
     try {
-      child = host.start({ command: spec.command, cwd: spec.cwd, env: spec.env, runId: spec.runId });
+      child = host.start({
+        command: spec.command,
+        cwd: spec.cwd,
+        env: spec.env,
+        runId: spec.runId,
+        ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+      });
     } catch (err) {
       reaped = { found: 0, leftovers: 0 };
       finish({ spawnError: spec.redact(err instanceof Error ? err.message : String(err)) });

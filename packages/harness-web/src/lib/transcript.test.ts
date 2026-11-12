@@ -1,7 +1,15 @@
 // 工人过程的展示模型（#3781）：调用和结果按 toolUseId 配对、折叠、和会话事件按事件号串起来、跳转编号。
 import { describe, expect, it } from 'vitest';
 import { eventsUrl, historyUrl } from './api';
-import { buildSteps, buildTimeline, runIdOfSession, summarizeToolRun, workerSessionOf } from './transcript';
+import {
+  buildSteps,
+  buildTimeline,
+  endLine,
+  runIdOfSession,
+  summarizeToolRun,
+  turnRunIds,
+  workerSessionOf,
+} from './transcript';
 import type { FeedEvent } from './types';
 
 let id = 0;
@@ -109,6 +117,19 @@ describe('buildTimeline：折叠和串联', () => {
     expect(run?.kind === 'toolrun' && run.failed).toBe(1);
   });
 
+  it('被停的一轮留一行已停止，用时从这一轮开始算，stderr 不在这行里', () => {
+    const start = ev('session.turn.started', { runId: 'r1' });
+    const settled = {
+      ...ev('session.turn.settled', { runId: 'r1', outcome: 'stopped', stderr: '同步配置…' }),
+      createdAt: new Date(Date.parse(start.createdAt) + 4000).toISOString(),
+    };
+    const items = buildTimeline([start, settled], []);
+    const end = items.find((i) => i.kind === 'end');
+    expect(end?.kind === 'end' && endLine(end.step)).toBe('已停止 · 用时 4.0 秒');
+    expect(end?.kind === 'end' && end.step.text).toBe('');
+    expect(items.some((i) => i.kind === 'event' && i.ev.type === 'session.turn.settled')).toBe(true);
+  });
+
   it('会话里的进度和过程按事件号交错；进度把两串工具调用隔开，各自折叠', () => {
     const t1 = [use('1'), res('1'), use('2'), res('2'), use('3'), res('3')];
     const p = progress('进度一');
@@ -147,6 +168,14 @@ describe('buildTimeline：折叠和串联', () => {
 
 describe('跳转：指挥会话 ↔ 工人会话', () => {
   it('工人会话号 worker-<runId> 取出 runId；别的会话没有', () => {
+    expect(
+      turnRunIds([
+        { type: 'session.turn.started', payload: { runId: 'a' } },
+        { type: 'session.turn.started', payload: { runId: 'a' } },
+        { type: 'session.message', payload: {} },
+        { type: 'session.turn.started', payload: { runId: 'b' } },
+      ]),
+    ).toEqual(['a', 'b']);
     expect(runIdOfSession('worker-d12-a1')).toBe('d12-a1');
     expect(runIdOfSession('cmd-demo-login-fix')).toBeNull();
   });

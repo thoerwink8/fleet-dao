@@ -12,6 +12,11 @@ export interface HostSpawnSpec {
   /** 整份环境；会话标记由实现加上。 */
   env: Record<string, string>;
   runId: string;
+  /**
+   * Windows 上参数已经按 CreateProcess 的原样写好（例如 cmd.exe /s /c 外面那层引号）。
+   * 再让运行时包一层就会把 .cmd 跑歪。
+   */
+  windowsVerbatimArguments?: boolean;
 }
 
 export interface HostReap {

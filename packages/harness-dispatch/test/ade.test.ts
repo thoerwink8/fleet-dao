@@ -1,6 +1,6 @@
 // 本机 ADE（#3914）：不连 GitHub 也能建工作区、开会话、看到流式回答、续一句、停下、子会话回报、补丁落文件。
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -15,10 +15,10 @@ import { insertAdeSession, readStream, updateAdeSession } from '@fleet-dao/harne
 import { createTestDb, type TestDb } from '@fleet-dao/harness-store/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createAdeHandler } from '../src/ade/http.ts';
-import { AdeService } from '../src/ade/service.ts';
+import { AdeService, adeCommand } from '../src/ade/service.ts';
 
 const TOKEN = 'b'.repeat(64);
-let mode: 'fake' | 'hang' = 'fake';
+let mode: 'fake' | 'hang' | 'stderr' = 'fake';
 
 class ScriptProc implements HostProcess {
   pid = 42;
@@ -63,6 +63,11 @@ const host: ProcessHost = {
     queueMicrotask(() => {
       if (proc.ended) return;
       if (spec.command[0] === 'hang') return;
+      if (mode === 'stderr') {
+        proc.stderr.write('同步配置…\n');
+        proc.finish(0, null);
+        return;
+      }
       proc.say('你好');
     });
     return proc;
@@ -217,6 +222,27 @@ describe('会话', () => {
     expect((await svc.getSession(s.id)).hold).toBe(true);
   });
 
+  it('只有 stderr、没有正文时，stderr 不进过程流也不进收场正文', async () => {
+    mode = 'stderr';
+    const dir = mkdtempSync(join(root, 'ws-'));
+    const ws = await svc.addWorkspace('错', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+      text: '看文件',
+    });
+    await waitIdle(s.id);
+    const evs = await readStream(t.db, `session:${s.id}`, 0, 20);
+    const settled = evs.find((e) => e.type === 'session.turn.settled');
+    expect(String(settled?.payload.text ?? '')).not.toContain('同步配置');
+    expect(settled?.payload.stderr).toContain('同步配置');
+    const runId = evs.find((e) => e.type === 'session.turn.started')?.payload.runId;
+    const transcript = typeof runId === 'string' ? await readStream(t.db, `transcript:${runId}`, 0, 20) : [];
+    expect(JSON.stringify(transcript)).not.toContain('同步配置');
+  });
+
   it('跑着的时候可以撤回队列，插队会停掉当前轮再跑那一句', async () => {
     mode = 'hang';
     const dir = mkdtempSync(join(root, 'ws-'));
@@ -353,3 +379,114 @@ async function textsOfFile(p: string): Promise<string> {
   const { readFile } = await import('node:fs/promises');
   return readFile(p, 'utf8');
 }
+
+function flag(cmd: string[], name: string): string | undefined {
+  const i = cmd.indexOf(name);
+  return i >= 0 ? cmd[i + 1] : undefined;
+}
+
+function isGrok(bin: string): boolean {
+  return bin === 'grok' || bin === 'grok.exe' || /[/\\]grok(\.exe)?$/i.test(bin);
+}
+
+describe('真命令', () => {
+  it('claude 第二次带同一个会话号的 --resume；grok 用 -r 和 acceptEdits，流里有字和工具；没登录的开不了', async () => {
+    const calls: string[][] = [];
+    const realHost: ProcessHost = {
+      kind: 'local',
+      start(spec) {
+        calls.push(spec.command);
+        const proc = new ScriptProc();
+        queueMicrotask(() => {
+          if (proc.ended) return;
+          if (isGrok(spec.command[0] ?? '')) {
+            proc.stdout.write(`${JSON.stringify({ type: 'text', data: '改好了' })}\n`);
+            proc.stdout.write(
+              `${JSON.stringify({ type: 'tool_call', toolName: 'read_file', toolCallId: 't1', rawInput: { path: 'a.txt' } })}\n`,
+            );
+            proc.stdout.write(`${JSON.stringify({ type: 'end', stopReason: 'end_turn' })}\n`);
+            proc.finish(0, null);
+            return;
+          }
+          proc.say('记住了');
+        });
+        return proc;
+      },
+      async attach() {
+        return false;
+      },
+    };
+    const local = new AdeService({
+      db: t.db,
+      dataDir: root,
+      host: realHost,
+      flushMs: 20,
+      commandFor: adeCommand,
+      agents: async () => [
+        { id: 'claude', resume: true, models: ['sonnet'], ready: true },
+        { id: 'grok', resume: true, models: ['grok-4.7'], ready: true },
+        { id: 'codex', resume: false, models: [], ready: false, note: '未登录' },
+        { id: 'pi', resume: false, models: [], ready: false, note: '未登录' },
+      ],
+    });
+    const dir = mkdtempSync(join(root, 'ws-'));
+    const ws = await local.addWorkspace('真', dir);
+    await expect(
+      local.createSession({ workspaceId: ws.id, agent: 'codex', model: 'default', worktree: false }),
+    ).rejects.toThrow(/未登录/);
+
+    const claude = await local.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'sonnet',
+      worktree: false,
+      text: '第一句',
+    });
+    await waitIdle(claude.id);
+    await local.postMessage(claude.id, {
+      text: '第二句',
+      from: { kind: 'user', id: null },
+      mode: 'send',
+      kind: 'chat',
+      expectReply: true,
+      hops: 0,
+    });
+    await waitIdle(claude.id);
+    const c1 = calls[0] ?? [];
+    const c2 = calls[1] ?? [];
+    expect(flag(c1, '--session-id')).toBeTruthy();
+    expect(flag(c2, '--resume')).toBe(flag(c1, '--session-id'));
+    expect(c2.join(' ')).not.toContain('bypassPermissions');
+
+    const grok = await local.createSession({
+      workspaceId: ws.id,
+      agent: 'grok',
+      model: 'grok-4.7',
+      worktree: false,
+      text: '改一行',
+    });
+    await waitIdle(grok.id);
+    expect(await textsOf(grok.id)).toContain('改好了');
+    expect(await textsOf(grok.id)).toContain('read_file');
+    await local.postMessage(grok.id, {
+      text: '还记得吗',
+      from: { kind: 'user', id: null },
+      mode: 'send',
+      kind: 'chat',
+      expectReply: true,
+      hops: 0,
+    });
+    await waitIdle(grok.id);
+    const g1 = calls[2] ?? [];
+    const g2 = calls[3] ?? [];
+    expect(isGrok(g1[0] ?? '')).toBe(true);
+    expect(flag(g2, '-r')).toBe(flag(g1, '-s'));
+    expect(g2).toContain('acceptEdits');
+    expect(g2).not.toContain('--always-approve');
+    expect(g2.join(' ')).not.toContain('bypassPermissions');
+    const promptPath = flag(g2, '--prompt-file');
+    expect(promptPath).toBeTruthy();
+    expect(readFileSync(promptPath ?? '', 'utf8')).toBe('还记得吗');
+    expect(readFileSync(promptPath ?? '', 'utf8')).not.toContain('无原生续接');
+  });
+});

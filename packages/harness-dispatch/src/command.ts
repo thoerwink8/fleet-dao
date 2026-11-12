@@ -3,7 +3,7 @@
 // 环境走工人环境白名单：检查命令跑的是工人写的代码，不能带宿主的任何凭据（H1）。
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { type Frame, type Redactor, runProcess } from '@fleet-dao/harness-runner';
+import { type Frame, type ProcessHost, type Redactor, runProcess } from '@fleet-dao/harness-runner';
 import { buildWorkerEnv } from '@fleet-dao/harness-workers';
 
 const EVERY_LINE_IS_PROGRESS = (): Frame => ({
@@ -33,6 +33,10 @@ export interface CommandSpec {
    * 只许内核跑它自己建的目录里的 git：工人写的东西（检查命令、工人的工作目录）绝不能走这条。
    */
   trustedEnv?: Readonly<Record<string, string>>;
+  /** 不给就按平台挑。登录探测要原样命令行时指定 localHost。 */
+  host?: ProcessHost;
+  /** Windows 上命令行已经按 CreateProcess 写好，不要再包一层引号。 */
+  windowsVerbatimArguments?: boolean;
 }
 
 export interface CommandResult {
@@ -72,6 +76,8 @@ export async function runCommand(spec: CommandSpec): Promise<CommandResult> {
       classify: EVERY_LINE_IS_PROGRESS,
       redact: spec.redact,
       ...(spec.signal ? { signal: spec.signal } : {}),
+      ...(spec.host ? { host: spec.host } : {}),
+      ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     },
     {
       onFrame(_frame, line) {

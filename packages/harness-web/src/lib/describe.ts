@@ -68,8 +68,9 @@ export function summaryOf(type: string, p: Record<string, unknown>): string {
     case 'session.message':
       return str(p.text) ?? '会话消息';
     case 'session.turn.started':
-    case 'session.turn.settled':
       return str(p.text) ?? str(p.summary) ?? TYPE_LABEL[type] ?? type;
+    case 'session.turn.settled':
+      return str(p.text) ?? str(p.summary) ?? outcomeLabel(str(p.outcome))?.text ?? TYPE_LABEL[type] ?? type;
     default:
       return TYPE_LABEL[type] ?? type;
   }

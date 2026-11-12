@@ -11,6 +11,8 @@ import {
   adeGet,
   adeQueueAct,
   adeSend,
+  agentChoices,
+  defaultModelFor,
   queueOf,
 } from '../lib/ade';
 import { Button } from '../ui/button';
@@ -124,10 +126,10 @@ function Picker({
 }: {
   label: string;
   value: string;
-  options: { id: string; label: string }[];
+  options: { id: string; label: string; disabled?: boolean }[];
   onChange: (id: string) => void;
 }) {
-  const current = options.find((o) => o.id === value) ?? options[0];
+  const current = options.find((o) => o.id === value) ?? options.find((o) => !o.disabled) ?? options[0];
   return (
     <Menu>
       <MenuTrigger asChild>
@@ -137,7 +139,13 @@ function Picker({
       </MenuTrigger>
       <MenuContent>
         {options.map((o) => (
-          <MenuItem key={o.id} onSelect={() => onChange(o.id)}>
+          <MenuItem
+            key={o.id}
+            disabled={o.disabled === true}
+            onSelect={() => {
+              if (!o.disabled) onChange(o.id);
+            }}
+          >
             {o.label}
           </MenuItem>
         ))}
@@ -151,7 +159,7 @@ export function EmptyComposer() {
   const { workspaces, agents, error, reload } = useAdeHome();
   const [wsId, setWsId] = useState('');
   const [agent, setAgent] = useState('claude');
-  const [model, setModel] = useState('default');
+  const [model, setModel] = useState('sonnet');
   const [tier, setTier] = useState('default');
   const [worktree, setWorktree] = useState(false);
   const [text, setText] = useState('');
@@ -159,8 +167,14 @@ export function EmptyComposer() {
   const [msg, setMsg] = useState('');
   const [addOpen, setAddOpen] = useState(false);
   const ws = workspaces.find((w) => w.id === wsId) ?? workspaces[0];
-  const agentInfo = agents.find((a) => a.id === agent);
-  const models = agentInfo?.models?.length ? agentInfo.models : ['default'];
+  const agentInfo =
+    agents.find((a) => a.id === agent && a.ready !== false) ?? agents.find((a) => a.ready !== false);
+  const models = agentInfo?.models?.length ? agentInfo.models : ['sonnet'];
+  useEffect(() => {
+    if (!agentInfo || agentInfo.id === agent) return;
+    setAgent(agentInfo.id);
+    setModel(defaultModelFor(agentInfo));
+  }, [agent, agentInfo]);
   const open = async () => {
     if (!ws) {
       setAddOpen(true);
@@ -218,14 +232,14 @@ export function EmptyComposer() {
             />
             <Picker
               label="agent"
-              value={agent}
-              options={(agents.length ? agents : [{ id: 'claude', resume: true, models: ['default'] }]).map(
-                (a) => ({
-                  id: a.id,
-                  label: a.resume ? a.id : `${a.id} · 无原生续接`,
-                }),
-              )}
-              onChange={setAgent}
+              value={agentInfo?.id ?? agent}
+              options={agentChoices(agents)}
+              onChange={(id) => {
+                const info = agents.find((a) => a.id === id);
+                if (!info || info.ready === false) return;
+                setAgent(id);
+                setModel(defaultModelFor(info));
+              }}
             />
             <Picker
               label="模型"
@@ -497,8 +511,9 @@ export function AdeTasks() {
   const [msg, setMsg] = useState('');
   const [addOpen, setAddOpen] = useState(false);
   const ws = workspaces.find((w) => w.id === wsId) ?? workspaces[0];
-  const agent = agents[0]?.id ?? 'claude';
-  const model = agents[0]?.models[0] ?? 'default';
+  const agentInfo = agents.find((a) => a.ready !== false);
+  const agent = agentInfo?.id ?? 'claude';
+  const model = agentInfo ? defaultModelFor(agentInfo) : 'sonnet';
   const load = useCallback(() => {
     let dead = false;
     adeGet<{ tasks: AdeTask[] }>('/tasks')

@@ -54,8 +54,8 @@ export function summarizeDiff(diff: string): { files: number; add: number; del: 
   };
 }
 
-const READ = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']);
-const EDIT = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const READ = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'read_file', 'grep']);
+const EDIT = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'search_replace', 'write_file']);
 
 export function toolPhrase(steps: { name: string }[]): string {
   if (steps.length === 0) return '调了工具';
