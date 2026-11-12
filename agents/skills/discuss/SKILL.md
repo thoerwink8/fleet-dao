@@ -19,10 +19,11 @@ description: 重大方案拍板前让别家挑错时读（默认 GPT，没收敛
 ## 本机工具
 脚本在本技能 `scripts/`，下面写成 `$S`（Claude Code：`~/.claude/skills/discuss/scripts`；别家：`~/.agents/skills/discuss/scripts`）。
 
-`node $S/ask.mjs --text 题面.md --round <0|1|2…> [--models gpt]`
+`node $S/ask.mjs --text 题面.md --round <0|1|2…> [--models gpt] [--gpt-model 型号]`
 
-- 要装好并登录 Cursor 命令行：先跑 `cursor-agent status`，没装就照实报「这台没装、没讨论成」，不拿别的工具或自己再想一遍冒充。
+- GPT 优先走本机 `~/.fleet-dao/discuss.env` 里的 `DISCUSS_GPT_BASE_URL` 和 `DISCUSS_GPT_API_KEY`（进程里已有的同名变量优先）。两个都有才走 OpenAI 兼容的 `chat/completions`，默认模型 `gpt-6.1-sol`（`--gpt-model` 可换）。没配再走 Cursor。
+- 别家，以及没配上面两个变量时的 GPT，仍要本机装好并登录，先跑 `cursor-agent status`。没装、没登录就照实报「这台没装、没讨论成」，不拿别的工具或自己再想一遍冒充。
 - 默认只问 GPT；盲设计或 GPT 答不上才加别家（`--models gpt,kimi,glm`，最多 3 家）。界面类的题换 Kimi 或 GLM。
-- 每家一个只读会话，默认 180 秒超时（`--limit` 最多 300）；超时、退出码非 0、没输出都记成「没答上」。退出码 2 = 没讨论成，别拿自己的方案冒充结论。
+- 每家有硬超时，默认 180 秒（`--limit` 最多 300）。超时、非 2xx、空回答、退出码非 0、没输出都记成「没答上」。配了中转却失败，不改走 Cursor。退出码 2 = 没讨论成，别拿自己的方案冒充结论。
 - `ask.mjs` 每次都是新会话，接着聊要把上一轮原话贴进新题面。
-- 拍板前要不同厂商的反方读整份分析：`node $S/second-opinion.mjs --text 材料.md --author-family <族[,族…]>`。退出码 0 同意、1 有异议、2 没查成（不算同意）。
+- 拍板前要不同厂商的反方读整份分析：`node $S/second-opinion.mjs --text 材料.md --author-family <族[,族…]> [--gpt-model 型号]`。反方轮到 GPT 时同样先走这条中转；没配则仍走原来的执行体。退出码 0 同意、1 有异议、2 没查成（不算同意）。
