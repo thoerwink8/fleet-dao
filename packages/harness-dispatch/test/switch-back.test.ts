@@ -174,10 +174,10 @@ describe('切回表的每一行', () => {
 
   it('有本地提交、没推：撤掉还没做的推送，补丁留在 publish_runs，放回；之后推不出去', async () => {
     await record();
-    expect(await opStates()).toEqual(['git.push:pending']);
+    expect(await opStates()).toEqual(['change.push:pending']);
     expect((await taskStage(deps(), ref)).stage).toBe('local-commit');
     expect(await switchBack(deps(), ref)).toMatchObject({ done: true, stage: 'local-commit' });
-    expect(await opStates()).toEqual(['git.push:dead']);
+    expect(await opStates()).toEqual(['change.push:dead']);
     expect((await getPublishRun(t.db, 'd1-a1'))?.patch).toContain('changed');
     expect(git(remote, 'branch', '--list', 'fleet2*').trim()).toBe('');
     expect(released).toHaveLength(1);
@@ -186,14 +186,14 @@ describe('切回表的每一行', () => {
   it('推了分支、没开 PR：分支改名 fleet2-abandoned/…留着，撤掉开 PR 的动作，放回重派', async () => {
     await record();
     await processOutbox(publishDeps()); // 只推：开 PR 的动作排着
-    expect(await opStates()).toEqual(['git.push:done', 'github.pr.open:pending']);
+    expect(await opStates()).toEqual(['change.push:done', 'change.pr.open:pending']);
     expect((await taskStage(deps(), ref)).stage).toBe('pushed-no-pr');
 
     const r = await switchBack(deps(), ref);
     expect(r).toMatchObject({ done: true, stage: 'pushed-no-pr' });
     expect(git(remote, 'branch', '--list', 'fleet2-abandoned/*').trim()).toBe('fleet2-abandoned/1-d1-a1');
     expect(git(remote, 'branch', '--list', 'fleet2/*').trim()).toBe('');
-    expect(await opStates()).toEqual(['git.push:done', 'github.pr.open:dead']);
+    expect(await opStates()).toEqual(['change.push:done', 'change.pr.open:dead']);
     expect(released).toEqual([{ state: 'queued', doing: expect.any(String) }]);
   });
 
@@ -253,12 +253,12 @@ describe('切回表的每一行', () => {
   it('外部动作结果未知（领着或 unknown）：不转手，等对账出结论', async () => {
     await record();
     await t.pg.exec(
-      "update fleet2.outbox set state = 'unknown', last_error = '超时' where kind = 'git.push'",
+      "update fleet2.outbox set state = 'unknown', last_error = '超时' where kind = 'change.push'",
     );
     const r = await switchBack(deps(), ref);
     expect(r).toMatchObject({ done: false, stage: 'external-unknown', action: 'wait' });
     expect(released).toEqual([]);
-    expect(await opStates()).toEqual(['git.push:unknown']);
+    expect(await opStates()).toEqual(['change.push:unknown']);
   });
 
   it('补偿失败（分支改名没成）：停下报警，所有权不放；修好后再调一次接着做完', async () => {

@@ -17,6 +17,10 @@ export const StreamId = z
 export const EVENT_TYPES = [
   'session.turn.started',
   'session.turn.settled',
+  // ADE 会话（#3914）：人在驾驶舱里建的会话。created 记工作区、agent、模型、父会话；message 是一句话
+  // （人对会话、会话对会话都是它），载荷形状见文件末尾的 AdeSessionCreated / AdeSessionMessage。
+  'session.created',
+  'session.message',
   'worker.spawned',
   'worker.settled',
   // 工人以会话用户跑时（#3814）：收 scope、删交出去的目录的结局，收不干净也照实记
@@ -118,6 +122,18 @@ export function parseOutbox(raw: unknown): { ok: true; kind: OutboxKind } | { ok
   return { ok: false, why: `出站种类 ${String(kind)} 这一版不认` };
 }
 
+/**
+ * 外送去哪个平台（#3914）：github、gitlab 是远端平台；local 是不连任何平台，结果是本地分支加补丁文件。
+ * 出站载荷里的 forge 缺省按 github 读（改名之前写的行都是 GitHub）。
+ */
+export const FORGES = ['github', 'gitlab', 'local'] as const;
+export type Forge = (typeof FORGES)[number];
+
+export function forgeOf(payload: unknown): Forge {
+  const f = (payload as { forge?: unknown } | null)?.forge;
+  return FORGES.includes(f as Forge) ? (f as Forge) : 'github';
+}
+
 /** 一张单的事件流名（真执行的推送、开 PR、切回记在这条流上）。 */
 export const issueStream = (ref: { repo: string; issue: number }): string => `issue:${ref.repo}#${ref.issue}`;
 
@@ -183,3 +199,30 @@ export const TranscriptResult = z.object({
   numTurns: z.number().nullable(),
 });
 export const TranscriptDropped = z.object({ runId: z.string(), count: z.number().int().positive() });
+
+/** 人在驾驶舱里建的会话（#3914）。写在 session:<号> 上，和轮次事件同一条流。 */
+export const AdeSessionCreated = z.object({
+  workspaceId: z.string().min(1),
+  agent: z.string().min(1),
+  model: z.string().min(1),
+  worktree: z.boolean(),
+  parentId: z.string().nullable(),
+  taskId: z.number().int().positive().nullable(),
+  cwd: z.string().min(1),
+});
+export type AdeSessionCreated = z.infer<typeof AdeSessionCreated>;
+
+/** 一句话：人对会话、会话对会话都是它。kind=report 是子会话结束给父会话的回报，不自动开下一轮。 */
+export const AdeSessionMessage = z.object({
+  from: z.object({
+    kind: z.enum(['user', 'session']),
+    id: z.string().nullable(),
+  }),
+  to: z.string().min(1),
+  text: z.string(),
+  kind: z.enum(['chat', 'report']),
+  expectReply: z.boolean(),
+  hops: z.number().int().nonnegative(),
+  mode: z.enum(['send', 'queue', 'jump']).optional(),
+});
+export type AdeSessionMessage = z.infer<typeof AdeSessionMessage>;

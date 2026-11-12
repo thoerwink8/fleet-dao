@@ -1,3 +1,4 @@
+export * from './ade/index.ts';
 export * from './command.ts';
 export * from './dispatcher.ts';
 export * from './github-app.ts';

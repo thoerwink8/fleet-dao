@@ -1,7 +1,7 @@
 // 装配档案 local（另一个工作环境，Windows 本机，#3858，决定 0125 第 1 条，讨论稿 6.6）：
 //   存储 PGlite 落文件（用户数据目录，不在安装目录）；内核、驾驶舱口、静态页一个进程，只听 127.0.0.1；
 //   本机令牌文件鉴权；没有 cgroup、没有出网关，隔离档位如实读回；没有 GitHub 写（进程里没有任何 GitHub 凭据）。
-// 这一片不接任务来源和外送（后续片）：taskFor、readMerged 是明说"没接"的桩，没有批次时节拍什么也不做。
+// 批次驱动的 taskFor、readMerged 仍是桩。人在驾驶舱建的工作区、单、会话走 ADE（src/ade，#3914）。
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -10,9 +10,10 @@ import {
   ensureLocalToken,
   localAuthorize,
 } from '@fleet-dao/harness-api';
-import { makeRedactor } from '@fleet-dao/harness-runner';
+import { defaultHost, makeHostdHost, makeRedactor } from '@fleet-dao/harness-runner';
 import { openLocalDb } from '@fleet-dao/harness-store/local-db';
 import { CLAUDE_PERMISSION_MODES, type ClaudePermissionMode } from '@fleet-dao/harness-workers';
+import { AdeService, createAdeHandler } from '../ade/index.ts';
 import { restrictToCurrentUserWindows } from './acl.ts';
 import { type Assembly, ConfigError, type Env, log, port } from './config.ts';
 import { readIsolation } from './isolation.ts';
@@ -60,6 +61,9 @@ export async function assembleLocal(
     // 当前用户名取自进程环境（给的 env 只是覆盖配置项，可以不带 USERNAME 这类系统变量）
     restrictToCurrentUserWindows(file, { ...process.env, ...env }, makeRedactor([])),
   );
+  const host = env.FLEET2_HOST === 'hostd' ? makeHostdHost() : defaultHost();
+  const ade = new AdeService({ db: store.db, dataDir, host, env: { ...process.env, ...env } });
+  await ade.recover();
   const cockpit = createCockpitApi({
     db: store.db,
     authorize: localAuthorize(token),
@@ -77,6 +81,7 @@ export async function assembleLocal(
     cockpit,
     token,
     distDir,
+    ade: createAdeHandler(ade, token),
     status: () => ({
       profile: 'local',
       version,
@@ -84,6 +89,7 @@ export async function assembleLocal(
       dataDir,
       isolation,
       externalWrites: { github: false, egressGateway: false },
+      ade: true,
       hosts: [{ id: 'local', kind: 'local', label: '本机', isolation: isolation.level }],
       settings: [
         { key: 'FLEET2_DATA_DIR', value: dataDir, note: '数据目录（用户数据目录，不在安装目录）' },

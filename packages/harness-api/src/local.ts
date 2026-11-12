@@ -99,6 +99,8 @@ export interface LocalStatus {
   externalWrites: { github: boolean; egressGateway: boolean };
   hosts: { id: string; kind: 'local' | 'ssh'; label: string; isolation: 'strong' | 'medium' | 'weak' }[];
   settings: { key: string; value: string; note: string }[];
+  /** 本机 ADE 接口挂上了没有（#3914）。香港那份没有这个字段。 */
+  ade?: boolean;
 }
 
 export interface LocalGatewayOptions {
@@ -107,6 +109,8 @@ export interface LocalGatewayOptions {
   /** 打包好的页面目录（base=/）。不存在就只有接口。 */
   distDir?: string;
   status: () => LocalStatus | Promise<LocalStatus>;
+  /** /api/ade：本机会话。返回 true 表示已经写完响应。不传就 404。 */
+  ade?: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 }
 
 export interface LocalGateway {
@@ -201,6 +205,12 @@ export function createLocalGateway(o: LocalGatewayOptions): LocalGateway {
       res
         .writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         .end(JSON.stringify(await o.status()));
+      return;
+    }
+    if (p === '/api/ade' || p.startsWith('/api/ade/')) {
+      if (!o.ade) return reply(res, 404, '没有这个接口');
+      const handled = await o.ade(req, res);
+      if (!handled && !res.headersSent) reply(res, 404, '没有这个接口');
       return;
     }
     if (p.startsWith('/api/')) return await o.cockpit.handler(req, res);

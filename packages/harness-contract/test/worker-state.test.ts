@@ -2,6 +2,36 @@
 import { describe, expect, it } from 'vitest';
 import { countStuck, DEADLINE_GRACE_MS, deriveWorkerState, type TailEvent } from '../src/worker-state.ts';
 
+describe('ADE 轮次结束', () => {
+  const now = Date.parse('2026-11-12T00:00:00Z');
+  it('带 outcome 的 settled：lost 卡住，其余空闲；没有 outcome 的不盖掉前面的做完', () => {
+    expect(
+      deriveWorkerState(
+        [{ type: 'session.turn.started' }, { type: 'session.turn.settled', outcome: 'completed' }],
+        now,
+      ),
+    ).toBe('waiting');
+    expect(
+      deriveWorkerState(
+        [{ type: 'session.turn.started' }, { type: 'session.turn.settled', outcome: 'stopped' }],
+        now,
+      ),
+    ).toBe('waiting');
+    expect(
+      deriveWorkerState(
+        [{ type: 'session.turn.started' }, { type: 'session.turn.settled', outcome: 'lost' }],
+        now,
+      ),
+    ).toBe('stuck');
+    expect(
+      deriveWorkerState(
+        [{ type: 'handback.recorded', final: true, outcome: 'completed' }, { type: 'session.turn.settled' }],
+        now,
+      ),
+    ).toBe('done');
+  });
+});
+
 const NOW = Date.parse('2026-10-31T12:00:00Z');
 
 describe('countStuck', () => {

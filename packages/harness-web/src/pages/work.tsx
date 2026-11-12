@@ -3,6 +3,7 @@ import { countStates } from '@fleet-dao/harness-contract/work-graph';
 import { LayoutList, Network, Workflow } from 'lucide-react';
 import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { AdeTasks } from '../components/ade-panel';
 import { Chip } from '../components/chip';
 import { LoginPrompt } from '../components/login-prompt';
 import { PageBar } from '../components/shell';
@@ -11,6 +12,7 @@ import { type PanelTab, WorkPanel } from '../components/work-panel';
 import { cn } from '../lib/cn';
 import { formatRelative } from '../lib/format';
 import { workStateLabel } from '../lib/labels';
+import { IS_LOCAL } from '../lib/profile';
 import {
   readView,
   useBatches,
@@ -146,6 +148,7 @@ export function Work() {
           </label>
         ) : null}
       </PageBar>
+      {IS_LOCAL ? <AdeTasks /> : null}
       <div className="flex h-[calc(100dvh-var(--bar-h)*2)] min-h-0 md:h-[calc(100dvh-var(--bar-h))]">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {unauthorized && !graph ? (

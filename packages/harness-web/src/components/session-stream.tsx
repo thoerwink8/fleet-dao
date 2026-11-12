@@ -4,14 +4,17 @@ import { cn } from '../lib/cn';
 import { CATEGORY_LABEL, type Category, categoryOf, taskIdOf } from '../lib/describe';
 import { dayKey, formatDay } from '../lib/format';
 import { useSessionFeed, useTranscriptFeed } from '../lib/hooks';
+import { IS_LOCAL } from '../lib/profile';
 import {
   buildSteps,
   buildTimeline,
+  latestTurnRunId,
   runIdOfSession,
   type TimelineItem,
   workerSessionOf,
 } from '../lib/transcript';
 import type { FeedEvent, FeedState } from '../lib/types';
+import { AdeComposer } from './ade-panel';
 import { Chip } from './chip';
 import { EventCard } from './event-card';
 import { LoginPrompt } from './login-prompt';
@@ -90,7 +93,7 @@ function ReconnectBanner({ state }: { state: FeedState }) {
 export function SessionStream({ sessionId }: { sessionId: string }) {
   const { feed, state } = useSessionFeed(sessionId);
   // 工人会话（worker-<runId>）：把这次运行 stream-json 的每一步（transcript:<runId> 流）和会话里的进度、交结果按事件号串在一起
-  const runId = runIdOfSession(sessionId);
+  const runId = runIdOfSession(sessionId) ?? latestTurnRunId(state.events);
   const { feed: tFeed, state: tState } = useTranscriptFeed(runId);
   const [off, setOff] = useState<Set<Category>>(new Set());
   const scroller = useRef<HTMLDivElement>(null);
@@ -367,6 +370,7 @@ export function SessionStream({ sessionId }: { sessionId: string }) {
           </button>
         ) : null}
       </div>
+      {IS_LOCAL ? <AdeComposer sessionId={sessionId} /> : null}
     </div>
   );
 }

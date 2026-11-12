@@ -17,6 +17,7 @@ import {
   type PublishDeps,
   prBody,
   processOutbox,
+  publishAction,
   publishBranch,
   recordPublish,
 } from '../src/publish.ts';
@@ -110,12 +111,22 @@ const ref = (issue = 1) => ({ repo: 'o/r', issue });
 const states = async (issue = 1) =>
   (await listOpsForTask(t.db, ref(issue))).map((o) => `${o.kind}:${o.state}`);
 
+describe('外送种类', () => {
+  it('旧名和新名指到同一件', () => {
+    expect(publishAction('git.push')).toBe('push');
+    expect(publishAction('change.push')).toBe('push');
+    expect(publishAction('github.pr.open')).toBe('open');
+    expect(publishAction('change.pr.open')).toBe('open');
+    expect(publishAction('change.merge')).toBeNull();
+  });
+});
+
 describe('记账：该推的才排推送', () => {
-  it('有改动、核验过得去、工人干净交活：ready，排一个 git.push；同一个 runId 重来还是一行一个动作', async () => {
+  it('有改动、核验过得去、工人干净交活：ready，排一个 change.push；同一个 runId 重来还是一行一个动作', async () => {
     const run = await record();
     expect(run).toMatchObject({ state: 'ready', branch: 'fleet2/1-d1-a1', fencing: 3, model: 'grok-4.7' });
     await record();
-    expect(await states()).toEqual(['git.push:pending']);
+    expect(await states()).toEqual(['change.push:pending']);
     const rows = await t.pg.query('select count(*)::int as n from fleet2.publish_runs');
     expect((rows.rows[0] as { n: number }).n).toBe(1);
   });
@@ -143,7 +154,7 @@ describe('推分支、开 PR', () => {
     await record();
     expect(await processOutbox(deps())).toMatchObject({ claimed: 1, done: 1 });
     // 推送做完后排出开 PR 的动作
-    expect(await states()).toEqual(['git.push:done', 'github.pr.open:pending']);
+    expect(await states()).toEqual(['change.push:done', 'change.pr.open:pending']);
     const sha = git(remote, 'rev-parse', 'refs/heads/fleet2/1-d1-a1').trim();
     expect(git(remote, 'show', `${sha}:src/a.txt`)).toBe('changed\n');
     expect(git(remote, 'show', `${sha}:src/new.txt`)).toBe('hello\n');
@@ -157,7 +168,7 @@ describe('推分支、开 PR', () => {
     expect(pr?.body).toContain('Closes #1');
     expect(pr?.body).toContain('grok-4.7');
     expect(pr?.body).toContain('unverified');
-    expect(await states()).toEqual(['git.push:done', 'github.pr.open:done']);
+    expect(await states()).toEqual(['change.push:done', 'change.pr.open:done']);
 
     const chain = (await readStream(t.db, issueStream(ref()), 0)).map((e) => e.type);
     expect(chain).toEqual(['publish.pushed', 'publish.pr.opened']);
@@ -171,11 +182,11 @@ describe('推分支、开 PR', () => {
     gh.loseNextOpenResponse = true;
     expect(await processOutbox(deps())).toMatchObject({ claimed: 1, unknown: 1 });
     expect(gh.prs).toHaveLength(1);
-    expect(await states()).toEqual(['git.push:done', 'github.pr.open:unknown']);
+    expect(await states()).toEqual(['change.push:done', 'change.pr.open:unknown']);
     expect(await processOutbox(deps())).toMatchObject({ claimed: 1, done: 1 });
     expect(gh.prs).toHaveLength(1);
     expect(gh.calls.filter((c) => c.startsWith('openPr'))).toHaveLength(1);
-    const op = await getOp(t.db, opKey('github.pr.open', ref(), 3, 'd1-a1'));
+    const op = await getOp(t.db, opKey('change.pr.open', ref(), 3, 'd1-a1'));
     expect(op?.result).toMatchObject({ number: gh.prs[0]?.number, opened: false });
   });
 
@@ -183,19 +194,19 @@ describe('推分支、开 PR', () => {
     await record();
     await processOutbox(deps());
     // 模拟「推完、写结果前崩了」：动作退回 pending，开 PR 的动作还没排的状态不影响
-    await t.pg.exec("update fleet2.outbox set state = 'pending', result = null where kind = 'git.push'");
+    await t.pg.exec("update fleet2.outbox set state = 'pending', result = null where kind = 'change.push'");
     expect(specs.filter((s) => s.command.includes('push'))).toHaveLength(1);
     // 这一轮领到两条：重来的推送（看到分支已在、内容对，补记）和排着的开 PR
     expect(await processOutbox(deps())).toMatchObject({ claimed: 2, done: 2 });
     expect(specs.filter((s) => s.command.includes('push'))).toHaveLength(1);
-    expect(await states()).toEqual(['git.push:done', 'github.pr.open:done']);
+    expect(await states()).toEqual(['change.push:done', 'change.pr.open:done']);
     expect(gh.prs).toHaveLength(1);
   });
 
   it('O1：这张单已经易手（令牌对不上）→ 动作进 dead，分支没推、PR 没开', async () => {
     await record();
     expect(await processOutbox(deps({ fencingOf: async () => 4 }))).toMatchObject({ dead: 1, done: 0 });
-    expect(await states()).toEqual(['git.push:dead']);
+    expect(await states()).toEqual(['change.push:dead']);
     expect(git(remote, 'branch', '--list', 'fleet2/*').trim()).toBe('');
     expect(gh.prs).toHaveLength(0);
   });
@@ -210,7 +221,7 @@ describe('推分支、开 PR', () => {
       }),
     );
     expect(rep).toMatchObject({ failed: 1, done: 0 });
-    expect(await states()).toEqual(['git.push:pending']);
+    expect(await states()).toEqual(['change.push:pending']);
     expect(git(remote, 'branch', '--list', 'fleet2/*').trim()).toBe('');
   });
 
@@ -220,7 +231,7 @@ describe('推分支、开 PR', () => {
     gh.setOpenPr({ number: 7, headRef: 'fleet/1-旧引擎', body: 'Closes #1' });
     expect(await processOutbox(deps())).toMatchObject({ dead: 1 });
     expect(gh.prs).toHaveLength(1);
-    expect(await states()).toEqual(['git.push:done', 'github.pr.open:dead']);
+    expect(await states()).toEqual(['change.push:done', 'change.pr.open:dead']);
   });
 
   it('GH3：PR 被人手动关了 → 不再开第二个，进 dead；合了就认', async () => {
@@ -229,7 +240,7 @@ describe('推分支、开 PR', () => {
     await processOutbox(deps());
     gh.closePrByHand(gh.prs[0]?.number ?? 0);
     await t.pg.exec(
-      "update fleet2.outbox set state = 'pending', result = null where kind = 'github.pr.open'",
+      "update fleet2.outbox set state = 'pending', result = null where kind = 'change.pr.open'",
     );
     expect(await processOutbox(deps())).toMatchObject({ dead: 1 });
     expect(gh.prs).toHaveLength(1);
@@ -240,7 +251,7 @@ describe('推分支、开 PR', () => {
     await record();
     expect(await processOutbox(deps())).toMatchObject({ dead: 1 });
     expect(git(remote, 'rev-parse', 'refs/heads/fleet2/1-d1-a1').trim()).toBe(baseSha);
-    expect(await states()).toEqual(['git.push:dead']);
+    expect(await states()).toEqual(['change.push:dead']);
   });
 
   it('补丁打不上基线 → 进 dead，不推', async () => {
@@ -258,9 +269,9 @@ describe('推分支、开 PR', () => {
       },
     };
     expect(await processOutbox(deps({ github: flaky, maxAttempts: 2 }))).toMatchObject({ unknown: 1 });
-    expect(await states()).toEqual(['git.push:unknown']);
+    expect(await states()).toEqual(['change.push:unknown']);
     expect(await processOutbox(deps({ github: flaky, maxAttempts: 2 }))).toMatchObject({ dead: 1 });
-    expect(await states()).toEqual(['git.push:dead']);
+    expect(await states()).toEqual(['change.push:dead']);
   });
 
   it('H1：令牌和认证头不在任何命令行里，只有推送那一条的环境里有，别的 git 没有', async () => {

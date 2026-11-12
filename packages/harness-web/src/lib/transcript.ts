@@ -259,6 +259,19 @@ export function runIdOfSession(sessionId: string): string | null {
   return m?.[1] ?? null;
 }
 
+/** ADE 会话号不是 worker-<runId>。过程流挂在最近一次 session.turn.started 的 runId 上。 */
+export function latestTurnRunId(
+  events: readonly { type: string; payload: { runId?: unknown } }[],
+): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev?.type === 'session.turn.started' && typeof ev.payload.runId === 'string' && ev.payload.runId) {
+      return ev.payload.runId;
+    }
+  }
+  return null;
+}
+
 /** 指挥会话里的派工请求 / 交回核验事件，对应的工人会话号；没有对应的返回 null。 */
 export function workerSessionOf(ev: FeedEvent): string | null {
   if (ev.type === 'handback.recorded') {

@@ -4,6 +4,7 @@ import { sql } from 'drizzle-orm';
 import {
   bigint,
   bigserial,
+  boolean,
   check,
   index,
   integer,
@@ -343,5 +344,75 @@ export const streamHeads = fleet2.table(
     index('stream_heads_session_last_idx')
       .on(t.lastEventId.desc())
       .where(sql`${t.streamId} like 'session:%'`),
+  ],
+);
+
+/**
+ * ADE 工作区（#3914）：本机文件夹。forge 从 git remote 推，推不出就是 local。
+ * 当前状态在表里（会被改）；发生了什么在事件流里。
+ */
+export const adeWorkspaces = fleet2.table(
+  'ade_workspaces',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    path: text('path').notNull(),
+    isGit: boolean('is_git').notNull(),
+    forge: text('forge').notNull(),
+    remote: text('remote'),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('ade_workspaces_path_unique').on(t.path),
+    check('ade_workspaces_forge', sql`${t.forge} in ('github', 'gitlab', 'local')`),
+  ],
+);
+
+/** ADE 自己的单。来源是手建或以后从平台导入；不依赖 GitHub 也能建。 */
+export const adeTasks = fleet2.table(
+  'ade_tasks',
+  {
+    id: integer('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull().default(''),
+    status: text('status').notNull().default('open'),
+    source: jsonb('source').notNull(),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    index('ade_tasks_workspace_idx').on(t.workspaceId, t.id),
+    check('ade_tasks_status', sql`${t.status} in ('open', 'closed')`),
+  ],
+);
+
+/** ADE 会话的当前状态。队列里是还没开跑的话；轮次过程在事件流和 transcript 流。 */
+export const adeSessions = fleet2.table(
+  'ade_sessions',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull(),
+    parentId: text('parent_id'),
+    taskId: integer('task_id'),
+    agent: text('agent').notNull(),
+    model: text('model').notNull(),
+    worktree: boolean('worktree').notNull(),
+    cwd: text('cwd').notNull(),
+    title: text('title').notNull(),
+    /** idle 没在跑；running 有一轮进程。 */
+    status: text('status').notNull(),
+    /** 人按了停：这一轮收掉后不自动把队列里的话开跑。 */
+    hold: boolean('hold').notNull().default(false),
+    queue: jsonb('queue').notNull().default(sql`'[]'::jsonb`),
+    runId: text('run_id'),
+    /** agent CLI 自己的会话号（Claude 要 UUID），追问时 --resume。 */
+    agentSessionId: text('agent_session_id'),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    index('ade_sessions_workspace_idx').on(t.workspaceId),
+    index('ade_sessions_parent_idx').on(t.parentId).where(sql`${t.parentId} is not null`),
+    check('ade_sessions_status', sql`${t.status} in ('idle', 'running')`),
   ],
 );

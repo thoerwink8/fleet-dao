@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 
+export * from './ade.ts';
 export * from './real.ts';
 export * from './scheduler.ts';
 export * from './schema.ts';
