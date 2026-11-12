@@ -535,7 +535,68 @@ function git(
   });
 }
 
-/** 不连平台：补丁、开单、评论、合并各自落一个文件。空补丁直接失败。 */
+function showRemote(url: string): string {
+  return url.replace(/\/\/[^@/]+@/, '//');
+}
+
+/**
+ * 本机面板的推送：人已经在工作树里提交，outbox 领到这条才 `git push`。
+ * 不动 main，不推 fleet-dao，GitHub / GitLab 不走这里（GitHub 用上面的处理器，GitLab 领到就停）。
+ */
+async function pushAdeCwd(
+  d: PublishDeps,
+  cwd: string,
+  branch: string,
+): Promise<{ branch: string; remote: string }> {
+  if (
+    branch === '' ||
+    branch === 'HEAD' ||
+    branch === 'main' ||
+    branch === 'master' ||
+    branch.startsWith('-') ||
+    branch.startsWith('/') ||
+    branch.endsWith('/') ||
+    branch.includes('..') ||
+    !/^[A-Za-z0-9._/-]+$/.test(branch)
+  ) {
+    throw new PermanentError(branch === 'main' || branch === 'master' ? '不动 main' : '这个分支不能推');
+  }
+  await mkdir(d.tmpRoot, { recursive: true });
+  const home = await mkdtemp(join(d.tmpRoot, 'fleet2-ade-push-'));
+  const gitArgs = (args: string[]) => ['-c', 'safe.directory=*', ...args];
+  try {
+    const head = await must(
+      '读分支',
+      git(d, cwd, gitArgs(['rev-parse', '--abbrev-ref', 'HEAD']), { home, redact: d.redact }),
+    );
+    if (head.stdout.trim() !== branch) throw new PermanentError('分支和载荷对不上');
+    const remote = await must(
+      '读 origin',
+      git(d, cwd, gitArgs(['remote', 'get-url', 'origin']), { home, redact: d.redact }),
+    );
+    const url = remote.stdout.trim();
+    const low = url.toLowerCase();
+    if (!url) throw new PermanentError('没有 origin');
+    if (low.includes('fleet-dao')) throw new PermanentError('不往 fleet-dao 推');
+    if (low.includes('github.com') || low.includes('gitlab'))
+      throw new PermanentError('这个远端不走本地推送');
+    await must(
+      '推送',
+      git(d, cwd, gitArgs(['push', '--porcelain', '-u', 'origin', `HEAD:refs/heads/${branch}`]), {
+        home,
+        redact: d.redact,
+      }),
+    );
+    return { branch, remote: showRemote(url) };
+  } catch (err) {
+    if (err instanceof PermanentError) throw err;
+    throw new PermanentError(err instanceof Error ? err.message : '推送没成');
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+/** 不连平台：补丁、开单、评论、合并各自落一个文件。没有 adeCwd 的空补丁直接失败。 */
 async function runLocal(d: PublishDeps, op: OutboxOp): Promise<Record<string, unknown>> {
   const dir = join(d.tmpRoot, 'local-changes');
   await mkdir(dir, { recursive: true });
@@ -543,10 +604,16 @@ async function runLocal(d: PublishDeps, op: OutboxOp): Promise<Record<string, un
   const file = (ext: string) => join(dir, `${safe}${ext}`);
   if (op.kind === 'change.push' || op.kind === 'git.push') {
     const patch = String(op.payload.patch ?? '');
-    if (!patch.trim()) throw new PermanentError('补丁是空的');
-    const patchFile = file('.patch');
-    await writeFile(patchFile, patch, 'utf8');
-    return { patchFile };
+    const adeCwd = typeof op.payload.adeCwd === 'string' ? op.payload.adeCwd : '';
+    if (!patch.trim() && !adeCwd) throw new PermanentError('补丁是空的');
+    let patchFile = '';
+    if (patch.trim()) {
+      patchFile = file('.patch');
+      await writeFile(patchFile, patch, 'utf8');
+    }
+    if (!adeCwd) return { patchFile };
+    const pushed = await pushAdeCwd(d, adeCwd, String(op.payload.branch ?? ''));
+    return { ...(patchFile ? { patchFile } : {}), ...pushed };
   }
   if (op.kind === 'change.pr.open' || op.kind === 'github.pr.open') {
     const side = file('.json');

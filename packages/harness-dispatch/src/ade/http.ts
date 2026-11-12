@@ -133,7 +133,9 @@ async function route(
     send(res, 201, { session: row });
     return true;
   }
-  const session = /^\/api\/ade\/sessions\/([^/]+)(?:\/(messages|stop|changes|deliver|queue))?$/.exec(path);
+  const session = /^\/api\/ade\/sessions\/([^/]+)(?:\/(messages|stop|changes|deliver|queue|git))?$/.exec(
+    path,
+  );
   if (!session) return false;
   const id = decodeURIComponent(session[1] ?? '');
   const action = session[2];
@@ -187,6 +189,10 @@ async function route(
   if (action === 'deliver' && method === 'POST') {
     await readJson(req);
     send(res, 200, await ade.deliver(id));
+    return true;
+  }
+  if (action === 'git' && method === 'POST') {
+    send(res, 200, await ade.gitOp(id, await readJson(req)));
     return true;
   }
   return false;
