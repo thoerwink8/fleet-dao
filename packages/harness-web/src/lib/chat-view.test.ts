@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { categoryOf } from './describe';
 import { isMainChat, splitConversation, summarizeDiff, toolPhrase } from './chat-view';
+import { categoryOf } from './describe';
 import type { TimelineItem } from './transcript';
 import type { FeedEvent } from './types';
 

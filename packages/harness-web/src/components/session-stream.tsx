@@ -146,8 +146,9 @@ export function SessionStream({
   }, [state.events]);
   const approvalMode = agentId && approvalModes ? approvalModes[agentId] : undefined;
   const onDecide = useCallback(
-    (approvalId: string, decision: 'allow' | 'deny') =>
-      adeSend(`/sessions/${encodeURIComponent(sessionId)}/approval`, 'POST', { approvalId, decision }),
+    async (approvalId: string, decision: 'allow' | 'deny'): Promise<void> => {
+      await adeSend(`/sessions/${encodeURIComponent(sessionId)}/approval`, 'POST', { approvalId, decision });
+    },
     [sessionId],
   );
 
