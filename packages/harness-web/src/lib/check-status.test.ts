@@ -8,6 +8,9 @@ describe('CI 状态词', () => {
     expect(checkStatusView('SUCCESS')).toEqual({ label: '通过', dot: 'bg-success' });
     expect(checkStatusView('failure').label).toBe('失败');
     expect(checkStatusView('failure').dot).toBe('bg-danger');
+    expect(checkStatusView('failed').label).toBe('失败');
+    expect(checkStatusView('canceled').label).toBe('失败');
+    expect(checkStatusView('preparing').label).toBe('排队中');
   });
 
   it('不认识的状态原样留下', () => {

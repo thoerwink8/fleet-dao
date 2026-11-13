@@ -7,11 +7,37 @@ import { runCommand } from '../command.ts';
 
 export type RepoForge = 'github' | 'gitlab' | 'local';
 
-export function forgeOfRemote(remote: string | null): RepoForge {
+/** 远端地址里的主机名。本机路径、认不出的地址回 null。 */
+export function remoteHost(remote: string): string | null {
+  const raw = remote.trim();
+  if (!raw) return null;
+  if (!raw.includes('://')) {
+    const scp = /^(?:[^@\s]+@)?([^:\s]+):(.+)$/.exec(raw);
+    const host = scp?.[1];
+    const path = scp?.[2] ?? '';
+    if (!host || host.includes('\\') || (host.length === 1 && path.startsWith('\\'))) return null;
+    return host.toLowerCase();
+  }
+  try {
+    return new URL(raw).hostname.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** gitlab.com、主机名里带 gitlab，或设置里登记过的自建主机。 */
+export function isGitlabHost(host: string, hosts: readonly string[] = []): boolean {
+  const name = host.toLowerCase();
+  if (name === 'gitlab.com' || name.endsWith('.gitlab.com') || name.includes('gitlab')) return true;
+  return hosts.some((item) => item.toLowerCase() === name);
+}
+
+export function forgeOfRemote(remote: string | null, hosts: readonly string[] = []): RepoForge {
   if (!remote) return 'local';
-  const u = remote.toLowerCase();
-  if (u.includes('github.com')) return 'github';
-  if (u.includes('gitlab')) return 'gitlab';
+  const host = remoteHost(remote);
+  if (!host) return 'local';
+  if (host === 'github.com' || host.endsWith('.github.com')) return 'github';
+  if (isGitlabHost(host, hosts)) return 'gitlab';
   return 'local';
 }
 
@@ -55,13 +81,14 @@ function git(cwd: string, args: string[]): Promise<{ code: number; out: string }
 
 export async function inspectRepo(
   dir: string,
+  hosts: readonly string[] = [],
 ): Promise<{ isGit: boolean; remote: string | null; forge: RepoForge }> {
   const inside = await git(dir, ['rev-parse', '--is-inside-work-tree']);
   if (inside.code !== 0 || inside.out.trim() !== 'true')
     return { isGit: false, remote: null, forge: 'local' };
   const remote = await git(dir, ['remote', 'get-url', 'origin']);
   const url = remote.code === 0 ? remote.out.trim() : null;
-  return { isGit: true, remote: url || null, forge: forgeOfRemote(url) };
+  return { isGit: true, remote: url || null, forge: forgeOfRemote(url, hosts) };
 }
 
 export async function addWorktree(repo: string, dest: string, branch: string): Promise<void> {

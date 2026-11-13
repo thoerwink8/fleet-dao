@@ -78,6 +78,15 @@ import {
 import { type AdeAgentInfo, discoverAgents, findAgentBin } from './agents.ts';
 import { addWorktree, existingDir, inspectRepo, worktreeDiff } from './git.ts';
 import { GitPanelError, gitAct, gitSnapshot } from './git-panel.ts';
+import {
+  removeGitlabHost as forgetGitlabHost,
+  type GitlabHostRow,
+  gitlabHostRows,
+  loadGitlabHosts,
+  normalizeGitlabHost,
+  addGitlabHost as rememberGitlabHost,
+  saveGitlabToken as writeGitlabToken,
+} from './gitlab-hosts.ts';
 import { readLocalQuota, unreadQuota } from './quota-view.ts';
 import {
   defaultSshDir,
@@ -355,7 +364,7 @@ export class AdeService {
     const dir = await existingDir(path).catch((e: Error) => {
       throw new AdeError(e.message, 400);
     });
-    const repo = await inspectRepo(dir);
+    const repo = await inspectRepo(dir, await loadGitlabHosts(this.#dataDir));
     const id = `w${randomBytes(6).toString('hex')}`;
     try {
       await insertAdeWorkspace(this.#db, {
@@ -470,6 +479,37 @@ export class AdeService {
 
   listSshHosts(): Promise<SshHost[]> {
     return loadSshHosts(this.#dataDir);
+  }
+
+  gitlabHosts(): Promise<GitlabHostRow[]> {
+    return gitlabHostRows(this.#dataDir);
+  }
+
+  async addGitlabHost(raw: string): Promise<GitlabHostRow[]> {
+    try {
+      await rememberGitlabHost(this.#dataDir, raw);
+    } catch (err) {
+      throw new AdeError(err instanceof Error ? err.message : '主机名不对', 400);
+    }
+    return gitlabHostRows(this.#dataDir);
+  }
+
+  async removeGitlabHost(raw: string): Promise<GitlabHostRow[]> {
+    try {
+      await forgetGitlabHost(this.#dataDir, raw);
+    } catch (err) {
+      throw new AdeError(err instanceof Error ? err.message : '主机名不对', 400);
+    }
+    return gitlabHostRows(this.#dataDir);
+  }
+
+  async saveGitlabToken(host: string, token: string): Promise<{ host: string; hasToken: true }> {
+    try {
+      await writeGitlabToken(this.#dataDir, host, token);
+      return { host: normalizeGitlabHost(host), hasToken: true };
+    } catch (err) {
+      throw new AdeError(err instanceof Error ? err.message : '令牌没写下', 400);
+    }
   }
 
   async addSshHost(input: unknown): Promise<SshHost[]> {
@@ -784,8 +824,9 @@ export class AdeService {
     if (!ws) throw new AdeError('工作区没了', 404);
     const diff = await worktreeDiff(row.cwd);
     if (!diff.diff.trim()) throw new AdeError('没有已跟踪的改动', 400);
-    const forge = ws.forge as Forge;
-    if (forge === 'gitlab') throw new AdeError('gitlab 还没实现', 501);
+    const looked = await inspectRepo(row.cwd, await loadGitlabHosts(this.#dataDir));
+    const forge = (looked.isGit ? looked.forge : ws.forge) as Forge;
+    if (forge === 'gitlab') throw new AdeError('GitLab 不走这条交付，用面板推送', 400);
     const ref = { repo: `local/${ws.id}`, issue: row.taskId ?? 1 };
     const key = opKey('change.push', ref, 0, `${row.id}-${randomBytes(4).toString('hex')}`);
     await enqueueOp(this.#db, {

@@ -12,13 +12,21 @@ export function checkStatusView(state: string): { label: string; dot: string } {
     case 'success':
       return { label: '通过', dot: 'bg-success' };
     case 'failure':
+    case 'failed':
     case 'cancelled':
+    case 'canceled':
     case 'timed_out':
     case 'action_required':
     case 'stale':
     case 'startup_failure':
     case 'error':
       return { label: '失败', dot: 'bg-danger' };
+    case 'created':
+    case 'preparing':
+    case 'waiting_for_resource':
+    case 'scheduled':
+    case 'manual':
+      return { label: '排队中', dot: 'bg-warning' };
     default:
       return { label: state, dot: 'bg-muted' };
   }
