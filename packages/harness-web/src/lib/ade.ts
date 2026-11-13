@@ -1,4 +1,5 @@
 // 本机 ADE 接口（#3914）。同源 cookie 鉴权，写请求带 JSON。
+import type { ContextReading } from '@fleet-dao/harness-contract/context-usage';
 import { API_BASE } from './api';
 
 export interface AdeWorkspace {
@@ -17,6 +18,8 @@ export interface AdeAgent {
   ready?: boolean;
   /** 跟在名字后面，例如「未登录」。 */
   note?: string;
+  /** per-call 才能逐条点。none 是这家交不出审批请求。 */
+  approvals?: 'per-call' | 'none';
 }
 
 export function agentChoices(
@@ -71,6 +74,29 @@ export interface AdeSession {
   hold?: boolean;
   queue?: AdeQueueItem[];
   updatedAt?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  /** 跑了几轮。不是事件条数。 */
+  turns?: number;
+  context?: ContextReading | null;
+}
+
+export function sessionListPath(opts: { q?: string; archived?: boolean; known?: readonly string[] }): string {
+  const params = new URLSearchParams();
+  const q = opts.q?.trim();
+  if (q) params.set('q', q);
+  if (opts.archived) params.set('archived', '1');
+  const known = (opts.known ?? []).filter((id) => id !== '').slice(0, 200);
+  if (known.length > 0) params.set('known', known.join(','));
+  const qs = params.toString();
+  return qs ? `/sessions?${qs}` : '/sessions';
+}
+
+export function patchSession(
+  id: string,
+  patch: { title?: string; pinned?: boolean; archived?: boolean },
+): Promise<{ session: AdeSession }> {
+  return adeSend(`/sessions/${encodeURIComponent(id)}`, 'PATCH', patch);
 }
 
 export function queueOf(session: AdeSession | undefined): AdeQueueItem[] {
@@ -131,7 +157,11 @@ export function deleteSchedule(id: string): Promise<void> {
   return adeSend(`/schedules/${encodeURIComponent(id)}`, 'DELETE');
 }
 
-export async function adeSend<T>(path: string, method: 'POST' | 'DELETE', body?: unknown): Promise<T> {
+export async function adeSend<T>(
+  path: string,
+  method: 'POST' | 'DELETE' | 'PATCH',
+  body?: unknown,
+): Promise<T> {
   const res = await fetch(`${API_BASE}/ade${path}`, {
     method,
     headers: {

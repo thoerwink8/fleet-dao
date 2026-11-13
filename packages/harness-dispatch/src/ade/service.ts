@@ -14,12 +14,21 @@ import {
   revokeSessionTokens,
 } from '@fleet-dao/harness-api';
 import { type Forge, opKey } from '@fleet-dao/harness-contract';
-import { makeRedactor, type ProcessHost, readLines, remoteHostd } from '@fleet-dao/harness-runner';
+import { type ContextReading, contextFromStreamLine } from '@fleet-dao/harness-contract/context-usage';
+import {
+  type HostProcess,
+  makeRedactor,
+  type ProcessHost,
+  readLines,
+  remoteHostd,
+} from '@fleet-dao/harness-runner';
 import {
   type AdeQueueItem,
   type AdeScheduleRow,
   type AdeSessionRow,
   adeQueue,
+  adeSessionIdsAmong,
+  bumpAdeSessionTurns,
   claimAdeSchedule,
   type Db,
   deleteAdeSchedule,
@@ -76,6 +85,20 @@ import {
   withSelection,
 } from './accounts.ts';
 import { type AdeAgentInfo, discoverAgents, findAgentBin } from './agents.ts';
+import {
+  allowFrame,
+  approvalsFor,
+  claudeUserLine,
+  clipInput,
+  controlOk,
+  denyFrame,
+  initializeFrame,
+  needsPerson,
+  parseControlRequest,
+  parseControlResponse,
+  streamResult,
+  toolCategory,
+} from './approvals.ts';
 import { addWorktree, existingDir, inspectRepo, worktreeDiff } from './git.ts';
 import { GitPanelError, gitAct, gitSnapshot } from './git-panel.ts';
 import {
@@ -126,16 +149,24 @@ export function adeCommand(
 ): string[] {
   if (!MODEL.test(model)) throw new AdeError(`模型名不合法：${model}`, 400);
   if (agent === 'claude') {
+    // acceptEdits 只自动放行改文件。命令和联网走 host 的 control_request，等人点。
+    // --permission-prompts none 会把要问的工具直接拒掉，这里不用。不许 bypassPermissions。
     return [
       'reclaude',
       '-p',
       '--output-format',
       'stream-json',
+      '--input-format',
+      'stream-json',
       '--verbose',
       '--permission-mode',
       'acceptEdits',
       '--permission-prompts',
-      'none',
+      'host',
+      '--permission-prompt-tool',
+      'stdio',
+      '--await-initialize',
+      // 不排除用户级设置。放行名单是用户自己的选择，命中的工具不弹卡；环境变量（含 git bash 路径）要留着。
       '--model',
       model,
       ...(resume ? ['--resume', agentSessionId] : ['--session-id', agentSessionId]),
@@ -189,6 +220,18 @@ export interface AdeOptions {
   sshDir?: string;
 }
 
+interface PendingApproval {
+  approvalId: string;
+  requestId: string;
+  tool: string;
+  category: ReturnType<typeof toolCategory>;
+  /** 允许时原样交回，不换成截断后的字符串。 */
+  input: unknown;
+  inputText: string;
+  inputTruncated: boolean;
+  decided: boolean;
+}
+
 interface Live {
   runId: string;
   stopped: boolean;
@@ -200,6 +243,17 @@ interface Live {
   item: AdeQueueItem;
   /** 这一句已经用过的账号。空串是机器上 CLI 自己的登录。 */
   tried: string[];
+  proc: HostProcess;
+  pending: Map<string, PendingApproval>;
+  /** claude 吐了 result 之后才能关 stdin，否则这一轮的答复交不回去。 */
+  sawResult: boolean;
+  stdinClosed: boolean;
+  /** `--await-initialize` 的那一帧。对上答复才把用户的话写进去。 */
+  initRequestId: string;
+  prompt: string;
+  userSent: boolean;
+  /** 这一轮里最后一帧给过的用量。没有就是 null。 */
+  context: ContextReading | null;
 }
 
 function textParser(runId: string): TranscriptParser {
@@ -400,7 +454,7 @@ export class AdeService {
 
   async listAgents(): Promise<AdeAgentInfo[]> {
     const [list, file] = await Promise.all([this.#baseAgents(), this.#accountsFile()]);
-    return withRelayModels(list, file);
+    return withRelayModels(list, file).map((a) => ({ ...a, approvals: approvalsFor(a.id) }));
   }
 
   async accountsView(): Promise<AccountsView> {
@@ -473,8 +527,34 @@ export class AdeService {
     return listAdeTasks(this.#db);
   }
 
-  listSessions() {
-    return listAdeSessions(this.#db);
+  listSessions(opts?: { q?: string; archived?: boolean }) {
+    return listAdeSessions(this.#db, opts);
+  }
+
+  /** 侧栏拿来对内核列表：有会话行的（含已归档）不能再当成没有这一行。 */
+  knownSessionIds(ids: readonly string[]): Promise<string[]> {
+    return adeSessionIdsAmong(this.#db, ids);
+  }
+
+  /** 改名、置顶、归档写进这一行。空标题拒。 */
+  async updateSession(
+    id: string,
+    patch: { title?: string; pinned?: boolean; archived?: boolean },
+  ): Promise<AdeSessionRow> {
+    await this.getSession(id);
+    const next: { title?: string; pinned?: boolean; archived?: boolean } = {};
+    if (patch.title !== undefined) {
+      const title = patch.title.trim().slice(0, 80);
+      if (!title) throw new AdeError('标题不能空', 400);
+      next.title = title;
+    }
+    if (patch.pinned !== undefined) next.pinned = patch.pinned;
+    if (patch.archived !== undefined) next.archived = patch.archived;
+    if (next.title === undefined && next.pinned === undefined && next.archived === undefined) {
+      throw new AdeError('没有要改的', 400);
+    }
+    await updateAdeSession(this.#db, id, next);
+    return this.getSession(id);
   }
 
   listSshHosts(): Promise<SshHost[]> {
@@ -799,6 +879,40 @@ export class AdeService {
     });
   }
 
+  /** 人点了允许或拒绝。进程没了、或这条已经点过，就 409。先落记录，再把答复写进 stdin。 */
+  async decide(sessionId: string, approvalId: string, decision: 'allow' | 'deny'): Promise<void> {
+    await this.#lock(sessionId, async () => {
+      const live = this.#live.get(sessionId);
+      const pending = live?.pending.get(approvalId);
+      if (!live || !pending || pending.decided || live.stopped) {
+        throw new AdeError('这一轮已经不在等这条审批', 409);
+      }
+      pending.decided = true;
+      try {
+        await appendToSession(this.#db, sessionId, 'session.approval', {
+          approvalId,
+          runId: live.runId,
+          tool: pending.tool,
+          category: pending.category,
+          input: pending.inputText,
+          inputTruncated: pending.inputTruncated,
+          status: decision === 'allow' ? 'allowed' : 'denied',
+          result: decision === 'allow' ? 'allowed' : 'denied',
+          by: '本机',
+          at: new Date().toISOString(),
+        });
+      } catch (err) {
+        pending.decided = false;
+        throw err;
+      }
+      const frame =
+        decision === 'allow' ? allowFrame(pending.requestId, pending.input) : denyFrame(pending.requestId);
+      live.proc.stdin.write(`${frame}\n`);
+      if (decision === 'deny') live.stop();
+      else this.#closeClaudeStdin(live);
+    });
+  }
+
   changes(id: string) {
     return this.#git(id, (s) => gitSnapshot({ db: this.#db, dataDir: this.#dataDir }, s));
   }
@@ -907,6 +1021,7 @@ export class AdeService {
       plan.env,
     );
     await updateAdeSession(this.#db, row.id, { status: 'running', runId, agentSessionId, hold: false });
+    await bumpAdeSessionTurns(this.#db, row.id);
     await appendToSession(this.#db, row.id, 'session.turn.started', {
       turnId: runId,
       text: item.text,
@@ -949,6 +1064,14 @@ export class AdeService {
       stderr: '',
       item,
       tried: [...tried, plan.accountId],
+      proc,
+      pending: new Map(),
+      sawResult: false,
+      stdinClosed: false,
+      initRequestId: `init-${randomBytes(4).toString('hex')}`,
+      prompt,
+      userSent: false,
+      context: null,
       stop: () => {
         live.stopped = true;
         proc.stop('term');
@@ -961,10 +1084,7 @@ export class AdeService {
       once = true;
       void this.#lock(row.id, () => this.#finish(row.id, runId, outcome, live.lastText, live.stderr, writer));
     };
-    readLines(proc.stdout, (line) => {
-      live.lastText = remember(line, live.lastText);
-      writer.pushLine(line);
-    });
+    readLines(proc.stdout, (line) => this.#onStdout(row, live, writer, line));
     // 标准错误不进过程流，也不当成模型说的话。调试视图读收场事件上的 stderr。
     readLines(proc.stderr, (line) => {
       const t = line.trim();
@@ -973,8 +1093,120 @@ export class AdeService {
     });
     proc.onError(() => done('failed'));
     proc.onExit((code) => done(live.stopped ? 'stopped' : code === 0 ? 'completed' : 'failed'));
-    if (row.agent !== 'grok') proc.stdin.write(prompt);
-    proc.stdin.end();
+    // 执行体先退时再写 stdin 会 EPIPE。记一下就行，不把内核打崩，也不重试。
+    proc.stdin.on('error', () => {
+      live.stdinClosed = true;
+    });
+    if (row.agent === 'claude') {
+      // 先等 CLI 认下 initialize，再写用户的话。否则它不把 can_use_tool 交出来，直接拒。
+      proc.stdin.write(`${initializeFrame(live.initRequestId)}\n`);
+    } else if (row.agent !== 'grok') {
+      proc.stdin.write(prompt);
+      proc.stdin.end();
+    }
+  }
+
+  #sendClaudeUser(live: Live): void {
+    if (live.userSent || live.stdinClosed) return;
+    live.userSent = true;
+    live.proc.stdin.write(`${claudeUserLine(live.prompt)}\n`);
+  }
+
+  #onStdout(row: AdeSessionRow, live: Live, writer: TranscriptWriter, line: string): void {
+    if (row.agent === 'claude') {
+      const replied = parseControlResponse(line);
+      if (replied) {
+        if (replied.requestId === live.initRequestId) this.#sendClaudeUser(live);
+        return;
+      }
+      const control = parseControlRequest(line);
+      if (control?.kind === 'initialize') {
+        live.proc.stdin.write(`${controlOk(control.requestId, {})}\n`);
+        this.#sendClaudeUser(live);
+        return;
+      }
+      if (control?.kind === 'can_use_tool') {
+        void this.#lock(row.id, () => this.#ask(row, live, control));
+        return;
+      }
+      if (control) return;
+      if (streamResult(line)) {
+        live.sawResult = true;
+        this.#closeClaudeStdin(live);
+      }
+    }
+    live.lastText = remember(line, live.lastText);
+    writer.pushLine(line);
+    const reading = contextFromStreamLine(row.agent, line);
+    if (reading) live.context = reading;
+  }
+
+  /** 先把待审批放进内存，再写事件。点的时候按 approvalId 找，找不到就是已经不在等。 */
+  async #ask(
+    row: AdeSessionRow,
+    live: Live,
+    control: { requestId: string; tool: string; input: unknown },
+  ): Promise<void> {
+    const category = toolCategory(control.tool);
+    const clipped = clipInput(control.input);
+    const at = new Date().toISOString();
+    const approvalId = `ap${randomBytes(4).toString('hex')}`;
+    const base = {
+      approvalId,
+      runId: live.runId,
+      tool: control.tool,
+      category,
+      input: clipped.text,
+      inputTruncated: clipped.truncated,
+    };
+    if (!needsPerson(category)) {
+      await appendToSession(this.#db, row.id, 'session.approval', {
+        ...base,
+        status: 'allowed',
+        result: 'allowed',
+        by: 'acceptEdits',
+        at,
+      });
+      if (this.#live.get(row.id) !== live) return;
+      live.proc.stdin.write(`${allowFrame(control.requestId, control.input)}\n`);
+      this.#closeClaudeStdin(live);
+      return;
+    }
+    live.pending.set(approvalId, {
+      ...base,
+      requestId: control.requestId,
+      input: control.input,
+      inputText: clipped.text,
+      decided: false,
+    });
+    await appendToSession(this.#db, row.id, 'session.approval', { ...base, status: 'pending', at });
+  }
+
+  #closeClaudeStdin(live: Live): void {
+    if (live.stdinClosed || !live.sawResult) return;
+    for (const p of live.pending.values()) if (!p.decided) return;
+    live.stdinClosed = true;
+    live.proc.stdin.end();
+  }
+
+  async #dropPending(id: string, live: Live | undefined): Promise<void> {
+    if (!live) return;
+    const at = new Date().toISOString();
+    for (const p of live.pending.values()) {
+      if (p.decided) continue;
+      p.decided = true;
+      await appendToSession(this.#db, id, 'session.approval', {
+        approvalId: p.approvalId,
+        runId: live.runId,
+        tool: p.tool,
+        category: p.category,
+        input: p.inputText,
+        inputTruncated: p.inputTruncated,
+        status: 'dropped',
+        result: 'stopped',
+        at,
+      });
+    }
   }
 
   async #switchAccount(
@@ -1019,8 +1251,10 @@ export class AdeService {
     const live = this.#live.get(id);
     this.#live.delete(id);
     await writer.close();
+    await this.#dropPending(id, live);
     const row = await this.getSession(id);
     if (row.runId !== runId) return;
+    if (live?.context) await updateAdeSession(this.#db, id, { context: live.context });
     // 这一轮的进程没了，这一轮的令牌也作废。换账号或队列里的下一句会在 #begin 里另发一枚。
     if (this.#wantMcp) await revokeSessionTokens(this.#db, id);
     if (await this.#switchAccount(row, live, outcome, lastText, stderr)) return;
@@ -1091,7 +1325,7 @@ export class AdeService {
   ): Promise<Record<string, string>> {
     if (!this.#wantMcp || (row.agent !== 'claude' && row.agent !== 'grok')) return env;
     const endpoint = await this.#mcpEndpoint(row.id);
-    // acceptEdits 只放行改文件。无头没人点批准，不放行的工具会被当场拒。只放这一只。
+    // acceptEdits 只放行改文件。这一只是本机自己的工具，预先放行，不占审批卡。
     const claudeAllow = `mcp__${MCP_SERVER_NAME}__${OPEN_CHILD_SESSION}`;
     const grokAllow = `MCPTool(${MCP_SERVER_NAME}__${OPEN_CHILD_SESSION})`;
     if (row.agent === 'claude') {

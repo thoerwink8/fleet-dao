@@ -1,4 +1,5 @@
 // 本机开会话、发话、排队。控件都来自 src/ui，不再用裸 select。
+import { contextLabel } from '@fleet-dao/harness-contract/context-usage';
 import { ArrowUp, Plus, Square } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
@@ -17,6 +18,7 @@ import {
   queueOf,
 } from '../lib/ade';
 import { pollNote } from '../lib/poll-note';
+import { roundLabel } from '../lib/rounds';
 import { composerStillRunning } from '../lib/transcript';
 import type { FeedEvent } from '../lib/types';
 import { Button } from '../ui/button';
@@ -536,8 +538,16 @@ export function AdeComposer({
               改动
             </Button>
           ) : null}
-          <span className="min-w-0 flex-1 truncate text-2xs text-muted">
-            {[wsName, session?.model, session?.worktree ? '工作树' : ''].filter(Boolean).join(' · ')}
+          <span className="min-w-0 flex-1 truncate text-2xs text-muted" data-testid="session-meta">
+            {[
+              wsName,
+              session?.model,
+              session?.worktree ? '工作树' : '',
+              session ? roundLabel(session.turns ?? 0) : '',
+              session ? `上下文 ${contextLabel(session.context)}` : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')}
           </span>
           <Button
             type="submit"

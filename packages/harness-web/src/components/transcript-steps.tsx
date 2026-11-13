@@ -131,10 +131,10 @@ export function ToolRow({ step }: { step: ToolStep }) {
   );
 }
 
-export function EndRow({ step }: { step: EndStep }) {
+export function EndRow({ step, agentTurns = true }: { step: EndStep; agentTurns?: boolean }) {
   return (
     <li data-step-id={step.id} data-step-kind="end" className="pb-1 pl-9 text-2xs text-muted">
-      {endLine(step)}
+      {endLine(step, { agentTurns })}
     </li>
   );
 }

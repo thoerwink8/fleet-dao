@@ -58,14 +58,19 @@ export interface EndStep {
   stopped?: boolean;
 }
 
-/** 运行结束 / 已停止那一行小字。两种结局同一个句子，只换开头。 */
-export function endLine(step: EndStep): string {
+/**
+ * 运行结束 / 已停止那一行小字。两种结局同一个句子，只换开头。
+ * numTurns 是 CLI 这一次调用里模型自己转的圈数。ADE 主视图不拿它当「N 轮」
+ * （那一处读会话行的 turns），所以 agentTurns 传 false。
+ */
+export function endLine(step: EndStep, opts?: { agentTurns?: boolean }): string {
+  const agentTurns = opts?.agentTurns !== false;
   const bits = step.stopped
     ? ['已停止', step.durationMs !== null ? `用时 ${formatDuration(step.durationMs)}` : null]
     : [
         '运行结束',
         step.isError ? '出错' : '正常',
-        step.numTurns !== null ? `${step.numTurns} 轮` : null,
+        agentTurns && step.numTurns !== null ? `${step.numTurns} 轮` : null,
         step.durationMs !== null ? formatDuration(step.durationMs) : null,
       ];
   return bits.filter((part): part is string => part !== null).join(' · ');
@@ -250,6 +255,20 @@ export function stoppedTurn(ev: FeedEvent, events: readonly FeedEvent[]): EndSte
   };
 }
 
+/** 同一条审批的 pending 和后来的决定并成一张卡。决定追加在后面，不改旧事件。 */
+export interface ApprovalView {
+  id: number;
+  at: string;
+  approvalId: string;
+  tool: string;
+  category: string;
+  input: string;
+  status: string;
+  by?: string;
+  decidedAt?: string;
+  result?: string;
+}
+
 export type TimelineItem =
   | { kind: 'event'; ev: FeedEvent }
   /** 连续的 MCP 工具事件（派工、进度、交结果……），#3836 已有的折叠。 */
@@ -259,7 +278,43 @@ export type TimelineItem =
   /** 连续的工人工具调用折叠成一行。 */
   | { kind: 'toolrun'; key: number; steps: ToolStep[]; summary: string; failed: number }
   | { kind: 'end'; step: EndStep }
-  | { kind: 'dropped'; step: DroppedStep };
+  | { kind: 'dropped'; step: DroppedStep }
+  | { kind: 'approval'; card: ApprovalView };
+
+function approvalViews(events: readonly FeedEvent[]): Map<string, ApprovalView> {
+  const map = new Map<string, ApprovalView>();
+  for (const ev of events) {
+    if (ev.type !== 'session.approval') continue;
+    const approvalId = s(ev.payload.approvalId);
+    if (!approvalId) continue;
+    const status = s(ev.payload.status, 'pending');
+    const prev = map.get(approvalId);
+    const by = s(ev.payload.by);
+    const result = s(ev.payload.result);
+    if (!prev) {
+      map.set(approvalId, {
+        id: ev.id,
+        at: ev.createdAt,
+        approvalId,
+        tool: s(ev.payload.tool),
+        category: s(ev.payload.category),
+        input: s(ev.payload.input),
+        status,
+        ...(by ? { by } : {}),
+        ...(status !== 'pending' ? { decidedAt: s(ev.payload.at) || ev.createdAt } : {}),
+        ...(result ? { result } : {}),
+      });
+      continue;
+    }
+    // 后来的 pending 不能把已经点过的盖回去。
+    if (status === 'pending') continue;
+    prev.status = status;
+    if (by) prev.by = by;
+    prev.decidedAt = s(ev.payload.at) || ev.createdAt;
+    if (result) prev.result = result;
+  }
+  return map;
+}
 
 /**
  * 会话事件（进度、交结果……）和工人过程按事件号串成一条时间线（事件号是全库单调的，不同流的号可以直接比）。
@@ -286,6 +341,7 @@ export function buildTimeline(
     }
   }
 
+  const cards = approvalViews(sessionEvents);
   const out: TimelineItem[] = [];
   let mcp: FeedEvent[] = [];
   let tools: ToolStep[] = [];
@@ -311,6 +367,22 @@ export function buildTimeline(
   };
   for (const m of merged) {
     if (m.ev) {
+      if (m.ev.type === 'session.approval') {
+        const approvalId = s(m.ev.payload.approvalId);
+        const card = approvalId ? cards.get(approvalId) : undefined;
+        if (card?.id === m.ev.id) {
+          flushTools();
+          flushMcp();
+          out.push({ kind: 'approval', card });
+        } else if (card) {
+          flushTools();
+        } else {
+          flushTools();
+          flushMcp();
+          out.push({ kind: 'event', ev: m.ev });
+        }
+        continue;
+      }
       flushTools();
       if (m.ev.type in TOOL_OF_EVENT) mcp.push(m.ev);
       else {

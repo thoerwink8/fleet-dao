@@ -15,8 +15,14 @@ export const CATEGORY_LABEL: Record<Category, string> = {
 
 export function categoryOf(type: string): Category {
   if (type.startsWith('transcript.')) return 'process';
-  if (type === 'session.created' || type === 'session.message' || type.startsWith('session.turn.'))
+  if (
+    type === 'session.created' ||
+    type === 'session.message' ||
+    type === 'session.approval' ||
+    type.startsWith('session.turn.')
+  ) {
     return 'turn';
+  }
   if (type === 'worker.spawn.requested' || type === 'worker.stop.requested') return 'dispatch';
   if (type === 'worker.spawned' || type === 'worker.settled' || type.startsWith('worker.')) return 'worker';
   if (type === 'handback.recorded') return 'handback';

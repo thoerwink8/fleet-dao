@@ -409,6 +409,17 @@ export const adeSessions = fleet2.table(
     agentSessionId: text('agent_session_id'),
     /** 远端 SSH 宿主的别名。空表示这一会话用本机 ProcessHost。 */
     hostAlias: text('host_alias'),
+    /** 人钉在列表顶上。 */
+    pinned: boolean('pinned').notNull().default(false),
+    /** 归档后缺省列表不显示，从「已归档」能找回来。 */
+    archived: boolean('archived').notNull().default(false),
+    /** 跑起来的轮数：每次开跑加一。不是事件条数，也不是 CLI 自己的 num_turns。 */
+    turns: integer('turns').notNull().default(0),
+    /**
+     * 执行体最近一帧给过的用量。没有准数就是 null，不拿别的数填。
+     * 形状见 harness-contract 的 ContextReading。
+     */
+    context: jsonb('context'),
     createdAt: timestamp('created_at', tz).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
   },
