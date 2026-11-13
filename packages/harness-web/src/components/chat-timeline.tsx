@@ -226,7 +226,7 @@ export function ChatTimeline({
           return (
             <Fragment key={`e-${item.step.id}`}>
               {dayRow}
-              <EndRow step={item.step} />
+              <EndRow step={item.step} agentTurns={false} />
             </Fragment>
           );
         }

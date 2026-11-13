@@ -1,85 +1,23 @@
 // 本机会话列表：置顶 / 最近 / 按工作区。标题用会话名，预览用最后一句人话。
-import { Pin, Plus, Search } from 'lucide-react';
+// 置顶、归档、改名写在会话行上。轮数读会话行的 turns，不数事件条数。
+import { MoreHorizontal, Pin, Plus, Search } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router';
-import { type AdeSession, type AdeWorkspace, adeGet } from '../lib/ade';
+import { type AdeSession, type AdeWorkspace, adeGet, patchSession, sessionListPath } from '../lib/ade';
 import { cn } from '../lib/cn';
 import { useSessions } from '../lib/hooks';
-import { previewText, sessionTitle } from '../lib/preview';
-import { matchingFamilies, type NestedSession, nestSessions } from '../lib/session-tree';
-import type { SessionSummary } from '../lib/types';
+import { roundLabel } from '../lib/rounds';
+import { buildRows, type SessionListRow } from '../lib/session-rows';
+import { type NestedSession, nestSessions } from '../lib/session-tree';
 import { Button } from '../ui/button';
+import { Dialog, DialogContent } from '../ui/dialog';
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '../ui/dropdown-menu';
 import { Input } from '../ui/input';
 import { WorkspaceDialog } from './composer';
 
-const PIN_KEY = 'fleet.next.session-pins';
+const NO_IDS: string[] = [];
 
-function readPins(): string[] {
-  try {
-    const raw = JSON.parse(localStorage.getItem(PIN_KEY) ?? '[]') as unknown;
-    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-interface Row {
-  id: string;
-  parentId: string | null;
-  title: string;
-  preview: string;
-  workspaceId: string;
-  workspaceName: string;
-  agent: string;
-  model: string;
-  running: boolean;
-  turns: number;
-  lastAt: number;
-}
-
-type SessionRow = NestedSession<Row>;
-
-function buildRows(ade: AdeSession[], cockpit: SessionSummary[] | null, spaces: AdeWorkspace[]): Row[] {
-  const byId = new Map((cockpit ?? []).map((s) => [s.id, s]));
-  const names = new Map(spaces.map((w) => [w.id, w.name]));
-  const seen = new Set<string>();
-  const rows: Row[] = [];
-  for (const s of ade) {
-    seen.add(s.id);
-    const c = byId.get(s.id);
-    rows.push({
-      id: s.id,
-      parentId: s.parentId ?? null,
-      title: sessionTitle(s.title),
-      preview: c ? previewText(c.lastType, c.lastPayload) : '',
-      workspaceId: s.workspaceId,
-      workspaceName: names.get(s.workspaceId) ?? '工作区',
-      agent: s.agent ?? '',
-      model: s.model ?? '',
-      running: s.status === 'running',
-      turns: c?.eventCount ?? 0,
-      lastAt: Date.parse(s.updatedAt ?? c?.lastAt ?? '') || 0,
-    });
-  }
-  for (const s of cockpit ?? []) {
-    if (seen.has(s.id)) continue;
-    rows.push({
-      id: s.id,
-      parentId: null,
-      title: sessionTitle(undefined),
-      preview: previewText(s.lastType, s.lastPayload),
-      workspaceId: '',
-      workspaceName: '内核',
-      agent: '',
-      model: '',
-      running: false,
-      turns: s.eventCount,
-      lastAt: Date.parse(s.lastAt) || 0,
-    });
-  }
-  return rows;
-}
+type SessionRow = NestedSession<SessionListRow>;
 
 export function LocalSessions({ className }: { className?: string }) {
   const nav = useNavigate();
@@ -87,21 +25,33 @@ export function LocalSessions({ className }: { className?: string }) {
   const [ade, setAde] = useState<AdeSession[]>([]);
   const [spaces, setSpaces] = useState<AdeWorkspace[]>([]);
   const [q, setQ] = useState('');
-  const [pins, setPins] = useState<string[]>(readPins);
+  const [archived, setArchived] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [rename, setRename] = useState<{ id: string; title: string } | null>(null);
+  const [hiddenAde, setHiddenAde] = useState<{ key: string; ids: string[] } | null>(null);
   const alive = useRef(true);
+  const req = useRef(0);
+  const askedKey = (sessions ?? [])
+    .map((s) => s.id)
+    .slice(0, 200)
+    .join(',');
   const reload = useCallback(() => {
-    adeGet<{ sessions: AdeSession[] }>('/sessions')
+    const mine = ++req.current;
+    const known = askedKey ? askedKey.split(',') : [];
+    adeGet<{ sessions: AdeSession[]; knownIds?: string[] }>(sessionListPath({ q, archived, known }))
       .then((r) => {
-        if (alive.current) setAde(r.sessions);
+        if (!alive.current || mine !== req.current) return;
+        setAde(r.sessions);
+        if (askedKey === '') setHiddenAde({ key: '', ids: NO_IDS });
+        else if (r.knownIds) setHiddenAde({ key: askedKey, ids: r.knownIds });
       })
       .catch(() => {});
     adeGet<{ workspaces: AdeWorkspace[] }>('/workspaces')
       .then((r) => {
-        if (alive.current) setSpaces(r.workspaces);
+        if (alive.current && mine === req.current) setSpaces(r.workspaces);
       })
       .catch(() => {});
-  }, []);
+  }, [q, archived, askedKey]);
   useEffect(() => {
     alive.current = true;
     reload();
@@ -111,25 +61,17 @@ export function LocalSessions({ className }: { className?: string }) {
       clearInterval(t);
     };
   }, [reload]);
-  const togglePin = (id: string) => {
-    const next = pins.includes(id) ? pins.filter((x) => x !== id) : [id, ...pins];
-    setPins(next);
-    try {
-      localStorage.setItem(PIN_KEY, JSON.stringify(next));
-    } catch {
-      /* 记不住就只管这一次 */
-    }
+  const save = (id: string, patch: { title?: string; pinned?: boolean; archived?: boolean }) => {
+    void patchSession(id, patch).then(reload);
   };
+  const classified = askedKey === '' || hiddenAde?.key === askedKey;
+  const knownIds = hiddenAde?.key === askedKey ? hiddenAde.ids : NO_IDS;
+  const knownAdeIds = useMemo(() => new Set(knownIds), [knownIds]);
+  const includeKernel = !archived && q.trim() === '' && classified;
   const grouped = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    const flat = buildRows(ade, sessions, spaces);
-    const matched = needle
-      ? matchingFamilies(flat, (r) =>
-          `${r.title} ${r.preview} ${r.workspaceName}`.toLowerCase().includes(needle),
-        )
-      : flat;
-    const rows = nestSessions(matched);
-    const pinnedHere = (r: SessionRow): boolean => pins.includes(r.id) || r.children.some(pinnedHere);
+    const flat = buildRows(ade, sessions, spaces, includeKernel, knownAdeIds);
+    const rows = nestSessions(flat);
+    const pinnedHere = (r: SessionRow): boolean => r.pinned || r.children.some(pinnedHere);
     const pinned = rows.filter(pinnedHere);
     const rest = rows.filter((r) => !pinnedHere(r)).sort((a, b) => b.lastAt - a.lastAt);
     const recent = rest.slice(0, 8);
@@ -142,7 +84,7 @@ export function LocalSessions({ className }: { className?: string }) {
       buckets.set(r.workspaceId, b);
     }
     return { pinned, recent, workspaces: [...buckets.entries()] };
-  }, [ade, sessions, spaces, q, pins]);
+  }, [ade, sessions, spaces, includeKernel, knownAdeIds]);
 
   const section = (label: string, rows: SessionRow[]) =>
     rows.length === 0 ? null : (
@@ -179,19 +121,28 @@ export function LocalSessions({ className }: { className?: string }) {
           {r.preview ? <p className="mt-0.5 truncate pl-3.5 text-2xs text-muted">{r.preview}</p> : null}
           <p className="mt-0.5 flex items-center gap-1 truncate pl-3.5 text-2xs text-muted">
             <span className="min-w-0 flex-1 truncate">
-              {[r.model, r.agent, r.turns ? `${r.turns} 轮` : ''].filter(Boolean).join(' · ')}
+              {[r.model, r.agent, r.turns === null ? '' : roundLabel(r.turns)].filter(Boolean).join(' · ')}
             </span>
           </p>
         </NavLink>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="mr-1 size-6 self-center"
-          aria-label={pins.includes(r.id) ? '取消置顶' : '置顶'}
-          onClick={() => togglePin(r.id)}
-        >
-          <Pin className="size-3" />
-        </Button>
+        {r.turns === null ? null : (
+          <Menu>
+            <MenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="mr-1 size-6 self-center" aria-label="整理会话">
+                {r.pinned ? <Pin className="size-3" /> : <MoreHorizontal className="size-3" />}
+              </Button>
+            </MenuTrigger>
+            <MenuContent>
+              <MenuItem onSelect={() => setRename({ id: r.id, title: r.title })}>改名</MenuItem>
+              <MenuItem onSelect={() => save(r.id, { pinned: !r.pinned })}>
+                {r.pinned ? '取消置顶' : '置顶'}
+              </MenuItem>
+              <MenuItem onSelect={() => save(r.id, { archived: !archived })}>
+                {archived ? '取消归档' : '归档'}
+              </MenuItem>
+            </MenuContent>
+          </Menu>
+        )}
       </div>
       {r.children.length > 0 ? (
         <ul className="ml-3 min-w-0 border-l border-line">{r.children.map((child) => rowView(child))}</ul>
@@ -210,6 +161,9 @@ export function LocalSessions({ className }: { className?: string }) {
           aria-label="搜索会话"
           className="h-8 flex-1 border-0 bg-transparent focus-visible:ring-0"
         />
+        <Button variant="ghost" size="sm" aria-pressed={archived} onClick={() => setArchived((v) => !v)}>
+          {archived ? '返回' : '已归档'}
+        </Button>
         <Menu>
           <MenuTrigger asChild>
             <Button variant="ghost" size="icon" aria-label="新建">
@@ -227,10 +181,43 @@ export function LocalSessions({ className }: { className?: string }) {
         {section('最近', grouped.recent)}
         {grouped.workspaces.map(([id, b]) => section(b.name || id || '内核', b.rows))}
         {grouped.pinned.length + grouped.recent.length + grouped.workspaces.length === 0 ? (
-          <p className="px-3 py-6 text-xs text-muted">还没有会话。右边写第一句。</p>
+          <p className="px-3 py-6 text-xs text-muted">
+            {archived
+              ? '没有已归档的会话。'
+              : q.trim()
+                ? '没有标题对得上的会话。'
+                : '还没有会话。右边写第一句。'}
+          </p>
         ) : null}
       </div>
       <WorkspaceDialog open={addOpen} onOpenChange={setAddOpen} onAdded={reload} />
+      <Dialog
+        open={rename !== null}
+        onOpenChange={(open) => {
+          if (!open) setRename(null);
+        }}
+      >
+        <DialogContent title="改名">
+          <Input
+            aria-label="会话标题"
+            value={rename?.title ?? ''}
+            onChange={(e) => setRename((cur) => (cur ? { ...cur, title: e.target.value } : cur))}
+          />
+          <div className="mt-3 flex justify-end">
+            <Button
+              onClick={() => {
+                if (!rename) return;
+                const id = rename.id;
+                const title = rename.title;
+                setRename(null);
+                save(id, { title });
+              }}
+            >
+              保存
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

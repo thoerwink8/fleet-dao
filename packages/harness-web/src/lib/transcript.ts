@@ -58,14 +58,19 @@ export interface EndStep {
   stopped?: boolean;
 }
 
-/** 运行结束 / 已停止那一行小字。两种结局同一个句子，只换开头。 */
-export function endLine(step: EndStep): string {
+/**
+ * 运行结束 / 已停止那一行小字。两种结局同一个句子，只换开头。
+ * numTurns 是 CLI 这一次调用里模型自己转的圈数。ADE 主视图不拿它当「N 轮」
+ * （那一处读会话行的 turns），所以 agentTurns 传 false。
+ */
+export function endLine(step: EndStep, opts?: { agentTurns?: boolean }): string {
+  const agentTurns = opts?.agentTurns !== false;
   const bits = step.stopped
     ? ['已停止', step.durationMs !== null ? `用时 ${formatDuration(step.durationMs)}` : null]
     : [
         '运行结束',
         step.isError ? '出错' : '正常',
-        step.numTurns !== null ? `${step.numTurns} 轮` : null,
+        agentTurns && step.numTurns !== null ? `${step.numTurns} 轮` : null,
         step.durationMs !== null ? formatDuration(step.durationMs) : null,
       ];
   return bits.filter((part): part is string => part !== null).join(' · ');

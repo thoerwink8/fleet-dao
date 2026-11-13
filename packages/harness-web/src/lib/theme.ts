@@ -22,3 +22,16 @@ export function applyTheme(theme: Theme): void {
     /* 记不住就只管这一次 */
   }
 }
+
+/** 已经画在页面上的主题。按钮跟这个走，不另读一次 localStorage。 */
+export function themeFromClass(isDark: boolean): Theme {
+  return isDark ? 'dark' : 'light';
+}
+
+/**
+ * 按钮写要点过去的主题。
+ * 以前只写「浅色」「深色」，浅色页面上若状态还停在 dark，按钮就显示「浅色」，分不清是现在还是要切过去。
+ */
+export function themeToggleLabel(theme: Theme): string {
+  return theme === 'dark' ? '切到浅色' : '切到深色';
+}

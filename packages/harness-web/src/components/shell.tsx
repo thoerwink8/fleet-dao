@@ -15,7 +15,7 @@ import { type ReactNode, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import { cn } from '../lib/cn';
 import { IS_LOCAL } from '../lib/profile';
-import { applyTheme, readTheme, type Theme } from '../lib/theme';
+import { applyTheme, type Theme, themeFromClass, themeToggleLabel } from '../lib/theme';
 import { Button } from '../ui/button';
 
 interface NavItem {
@@ -79,7 +79,9 @@ function isOn(item: NavItem, path: string): boolean {
 /** 电脑：左侧导航（可收成一列图标）；手机（768 以下）：底部标签栏。内容区自己管顶栏。 */
 export function Shell() {
   const [fold, setFold] = useState(readFold);
-  const [theme, setTheme] = useState<Theme>(readTheme);
+  const [theme, setTheme] = useState<Theme>(() =>
+    themeFromClass(document.documentElement.classList.contains('dark')),
+  );
   const toggle = () => {
     setFold(!fold);
     try {
@@ -143,7 +145,7 @@ export function Shell() {
           <Button
             variant="ghost"
             className={cn('mb-1 h-10 w-full text-sm text-muted', fold ? 'px-0' : 'justify-start px-3')}
-            aria-label={theme === 'dark' ? '切换浅色' : '切换深色'}
+            aria-label={themeToggleLabel(theme)}
             onClick={() => {
               const next = theme === 'dark' ? 'light' : 'dark';
               setTheme(next);
@@ -151,7 +153,7 @@ export function Shell() {
             }}
           >
             {theme === 'dark' ? <Sun /> : <Moon />}
-            {fold ? null : theme === 'dark' ? '浅色' : '深色'}
+            {fold ? null : themeToggleLabel(theme)}
           </Button>
           <button
             type="button"

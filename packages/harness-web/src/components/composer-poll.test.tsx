@@ -57,6 +57,7 @@ describe('会话轮询的报错', () => {
       pending[1]?.resolve({ session });
     });
     expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByTestId('session-meta').textContent).toContain('上下文 未知');
   });
 
   it('更早的失败比成功晚到，也不再把报错挂上', async () => {

@@ -16,6 +16,7 @@
 
 - 真执行的账（`src/real.ts`，#3783）：`real_batch_items` 冻结真执行批次（和 `shadow_batch_items` 分开存，冻结后不改）；`publish_runs` 存一次交回的补丁、所有权令牌、模型、核验和该不该推（`ready` 已排推送 / `held` 核验没过 / `empty` 没改动 / `released` 切回了），同一个 `runId` 重放回原行；`outbox` 加了按单读 `listOpsForTask`、按键读 `getOp`、按键领 `claimOpByKey`、切回作废没开始的动作 `cancelPendingOps`（领着的和结果不知道的不动）。
 - 本机定时（#3929，`src/schedules.ts`）：`ade_schedules` 一行一条。到期与否用调用方传入的时刻和 `run_at` 比，不用数据库 `now()`，测试才能换钟。领取把 active 改成 firing，对不上就当没领到。列表和到期扫描都有页上限。
+- 本机会话整理（#3931，`src/ade.ts`）：`pinned`、`archived` 写在 `ade_sessions`。列表缺省排除已归档，`archived: true` 只看已归档，`q` 按标题包含筛（大小写不敏感，`%` `_` `\` 当字面量）。`adeSessionIdsAmong` 只查给来的号有没有会话行（含已归档），不扫全表。`turns` 是开跑的轮数，每次开跑加一，不是事件条数。`context` 只存执行体帧里给过的用量，没有就是 null。
 - 本机库（`src/local-db.ts`，子路径 `@fleet-dao/harness-store/local-db`，#3858）：本机装法用 PGlite 落文件，跑和法国同一份 fleet2 迁移；PGlite 是正式依赖（法国的进程不 import 这个子路径）。一个数据目录同一时刻只许一个进程开：目录里的 `fleet2.lock` 记 pid，pid 还活着就抛 `LocalDbBusyError`，已经不在（上一次被强杀）就接手。关库才放锁。测试 `test/local-db.test.ts`；Windows 真机强杀后重起事件还在的记录在 #3858 的 PR。
 
 ## 迁移和测试

@@ -1,5 +1,6 @@
 // ADE 的当前状态（#3914）：工作区、单、会话。发生了什么写在事件流里，不在这三张表。
-import { asc, desc, eq, sql } from 'drizzle-orm';
+import type { ContextReading } from '@fleet-dao/harness-contract/context-usage';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { adeSessions, adeTasks, adeWorkspaces } from './schema.ts';
 import type { Db } from './store.ts';
 
@@ -66,12 +67,40 @@ export async function insertAdeTask(
   });
 }
 
-export async function listAdeSessions(db: Db): Promise<AdeSessionRow[]> {
-  return db.select().from(adeSessions).orderBy(desc(adeSessions.updatedAt), desc(adeSessions.id));
+export interface AdeSessionListOpts {
+  /** 标题包含这段就留下。空的不筛。大小写不敏感，`%` `_` `\` 当字面量。 */
+  q?: string;
+  /** true 只看已归档。缺省排除已归档。 */
+  archived?: boolean;
+}
+
+function titleNeedle(q: string): string {
+  return `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+}
+
+export async function listAdeSessions(db: Db, opts: AdeSessionListOpts = {}): Promise<AdeSessionRow[]> {
+  const conds = [eq(adeSessions.archived, opts.archived === true)];
+  const q = opts.q?.trim();
+  if (q) conds.push(sql`${adeSessions.title} ilike ${titleNeedle(q)} escape '\\'`);
+  return db
+    .select()
+    .from(adeSessions)
+    .where(and(...conds))
+    .orderBy(desc(adeSessions.pinned), desc(adeSessions.updatedAt), desc(adeSessions.id));
 }
 
 export async function listRunningAdeSessions(db: Db): Promise<AdeSessionRow[]> {
   return db.select().from(adeSessions).where(eq(adeSessions.status, 'running'));
+}
+
+/** 这些号里哪些真有会话行，含已归档。只查给来的号，不扫全表。 */
+export async function adeSessionIdsAmong(db: Db, ids: readonly string[]): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const rows = await db
+    .select({ id: adeSessions.id })
+    .from(adeSessions)
+    .where(inArray(adeSessions.id, [...ids]));
+  return rows.map((row) => row.id);
 }
 
 export async function getAdeSession(db: Db, id: string): Promise<AdeSessionRow | null> {
@@ -114,10 +143,22 @@ export async function updateAdeSession(
     queue: AdeQueueItem[];
     runId: string | null;
     agentSessionId: string | null;
+    title: string;
+    pinned: boolean;
+    archived: boolean;
+    context: ContextReading | null;
   }>,
 ): Promise<void> {
   await db
     .update(adeSessions)
     .set({ ...patch, updatedAt: sql`now()` })
+    .where(eq(adeSessions.id, id));
+}
+
+/** 一轮真的开跑了。排队还没开跑的不加。 */
+export async function bumpAdeSessionTurns(db: Db, id: string): Promise<void> {
+  await db
+    .update(adeSessions)
+    .set({ turns: sql`${adeSessions.turns} + 1`, updatedAt: sql`now()` })
     .where(eq(adeSessions.id, id));
 }
