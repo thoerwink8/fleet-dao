@@ -55,9 +55,13 @@ pub(crate) fn start(
     }
     let cols = u16::try_from(cols).map_err(|_| StartError::Failed("cols do not fit".into()))?;
     let rows = u16::try_from(rows).map_err(|_| StartError::Failed("rows do not fit".into()))?;
-    let (exe, args) = shell();
-    let mut cmd = CommandBuilder::new(exe);
-    for arg in args {
+    let exe = shell_program();
+    let mut cmd = CommandBuilder::new(&exe);
+    // Read PATH after `CommandBuilder::new`: on Windows it merges the registry
+    // and that can differ from this process. The git launcher check has to use
+    // the environment the shell will actually see.
+    let path = cmd.get_env("PATH").map(|value| value.to_owned());
+    for arg in shell_args(path.as_deref()) {
         cmd.arg(arg);
     }
     cmd.cwd(cwd);
@@ -210,37 +214,73 @@ fn pump(
     ptys.lock().unwrap().remove(&run_id);
 }
 
-/// ConPTY emits a fast native command's last frame after the shell has already
-/// continued, so the next prompt and the first output line share a row.
-/// Sleeping at the start of `prompt` lets that frame land on its own row.
-/// A breakpoint is used so this still runs after the user replaces `prompt`.
-/// 20ms still lost the race; 80ms cleared it.
-const WINDOWS_SHELL_COMMAND: &str = "[Console]::InputEncoding=[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding $false; Set-PSBreakpoint -Command prompt -Action { Start-Sleep -Milliseconds 80 } | Out-Null";
+const WINDOWS_UTF8: &str =
+    "[Console]::InputEncoding=[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding $false";
+
+/// First `git.exe` on `path`. Git for Windows puts a .NET QuietGit launcher at
+/// `cmd\git.exe` (`CREATE_NO_WINDOW`, then `AttachConsole`). ConPTY — inbox and
+/// Windows Terminal's OpenConsole, including node-pty — emits that child's
+/// frame after PowerShell has already drawn the next prompt, so the prompt and
+/// the first output line share a row. `bin\git.exe` beside it does not attach
+/// the console after the fact, so its output stays in order. Return that
+/// `bin\git.exe`. Any other first hit is left alone. There is no console API
+/// that waits for the late frame.
+fn terminal_git(path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let path = path?;
+    for dir in std::env::split_paths(path) {
+        let found = dir.join("git.exe");
+        if !found.is_file() {
+            continue;
+        }
+        let name = dir.file_name().and_then(|name| name.to_str());
+        if !name.is_some_and(|name| name.eq_ignore_ascii_case("cmd")) {
+            return None;
+        }
+        let bin = dir.parent()?.join("bin").join("git.exe");
+        if bin.is_file() && bin != found {
+            return Some(bin);
+        }
+        return None;
+    }
+    None
+}
+
+fn windows_shell_command(path: Option<&std::ffi::OsStr>) -> String {
+    let mut command = WINDOWS_UTF8.to_string();
+    if let Some(bin) = terminal_git(path) {
+        let quoted = bin.to_string_lossy().replace('\'', "''");
+        command.push_str(&format!("; function global:git {{ & '{quoted}' @args }}"));
+    }
+    command
+}
 
 /// Windows: PowerShell (`pwsh` if it is on PATH, otherwise Windows PowerShell) with a UTF-8 console.
 /// Unix: `$SHELL`, or `/bin/sh`.
-fn shell() -> (String, Vec<String>) {
+fn shell_program() -> String {
     if cfg!(windows) {
-        let exe = if exe_on_path("pwsh.exe") {
-            "pwsh.exe"
+        if exe_on_path("pwsh.exe") {
+            "pwsh.exe".into()
         } else {
-            "powershell.exe"
-        };
-        (
-            exe.to_string(),
-            vec![
-                "-NoLogo".into(),
-                "-NoExit".into(),
-                "-Command".into(),
-                WINDOWS_SHELL_COMMAND.into(),
-            ],
-        )
+            "powershell.exe".into()
+        }
     } else {
-        let exe = std::env::var("SHELL")
+        std::env::var("SHELL")
             .ok()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/bin/sh".into());
-        (exe, vec!["-i".into()])
+            .unwrap_or_else(|| "/bin/sh".into())
+    }
+}
+
+fn shell_args(path: Option<&std::ffi::OsStr>) -> Vec<String> {
+    if cfg!(windows) {
+        vec![
+            "-NoLogo".into(),
+            "-NoExit".into(),
+            "-Command".into(),
+            windows_shell_command(path),
+        ]
+    } else {
+        vec!["-i".into()]
     }
 }
 
@@ -276,19 +316,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_shell_command_waits_before_the_prompt() {
-        assert!(WINDOWS_SHELL_COMMAND
-            .contains("Set-PSBreakpoint -Command prompt -Action { Start-Sleep -Milliseconds 80 }"));
-        assert!(WINDOWS_SHELL_COMMAND.contains("UTF8Encoding $false"));
-        assert!(!WINDOWS_SHELL_COMMAND.contains("-NoProfile"));
+    fn windows_shell_command_does_not_sleep() {
+        let command = windows_shell_command(None);
+        assert!(command.contains("UTF8Encoding $false"));
+        assert!(!command.contains("Start-Sleep"));
+        assert!(!command.contains("Set-PSBreakpoint"));
+        assert!(!command.contains("-NoProfile"));
+    }
+
+    #[test]
+    fn terminal_git_skips_the_cmd_launcher() {
+        let root = std::env::temp_dir().join(format!("hostd-git-{}", std::process::id()));
+        let bare = std::env::temp_dir().join(format!("hostd-git-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
+        std::fs::create_dir_all(root.join("cmd")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("cmd").join("git.exe"), b"shim").unwrap();
+        std::fs::write(root.join("bin").join("git.exe"), b"real").unwrap();
+        let path = std::env::join_paths([root.join("cmd")]).unwrap();
+        let found = terminal_git(Some(path.as_os_str())).expect("bin git");
+        assert_eq!(found, root.join("bin").join("git.exe"));
+        let command = windows_shell_command(Some(path.as_os_str()));
+        assert!(command.contains("function global:git"));
+        assert!(command.contains(&found.to_string_lossy().replace('\'', "''")));
+        assert!(!command.contains("Start-Sleep"));
+
+        let direct = std::env::join_paths([root.join("bin")]).unwrap();
+        assert!(terminal_git(Some(direct.as_os_str())).is_none());
+
+        std::fs::create_dir_all(bare.join("cmd")).unwrap();
+        std::fs::write(bare.join("cmd").join("git.exe"), b"shim").unwrap();
+        let bare_path = std::env::join_paths([bare.join("cmd")]).unwrap();
+        assert!(terminal_git(Some(bare_path.as_os_str())).is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 
     #[cfg(windows)]
     #[test]
-    fn windows_shell_installs_the_prompt_wait() {
-        let (exe, args) = shell();
+    fn windows_shell_installs_utf8_without_a_prompt_sleep() {
+        let exe = shell_program();
+        let args = shell_args(None);
         assert!(exe == "pwsh.exe" || exe == "powershell.exe");
-        assert_eq!(args.last().map(String::as_str), Some(WINDOWS_SHELL_COMMAND));
+        assert_eq!(args[..3], ["-NoLogo", "-NoExit", "-Command"]);
+        let command = args.last().expect("command");
+        assert!(command.contains("UTF8Encoding $false"));
+        assert!(!command.contains("Start-Sleep"));
         assert!(!args.iter().any(|arg| arg == "-NoProfile"));
     }
 }
