@@ -323,6 +323,24 @@ fn selftest(app: &AppHandle, out: &str) -> i32 {
     }
 }
 
+/// Browser arguments for the WebView2 environment-options API.
+///
+/// Runtime 150 and later drop `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` when the host is high
+/// integrity. The CI runner is elevated, so the driver's `--remote-debugging-port` never reaches
+/// the browser process and `DevToolsActivePort` is never written. wry always sets
+/// `AdditionalBrowserArguments`, which is the channel an elevated runtime still honors, but setting
+/// it replaces wry's own defaults. Keep the string wry 0.57 adds when the option is unset and
+/// autoplay is off (this window does not turn autoplay on). Empty or absent means "leave wry's
+/// defaults alone".
+fn browser_args_from_env(from_env: Option<&str>) -> Option<String> {
+    let extra = from_env?.trim();
+    if extra.is_empty() {
+        return None;
+    }
+    const WRY_DEFAULT: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+    Some(format!("{WRY_DEFAULT} {extra}"))
+}
+
 /// A GUI program has no console, so a panic or a failed start would vanish without a trace. Both are written to
 /// fleet2-shell.log in the temp folder (the end-to-end run prints it when the window does not come up).
 fn log_to_temp(line: &str) {
@@ -348,7 +366,31 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .setup(|app| {
+            // The window is created here, not by tauri.conf.json (`create: false`). The debugging
+            // port has to be on the WebView2 environment before the browser process starts; setup
+            // is the first place that can read the env var and pass it through the API.
             let handle = app.handle().clone();
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == MAIN)
+                .cloned()
+                .ok_or("tauri.conf.json 里没有主窗口")?;
+            let window = tauri::WebviewWindowBuilder::from_config(&handle, &window_config)?;
+            #[cfg(windows)]
+            let window = if let Some(args) = browser_args_from_env(
+                std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+                    .ok()
+                    .as_deref(),
+            ) {
+                window.additional_browser_args(&args)
+            } else {
+                window
+            };
+            window.build()?;
+
             let config_dir = app.path().app_config_dir()?;
             let settings_path = config_dir.join("shell.json");
             let (settings, settings_err) = match read_settings(&settings_path) {
@@ -421,4 +463,24 @@ pub fn run() {
             stop_kernel(app);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::browser_args_from_env;
+
+    #[test]
+    fn no_env_leaves_wry_defaults_alone() {
+        assert_eq!(browser_args_from_env(None), None);
+        assert_eq!(browser_args_from_env(Some("   ")), None);
+    }
+
+    #[test]
+    fn debugging_port_goes_through_the_api_with_wry_defaults_kept() {
+        let args =
+            browser_args_from_env(Some("--remote-debugging-port=0 --enable-logging")).unwrap();
+        assert!(args.starts_with("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection "));
+        assert!(args.contains("--remote-debugging-port=0"));
+        assert!(args.contains("--enable-logging"));
+    }
 }
