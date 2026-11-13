@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { isMainChat, splitConversation, summarizeDiff, toolPhrase } from './chat-view';
+import { approvalInputView, isMainChat, splitConversation, summarizeDiff, toolPhrase } from './chat-view';
+import { categoryOf } from './describe';
 import type { TimelineItem } from './transcript';
 import type { FeedEvent } from './types';
 
@@ -31,5 +32,33 @@ describe('对话主视图', () => {
     expect(toolPhrase([{ name: 'Edit' }])).toBe('改了 1 个文件');
     expect(toolPhrase([{ name: 'read_file' }])).toBe('读了 1 个文件');
     expect(toolPhrase([{ name: 'search_replace' }])).toBe('改了 1 个文件');
+    expect(toolPhrase([{ name: 'Bash', status: 'running' }])).toBe('要跑 1 条命令');
+    expect(toolPhrase([{ name: 'Bash', status: 'ok' }])).toBe('跑了 1 条命令');
+    expect(approvalInputView('command', '{"command":"git init","description":"建仓库"}')).toEqual({
+      command: 'git init',
+      description: '建仓库',
+    });
+    expect(approvalInputView('network', '{"url":"https://example.com"}')).toEqual({
+      url: 'https://example.com',
+    });
+    expect(approvalInputView('other', '{"todos":[]}')).toEqual({ json: '{"todos":[]}' });
+  });
+
+  it('审批卡进主视图，类别算会话轮次', () => {
+    const card: TimelineItem = {
+      kind: 'approval',
+      card: {
+        id: 3,
+        at: '2026-11-13T00:00:00.000Z',
+        approvalId: 'ap1',
+        tool: 'Bash',
+        category: 'command',
+        input: 'git init',
+        status: 'pending',
+      },
+    };
+    expect(isMainChat(card)).toBe(true);
+    expect(splitConversation([card]).main).toHaveLength(1);
+    expect(categoryOf('session.approval')).toBe('turn');
   });
 });

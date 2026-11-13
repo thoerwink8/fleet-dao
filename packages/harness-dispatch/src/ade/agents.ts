@@ -19,6 +19,8 @@ export interface AdeAgentInfo {
   account?: string;
   /** 型号不是从 CLI 列出来的时候，给人看的一句说明。 */
   modelsNote?: string;
+  /** per-call 才能逐条点允许或拒绝。none 是这家交不出审批请求。 */
+  approvals?: 'per-call' | 'none';
 }
 
 const ORDER = ['claude', 'grok', 'codex', 'pi'] as const;
