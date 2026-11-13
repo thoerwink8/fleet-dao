@@ -69,6 +69,79 @@ function run(cmd, args, { timeoutMs = 120_000, input } = {}) {
 
 const git = (args, opts) => run('git', ['-C', CHECKOUT, ...args], opts);
 
+/** `git status --porcelain` 的非空行。不 trim 行首：第一列是暂存区、第二列是工作区（` M` 才是没暂存的改动）。 */
+function porcelainLines(text) {
+  return String(text ?? '')
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+$/, ''))
+    .filter((l) => l !== '');
+}
+
+const trackedPorcelain = (lines) => lines.filter((l) => !l.startsWith('??'));
+
+function listPorcelain(lines) {
+  const shown = lines.slice(0, 12);
+  const more = lines.length > shown.length ? `；另有 ${lines.length - shown.length} 条` : '';
+  return `${shown.join('；')}${more}`;
+}
+
+/**
+ * 部署检出快进到 sha。发布物从裸仓 archive 取，这份检出是为了让 release.sh 用要发的那一版脚本。
+ * 没提交的改动不再一律拒绝：和这次快进不重叠的，`git merge --ff-only` 会留下并快进
+ * （法国现场改过的 harness-api 源文件、未跟踪的 ade.ts 都不在要发的提交里，不该挡住发版）。
+ * 快进会盖掉本地改动时才没成。原因写明命令和挡住的路径（含未跟踪文件），不只留 git 报错的尾几行。
+ * 已经在目标上、或目标是当前提交的祖先，但有已跟踪的没提交改动：不跑工作区里可能被改过的 release.sh。
+ * 只有未跟踪文件、又不挡快进的，跟以前一样不拦。
+ * runGit(args) 同步跑，回 { status, stdout, stderr, error? }（工作目录已是这个检出）。
+ */
+export function fastForwardCheckout(runGit, sha, checkout = CHECKOUT) {
+  const status = runGit(['status', '--porcelain']);
+  if (status.status !== 0) {
+    return {
+      ok: false,
+      why: `看部署检出有没有改动没成（git status --porcelain）：${tail(status.stderr || status.error)}`,
+    };
+  }
+  const at = runGit(['rev-parse', 'HEAD']);
+  if (at.status !== 0) {
+    return { ok: false, why: `读部署检出的提交没成（git rev-parse HEAD）：${tail(at.stderr || at.error)}` };
+  }
+  const head = at.stdout.trim();
+  const lines = porcelainLines(status.stdout);
+  const tracked = trackedPorcelain(lines);
+  const stays = head === sha || runGit(['merge-base', '--is-ancestor', sha, head]).status === 0;
+  if (stays) {
+    if (tracked.length > 0) {
+      return {
+        ok: false,
+        why:
+          `部署检出 ${checkout} 已在 ${head.slice(0, 12)}，` +
+          `git status --porcelain 有没提交的改动，不跑工作区里的 release.sh：${listPorcelain(tracked)}`,
+      };
+    }
+    return { ok: true };
+  }
+  if (runGit(['merge-base', '--is-ancestor', head, sha]).status !== 0) {
+    return {
+      ok: false,
+      why: `部署检出在 ${head.slice(0, 12)}，和主线分叉了（git merge-base --is-ancestor）`,
+    };
+  }
+  const merged = runGit(['merge', '--ff-only', '--quiet', sha]);
+  if (merged.status !== 0) {
+    const paths = lines.length ? listPorcelain(lines) : 'git status --porcelain 没有列出路径';
+    const detail = tail(merged.stderr || merged.stdout || merged.error);
+    const gitNote = detail ? `。git：${detail}` : '';
+    return {
+      ok: false,
+      why:
+        `git merge --ff-only ${sha.slice(0, 12)} 没成（部署检出 ${checkout}）。` +
+        `挡住的路径（git status --porcelain）：${paths}${gitNote}`,
+    };
+  }
+  return { ok: true };
+}
+
 /** 单元在不在跑：true/false；systemctl 起不来、读不成回 null（不当成「没在跑」）。 */
 function serviceActive(unit) {
   const r = run('systemctl', ['is-active', unit], { timeoutMs: 15_000 });
@@ -376,22 +449,7 @@ export const realIo = {
   },
   /** 部署检出快进到要发的提交（同自动发布的 prepareCheckout）：release.sh 取自己的新版本。 */
   async prepareCheckout(sha) {
-    const dirty = git(['status', '--porcelain', '--untracked-files=no']);
-    if (dirty.status !== 0)
-      return { ok: false, why: `看部署检出有没有改动没成：${tail(dirty.stderr || dirty.error)}` };
-    if (dirty.stdout.trim())
-      return { ok: false, why: `部署检出 ${CHECKOUT} 有没提交的改动：${tail(dirty.stdout)}` };
-    const at = git(['rev-parse', 'HEAD']);
-    if (at.status !== 0) return { ok: false, why: `读部署检出的提交没成：${tail(at.stderr || at.error)}` };
-    const head = at.stdout.trim();
-    if (head === sha || git(['merge-base', '--is-ancestor', sha, head]).status === 0) return { ok: true };
-    if (git(['merge-base', '--is-ancestor', head, sha]).status !== 0) {
-      return { ok: false, why: `部署检出在 ${head.slice(0, 12)}，和主线分叉了` };
-    }
-    const m = git(['merge', '--ff-only', '--quiet', sha]);
-    if (m.status !== 0)
-      return { ok: false, why: `快进部署检出到 ${sha.slice(0, 12)} 没成：${tail(m.stderr || m.error)}` };
-    return { ok: true };
+    return fastForwardCheckout(git, sha);
   },
   async runRelease(sha, timeoutMs) {
     return run('bash', [RELEASE_SH, sha], { timeoutMs });

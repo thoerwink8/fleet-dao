@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { gateVerdict, HUMAN_TIER_PATHS, INSTALLED_COPIES, reasonOf } from '../france/auto-release/lib.mjs';
-import { requestArchiveIo } from '../france/release-request/fleet-release-request.mjs';
+import { fastForwardCheckout, requestArchiveIo } from '../france/release-request/fleet-release-request.mjs';
 import {
   EXIT,
   FLEET_API,
@@ -706,6 +706,120 @@ test('【故意造出的失败】部署检出没准备好：不跑 release.sh', 
   assert.equal(await runRequest(io), EXIT.failed);
   assert.deepEqual(log.release, []);
   assert.match(log.states.at(-1).why, /部署检出没准备好/);
+});
+
+/** 临时 git 检出。runGit 的形状和真接活里的 git() 一样，非 0 也交回，不起不来才算没跑成。 */
+function checkoutGit(dir) {
+  return (args) => {
+    try {
+      return runChild('git', ['-C', dir, ...args], {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 't',
+          GIT_AUTHOR_EMAIL: 't@example.com',
+          GIT_COMMITTER_NAME: 't',
+          GIT_COMMITTER_EMAIL: 't@example.com',
+        },
+      });
+    } catch (e) {
+      return { status: null, stdout: '', stderr: '', error: e instanceof Error ? e.message : String(e) };
+    }
+  };
+}
+
+function okGit(git, args) {
+  const r = git(args);
+  assert.equal(r.status, 0, `${args.join(' ')}：${r.stderr || r.error || ''}`);
+  return r;
+}
+
+/** 法国现场那种检出：cockpit.ts、index.ts 有没提交的改动，另有未跟踪的 ade.ts。要发的提交在另一条文件上。 */
+function incidentCheckout() {
+  const dir = mkdtempSync(join(tmpdir(), 'ff-checkout-'));
+  const git = checkoutGit(dir);
+  const src = join(dir, 'packages/harness-api/src');
+  mkdirSync(src, { recursive: true });
+  const cockpit = join(src, 'cockpit.ts');
+  const index = join(src, 'index.ts');
+  writeFileSync(cockpit, 'export const cockpit = 1;\n');
+  writeFileSync(index, "export * from './cockpit.ts';\n");
+  writeFileSync(join(dir, 'a.txt'), 'base\n');
+  okGit(git, ['init', '-q', '-b', 'main']);
+  okGit(git, ['add', '-A']);
+  okGit(git, ['commit', '-q', '-m', 'base']);
+  return {
+    dir,
+    git,
+    cockpit,
+    index,
+    ade: join(src, 'ade.ts'),
+    done: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+function dirtyLikeFrance(s) {
+  writeFileSync(s.cockpit, "export const cockpit = 1;\nimport { createAdeStore } from './ade.ts';\n");
+  writeFileSync(s.index, "export * from './ade.ts';\nexport * from './cockpit.ts';\n");
+  writeFileSync(s.ade, 'export const ade = 1;\n');
+}
+
+test('快进部署检出：和要发的提交不重叠的没提交改动不挡（法国现场那两份 harness-api），改动还在', () => {
+  const s = incidentCheckout();
+  try {
+    writeFileSync(join(s.dir, 'a.txt'), 'next\n');
+    okGit(s.git, ['add', 'a.txt']);
+    okGit(s.git, ['commit', '-q', '-m', 'next']);
+    const sha = okGit(s.git, ['rev-parse', 'HEAD']).stdout.trim();
+    okGit(s.git, ['reset', '--hard', 'HEAD~1']);
+    dirtyLikeFrance(s);
+    const r = fastForwardCheckout(s.git, sha, s.dir);
+    assert.equal(r.ok, true, r.why);
+    assert.equal(okGit(s.git, ['rev-parse', 'HEAD']).stdout.trim(), sha);
+    assert.match(readFileSync(s.cockpit, 'utf8'), /createAdeStore/);
+    assert.match(readFileSync(s.index, 'utf8'), /ade\.ts/);
+    assert.equal(readFileSync(s.ade, 'utf8'), 'export const ade = 1;\n');
+    assert.equal(readFileSync(join(s.dir, 'a.txt'), 'utf8'), 'next\n');
+  } finally {
+    s.done();
+  }
+});
+
+test('快进会盖掉本地改动：没成，原因里有 git merge --ff-only、git status 和挡住的文件（含未跟踪）', () => {
+  const s = incidentCheckout();
+  try {
+    writeFileSync(s.cockpit, 'export const cockpit = 2;\n');
+    okGit(s.git, ['add', 'packages/harness-api/src/cockpit.ts']);
+    okGit(s.git, ['commit', '-q', '-m', 'touch cockpit']);
+    const sha = okGit(s.git, ['rev-parse', 'HEAD']).stdout.trim();
+    okGit(s.git, ['reset', '--hard', 'HEAD~1']);
+    dirtyLikeFrance(s);
+    const r = fastForwardCheckout(s.git, sha, s.dir);
+    assert.equal(r.ok, false);
+    assert.match(r.why, /git merge --ff-only/);
+    assert.match(r.why, /git status --porcelain/);
+    assert.match(r.why, /packages\/harness-api\/src\/cockpit\.ts/);
+    assert.match(r.why, /packages\/harness-api\/src\/index\.ts/);
+    assert.match(r.why, /packages\/harness-api\/src\/ade\.ts/);
+    assert.notEqual(s.git(['rev-parse', 'HEAD']).stdout.trim(), sha, '没快进成功，头还停在原处');
+  } finally {
+    s.done();
+  }
+});
+
+test('检出已经在目标上、但有已跟踪的没提交改动：不跑工作区脚本，原因里有 git status 和文件', () => {
+  const s = incidentCheckout();
+  try {
+    const sha = okGit(s.git, ['rev-parse', 'HEAD']).stdout.trim();
+    dirtyLikeFrance(s);
+    const r = fastForwardCheckout(s.git, sha, s.dir);
+    assert.equal(r.ok, false);
+    assert.match(r.why, /git status --porcelain/);
+    assert.match(r.why, /packages\/harness-api\/src\/cockpit\.ts/);
+    assert.match(r.why, /packages\/harness-api\/src\/index\.ts/);
+    assert.equal(okGit(s.git, ['rev-parse', 'HEAD']).stdout.trim(), sha);
+  } finally {
+    s.done();
+  }
 });
 
 test('【故意造出的失败】release.sh 有红（退出码 1）：没成，记着已经动过手', async () => {
