@@ -32,11 +32,24 @@ class ScriptProc implements HostProcess {
   behavior = '';
   updatedInput: unknown;
   answered = false;
+  initReplied = false;
   #onExit?: (code: number | null, signal: string | null) => void;
   #onClose?: () => void;
   constructor() {
     this.stdin.on('data', (chunk: Buffer | string) => {
       this.stdinText += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      if (
+        mode === 'ask' &&
+        !this.ended &&
+        !this.initReplied &&
+        this.stdinText.includes('"subtype":"initialize"')
+      ) {
+        this.initReplied = true;
+        const id = /"request_id":"([^"]+)"/.exec(this.stdinText)?.[1] ?? 'init';
+        this.stdout.write(
+          `${JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: id, response: {} } })}\n`,
+        );
+      }
       if (mode !== 'ask' || this.ended || this.answered) return;
       const line = this.stdinText.split('\n').find((part) => part.includes('"control_response"'));
       if (!line) return;
@@ -493,6 +506,9 @@ describe('真命令', () => {
     expect(flag(c2, '--resume')).toBe(flag(c1, '--session-id'));
     expect(c2.join(' ')).not.toContain('bypassPermissions');
     expect(flag(c1, '--permission-prompts')).toBe('host');
+    expect(flag(c1, '--permission-prompt-tool')).toBe('stdio');
+    expect(c1).toContain('--await-initialize');
+    expect(flag(c1, '--setting-sources')).toBe('project,local');
     expect(flag(c1, '--input-format')).toBe('stream-json');
     expect(c1.join(' ')).not.toContain('--permission-prompts none');
     const listed = await local.listAgents();
@@ -615,6 +631,8 @@ describe('审批', () => {
     expect(pending).toMatchObject({ status: 'pending', category: 'command', tool: 'Bash' });
     expect(pending.input).toContain('git init');
     expect(pending.by).toBeUndefined();
+    expect(lastProc?.stdinText).toContain('"subtype":"initialize"');
+    expect(lastProc?.stdinText).toContain('初始化');
     expect(String(pending.at)).toMatch(/^\d{4}-/);
     const res = await postDecision(s.id, pending.approvalId, 'allow');
     expect(res.status).toBe(202);

@@ -86,6 +86,32 @@ export function denyFrame(requestId: string): string {
 }
 
 /** claude `--input-format stream-json` 的一句用户消息。session_id 用协议里的 default，续跑靠命令行的 --resume。 */
+/** 主机先发这一帧。`--await-initialize` 的 CLI 等到它才把审批交出来。 */
+export function initializeFrame(requestId: string): string {
+  return JSON.stringify({
+    type: 'control_request',
+    request_id: requestId,
+    request: { subtype: 'initialize' },
+  });
+}
+
+/** CLI 对主机 control_request 的答复。不是模型的话。 */
+export function parseControlResponse(line: string): { requestId: string } | null {
+  let msg: Record<string, unknown>;
+  try {
+    const v: unknown = JSON.parse(line);
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    msg = v as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (msg.type !== 'control_response') return null;
+  const response = msg.response;
+  if (!response || typeof response !== 'object' || Array.isArray(response)) return null;
+  const requestId = (response as { request_id?: unknown }).request_id;
+  return typeof requestId === 'string' && requestId ? { requestId } : null;
+}
+
 export function claudeUserLine(text: string): string {
   return JSON.stringify({
     type: 'user',

@@ -89,8 +89,10 @@ import {
   clipInput,
   controlOk,
   denyFrame,
+  initializeFrame,
   needsPerson,
   parseControlRequest,
+  parseControlResponse,
   streamResult,
   toolCategory,
 } from './approvals.ts';
@@ -158,6 +160,12 @@ export function adeCommand(
       'acceptEdits',
       '--permission-prompts',
       'host',
+      '--permission-prompt-tool',
+      'stdio',
+      '--await-initialize',
+      // 用户级放行名单会把命令和联网一并放掉。本机审批只认工作区自己的 project/local。
+      '--setting-sources',
+      'project,local',
       '--model',
       model,
       ...(resume ? ['--resume', agentSessionId] : ['--session-id', agentSessionId]),
@@ -239,6 +247,10 @@ interface Live {
   /** claude 吐了 result 之后才能关 stdin，否则这一轮的答复交不回去。 */
   sawResult: boolean;
   stdinClosed: boolean;
+  /** `--await-initialize` 的那一帧。对上答复才把用户的话写进去。 */
+  initRequestId: string;
+  prompt: string;
+  userSent: boolean;
 }
 
 function textParser(runId: string): TranscriptParser {
@@ -1026,6 +1038,9 @@ export class AdeService {
       pending: new Map(),
       sawResult: false,
       stdinClosed: false,
+      initRequestId: `init-${randomBytes(4).toString('hex')}`,
+      prompt,
+      userSent: false,
       stop: () => {
         live.stopped = true;
         proc.stop('term');
@@ -1052,19 +1067,31 @@ export class AdeService {
       live.stdinClosed = true;
     });
     if (row.agent === 'claude') {
-      // 整轮结束前不能关 stdin，否则 control_response 交不回去。看到 result 且没有待审批再关。
-      proc.stdin.write(`${claudeUserLine(prompt)}\n`);
+      // 先等 CLI 认下 initialize，再写用户的话。否则它不把 can_use_tool 交出来，直接拒。
+      proc.stdin.write(`${initializeFrame(live.initRequestId)}\n`);
     } else if (row.agent !== 'grok') {
       proc.stdin.write(prompt);
       proc.stdin.end();
     }
   }
 
+  #sendClaudeUser(live: Live): void {
+    if (live.userSent || live.stdinClosed) return;
+    live.userSent = true;
+    live.proc.stdin.write(`${claudeUserLine(live.prompt)}\n`);
+  }
+
   #onStdout(row: AdeSessionRow, live: Live, writer: TranscriptWriter, line: string): void {
     if (row.agent === 'claude') {
+      const replied = parseControlResponse(line);
+      if (replied) {
+        if (replied.requestId === live.initRequestId) this.#sendClaudeUser(live);
+        return;
+      }
       const control = parseControlRequest(line);
       if (control?.kind === 'initialize') {
         live.proc.stdin.write(`${controlOk(control.requestId, {})}\n`);
+        this.#sendClaudeUser(live);
         return;
       }
       if (control?.kind === 'can_use_tool') {

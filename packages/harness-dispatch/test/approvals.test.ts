@@ -4,8 +4,10 @@ import {
   approvalsFor,
   clipInput,
   denyFrame,
+  initializeFrame,
   needsPerson,
   parseControlRequest,
+  parseControlResponse,
   toolCategory,
 } from '../src/ade/approvals.ts';
 
@@ -51,6 +53,21 @@ describe('审批帧', () => {
       input: { command: 'git init' },
     });
     expect(parseControlRequest('你好')).toBeNull();
+    const init = JSON.parse(initializeFrame('init-1')) as {
+      type: string;
+      request: { subtype: string };
+    };
+    expect(init.type).toBe('control_request');
+    expect(init.request.subtype).toBe('initialize');
+    expect(
+      parseControlResponse(
+        JSON.stringify({
+          type: 'control_response',
+          response: { subtype: 'success', request_id: 'init-1', response: {} },
+        }),
+      ),
+    ).toEqual({ requestId: 'init-1' });
+    expect(parseControlResponse('你好')).toBeNull();
     expect(clipInput('x'.repeat(2001)).truncated).toBe(true);
     expect(clipInput('x'.repeat(2001)).text).toHaveLength(2000);
   });

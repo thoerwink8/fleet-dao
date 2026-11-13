@@ -124,6 +124,9 @@ describe('命令', () => {
       expect(cmd.join(' ')).not.toContain('bypassPermissions');
       expect(cmd[cmd.indexOf('--permission-mode') + 1]).toBe('acceptEdits');
       expect(cmd[cmd.indexOf('--permission-prompts') + 1]).toBe('host');
+      expect(cmd[cmd.indexOf('--permission-prompt-tool') + 1]).toBe('stdio');
+      expect(cmd).toContain('--await-initialize');
+      expect(cmd[cmd.indexOf('--setting-sources') + 1]).toBe('project,local');
       expect(cmd[cmd.indexOf('--input-format') + 1]).toBe('stream-json');
       expect(cmd.join(' ')).not.toContain('--permission-prompts none');
     }
