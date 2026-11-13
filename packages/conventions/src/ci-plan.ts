@@ -161,6 +161,9 @@ export const TEST_READS: Record<string, string[]> = {
     // discussion-draft.test.ts 钉住「讨论稿脚本过的稿，方案索引一定过」（决定 0118），读索引的判法
     'packages/conventions/src/specs-index.ts',
   ],
+  // ade-organize.test.ts 为回填核对读这一份迁移。迁移在 harness-store 的面以外，
+  // 依赖图不会因为改这份 SQL 选上 harness-dispatch。只记这一个文件，不记整个 store。
+  'harness-dispatch': ['packages/harness-store/migrations/0011_nebulous_landau.sql'],
 };
 
 export type Rule =

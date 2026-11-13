@@ -544,7 +544,7 @@ export function AdeComposer({
               session?.model,
               session?.worktree ? '工作树' : '',
               session ? roundLabel(session.turns ?? 0) : '',
-              session ? contextLabel(session.context) : '',
+              session ? `上下文 ${contextLabel(session.context)}` : '',
             ]
               .filter(Boolean)
               .join(' · ')}
