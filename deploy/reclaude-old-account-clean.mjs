@@ -463,7 +463,7 @@ export function cleanHome(home, { apply = false } = {}) {
 
 export function listTargetHomes({ allHomes, homes, passwdText, homedir = os.homedir() }) {
   if (!allHomes) {
-    const list = homes && homes.length ? homes : [homedir];
+    const list = homes?.length ? homes : [homedir];
     return { ok: true, homes: list, limited: false };
   }
   if (process.platform === 'win32') {

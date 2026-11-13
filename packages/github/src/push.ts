@@ -537,9 +537,12 @@ export function fromPushFailure(
     case 'workflow_permission':
       return new GitHubError(
         'WORKFLOW_PERMISSION',
-        `推 ${slug} ${branch} 被拒：改动碰了 .github/workflows/，而「干活的」机器人（agent App）缺 Workflows 写权限（workflows:write）——` +
-          `这项权限有意没给（给了它就能改 CI，是放大授权），换多少次都一样，要人处理：由人把这份 workflow 改动推上去，` +
-          `或创始人决定给 agent App 加 Workflows 读写权限（${why}）`,
+        `推 ${slug} ${branch} 被拒：改动碰了 .github/workflows/，` +
+          `App 已发 workflows 权限（token-scopes.ts 的 git scope，0106 起），还是被打回：` +
+          `说明这一刀是合并闸「安全基前置要你拍」开着的——PR 里动了安全基路径，照规则要前置批准（决定 0106）；` +
+          `从 PR 分支名的 head SHA 进「要你拍」，批准后那把 workflow 子令牌才会放通。` +
+          `（GitHub 报：refusing to allow a GitHub App to create or update workflow without workflows permission——` +
+          `已经不是"没权限"，是"合并闸化掉了不该先合的 workflow 修改"）（${why}）`,
         {
           details: {
             exitCode: res.code,
