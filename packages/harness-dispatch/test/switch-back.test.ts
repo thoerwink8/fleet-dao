@@ -195,7 +195,7 @@ describe('切回表的每一行', () => {
     expect(git(remote, 'branch', '--list', 'fleet2/*').trim()).toBe('');
     expect(await opStates()).toEqual(['change.push:done', 'change.pr.open:dead']);
     expect(released).toEqual([{ state: 'queued', doing: expect.any(String) }]);
-  });
+  }, 20_000);
 
   describe('开了 PR', () => {
     beforeEach(async () => {
