@@ -37,7 +37,13 @@ describe('枚举中文映射（只有 labels.ts 一处）', () => {
   });
 
   it('契约里的事件类型都有中文名', () => {
-    for (const t of ['session.turn.started', 'worker.spawned', 'worker.cleaned', 'handback.recorded']) {
+    for (const t of [
+      'session.turn.started',
+      'session.approval',
+      'worker.spawned',
+      'worker.cleaned',
+      'handback.recorded',
+    ]) {
       expect(TYPE_LABEL[t], t).toBeTruthy();
     }
     expect(OUTCOME_LABEL.completed).toBeTruthy();

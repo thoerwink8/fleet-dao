@@ -13,6 +13,7 @@ export const TYPE_LABEL: Record<string, string> = {
   'session.message': '会话消息',
   'session.turn.started': '轮次开始',
   'session.turn.settled': '轮次结束',
+  'session.approval': '审批',
   'worker.spawn.requested': '派工请求',
   'worker.stop.requested': '叫停请求',
   'worker.spawned': '工人启动',
@@ -22,6 +23,29 @@ export const TYPE_LABEL: Record<string, string> = {
   'worker.result.submitted': '交结果',
   'handback.recorded': '交回核验',
 };
+
+export const APPROVAL_CATEGORY_LABEL: Record<string, string> = {
+  edit: '改文件',
+  command: '跑命令',
+  network: '联网',
+  other: '其他',
+};
+
+export const APPROVAL_STATUS_LABEL: Record<string, string> = {
+  pending: '待审批',
+  allowed: '已允许',
+  denied: '已拒绝',
+  dropped: '没点，这一轮停了',
+};
+
+export const APPROVAL_RESULT_LABEL: Record<string, string> = {
+  allowed: '允许',
+  denied: '拒绝',
+  stopped: '停',
+};
+
+/** 这家 headless 交不出逐条审批时，界面上就写这一句，不假装能点。 */
+export const APPROVALS_UNSUPPORTED = '这家不支持逐条审批';
 
 /** 工人交结果的状态（submit_result 的 status）。 */
 export const RESULT_STATUS_LABEL: Record<string, string> = {

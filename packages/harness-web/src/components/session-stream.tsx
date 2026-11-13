@@ -1,5 +1,6 @@
 import { ArrowDown, ChevronDown, ChevronRight, LoaderCircle, RefreshCw, WifiOff, Wrench } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { adeGet, adeSend } from '../lib/ade';
 import { splitConversation } from '../lib/chat-view';
 import { cn } from '../lib/cn';
 import { CATEGORY_LABEL, type Category, categoryOf, taskIdOf } from '../lib/describe';
@@ -17,7 +18,7 @@ import {
 import type { FeedEvent, FeedState } from '../lib/types';
 import { Button } from '../ui/button';
 import { AdeComposer } from './ade-panel';
-import { ChatTimeline } from './chat-timeline';
+import { ApprovalRow, ApprovalsNote, ChatTimeline } from './chat-timeline';
 import { Chip } from './chip';
 import { EventCard } from './event-card';
 import { LoginPrompt } from './login-prompt';
@@ -34,6 +35,8 @@ function itemStart(item: TimelineItem): string | undefined {
       return item.events[0]?.createdAt;
     case 'toolrun':
       return item.steps[0]?.at;
+    case 'approval':
+      return item.card.at;
     default:
       return item.step.at;
   }
@@ -116,7 +119,37 @@ export function SessionStream({
   const lastCount = useRef(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [debug, setDebug] = useState(false);
+  const [approvalModes, setApprovalModes] = useState<Record<string, 'per-call' | 'none'> | null>(null);
   const total = state.events.length + tState.events.length;
+  useEffect(() => {
+    if (!IS_LOCAL) return;
+    let gone = false;
+    void adeGet<{ agents: { id: string; approvals?: 'per-call' | 'none' }[] }>('/agents')
+      .then((res) => {
+        if (gone) return;
+        const next: Record<string, 'per-call' | 'none'> = {};
+        for (const agent of res.agents) if (agent.approvals) next[agent.id] = agent.approvals;
+        setApprovalModes(next);
+      })
+      .catch(() => {
+        if (!gone) setApprovalModes({});
+      });
+    return () => {
+      gone = true;
+    };
+  }, []);
+  const agentId = useMemo(() => {
+    for (const ev of state.events) {
+      if (ev.type === 'session.created' && typeof ev.payload.agent === 'string') return ev.payload.agent;
+    }
+    return undefined;
+  }, [state.events]);
+  const approvalMode = agentId && approvalModes ? approvalModes[agentId] : undefined;
+  const onDecide = useCallback(
+    (approvalId: string, decision: 'allow' | 'deny') =>
+      adeSend(`/sessions/${encodeURIComponent(sessionId)}/approval`, 'POST', { approvalId, decision }),
+    [sessionId],
+  );
 
   const counts = useMemo(() => {
     const c: Record<Category, number> = {
@@ -284,105 +317,119 @@ export function SessionStream({
           ) : items.length === 0 && total > 0 ? (
             <p className="py-10 text-center text-sm text-muted">筛选把事件全藏起来了，点上面的类别条恢复。</p>
           ) : IS_LOCAL && !debug ? (
-            <ChatTimeline items={parts.main} />
+            <>
+              <ApprovalsNote mode={approvalMode} />
+              <ChatTimeline items={parts.main} onDecide={onDecide} />
+            </>
           ) : (
-            <ol className="mx-auto max-w-3xl" data-testid="events">
-              {(IS_LOCAL ? parts.debug : items).map((item) => {
-                const startedAt = itemStart(item);
-                if (!startedAt) return null;
-                const day = dayKey(startedAt);
-                const showDay = day !== lastDay;
-                lastDay = day;
-                const dayRow = showDay ? (
-                  <li className="mb-3 flex items-center gap-3 text-2xs text-muted" aria-hidden>
-                    <span className="h-px flex-1 bg-line" />
-                    {formatDay(startedAt)}
-                    <span className="h-px flex-1 bg-line" />
-                  </li>
-                ) : null;
-                if (item.kind === 'event') {
-                  return (
-                    <Fragment key={item.ev.id}>
-                      {dayRow}
-                      <EventCard
-                        ev={item.ev}
-                        taskLabel={taskIdOf(item.ev)}
-                        workerSession={workerSessionOf(item.ev)}
-                      />
-                    </Fragment>
-                  );
-                }
-                if (
-                  item.kind === 'say' ||
-                  item.kind === 'tool' ||
-                  item.kind === 'end' ||
-                  item.kind === 'dropped'
-                ) {
-                  const st = item.step;
-                  return (
-                    <Fragment key={`step-${st.id}`}>
-                      {dayRow}
-                      {item.kind === 'say' ? (
-                        <SayRow step={item.step} />
-                      ) : item.kind === 'tool' ? (
-                        <ToolRow step={item.step} />
-                      ) : item.kind === 'end' ? (
-                        <EndRow step={item.step} />
-                      ) : (
-                        <DroppedRow step={item.step} />
-                      )}
-                    </Fragment>
-                  );
-                }
-                const open = openRuns.has(item.key);
-                if (item.kind === 'toolrun') {
-                  return (
-                    <Fragment key={`steprun-${item.key}`}>
-                      {dayRow}
-                      <ToolRunRow
-                        steps={item.steps}
-                        summary={item.summary}
-                        failed={item.failed}
-                        open={open}
-                        onToggle={() => toggleRun(item.key)}
-                      />
-                    </Fragment>
-                  );
-                }
-                const first: FeedEvent | undefined = item.events[0];
-                if (!first) return null;
-                return (
-                  <Fragment key={`run-${item.key}`}>
-                    {dayRow}
-                    <li data-tool-run={item.key} data-open={open} className="pb-3">
-                      <button
-                        type="button"
-                        aria-expanded={open}
-                        onClick={() => toggleRun(item.key)}
-                        className="flex min-h-9 w-full cursor-pointer items-center gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-left text-xs text-ink-2 hover:bg-subtle"
-                      >
-                        {open ? (
-                          <ChevronDown className="size-3.5 shrink-0" />
-                        ) : (
-                          <ChevronRight className="size-3.5 shrink-0" />
-                        )}
-                        <Wrench className="size-3.5 shrink-0 text-muted" />
-                        <span className="min-w-0 flex-1 break-words">{item.summary}</span>
-                        <span className="num shrink-0 text-2xs text-muted">
-                          #{first.id}–{item.events.at(-1)?.id}
-                        </span>
-                      </button>
-                      {/* 收起时卡片仍在页面里（hidden），事件号对账和展开都不用重新取 */}
-                      <ol hidden={!open} className="mt-3">
-                        {item.events.map((ev) => (
-                          <EventCard key={ev.id} ev={ev} taskLabel={taskIdOf(ev)} />
-                        ))}
-                      </ol>
+            <>
+              {IS_LOCAL ? <ApprovalsNote mode={approvalMode} /> : null}
+              <ol className="mx-auto max-w-3xl" data-testid="events">
+                {(IS_LOCAL ? parts.debug : items).map((item) => {
+                  const startedAt = itemStart(item);
+                  if (!startedAt) return null;
+                  const day = dayKey(startedAt);
+                  const showDay = day !== lastDay;
+                  lastDay = day;
+                  const dayRow = showDay ? (
+                    <li className="mb-3 flex items-center gap-3 text-2xs text-muted" aria-hidden>
+                      <span className="h-px flex-1 bg-line" />
+                      {formatDay(startedAt)}
+                      <span className="h-px flex-1 bg-line" />
                     </li>
-                  </Fragment>
-                );
-              })}
-            </ol>
+                  ) : null;
+                  if (item.kind === 'event') {
+                    return (
+                      <Fragment key={item.ev.id}>
+                        {dayRow}
+                        <EventCard
+                          ev={item.ev}
+                          taskLabel={taskIdOf(item.ev)}
+                          workerSession={workerSessionOf(item.ev)}
+                        />
+                      </Fragment>
+                    );
+                  }
+                  if (
+                    item.kind === 'say' ||
+                    item.kind === 'tool' ||
+                    item.kind === 'end' ||
+                    item.kind === 'dropped'
+                  ) {
+                    const st = item.step;
+                    return (
+                      <Fragment key={`step-${st.id}`}>
+                        {dayRow}
+                        {item.kind === 'say' ? (
+                          <SayRow step={item.step} />
+                        ) : item.kind === 'tool' ? (
+                          <ToolRow step={item.step} />
+                        ) : item.kind === 'end' ? (
+                          <EndRow step={item.step} />
+                        ) : (
+                          <DroppedRow step={item.step} />
+                        )}
+                      </Fragment>
+                    );
+                  }
+                  if (item.kind === 'approval') {
+                    return (
+                      <Fragment key={`ap-${item.card.id}`}>
+                        {dayRow}
+                        <ApprovalRow card={item.card} onDecide={onDecide} />
+                      </Fragment>
+                    );
+                  }
+                  const open = openRuns.has(item.key);
+                  if (item.kind === 'toolrun') {
+                    return (
+                      <Fragment key={`steprun-${item.key}`}>
+                        {dayRow}
+                        <ToolRunRow
+                          steps={item.steps}
+                          summary={item.summary}
+                          failed={item.failed}
+                          open={open}
+                          onToggle={() => toggleRun(item.key)}
+                        />
+                      </Fragment>
+                    );
+                  }
+                  const first: FeedEvent | undefined = item.events[0];
+                  if (!first) return null;
+                  return (
+                    <Fragment key={`run-${item.key}`}>
+                      {dayRow}
+                      <li data-tool-run={item.key} data-open={open} className="pb-3">
+                        <button
+                          type="button"
+                          aria-expanded={open}
+                          onClick={() => toggleRun(item.key)}
+                          className="flex min-h-9 w-full cursor-pointer items-center gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-left text-xs text-ink-2 hover:bg-subtle"
+                        >
+                          {open ? (
+                            <ChevronDown className="size-3.5 shrink-0" />
+                          ) : (
+                            <ChevronRight className="size-3.5 shrink-0" />
+                          )}
+                          <Wrench className="size-3.5 shrink-0 text-muted" />
+                          <span className="min-w-0 flex-1 break-words">{item.summary}</span>
+                          <span className="num shrink-0 text-2xs text-muted">
+                            #{first.id}–{item.events.at(-1)?.id}
+                          </span>
+                        </button>
+                        {/* 收起时卡片仍在页面里（hidden），事件号对账和展开都不用重新取 */}
+                        <ol hidden={!open} className="mt-3">
+                          {item.events.map((ev) => (
+                            <EventCard key={ev.id} ev={ev} taskLabel={taskIdOf(ev)} />
+                          ))}
+                        </ol>
+                      </li>
+                    </Fragment>
+                  );
+                })}
+              </ol>
+            </>
           )}
         </div>
         {unseen > 0 ? (

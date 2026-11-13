@@ -18,7 +18,9 @@ import { createAdeHandler } from '../src/ade/http.ts';
 import { AdeService, adeCommand } from '../src/ade/service.ts';
 
 const TOKEN = 'b'.repeat(64);
-let mode: 'fake' | 'hang' | 'stderr' = 'fake';
+let mode: 'fake' | 'hang' | 'stderr' | 'ask' = 'fake';
+let askSpec: { tool: string; input: unknown } = { tool: 'Bash', input: { command: 'git init' } };
+let lastProc: ScriptProc | null = null;
 
 class ScriptProc implements HostProcess {
   pid = 42;
@@ -26,8 +28,27 @@ class ScriptProc implements HostProcess {
   stdout = new PassThrough();
   stderr = new PassThrough();
   ended = false;
+  stdinText = '';
+  behavior = '';
+  updatedInput: unknown;
+  answered = false;
   #onExit?: (code: number | null, signal: string | null) => void;
   #onClose?: () => void;
+  constructor() {
+    this.stdin.on('data', (chunk: Buffer | string) => {
+      this.stdinText += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      if (mode !== 'ask' || this.ended || this.answered) return;
+      const line = this.stdinText.split('\n').find((part) => part.includes('"control_response"'));
+      if (!line) return;
+      this.answered = true;
+      const msg = JSON.parse(line) as {
+        response?: { response?: { behavior?: string; updatedInput?: unknown } };
+      };
+      this.behavior = msg.response?.response?.behavior ?? '';
+      this.updatedInput = msg.response?.response?.updatedInput;
+      if (this.behavior === 'allow') this.say('跑完了');
+    });
+  }
   onError(): void {}
   onExit(cb: (code: number | null, signal: string | null) => void): void {
     this.#onExit = cb;
@@ -40,6 +61,14 @@ class ScriptProc implements HostProcess {
   }
   async reap() {
     return { found: 0, leftovers: 0 };
+  }
+  armAsk(tool: string, input: unknown): void {
+    const line = JSON.stringify({
+      type: 'control_request',
+      request_id: 'req-1',
+      request: { subtype: 'can_use_tool', tool_name: tool, input, tool_use_id: 'tu-1' },
+    });
+    this.stdout.write(`${line}\n`);
   }
   say(text: string): void {
     const line = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
@@ -60,12 +89,17 @@ const host: ProcessHost = {
   kind: 'local',
   start(spec: HostSpawnSpec): HostProcess {
     const proc = new ScriptProc();
+    lastProc = proc;
     queueMicrotask(() => {
       if (proc.ended) return;
       if (spec.command[0] === 'hang') return;
       if (mode === 'stderr') {
         proc.stderr.write('同步配置…\n');
         proc.finish(0, null);
+        return;
+      }
+      if (mode === 'ask') {
+        proc.armAsk(askSpec.tool, askSpec.input);
         return;
       }
       proc.say('你好');
@@ -129,6 +163,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   mode = 'fake';
+  askSpec = { tool: 'Bash', input: { command: 'git init' } };
 });
 
 async function waitIdle(id: string): Promise<void> {
@@ -457,6 +492,13 @@ describe('真命令', () => {
     expect(flag(c1, '--session-id')).toBeTruthy();
     expect(flag(c2, '--resume')).toBe(flag(c1, '--session-id'));
     expect(c2.join(' ')).not.toContain('bypassPermissions');
+    expect(flag(c1, '--permission-prompts')).toBe('host');
+    expect(flag(c1, '--input-format')).toBe('stream-json');
+    expect(c1.join(' ')).not.toContain('--permission-prompts none');
+    const listed = await local.listAgents();
+    expect(listed.find((a) => a.id === 'claude')?.approvals).toBe('per-call');
+    expect(listed.find((a) => a.id === 'grok')?.approvals).toBe('none');
+    expect(listed.find((a) => a.id === 'codex')?.approvals).toBe('none');
 
     const grok = await local.createSession({
       workspaceId: ws.id,
@@ -488,5 +530,164 @@ describe('真命令', () => {
     expect(promptPath).toBeTruthy();
     expect(readFileSync(promptPath ?? '', 'utf8')).toBe('还记得吗');
     expect(readFileSync(promptPath ?? '', 'utf8')).not.toContain('无原生续接');
+  });
+});
+
+async function approvalsOf(id: string) {
+  const evs = await readStream(t.db, `session:${id}`, 0, 80);
+  return evs.filter((e) => e.type === 'session.approval');
+}
+
+async function waitPending(id: string): Promise<Record<string, unknown>> {
+  const start = Date.now();
+  while (Date.now() - start < 3000) {
+    const hit = (await approvalsOf(id)).find((e) => e.payload.status === 'pending');
+    if (hit) return hit.payload;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error(`会话 ${id} 没有待审批`);
+}
+
+function postDecision(id: string, approvalId: unknown, decision: 'allow' | 'deny') {
+  return fetch(`${base}/api/ade/sessions/${encodeURIComponent(id)}/approval`, {
+    method: 'POST',
+    headers: { [LOCAL_TOKEN_HEADER]: TOKEN, 'content-type': 'application/json' },
+    body: JSON.stringify({ approvalId, decision }),
+  });
+}
+
+async function outcomeOf(id: string): Promise<unknown> {
+  const evs = await readStream(t.db, `session:${id}`, 0, 80);
+  return [...evs].reverse().find((e) => e.type === 'session.turn.settled')?.payload.outcome;
+}
+
+describe('审批', () => {
+  it('列出来的能力只有 claude 是逐条', async () => {
+    const list = await svc.listAgents();
+    expect(list.find((a) => a.id === 'claude')?.approvals).toBe('per-call');
+  });
+
+  it('改文件由 acceptEdits 放行并留下记录，不挂待审批', async () => {
+    mode = 'ask';
+    const input = { file_path: 'a.txt', old_string: 'a', new_string: 'b' };
+    askSpec = { tool: 'Edit', input };
+    const dir = mkdtempSync(join(root, 'ask-'));
+    const ws = await svc.addWorkspace('改', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+      text: '改文件',
+    });
+    await waitIdle(s.id);
+    const rows = await approvalsOf(s.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.payload).toMatchObject({
+      status: 'allowed',
+      result: 'allowed',
+      by: 'acceptEdits',
+      category: 'edit',
+      tool: 'Edit',
+    });
+    expect(rows[0]?.payload.input).toContain('a.txt');
+    expect(String(rows[0]?.payload.at)).toMatch(/^\d{4}-/);
+    expect(rows.some((e) => e.payload.status === 'pending')).toBe(false);
+    expect(lastProc?.behavior).toBe('allow');
+    expect(lastProc?.updatedInput).toEqual(input);
+    expect(await outcomeOf(s.id)).toBe('completed');
+  });
+
+  it('跑命令先写成待审批，点允许才把原参数交回', async () => {
+    mode = 'ask';
+    const input = { command: 'git init' };
+    askSpec = { tool: 'Bash', input };
+    const dir = mkdtempSync(join(root, 'ask-'));
+    const ws = await svc.addWorkspace('令', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+      text: '初始化',
+    });
+    const pending = await waitPending(s.id);
+    expect(pending).toMatchObject({ status: 'pending', category: 'command', tool: 'Bash' });
+    expect(pending.input).toContain('git init');
+    expect(pending.by).toBeUndefined();
+    expect(String(pending.at)).toMatch(/^\d{4}-/);
+    const res = await postDecision(s.id, pending.approvalId, 'allow');
+    expect(res.status).toBe(202);
+    await waitIdle(s.id);
+    expect(lastProc?.behavior).toBe('allow');
+    expect(lastProc?.updatedInput).toEqual(input);
+    const decided = (await approvalsOf(s.id)).find((e) => e.payload.status === 'allowed');
+    expect(decided?.payload).toMatchObject({
+      by: '本机',
+      result: 'allowed',
+      tool: 'Bash',
+      category: 'command',
+      approvalId: pending.approvalId,
+    });
+    expect(String(decided?.payload.at)).toMatch(/^\d{4}-/);
+    expect((await postDecision(s.id, pending.approvalId, 'allow')).status).toBe(409);
+    expect(await outcomeOf(s.id)).toBe('completed');
+  });
+
+  it('联网要人点，点拒绝则这一轮记成停', async () => {
+    mode = 'ask';
+    const input = { url: 'https://example.com' };
+    askSpec = { tool: 'WebFetch', input };
+    const dir = mkdtempSync(join(root, 'ask-'));
+    const ws = await svc.addWorkspace('网', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+      text: '看一眼',
+    });
+    const pending = await waitPending(s.id);
+    expect(pending).toMatchObject({ category: 'network', tool: 'WebFetch', status: 'pending' });
+    expect(pending.input).toContain('example.com');
+    expect((await postDecision(s.id, pending.approvalId, 'deny')).status).toBe(202);
+    await waitIdle(s.id);
+    expect(lastProc?.behavior).toBe('deny');
+    const decided = (await approvalsOf(s.id)).find((e) => e.payload.status === 'denied');
+    expect(decided?.payload).toMatchObject({
+      by: '本机',
+      result: 'denied',
+      tool: 'WebFetch',
+      category: 'network',
+      approvalId: pending.approvalId,
+    });
+    expect(String(decided?.payload.at)).toMatch(/^\d{4}-/);
+    expect(await outcomeOf(s.id)).toBe('stopped');
+  });
+
+  it('还没点这一轮就停了，记成 dropped，不写成是人点的', async () => {
+    mode = 'ask';
+    askSpec = { tool: 'Bash', input: { command: 'git status' } };
+    const dir = mkdtempSync(join(root, 'ask-'));
+    const ws = await svc.addWorkspace('停', dir);
+    const s = await svc.createSession({
+      workspaceId: ws.id,
+      agent: 'claude',
+      model: 'default',
+      worktree: false,
+      text: '等一下',
+    });
+    await waitPending(s.id);
+    await svc.stop(s.id);
+    await waitIdle(s.id);
+    const dropped = (await approvalsOf(s.id)).find((e) => e.payload.status === 'dropped');
+    expect(dropped?.payload).toMatchObject({
+      result: 'stopped',
+      status: 'dropped',
+      tool: 'Bash',
+      category: 'command',
+    });
+    expect(dropped?.payload.by).toBeUndefined();
+    expect(await outcomeOf(s.id)).toBe('stopped');
   });
 });

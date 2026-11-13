@@ -238,3 +238,32 @@ describe('过程流的地址', () => {
     expect(eventsUrl('/b', 's')).toBe('/b/sessions/s/events');
   });
 });
+
+describe('审批并成一张卡', () => {
+  it('待审批和后来的允许并成一张，状态是允许', () => {
+    const pending = ev('session.approval', {
+      approvalId: 'ap1',
+      tool: 'Bash',
+      category: 'command',
+      input: '{"command":"git init"}',
+      status: 'pending',
+      at: '2026-11-13T00:00:00.000Z',
+    });
+    const allowed = ev('session.approval', {
+      approvalId: 'ap1',
+      tool: 'Bash',
+      category: 'command',
+      input: '{"command":"git init"}',
+      status: 'allowed',
+      result: 'allowed',
+      by: '本机',
+      at: '2026-11-13T00:00:01.000Z',
+    });
+    const items = buildTimeline([pending, allowed], []);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'approval',
+      card: { approvalId: 'ap1', status: 'allowed', by: '本机', result: 'allowed', tool: 'Bash' },
+    });
+  });
+});

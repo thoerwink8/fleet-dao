@@ -172,9 +172,8 @@ async function route(
     return true;
   }
   if (await routeTerminal(ade, req, res, path)) return true;
-  const session = /^\/api\/ade\/sessions\/([^/]+)(?:\/(messages|stop|changes|deliver|queue|git))?$/.exec(
-    path,
-  );
+  const session =
+    /^\/api\/ade\/sessions\/([^/]+)(?:\/(messages|stop|changes|deliver|queue|git|approval))?$/.exec(path);
   if (!session) return false;
   const id = decodeURIComponent(session[1] ?? '');
   const action = session[2];
@@ -218,6 +217,15 @@ async function route(
   if (action === 'stop' && method === 'POST') {
     await readJson(req);
     await ade.stop(id);
+    send(res, 202, { ok: true });
+    return true;
+  }
+  if (action === 'approval' && method === 'POST') {
+    const body = await readJson(req);
+    const decision = body.decision === 'allow' || body.decision === 'deny' ? body.decision : null;
+    const approvalId = str(body.approvalId);
+    if (!decision || !approvalId) throw new AdeError('要 approvalId 和 decision', 400);
+    await ade.decide(id, approvalId, decision);
     send(res, 202, { ok: true });
     return true;
   }

@@ -17,6 +17,8 @@ export interface AdeAgent {
   ready?: boolean;
   /** 跟在名字后面，例如「未登录」。 */
   note?: string;
+  /** per-call 才能逐条点。none 是这家交不出审批请求。 */
+  approvals?: 'per-call' | 'none';
 }
 
 export function agentChoices(

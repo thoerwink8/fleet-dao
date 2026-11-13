@@ -3,9 +3,89 @@ import { Fragment, useState } from 'react';
 import { Link } from 'react-router';
 import { toolPhrase } from '../lib/chat-view';
 import { dayKey, formatDay } from '../lib/format';
-import type { TimelineItem } from '../lib/transcript';
+import {
+  APPROVAL_CATEGORY_LABEL,
+  APPROVAL_RESULT_LABEL,
+  APPROVAL_STATUS_LABEL,
+  APPROVALS_UNSUPPORTED,
+} from '../lib/labels';
+import type { ApprovalView, TimelineItem } from '../lib/transcript';
+import { Button } from '../ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible';
 import { DroppedRow, EndRow, ToolRow, ToolRunRow } from './transcript-steps';
+
+export function ApprovalsNote({ mode }: { mode: 'per-call' | 'none' | undefined }) {
+  if (mode !== 'none') return null;
+  return (
+    <p
+      data-testid="approvals-none"
+      className="mb-3 rounded-lg border border-line bg-surface px-3 py-2 text-xs text-ink-2"
+    >
+      {APPROVALS_UNSUPPORTED}
+    </p>
+  );
+}
+
+export function ApprovalRow({
+  card,
+  onDecide,
+}: {
+  card: ApprovalView;
+  onDecide?: (approvalId: string, decision: 'allow' | 'deny') => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const category = APPROVAL_CATEGORY_LABEL[card.category] ?? card.category;
+  const status = APPROVAL_STATUS_LABEL[card.status] ?? card.status;
+  const result = card.result ? (APPROVAL_RESULT_LABEL[card.result] ?? card.result) : '';
+  const act = (decision: 'allow' | 'deny') => {
+    if (!onDecide || busy) return;
+    setBusy(true);
+    setError('');
+    void onDecide(card.approvalId, decision).catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : '没送出去');
+      setBusy(false);
+    });
+  };
+  const who = [card.by, card.decidedAt, result].filter((part) => part);
+  return (
+    <li
+      data-testid="approval-card"
+      data-approval-id={card.approvalId}
+      data-status={card.status}
+      className="rounded-lg border border-line bg-surface px-3 py-3"
+    >
+      <p className="text-sm text-ink">
+        {status}
+        <span className="text-ink-2"> · {category}</span>
+      </p>
+      <p className="mt-1 font-mono text-xs text-ink">{card.tool}</p>
+      {card.input ? (
+        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-subtle px-3 py-2 font-mono text-xs text-ink">
+          {card.input}
+        </pre>
+      ) : null}
+      {who.length > 0 ? <p className="mt-2 text-2xs text-muted">{who.join(' · ')}</p> : null}
+      {card.status === 'pending' ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button size="sm" data-testid="approval-allow" disabled={busy} onClick={() => act('allow')}>
+            允许
+          </Button>
+          <Button
+            size="sm"
+            variant="danger"
+            data-testid="approval-deny"
+            disabled={busy}
+            onClick={() => act('deny')}
+          >
+            拒绝
+          </Button>
+        </div>
+      ) : null}
+      {error ? <p className="mt-2 text-xs text-danger">{error}</p> : null}
+    </li>
+  );
+}
 
 function MarkdownText({ text }: { text: string }) {
   const chunks = text.split('```');
@@ -42,7 +122,13 @@ function childSessionId(item: TimelineItem): string {
   return typeof id === 'string' ? id : '';
 }
 
-export function ChatTimeline({ items }: { items: TimelineItem[] }) {
+export function ChatTimeline({
+  items,
+  onDecide,
+}: {
+  items: TimelineItem[];
+  onDecide?: (approvalId: string, decision: 'allow' | 'deny') => Promise<void>;
+}) {
   const [open, setOpen] = useState<Set<number>>(new Set());
   let lastDay = '';
   if (items.length === 0) {
@@ -54,11 +140,16 @@ export function ChatTimeline({ items }: { items: TimelineItem[] }) {
         const at =
           item.kind === 'event'
             ? item.ev.createdAt
-            : item.kind === 'toolrun'
-              ? item.steps[0]?.at
-              : item.kind === 'say' || item.kind === 'tool' || item.kind === 'end' || item.kind === 'dropped'
-                ? item.step.at
-                : undefined;
+            : item.kind === 'approval'
+              ? item.card.at
+              : item.kind === 'toolrun'
+                ? item.steps[0]?.at
+                : item.kind === 'say' ||
+                    item.kind === 'tool' ||
+                    item.kind === 'end' ||
+                    item.kind === 'dropped'
+                  ? item.step.at
+                  : undefined;
         const day = at ? dayKey(at) : '';
         const showDay = day !== '' && day !== lastDay;
         if (day) lastDay = day;
@@ -125,6 +216,14 @@ export function ChatTimeline({ items }: { items: TimelineItem[] }) {
             <Fragment key={`x-${item.step.id}`}>
               {dayRow}
               <DroppedRow step={item.step} />
+            </Fragment>
+          );
+        }
+        if (item.kind === 'approval') {
+          return (
+            <Fragment key={`ap-${item.card.id}`}>
+              {dayRow}
+              <ApprovalRow card={item.card} {...(onDecide ? { onDecide } : {})} />
             </Fragment>
           );
         }

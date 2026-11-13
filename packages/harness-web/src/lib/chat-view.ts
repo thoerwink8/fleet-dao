@@ -7,7 +7,8 @@ export function isMainChat(item: TimelineItem): boolean {
     item.kind === 'tool' ||
     item.kind === 'toolrun' ||
     item.kind === 'end' ||
-    item.kind === 'dropped'
+    item.kind === 'dropped' ||
+    item.kind === 'approval'
   ) {
     return true;
   }

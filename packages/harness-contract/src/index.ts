@@ -21,6 +21,8 @@ export const EVENT_TYPES = [
   // （人对会话、会话对会话都是它），载荷形状见文件末尾的 AdeSessionCreated / AdeSessionMessage。
   'session.created',
   'session.message',
+  // 本机审批（#3932）：同一 approvalId 先记 pending，点了再追加一条，不改旧事件。加类型不升版本。
+  'session.approval',
   'worker.spawned',
   'worker.settled',
   // 工人以会话用户跑时（#3814）：收 scope、删交出去的目录的结局，收不干净也照实记
