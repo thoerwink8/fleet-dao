@@ -14,6 +14,7 @@ import {
   revokeSessionTokens,
 } from '@fleet-dao/harness-api';
 import { type Forge, opKey } from '@fleet-dao/harness-contract';
+import { type ContextReading, contextFromStreamLine } from '@fleet-dao/harness-contract/context-usage';
 import {
   type HostProcess,
   makeRedactor,
@@ -26,6 +27,8 @@ import {
   type AdeScheduleRow,
   type AdeSessionRow,
   adeQueue,
+  adeSessionIdsAmong,
+  bumpAdeSessionTurns,
   claimAdeSchedule,
   type Db,
   deleteAdeSchedule,
@@ -249,6 +252,8 @@ interface Live {
   initRequestId: string;
   prompt: string;
   userSent: boolean;
+  /** 这一轮里最后一帧给过的用量。没有就是 null。 */
+  context: ContextReading | null;
 }
 
 function textParser(runId: string): TranscriptParser {
@@ -522,8 +527,34 @@ export class AdeService {
     return listAdeTasks(this.#db);
   }
 
-  listSessions() {
-    return listAdeSessions(this.#db);
+  listSessions(opts?: { q?: string; archived?: boolean }) {
+    return listAdeSessions(this.#db, opts);
+  }
+
+  /** 侧栏拿来对内核列表：有会话行的（含已归档）不能再当成没有这一行。 */
+  knownSessionIds(ids: readonly string[]): Promise<string[]> {
+    return adeSessionIdsAmong(this.#db, ids);
+  }
+
+  /** 改名、置顶、归档写进这一行。空标题拒。 */
+  async updateSession(
+    id: string,
+    patch: { title?: string; pinned?: boolean; archived?: boolean },
+  ): Promise<AdeSessionRow> {
+    await this.getSession(id);
+    const next: { title?: string; pinned?: boolean; archived?: boolean } = {};
+    if (patch.title !== undefined) {
+      const title = patch.title.trim().slice(0, 80);
+      if (!title) throw new AdeError('标题不能空', 400);
+      next.title = title;
+    }
+    if (patch.pinned !== undefined) next.pinned = patch.pinned;
+    if (patch.archived !== undefined) next.archived = patch.archived;
+    if (next.title === undefined && next.pinned === undefined && next.archived === undefined) {
+      throw new AdeError('没有要改的', 400);
+    }
+    await updateAdeSession(this.#db, id, next);
+    return this.getSession(id);
   }
 
   listSshHosts(): Promise<SshHost[]> {
@@ -990,6 +1021,7 @@ export class AdeService {
       plan.env,
     );
     await updateAdeSession(this.#db, row.id, { status: 'running', runId, agentSessionId, hold: false });
+    await bumpAdeSessionTurns(this.#db, row.id);
     await appendToSession(this.#db, row.id, 'session.turn.started', {
       turnId: runId,
       text: item.text,
@@ -1039,6 +1071,7 @@ export class AdeService {
       initRequestId: `init-${randomBytes(4).toString('hex')}`,
       prompt,
       userSent: false,
+      context: null,
       stop: () => {
         live.stopped = true;
         proc.stop('term');
@@ -1104,6 +1137,8 @@ export class AdeService {
     }
     live.lastText = remember(line, live.lastText);
     writer.pushLine(line);
+    const reading = contextFromStreamLine(row.agent, line);
+    if (reading) live.context = reading;
   }
 
   /** 先把待审批放进内存，再写事件。点的时候按 approvalId 找，找不到就是已经不在等。 */
@@ -1219,6 +1254,7 @@ export class AdeService {
     await this.#dropPending(id, live);
     const row = await this.getSession(id);
     if (row.runId !== runId) return;
+    if (live?.context) await updateAdeSession(this.#db, id, { context: live.context });
     // 这一轮的进程没了，这一轮的令牌也作废。换账号或队列里的下一句会在 #begin 里另发一枚。
     if (this.#wantMcp) await revokeSessionTokens(this.#db, id);
     if (await this.#switchAccount(row, live, outcome, lastText, stderr)) return;

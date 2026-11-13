@@ -79,6 +79,9 @@ describe('buildSteps：调用和结果配对', () => {
     ]);
     expect(steps[0]).toMatchObject({ kind: 'tool', status: 'noresult' });
     expect(steps[1]).toMatchObject({ kind: 'end', durationMs: 1000, numTurns: 2 });
+    const end = steps[1];
+    expect(end?.kind === 'end' && endLine(end)).toBe('运行结束 · 正常 · 2 轮 · 1.0 秒');
+    expect(end?.kind === 'end' && endLine(end, { agentTurns: false })).toBe('运行结束 · 正常 · 1.0 秒');
   });
 
   it('调用在更早的页里（还没往上翻）：只有结果也显示一行，不丢', () => {

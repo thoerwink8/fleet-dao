@@ -40,7 +40,7 @@ export function createAdeHandler(
     const path = url.pathname;
     if (path !== '/api/ade' && !path.startsWith('/api/ade/')) return false;
     try {
-      const hit = await route(ade, req, res, path, githubToken);
+      const hit = await route(ade, req, res, path, url.searchParams, githubToken);
       if (!hit) send(res, 404, { error: '没有这个接口' });
     } catch (err) {
       const status = err instanceof AdeError ? err.status : 500;
@@ -56,6 +56,7 @@ async function route(
   req: IncomingMessage,
   res: ServerResponse,
   path: string,
+  query: URLSearchParams,
   githubToken: string | null,
 ): Promise<boolean> {
   const method = req.method ?? 'GET';
@@ -153,7 +154,25 @@ async function route(
     return true;
   }
   if (path === '/api/ade/sessions' && method === 'GET') {
-    send(res, 200, { sessions: await ade.listSessions() });
+    const archived = query.get('archived');
+    if (archived !== null && archived !== '0' && archived !== '1') {
+      throw new AdeError('archived 只能是 0 或 1', 400);
+    }
+    const knownRaw = query.get('known');
+    let knownIds: string[] | undefined;
+    if (knownRaw !== null) {
+      const ids = knownRaw
+        .split(',')
+        .map((id) => id.trim())
+        .filter((id) => id !== '');
+      if (ids.length > 200) throw new AdeError('known 最多 200 个', 400);
+      if (ids.some((id) => id.length > 80)) throw new AdeError('known 里的会话号太长', 400);
+      knownIds = await ade.knownSessionIds(ids);
+    }
+    send(res, 200, {
+      sessions: await ade.listSessions({ q: query.get('q') ?? '', archived: archived === '1' }),
+      ...(knownIds !== undefined ? { knownIds } : {}),
+    });
     return true;
   }
   if (path === '/api/ade/sessions' && method === 'POST') {
@@ -179,6 +198,21 @@ async function route(
   const action = session[2];
   if (!action && method === 'GET') {
     send(res, 200, { session: await ade.getSession(id) });
+    return true;
+  }
+  if (!action && method === 'PATCH') {
+    const body = await readJson(req);
+    const patch: { title?: string; pinned?: boolean; archived?: boolean } = {};
+    if ('title' in body) patch.title = str(body.title);
+    if ('pinned' in body) {
+      if (typeof body.pinned !== 'boolean') throw new AdeError('pinned 要是 true 或 false', 400);
+      patch.pinned = body.pinned;
+    }
+    if ('archived' in body) {
+      if (typeof body.archived !== 'boolean') throw new AdeError('archived 要是 true 或 false', 400);
+      patch.archived = body.archived;
+    }
+    send(res, 200, { session: await ade.updateSession(id, patch) });
     return true;
   }
   if (action === 'messages' && method === 'POST') {
