@@ -17,6 +17,8 @@ import {
   queueOf,
 } from '../lib/ade';
 import { pollNote } from '../lib/poll-note';
+import { composerStillRunning } from '../lib/transcript';
+import type { FeedEvent } from '../lib/types';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent } from '../ui/dialog';
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '../ui/dropdown-menu';
@@ -384,10 +386,16 @@ export function AdeComposer({
   sessionId,
   onToggleChanges,
   onToggleTerminal,
+  sessionEvents,
+  transcriptEvents,
 }: {
   sessionId: string;
   onToggleChanges?: () => void;
   onToggleTerminal?: () => void;
+  /** 会话实时流。不传就只看轮询到的会话状态（单测）。 */
+  sessionEvents?: readonly FeedEvent[];
+  /** 这一会话的过程流。里面出现当前轮的 transcript.result 时，输入框不再显示运行中。 */
+  transcriptEvents?: readonly FeedEvent[];
 }) {
   const [text, setText] = useState('');
   const [msg, setMsg] = useState('');
@@ -434,7 +442,7 @@ export function AdeComposer({
     };
   }, [reload]);
 
-  const running = session?.status === 'running';
+  const running = composerStillRunning(session?.status, sessionEvents ?? [], transcriptEvents ?? []);
   const post = async (body: string, mode: 'send' | 'queue' | 'jump') => {
     setBusy(true);
     setMsg('');

@@ -310,6 +310,16 @@ mod tests {
     }
 
     #[test]
+    fn utf8_chinese_line_is_not_read_as_gbk() {
+        let path = tmp("zh").join("out.log");
+        fs::write(&path, "收到：请回一句收到\n").unwrap();
+        let mut r = LogReader::open(path, 0, true).unwrap();
+        let c = r.next(true, 8);
+        assert_eq!(c.lines, vec!["收到：请回一句收到"]);
+        assert!(c.drained);
+    }
+
+    #[test]
     fn a_cursor_ahead_of_the_log_is_refused() {
         let path = tmp("ahead").join("out.log");
         fs::write(&path, "one\n").unwrap();

@@ -4,6 +4,7 @@ import { eventsUrl, historyUrl } from './api';
 import {
   buildSteps,
   buildTimeline,
+  composerStillRunning,
   endLine,
   runIdOfSession,
   summarizeToolRun,
@@ -193,6 +194,37 @@ describe('跳转：指挥会话 ↔ 工人会话', () => {
     const sp: FeedEvent = { id: 41, seq: 1, type: 'worker.spawn.requested', payload: {}, createdAt: '' };
     expect(workerSessionOf(sp)).toBe('worker-d41-a1');
     expect(workerSessionOf({ ...sp, type: 'worker.progress.reported' })).toBeNull();
+  });
+});
+
+describe('输入框跟实时流收场走', () => {
+  const turn = (type: string, runId: string) => ev(type, { runId });
+  const result = (runId: string) =>
+    ev('transcript.result', {
+      runId,
+      subtype: 'success',
+      isError: false,
+      text: '好',
+      durationMs: 1,
+      numTurns: 1,
+    });
+
+  it('流里还没有这一轮时，只看会话状态', () => {
+    expect(composerStillRunning('running', [], [])).toBe(true);
+    expect(composerStillRunning('idle', [], [])).toBe(false);
+  });
+
+  it('过程流已经有这一轮的 result，会话状态还写着 running，也不再算运行中', () => {
+    const session = [turn('session.turn.started', 'r9')];
+    expect(composerStillRunning('running', session, [result('r9')])).toBe(false);
+    expect(composerStillRunning('running', session, [result('other')])).toBe(true);
+  });
+
+  it('session.turn.settled 之后不再算运行中；新的一轮开始又算', () => {
+    const ended = [turn('session.turn.started', 'r9'), turn('session.turn.settled', 'r9')];
+    expect(composerStillRunning('running', ended, [])).toBe(false);
+    const again = [...ended, turn('session.turn.started', 'r10')];
+    expect(composerStillRunning('idle', again, [])).toBe(true);
   });
 });
 

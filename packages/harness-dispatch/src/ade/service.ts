@@ -205,7 +205,8 @@ function textParser(runId: string): TranscriptParser {
   };
 }
 
-function remember(line: string, prev: string): string {
+/** 从一行模型输出里取出要留在列表摘要上的正文。UTF-8 字符串原样留，这里不再解码。 */
+export function remember(line: string, prev: string): string {
   const t = line.trim();
   if (!t) return prev;
   try {
