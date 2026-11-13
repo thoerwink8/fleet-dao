@@ -241,13 +241,16 @@ class HostdProcess implements HostProcess {
         const data = decoder.write(chunk);
         this.#afterStart(async () => {
           if (data) await this.#request({ type: 'stdin', runId, data, end: false });
-        }).then(() => cb(), cb);
+        }).then(
+          () => cb(),
+          (err: unknown) => this.#stdinFailed(err, cb),
+        );
       },
       final: (cb) => {
         const rest = decoder.end();
         this.#afterStart(() => this.#request({ type: 'stdin', runId, data: rest, end: true })).then(
           () => cb(),
-          cb,
+          (err: unknown) => this.#stdinFailed(err, cb),
         );
       },
     });
@@ -343,6 +346,12 @@ class HostdProcess implements HostProcess {
     this.stderr.end();
   }
 
+  /** 起没起来、或后来写不进，都已经走 onError。再把同一个错误交给 Writable 的回调会在没人听 stdin 的时候打垮整个进程。 */
+  #stdinFailed(err: unknown, cb: (error?: Error | null) => void) {
+    this.#fail(err instanceof Error ? err : new Error(String(err)));
+    cb();
+  }
+
   #fail(err: Error) {
     if (this.#exited) return;
     this.#startedFail(err);
@@ -402,6 +411,11 @@ export class HostdProcessHost implements ProcessHost {
 
   constructor(opts: HostdHostOptions) {
     this.#launch = opts.launch;
+  }
+
+  /** 起 hostd 的命令。SSH 远端是 ssh -T <别名> fleet2-hostd --stdio。 */
+  get launch(): readonly string[] {
+    return this.#launch;
   }
 
   /** 当前的连接；没有或断了就重起一个 hostd 并握手（版本不对拒用）。并发来的几个调用共用同一个新连接。 */
@@ -468,4 +482,17 @@ export function makeHostdHost(opts?: {
   return new HostdProcessHost({
     launch: [bin, '--stdio', ...(opts?.stateDir ? ['--state-dir', opts.stateDir] : [])],
   });
+}
+
+const SSH_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** 远端 hostd 的启动命令。只换 launch，不另起一套看守。 */
+export function sshHostdLaunch(alias: string): string[] {
+  if (!SSH_ALIAS.test(alias)) throw new Error('SSH 别名不合法');
+  return ['ssh', '-T', alias, 'fleet2-hostd', '--stdio'];
+}
+
+/** 连到已登记别名的 hostd。远端那个 hostd 自己看守执行体。 */
+export function remoteHostd(alias: string): HostdProcessHost {
+  return makeHostdHost({ launch: sshHostdLaunch(alias) });
 }

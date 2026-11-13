@@ -37,7 +37,7 @@
 
 ## 本机装法的页面（#3858）
 
-`vite build --mode desktop`（`pnpm --filter @fleet-dao/harness-web build:local`，vite 不许把模式叫 local）出 `dist-local/`：`base=/`，接口在 `/api`，`src/lib/profile.ts` 的 `IS_LOCAL` 为真。导航换成会话、任务、待我、宿主、设置（`shell.tsx` 的 `NAV_LOCAL`；待我取代决策，宿主取代法国运维），三块新页面在 `src/pages/local-pages.tsx`：待我（卡住的排前、其次做完没看的；待拍板、待验收等验收闸接进来再出）、宿主（隔离档位和读回的事实）、设置（当前配置，只读）；数据来自 `/api/local/status`（`src/lib/local-status.ts`）。没登录时 `LoginPrompt` 换成粘贴本机令牌的表单。由 `pnpm fleet2 up` 起的单口服务放出来，见 `packages/harness-api/AGENTS.md`「本机单口服务」。香港那份（`/next/`）的导航和路由不变。
+`vite build --mode desktop`（`pnpm --filter @fleet-dao/harness-web build:local`，vite 不许把模式叫 local）出 `dist-local/`：`base=/`，接口在 `/api`，`src/lib/profile.ts` 的 `IS_LOCAL` 为真。导航换成会话、任务、待我、宿主、设置（`shell.tsx` 的 `NAV_LOCAL`；待我取代决策，宿主取代法国运维），三块新页面在 `src/pages/local-pages.tsx`：待我（卡住的排前、其次做完没看的；待拍板、待验收等验收闸接进来再出）、宿主（隔离档位和读回的事实；登记 SSH 宿主只填别名、目标和密钥路径，没有端口转发，#3928）、设置（当前配置，只读）；新会话能选本机或已登记的宿主。数据来自 `/api/local/status`（`src/lib/local-status.ts`）。没登录时 `LoginPrompt` 换成粘贴本机令牌的表单。由 `pnpm fleet2 up` 起的单口服务放出来，见 `packages/harness-api/AGENTS.md`「本机单口服务」。香港那份（`/next/`）的导航和路由不变。
 
 本机定时（#3929，`src/pages/schedules-page.tsx`）：侧栏「定时」。表单选工作区、agent、模型、到点和第一句话；列表可暂停、删除。到点后的会话出现在会话列表。
 

@@ -1,12 +1,16 @@
-// 本机装法的三块页面（#3858）：待我、宿主、设置。数据来自本机状态口和会话列表，都是只读展示。
+// 本机装法的三块页面（#3858）：待我、宿主、设置。宿主页可以登记 SSH 宿主（#3928）。
+import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router';
 import { Chip } from '../components/chip';
 import { LoginPrompt } from '../components/login-prompt';
 import { PageBar } from '../components/shell';
+import { adeGet, adeSend } from '../lib/ade';
 import { formatRelative, shortId } from '../lib/format';
 import { useSessions } from '../lib/hooks';
 import { LEVEL_LABEL, useLocalStatus } from '../lib/local-status';
 import { deriveWorkerState } from '../lib/session-state';
+import { Button } from '../ui/button';
+import { Input } from '../ui/input';
 import { AccountsPanel } from './accounts-page';
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
@@ -67,6 +71,118 @@ export function InboxPage() {
   );
 }
 
+interface SshHostRow {
+  alias: string;
+  target: string;
+  keyPath: string;
+}
+
+/** 登记远端宿主：别名、ssh 目标、密钥路径。没有端口转发。 */
+function SshHostForm() {
+  const [hosts, setHosts] = useState<SshHostRow[]>([]);
+  const [alias, setAlias] = useState('');
+  const [target, setTarget] = useState('');
+  const [keyPath, setKeyPath] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let dead = false;
+    adeGet<{ hosts: SshHostRow[] }>('/ssh-hosts')
+      .then((r) => {
+        if (!dead) setHosts(r.hosts);
+      })
+      .catch((err: unknown) => {
+        if (!dead) setMsg(err instanceof Error ? err.message : '读不到宿主');
+      });
+    return () => {
+      dead = true;
+    };
+  }, []);
+  const add = async () => {
+    setBusy(true);
+    setMsg('');
+    try {
+      const res = await adeSend<{ hosts: SshHostRow[] }>('/ssh-hosts', 'POST', { alias, target, keyPath });
+      setHosts(res.hosts);
+      setAlias('');
+      setTarget('');
+      setKeyPath('');
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '没加上');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card title="SSH 宿主">
+      <form
+        className="flex flex-col gap-2"
+        aria-label="添加 SSH 宿主"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void add();
+        }}
+      >
+        <label htmlFor="ssh-alias" className="flex flex-col gap-1">
+          <span className="text-ink">别名</span>
+          <Input
+            id="ssh-alias"
+            data-testid="ssh-alias"
+            value={alias}
+            onChange={(e) => setAlias(e.target.value)}
+            placeholder="例如 desk"
+            autoComplete="off"
+          />
+        </label>
+        <label htmlFor="ssh-target" className="flex flex-col gap-1">
+          <span className="text-ink">SSH 目标</span>
+          <Input
+            id="ssh-target"
+            data-testid="ssh-target"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            placeholder="user@host"
+            autoComplete="off"
+          />
+        </label>
+        <label htmlFor="ssh-key" className="flex flex-col gap-1">
+          <span className="text-ink">密钥路径</span>
+          <Input
+            id="ssh-key"
+            data-testid="ssh-key"
+            value={keyPath}
+            onChange={(e) => setKeyPath(e.target.value)}
+            placeholder="私钥文件的路径，不填正文"
+            autoComplete="off"
+          />
+        </label>
+        <div>
+          <Button data-testid="ssh-add" type="submit" disabled={busy || !alias || !target || !keyPath}>
+            添加
+          </Button>
+        </div>
+        {msg ? (
+          <p role="alert" className="text-warning">
+            {msg}
+          </p>
+        ) : null}
+      </form>
+      {hosts.length === 0 ? <p className="mt-3">还没有登记远端宿主。</p> : null}
+      {hosts.length > 0 ? (
+        <ul aria-label="已登记的 SSH 宿主" className="mt-3 flex flex-col gap-2">
+          {hosts.map((h) => (
+            <li key={h.alias} data-host={h.alias} className="flex flex-wrap items-baseline gap-2">
+              <span className="font-medium text-ink">{h.alias}</span>
+              <span className="font-mono text-2xs">{h.target}</span>
+              <span className="font-mono text-2xs text-muted">{h.keyPath}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </Card>
+  );
+}
+
 export function HostsPage() {
   const { status, error, unauthorized } = useLocalStatus();
   return (
@@ -74,6 +190,7 @@ export function HostsPage() {
       <PageBar title="宿主" />
       <div className="flex flex-col gap-3 p-3 md:p-6">
         {unauthorized ? <LoginPrompt /> : null}
+        <SshHostForm />
         {error ? (
           <p role="alert" className="text-sm text-warning">
             读不到本机状态（{error}）。

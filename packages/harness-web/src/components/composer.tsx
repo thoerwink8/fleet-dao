@@ -32,12 +32,14 @@ const TIERS = [
 export function useAdeHome(): {
   workspaces: AdeWorkspace[];
   agents: AdeAgent[];
+  hosts: { alias: string }[];
   pref: { agent: string; tier: string } | null;
   error: string;
   reload: () => void;
 } {
   const [workspaces, setWorkspaces] = useState<AdeWorkspace[]>([]);
   const [agents, setAgents] = useState<AdeAgent[]>([]);
+  const [hosts, setHosts] = useState<{ alias: string }[]>([]);
   const [pref, setPref] = useState<{ agent: string; tier: string } | null>(null);
   const [error, setError] = useState('');
   const reload = useCallback(() => {
@@ -47,11 +49,13 @@ export function useAdeHome(): {
       adeGet<{ workspaces: AdeWorkspace[] }>('/workspaces'),
       adeGet<{ agents: AdeAgent[] }>('/agents'),
       adeGet<{ agent: string; tier: string }>('/accounts').catch(() => null),
+      adeGet<{ hosts: { alias: string }[] }>('/ssh-hosts').catch(() => ({ hosts: [] })),
     ])
-      .then(([w, a, accounts]) => {
+      .then(([w, a, accounts, ssh]) => {
         if (dead) return;
         setWorkspaces(w.workspaces);
         setAgents(a.agents);
+        setHosts(ssh.hosts);
         if (accounts?.agent && accounts.tier) setPref({ agent: accounts.agent, tier: accounts.tier });
       })
       .catch((err: unknown) => {
@@ -62,7 +66,7 @@ export function useAdeHome(): {
     };
   }, []);
   useEffect(() => reload(), [reload]);
-  return { workspaces, agents, pref, error, reload };
+  return { workspaces, agents, hosts, pref, error, reload };
 }
 
 function pickedModel(models: string[], model: string, tier: string): string {
@@ -162,11 +166,12 @@ function Picker({
 
 export function EmptyComposer() {
   const nav = useNavigate();
-  const { workspaces, agents, pref, error, reload } = useAdeHome();
+  const { workspaces, agents, hosts, pref, error, reload } = useAdeHome();
   const [wsId, setWsId] = useState('');
   const [agent, setAgent] = useState('claude');
   const [model, setModel] = useState('sonnet');
   const [tier, setTier] = useState('default');
+  const [host, setHost] = useState('');
   const [worktree, setWorktree] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -207,6 +212,7 @@ export function EmptyComposer() {
         model: pickedModel(models, model, tier),
         worktree: worktree && ws.isGit,
         text,
+        host: host || null,
       });
       nav(`/s/${encodeURIComponent(res.session.id)}`);
     } catch (err) {
@@ -270,6 +276,12 @@ export function EmptyComposer() {
               value={tier}
               options={TIERS.map((t) => ({ id: t.id, label: t.label }))}
               onChange={setTier}
+            />
+            <Picker
+              label="宿主"
+              value={host}
+              options={[{ id: '', label: '本机' }, ...hosts.map((h) => ({ id: h.alias, label: h.alias }))]}
+              onChange={setHost}
             />
             <Button
               variant={worktree ? 'default' : 'ghost'}

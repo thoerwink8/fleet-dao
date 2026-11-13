@@ -14,7 +14,7 @@ import {
   revokeSessionTokens,
 } from '@fleet-dao/harness-api';
 import { type Forge, opKey } from '@fleet-dao/harness-contract';
-import { makeRedactor, type ProcessHost, readLines } from '@fleet-dao/harness-runner';
+import { makeRedactor, type ProcessHost, readLines, remoteHostd } from '@fleet-dao/harness-runner';
 import {
   type AdeQueueItem,
   type AdeScheduleRow,
@@ -79,6 +79,14 @@ import { type AdeAgentInfo, discoverAgents, findAgentBin } from './agents.ts';
 import { addWorktree, existingDir, inspectRepo, worktreeDiff } from './git.ts';
 import { GitPanelError, gitAct, gitSnapshot } from './git-panel.ts';
 import { readLocalQuota, unreadQuota } from './quota-view.ts';
+import {
+  defaultSshDir,
+  loadSshHosts,
+  parseSshHost,
+  type SshHost,
+  saveSshHosts,
+  writeSshConfig,
+} from './ssh-hosts.ts';
 
 export type { AdeAgentInfo } from './agents.ts';
 
@@ -168,6 +176,8 @@ export interface AdeOptions {
    * 令牌写进 MCP 配置文件，不进命令行。claude、grok 才挂得上；codex、pi 没有这套配置格式。
    */
   mcp?: boolean;
+  /** 测试把 SSH config 写到临时目录。缺省是用户的 ~/.ssh。 */
+  sshDir?: string;
 }
 
 interface Live {
@@ -251,6 +261,9 @@ export class AdeService {
   readonly #agents?: () => Promise<AdeAgentInfo[]>;
   readonly #quotaFor?: (env: NodeJS.ProcessEnv) => Promise<Record<string, string>>;
   readonly #onScheduleError?: (err: unknown) => void;
+  readonly #sshDir: string;
+  /** 每个远端别名一条 hostd 连接。远端 hostd 自己看守，这里不再套一层。 */
+  readonly #remotes = new Map<string, ProcessHost>();
   readonly #live = new Map<string, Live>();
   readonly #locks = new Map<string, Promise<void>>();
   #scheduleTimer: ReturnType<typeof setInterval> | undefined;
@@ -270,6 +283,7 @@ export class AdeService {
     if (o.agents) this.#agents = o.agents;
     if (o.quotaFor) this.#quotaFor = o.quotaFor;
     if (o.onScheduleError) this.#onScheduleError = o.onScheduleError;
+    this.#sshDir = o.sshDir ?? defaultSshDir();
   }
 
   /** 本机装配在 recover 之后才起。测试不走这个间隔，直接把钟传给 runDue。 */
@@ -301,12 +315,24 @@ export class AdeService {
     return this.#ensureMcp();
   }
 
+  /** 没选远端就用装配时的本机宿主。选了就用那个别名的一条 ssh hostd，不另起看守。 */
+  #hostFor(row: AdeSessionRow): ProcessHost {
+    const alias = row.hostAlias;
+    if (!alias) return this.#host;
+    let host = this.#remotes.get(alias);
+    if (!host) {
+      host = remoteHostd(alias);
+      this.#remotes.set(alias, host);
+    }
+    return host;
+  }
+
   async recover(): Promise<number> {
     await releaseFiringSchedules(this.#db, new Date());
     const running = await listRunningAdeSessions(this.#db);
     let n = 0;
     for (const s of running) {
-      const alive = s.runId ? await this.#host.attach(s.runId) : false;
+      const alive = s.runId ? await this.#hostFor(s).attach(s.runId) : false;
       if (alive === true) continue;
       await appendToSession(this.#db, s.id, 'session.turn.settled', {
         turnId: s.runId ?? 'lost',
@@ -441,6 +467,32 @@ export class AdeService {
     return listAdeSessions(this.#db);
   }
 
+  listSshHosts(): Promise<SshHost[]> {
+    return loadSshHosts(this.#dataDir);
+  }
+
+  async addSshHost(input: unknown): Promise<SshHost[]> {
+    let host: SshHost;
+    try {
+      host = parseSshHost(input);
+    } catch (err) {
+      throw new AdeError(err instanceof Error ? err.message : '宿主配置不合法', 400);
+    }
+    const hosts = (await loadSshHosts(this.#dataDir)).filter((h) => h.alias !== host.alias);
+    hosts.push(host);
+    await saveSshHosts(this.#dataDir, hosts);
+    await writeSshConfig(this.#sshDir, hosts);
+    return hosts;
+  }
+
+  async #resolveHost(host: string | null | undefined): Promise<string | null> {
+    const alias = (host ?? '').trim();
+    if (!alias || alias === 'local') return null;
+    const hosts = await loadSshHosts(this.#dataDir);
+    if (!hosts.some((h) => h.alias === alias)) throw new AdeError('没有这个宿主', 400);
+    return alias;
+  }
+
   async addTask(workspaceId: string, title: string, body: string) {
     const ws = await getAdeWorkspace(this.#db, workspaceId);
     if (!ws) throw new AdeError('没有这个工作区', 404);
@@ -555,6 +607,8 @@ export class AdeService {
     taskId?: number | null;
     parentId?: string | null;
     text?: string;
+    /** 已登记的 SSH 别名。空或 local 用本机宿主。 */
+    host?: string | null;
   }) {
     const ws = await this.#sessionTarget(input.agent, input.model, input.workspaceId);
     let taskTitle = '';
@@ -576,6 +630,7 @@ export class AdeService {
       cwd = join(this.#dataDir, 'worktrees', id);
       await addWorktree(ws.path, cwd, `fleet2/${id}`);
     }
+    const hostAlias = await this.#resolveHost(input.host);
     const text = (input.text ?? '').trim() || (taskTitle ? `${taskTitle}\n${taskBody}`.trim() : '');
     const title = (text || taskTitle || '新会话').split('\n')[0]?.slice(0, 80) || '新会话';
     await insertAdeSession(this.#db, {
@@ -588,6 +643,7 @@ export class AdeService {
       worktree: input.worktree,
       cwd,
       title,
+      hostAlias,
     });
     await appendToSession(this.#db, id, 'session.created', {
       workspaceId: ws.id,
@@ -597,6 +653,7 @@ export class AdeService {
       parentId: input.parentId ?? null,
       taskId: input.taskId ?? null,
       cwd,
+      host: hostAlias,
     });
     if (text) {
       await this.postMessage(id, {
@@ -829,7 +886,7 @@ export class AdeService {
       if (resolved) command[0] = resolved;
     }
     env = await this.#attachMcp(row, command, env, tmp);
-    const proc = this.#host.start({ command, cwd: row.cwd, env, runId });
+    const proc = this.#hostFor(row).start({ command, cwd: row.cwd, env, runId });
     const writer = new TranscriptWriter({
       db: this.#db,
       runId,

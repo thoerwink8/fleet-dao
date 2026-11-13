@@ -407,6 +407,8 @@ export const adeSessions = fleet2.table(
     runId: text('run_id'),
     /** agent CLI 自己的会话号（Claude 要 UUID），追问时 --resume。 */
     agentSessionId: text('agent_session_id'),
+    /** 远端 SSH 宿主的别名。空表示这一会话用本机 ProcessHost。 */
+    hostAlias: text('host_alias'),
     createdAt: timestamp('created_at', tz).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
   },
