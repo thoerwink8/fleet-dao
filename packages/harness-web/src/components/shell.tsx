@@ -1,5 +1,6 @@
 import {
   CircleCheckBig,
+  Clock,
   Ellipsis,
   MessagesSquare,
   Moon,
@@ -34,11 +35,12 @@ const NAV_HK: NavItem[] = [
   { to: '/ops', label: '法国运维', short: '运维', icon: <Server /> },
   { to: '/settings', label: '设置', short: '设置', icon: <Settings /> },
 ];
-// 本机装法（#3858，决定 0125 第 7 条）：会话、任务、待我、宿主、设置；待我取代决策，宿主取代法国运维。
+// 本机装法（#3858，决定 0125 第 7 条）：会话、任务、待我、定时、宿主、设置。定时是 #3929。
 const NAV_LOCAL: NavItem[] = [
   { to: '/', label: '会话', short: '会话', icon: <MessagesSquare />, end: false },
   { to: '/work', label: '任务', short: '任务', icon: <Workflow /> },
   { to: '/inbox', label: '待我', short: '待我', icon: <CircleCheckBig /> },
+  { to: '/schedules', label: '定时', short: '定时', icon: <Clock /> },
   { to: '/hosts', label: '宿主', short: '宿主', icon: <Server /> },
   { to: '/settings', label: '设置', short: '设置', icon: <Settings /> },
 ];
@@ -64,7 +66,11 @@ function isOn(item: NavItem, path: string): boolean {
   if (item.to === '/') return path === '/' || path.startsWith('/s/');
   if (item.to === '/more') {
     return (
-      path === '/more' || path.startsWith('/ops') || path.startsWith('/settings') || path.startsWith('/hosts')
+      path === '/more' ||
+      path.startsWith('/ops') ||
+      path.startsWith('/settings') ||
+      path.startsWith('/hosts') ||
+      path.startsWith('/schedules')
     );
   }
   return path === item.to || path.startsWith(`${item.to}/`);
@@ -240,18 +246,16 @@ export function MorePage() {
     <>
       <PageBar title="更多" />
       <div className="flex flex-col gap-2 p-3">
-        {[NAV[3], NAV[4]].map((it) =>
-          it ? (
-            <NavLink
-              key={it.to}
-              to={it.to}
-              className="flex h-12 items-center gap-3 rounded-lg border border-line bg-surface px-4 text-sm [&_svg]:size-[18px] [&_svg]:text-muted"
-            >
-              {it.icon}
-              {it.label}
-            </NavLink>
-          ) : null,
-        )}
+        {NAV.slice(3).map((it) => (
+          <NavLink
+            key={it.to}
+            to={it.to}
+            className="flex h-12 items-center gap-3 rounded-lg border border-line bg-surface px-4 text-sm [&_svg]:size-[18px] [&_svg]:text-muted"
+          >
+            {it.icon}
+            {it.label}
+          </NavLink>
+        ))}
       </div>
     </>
   );

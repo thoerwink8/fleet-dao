@@ -9,22 +9,33 @@ import { type Forge, opKey } from '@fleet-dao/harness-contract';
 import { makeRedactor, type ProcessHost, readLines } from '@fleet-dao/harness-runner';
 import {
   type AdeQueueItem,
+  type AdeScheduleRow,
   type AdeSessionRow,
   adeQueue,
+  claimAdeSchedule,
   type Db,
+  deleteAdeSchedule,
   deleteAdeWorkspace,
   enqueueOp,
+  failAdeSchedule,
+  finishAdeSchedule,
+  getAdeSchedule,
   getAdeSession,
   getAdeTask,
   getAdeWorkspace,
   getOp,
+  insertAdeSchedule,
   insertAdeSession,
   insertAdeTask,
   insertAdeWorkspace,
+  listAdeSchedules,
   listAdeSessions,
   listAdeTasks,
   listAdeWorkspaces,
+  listDueAdeSchedules,
   listRunningAdeSessions,
+  pauseAdeSchedule,
+  releaseFiringSchedules,
   updateAdeSession,
 } from '@fleet-dao/harness-store';
 import {
@@ -138,6 +149,8 @@ export interface AdeOptions {
   agents?: () => Promise<AdeAgentInfo[]>;
   /** 测试注入。缺省读本机 CLI 的额度，读不成是「读不到」。 */
   quotaFor?: (env: NodeJS.ProcessEnv) => Promise<Record<string, string>>;
+  /** runDue 自己抛出来的错（库断了）。单条定时没建成记在那一行上，不走这里。 */
+  onScheduleError?: (err: unknown) => void;
 }
 
 interface Live {
@@ -220,8 +233,11 @@ export class AdeService {
   readonly #flushMs: number;
   readonly #agents?: () => Promise<AdeAgentInfo[]>;
   readonly #quotaFor?: (env: NodeJS.ProcessEnv) => Promise<Record<string, string>>;
+  readonly #onScheduleError?: (err: unknown) => void;
   readonly #live = new Map<string, Live>();
   readonly #locks = new Map<string, Promise<void>>();
+  #scheduleTimer: ReturnType<typeof setInterval> | undefined;
+  #dueRunning = false;
 
   constructor(o: AdeOptions) {
     this.#db = o.db;
@@ -232,9 +248,27 @@ export class AdeService {
     this.#flushMs = o.flushMs ?? 200;
     if (o.agents) this.#agents = o.agents;
     if (o.quotaFor) this.#quotaFor = o.quotaFor;
+    if (o.onScheduleError) this.#onScheduleError = o.onScheduleError;
+  }
+
+  /** 本机装配在 recover 之后才起。测试不走这个间隔，直接把钟传给 runDue。 */
+  startScheduleTicker(tickMs: number): void {
+    this.stopScheduleTicker();
+    if (!tickMs || tickMs <= 0) return;
+    const timer = setInterval(() => {
+      void this.runDue(new Date()).catch((err) => this.#onScheduleError?.(err));
+    }, tickMs);
+    timer.unref?.();
+    this.#scheduleTimer = timer;
+  }
+
+  stopScheduleTicker(): void {
+    if (this.#scheduleTimer) clearInterval(this.#scheduleTimer);
+    this.#scheduleTimer = undefined;
   }
 
   async recover(): Promise<number> {
+    await releaseFiringSchedules(this.#db, new Date());
     const running = await listRunningAdeSessions(this.#db);
     let n = 0;
     for (const s of running) {
@@ -386,6 +420,99 @@ export class AdeService {
     });
   }
 
+  async #sessionTarget(agent: string, model: string, workspaceId: string) {
+    if (!AGENTS.includes(agent as AgentId)) throw new AdeError(`不认识的 agent：${agent}`, 400);
+    if (!MODEL.test(model)) throw new AdeError(`模型名不合法：${model}`, 400);
+    const listed = (await this.listAgents()).find((a) => a.id === agent);
+    if (listed?.ready === false) {
+      throw new AdeError(listed.note ? `${agent} ${listed.note}` : `${agent} 现在不能用`, 400);
+    }
+    const ws = await getAdeWorkspace(this.#db, workspaceId);
+    if (!ws) throw new AdeError('没有这个工作区', 404);
+    return ws;
+  }
+
+  listSchedules() {
+    return listAdeSchedules(this.#db);
+  }
+
+  async createSchedule(input: {
+    workspaceId: string;
+    agent: string;
+    model: string;
+    text: string;
+    runAt: string;
+  }): Promise<AdeScheduleRow> {
+    const text = input.text.trim();
+    if (!text) throw new AdeError('话不能空', 400);
+    if ([...text].length > 8000) throw new AdeError('话太长', 400);
+    const ms = Date.parse(input.runAt);
+    if (Number.isNaN(ms)) throw new AdeError('到点时间不对', 400);
+    await this.#sessionTarget(input.agent, input.model, input.workspaceId);
+    const id = `h${randomBytes(8).toString('hex')}`;
+    await insertAdeSchedule(this.#db, {
+      id,
+      workspaceId: input.workspaceId,
+      agent: input.agent,
+      model: input.model,
+      prompt: text,
+      runAt: new Date(ms),
+    });
+    const row = await getAdeSchedule(this.#db, id);
+    if (!row) throw new Error('定时写进去了却读不到');
+    return row;
+  }
+
+  async pauseSchedule(id: string): Promise<AdeScheduleRow> {
+    const row = await pauseAdeSchedule(this.#db, id, new Date());
+    if (row) return row;
+    const cur = await getAdeSchedule(this.#db, id);
+    if (!cur) throw new AdeError('没有这条定时', 404);
+    throw new AdeError('只有还在等的定时能暂停', 400);
+  }
+
+  async deleteSchedule(id: string): Promise<void> {
+    const r = await deleteAdeSchedule(this.#db, id);
+    if (r === 'deleted') return;
+    if (r === 'firing') throw new AdeError('正在到点建会话，等这一下结束再删', 409);
+    throw new AdeError('没有这条定时', 404);
+  }
+
+  /**
+   * 到点的定时调用和人手同一个 createSession。now 由调用方给：测试用假钟，本机装配传系统钟。
+   * 没到点、暂停、已经触发过、上次没建成，都不起会话。
+   */
+  async runDue(now: Date): Promise<{ fired: string[] }> {
+    if (Number.isNaN(now.getTime())) throw new AdeError('时钟无效', 400);
+    if (this.#dueRunning) return { fired: [] };
+    this.#dueRunning = true;
+    const fired: string[] = [];
+    try {
+      const due = await listDueAdeSchedules(this.#db, now);
+      for (const row of due) {
+        const claimed = await claimAdeSchedule(this.#db, row.id, now);
+        if (!claimed) continue;
+        try {
+          const session = await this.createSession({
+            workspaceId: claimed.workspaceId,
+            agent: claimed.agent,
+            model: claimed.model,
+            worktree: false,
+            text: claimed.prompt,
+          });
+          await finishAdeSchedule(this.#db, claimed.id, session.id, now);
+          fired.push(session.id);
+        } catch (err) {
+          const message = (err instanceof Error ? err.message : '建会话失败').replace(/\s+/g, ' ').trim();
+          await failAdeSchedule(this.#db, claimed.id, message.slice(0, 300), now);
+        }
+      }
+      return { fired };
+    } finally {
+      this.#dueRunning = false;
+    }
+  }
+
   async createSession(input: {
     workspaceId: string;
     agent: string;
@@ -395,14 +522,7 @@ export class AdeService {
     parentId?: string | null;
     text?: string;
   }) {
-    if (!AGENTS.includes(input.agent as AgentId)) throw new AdeError(`不认识的 agent：${input.agent}`, 400);
-    if (!MODEL.test(input.model)) throw new AdeError(`模型名不合法：${input.model}`, 400);
-    const listed = (await this.listAgents()).find((a) => a.id === input.agent);
-    if (listed?.ready === false) {
-      throw new AdeError(listed.note ? `${input.agent} ${listed.note}` : `${input.agent} 现在不能用`, 400);
-    }
-    const ws = await getAdeWorkspace(this.#db, input.workspaceId);
-    if (!ws) throw new AdeError('没有这个工作区', 404);
+    const ws = await this.#sessionTarget(input.agent, input.model, input.workspaceId);
     let taskTitle = '';
     let taskBody = '';
     if (input.taskId != null) {

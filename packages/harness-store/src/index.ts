@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 export * from './ade.ts';
 export * from './real.ts';
 export * from './scheduler.ts';
+export * from './schedules.ts';
 export * from './schema.ts';
 export * from './shadow.ts';
 export * from './store.ts';

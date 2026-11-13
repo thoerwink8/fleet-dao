@@ -39,6 +39,8 @@
 
 `vite build --mode desktop`（`pnpm --filter @fleet-dao/harness-web build:local`，vite 不许把模式叫 local）出 `dist-local/`：`base=/`，接口在 `/api`，`src/lib/profile.ts` 的 `IS_LOCAL` 为真。导航换成会话、任务、待我、宿主、设置（`shell.tsx` 的 `NAV_LOCAL`；待我取代决策，宿主取代法国运维），三块新页面在 `src/pages/local-pages.tsx`：待我（卡住的排前、其次做完没看的；待拍板、待验收等验收闸接进来再出）、宿主（隔离档位和读回的事实）、设置（当前配置，只读）；数据来自 `/api/local/status`（`src/lib/local-status.ts`）。没登录时 `LoginPrompt` 换成粘贴本机令牌的表单。由 `pnpm fleet2 up` 起的单口服务放出来，见 `packages/harness-api/AGENTS.md`「本机单口服务」。香港那份（`/next/`）的导航和路由不变。
 
+本机定时（#3929，`src/pages/schedules-page.tsx`）：侧栏「定时」。表单选工作区、agent、模型、到点和第一句话；列表可暂停、删除。到点后的会话出现在会话列表。
+
 本机会话页（#3918，设计在 `specs/3918-fleet2-session-ui/方案.md`）：参考了 mirasim 的分层思路和 token 分组（文字五档、surface/raised/panel/inset、running/idle），以及 cc-haha README 里的工作台交互（多会话、worktree、右栏 diff）。代码全部自写，或来自 MIT 的 Radix 与 shadcn/ui 的写法。没有从这两家拷代码、样式、色值或 class。色值和对照表在 `src/app.css` 和那份方案里。组件在 `src/ui/`，页面在 `composer.tsx`（新会话、底部输入、排队条、任务页开单）、`chat-timeline.tsx`、`local-sessions.tsx`、`changes-panel.tsx`。标题用会话上存的第一句，预览用 `src/lib/preview.ts`（跳过内部事件、解开 JSON、修把 UTF-8 当成 latin1 的乱码）。深浅色记在 `localStorage` 键 `fleet.next.theme`，侧栏可切。右栏是 git 面板（#3926、#3948）：`GET /api/ade/sessions/:id/changes` 给按文件的状态、分支、head、领先落后、工作树清单；暂存、提交、拉取、推送、开 PR、合并、看 CI、删工作树走 `POST .../git`。看 CI 同一检查名只留最新一次，状态写成排队中、在跑、通过、失败，旁边一个颜色点。输入框下的报错在下一次会话读取成功时清掉，更早失败的回包不再写上。这些写操作先入 `change.*` outbox。GitHub 上的推送、开 PR、合并由这次点击做完：合并先确认，并带上看到的 head，分支上又有新提交就拒。删工作树先预览，人确认才删。分支有已合并的 PR 就算已合并；没有 PR 再看祖先，或改动已经在 main 上。有没提交的改动或会话在跑仍不删。排队的插队和撤回走 `POST /api/ade/sessions/:id/queue`。终端格在对话下方（窄屏盖住对话），走 hostd 的 pty.* 帧；xterm.js 按需加载。关掉页面不会接回还在跑的那条，流一断终端就退出。
 
 ## 本机跑起来看

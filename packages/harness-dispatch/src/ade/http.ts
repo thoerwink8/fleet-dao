@@ -95,6 +95,36 @@ async function route(
     if (!githubToken) throw new AdeError('没连 GitHub', 400);
     throw new AdeError('导入还没做', 501);
   }
+  if (path === '/api/ade/schedules' && method === 'GET') {
+    send(res, 200, { schedules: await ade.listSchedules() });
+    return true;
+  }
+  if (path === '/api/ade/schedules' && method === 'POST') {
+    const body = await readJson(req);
+    if (typeof body.runAt !== 'string') throw new AdeError('要到点时间', 400);
+    const row = await ade.createSchedule({
+      workspaceId: str(body.workspaceId),
+      agent: str(body.agent),
+      model: str(body.model),
+      text: str(body.text),
+      runAt: body.runAt,
+    });
+    send(res, 201, { schedule: row });
+    return true;
+  }
+  const schedPause = /^\/api\/ade\/schedules\/([^/]+)\/pause$/.exec(path);
+  if (schedPause && method === 'POST') {
+    await readJson(req);
+    const row = await ade.pauseSchedule(decodeURIComponent(schedPause[1] ?? ''));
+    send(res, 200, { schedule: row });
+    return true;
+  }
+  const schedDel = /^\/api\/ade\/schedules\/([^/]+)$/.exec(path);
+  if (schedDel && method === 'DELETE') {
+    await ade.deleteSchedule(decodeURIComponent(schedDel[1] ?? ''));
+    send(res, 204, {});
+    return true;
+  }
   if (path === '/api/ade/sessions' && method === 'GET') {
     send(res, 200, { sessions: await ade.listSessions() });
     return true;
