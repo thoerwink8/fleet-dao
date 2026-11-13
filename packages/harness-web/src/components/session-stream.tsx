@@ -403,6 +403,8 @@ export function SessionStream({
       {IS_LOCAL ? (
         <AdeComposer
           sessionId={sessionId}
+          sessionEvents={state.events}
+          transcriptEvents={tState.events}
           {...(onToggleChanges ? { onToggleChanges } : {})}
           {...(onToggleTerminal ? { onToggleTerminal } : {})}
         />

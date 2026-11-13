@@ -26,6 +26,13 @@ describe('会话标题和预览', () => {
     ).toBe('你好');
   });
 
+  it('中文摘要原样留下，不把 UTF-8 当成 GBK', () => {
+    const text = '收到：请回一句收到';
+    expect(repairMojibake(text)).toBe(text);
+    expect(previewText('session.turn.settled', { outcome: 'completed', text })).toBe(text);
+    expect(previewText('session.message', { text: '请回一句收到' })).toBe('请回一句收到');
+  });
+
   it('只有 stderr、没有正文时预览不含 stderr', () => {
     const preview = previewText('session.turn.settled', {
       outcome: 'stopped',

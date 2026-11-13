@@ -71,6 +71,13 @@
       "when": 1794530248044,
       "tag": "0009_strong_satana",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794534326506,
+      "tag": "0010_tranquil_carmella_unuscione",
+      "breakpoints": true
     }
   ]
 }

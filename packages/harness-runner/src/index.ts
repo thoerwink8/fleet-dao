@@ -7,6 +7,8 @@ export {
   HostdVersionError,
   hostdBinary,
   makeHostdHost,
+  remoteHostd,
+  sshHostdLaunch,
 } from './host-hostd.ts';
 export { jobName, jobrunBinary, jobrunReap, makeJobrunHost, reportPath } from './host-jobrun.ts';
 export { localHost } from './host-local.ts';

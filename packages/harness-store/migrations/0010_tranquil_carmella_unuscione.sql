@@ -1,0 +1,1 @@
+ALTER TABLE "fleet2"."ade_sessions" ADD COLUMN "host_alias" text;
