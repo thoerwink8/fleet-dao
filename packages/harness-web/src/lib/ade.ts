@@ -63,6 +63,7 @@ export interface AdeSession {
   title: string;
   status: string;
   workspaceId: string;
+  parentId?: string | null;
   agent?: string;
   model?: string;
   worktree?: boolean;

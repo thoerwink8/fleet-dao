@@ -1,5 +1,6 @@
 import { ChevronRight } from 'lucide-react';
 import { Fragment, useState } from 'react';
+import { Link } from 'react-router';
 import { toolPhrase } from '../lib/chat-view';
 import { dayKey, formatDay } from '../lib/format';
 import type { TimelineItem } from '../lib/transcript';
@@ -33,6 +34,14 @@ function userText(item: TimelineItem): string {
   return typeof text === 'string' ? text : '';
 }
 
+function childSessionId(item: TimelineItem): string {
+  if (item.kind !== 'event') return '';
+  const from = item.ev.payload.from;
+  if (!from || typeof from !== 'object' || Array.isArray(from)) return '';
+  const id = (from as { id?: unknown }).id;
+  return typeof id === 'string' ? id : '';
+}
+
 export function ChatTimeline({ items }: { items: TimelineItem[] }) {
   const [open, setOpen] = useState<Set<number>>(new Set());
   let lastDay = '';
@@ -61,6 +70,26 @@ export function ChatTimeline({ items }: { items: TimelineItem[] }) {
               <span className="h-px flex-1 bg-line" />
             </li>
           ) : null;
+        if (item.kind === 'event' && item.ev.payload.kind === 'report') {
+          const childId = childSessionId(item);
+          return (
+            <Fragment key={`m-${item.ev.id}`}>
+              {dayRow}
+              <li data-kind="report" className="rounded-lg border border-line bg-raised px-3 py-2">
+                <p className="text-2xs text-muted">子会话回报</p>
+                <p className="mt-1 whitespace-pre-wrap text-sm text-ink">{userText(item)}</p>
+                {childId ? (
+                  <Link
+                    to={`/s/${encodeURIComponent(childId)}`}
+                    className="mt-1 inline-block text-2xs text-ink-2 underline"
+                  >
+                    打开子会话
+                  </Link>
+                ) : null}
+              </li>
+            </Fragment>
+          );
+        }
         if (item.kind === 'event') {
           return (
             <Fragment key={`m-${item.ev.id}`}>

@@ -2,9 +2,17 @@
 // 人的话开跑；子会话结束只给父会话投一条 report，不自动把父会话再开起来。
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { accountExhaustedReason } from '@fleet-dao/adapters/judge';
-import { appendToSession } from '@fleet-dao/harness-api';
+import {
+  appendToSession,
+  createHarnessApi,
+  type HarnessApi,
+  issueToken,
+  OPEN_CHILD_SESSION,
+  revokeSessionTokens,
+} from '@fleet-dao/harness-api';
 import { type Forge, opKey } from '@fleet-dao/harness-contract';
 import { makeRedactor, type ProcessHost, readLines } from '@fleet-dao/harness-runner';
 import {
@@ -42,8 +50,12 @@ import {
   buildWorkerEnv,
   GROK_UNATTENDED_ENV,
   GrokTranscriptParser,
+  grokConfigToml,
+  MCP_SERVER_NAME,
+  type McpEndpoint,
   type TranscriptParser,
   TranscriptWriter,
+  writeMcpConfig,
 } from '@fleet-dao/harness-workers';
 import { localOutboxDeps, processOutbox } from '../publish.ts';
 import {
@@ -151,6 +163,11 @@ export interface AdeOptions {
   quotaFor?: (env: NodeJS.ProcessEnv) => Promise<Record<string, string>>;
   /** runDue 自己抛出来的错（库断了）。单条定时没建成记在那一行上，不走这里。 */
   onScheduleError?: (err: unknown) => void;
+  /**
+   * 给会话里的 agent 挂 open_child_session。本机装法打开。
+   * 令牌写进 MCP 配置文件，不进命令行。claude、grok 才挂得上；codex、pi 没有这套配置格式。
+   */
+  mcp?: boolean;
 }
 
 interface Live {
@@ -238,6 +255,9 @@ export class AdeService {
   readonly #locks = new Map<string, Promise<void>>();
   #scheduleTimer: ReturnType<typeof setInterval> | undefined;
   #dueRunning = false;
+  readonly #wantMcp: boolean;
+  #mcp: HarnessApi | null = null;
+  #mcpBase: string | null = null;
 
   constructor(o: AdeOptions) {
     this.#db = o.db;
@@ -246,6 +266,7 @@ export class AdeService {
     this.#env = o.env ?? process.env;
     this.#commandFor = o.commandFor ?? adeCommand;
     this.#flushMs = o.flushMs ?? 200;
+    this.#wantMcp = o.mcp === true;
     if (o.agents) this.#agents = o.agents;
     if (o.quotaFor) this.#quotaFor = o.quotaFor;
     if (o.onScheduleError) this.#onScheduleError = o.onScheduleError;
@@ -265,6 +286,19 @@ export class AdeService {
   stopScheduleTicker(): void {
     if (this.#scheduleTimer) clearInterval(this.#scheduleTimer);
     this.#scheduleTimer = undefined;
+  }
+
+  /** 关掉给 agent 用的 MCP。不停已经在跑的会话进程。 */
+  async close(): Promise<void> {
+    await this.#mcp?.close();
+    this.#mcp = null;
+    this.#mcpBase = null;
+  }
+
+  /** 测试用：MCP 的根地址（不含 /mcp）。没开就抛。 */
+  async mcpUrl(): Promise<string> {
+    if (!this.#wantMcp) throw new AdeError('没开 MCP', 500);
+    return this.#ensureMcp();
   }
 
   async recover(): Promise<number> {
@@ -765,7 +799,7 @@ export class AdeService {
       nativeResume || !resume ? item.text : `（这个 agent 没有原生续接，上文在会话页里）\n${item.text}`;
     const promptFile = join(tmp, 'prompt.md');
     if (row.agent === 'grok') await writeFile(promptFile, prompt, 'utf8');
-    const env = mergeAccountEnv(
+    let env = mergeAccountEnv(
       buildWorkerEnv({
         base: this.#env,
         tmpDir: tmp,
@@ -794,6 +828,7 @@ export class AdeService {
       const resolved = await findAgentBin(row.agent, this.#env);
       if (resolved) command[0] = resolved;
     }
+    env = await this.#attachMcp(row, command, env, tmp);
     const proc = this.#host.start({ command, cwd: row.cwd, env, runId });
     const writer = new TranscriptWriter({
       db: this.#db,
@@ -887,6 +922,8 @@ export class AdeService {
     await writer.close();
     const row = await this.getSession(id);
     if (row.runId !== runId) return;
+    // 这一轮的进程没了，这一轮的令牌也作废。换账号或队列里的下一句会在 #begin 里另发一枚。
+    if (this.#wantMcp) await revokeSessionTokens(this.#db, id);
     if (await this.#switchAccount(row, live, outcome, lastText, stderr)) return;
     await appendToSession(this.#db, id, 'session.turn.settled', {
       turnId: runId,
@@ -917,5 +954,64 @@ export class AdeService {
         hops: 0,
       });
     }
+  }
+
+  async #ensureMcp(): Promise<string> {
+    if (this.#mcpBase) return this.#mcpBase;
+    const api = createHarnessApi({
+      db: this.#db,
+      ade: true,
+      openChildSession: (parentId, input) =>
+        this.createSession({
+          workspaceId: input.workspaceId,
+          agent: input.agent,
+          model: input.model,
+          text: input.text,
+          worktree: false,
+          parentId,
+        }).then((row) => ({ id: row.id })),
+    });
+    this.#mcp = api;
+    const port = await api.listen(0, '127.0.0.1');
+    this.#mcpBase = `http://127.0.0.1:${port}`;
+    return this.#mcpBase;
+  }
+
+  async #mcpEndpoint(sessionId: string): Promise<McpEndpoint> {
+    const base = await this.#ensureMcp();
+    const issued = await issueToken(this.#db, sessionId, 'commander');
+    return { url: `${base}/mcp`, token: issued.token };
+  }
+
+  /** claude、grok 才挂得上。令牌写进配置文件，不进命令行。 */
+  async #attachMcp(
+    row: AdeSessionRow,
+    command: string[],
+    env: Record<string, string>,
+    tmp: string,
+  ): Promise<Record<string, string>> {
+    if (!this.#wantMcp || (row.agent !== 'claude' && row.agent !== 'grok')) return env;
+    const endpoint = await this.#mcpEndpoint(row.id);
+    // acceptEdits 只放行改文件。无头没人点批准，不放行的工具会被当场拒。只放这一只。
+    const claudeAllow = `mcp__${MCP_SERVER_NAME}__${OPEN_CHILD_SESSION}`;
+    const grokAllow = `MCPTool(${MCP_SERVER_NAME}__${OPEN_CHILD_SESSION})`;
+    if (row.agent === 'claude') {
+      command.push(
+        '--strict-mcp-config',
+        '--mcp-config',
+        await writeMcpConfig(tmp, endpoint),
+        '--allowedTools',
+        claudeAllow,
+      );
+      return env;
+    }
+    command.push('--allow', grokAllow);
+    const home = join(tmp, 'grok-home');
+    await mkdir(home, { recursive: true });
+    await writeFile(join(home, 'config.toml'), grokConfigToml(endpoint), { mode: 0o600 });
+    const auth =
+      this.#env.GROK_AUTH_PATH ||
+      join(this.#env.USERPROFILE ?? this.#env.HOME ?? homedir(), '.grok', 'auth.json');
+    return { ...env, GROK_HOME: home, GROK_AUTH_PATH: auth };
   }
 }

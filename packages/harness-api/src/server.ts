@@ -9,12 +9,16 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { sessionStream } from './events.ts';
 import { reply, serveHistory, serveSse } from './session-http.ts';
 import { readTokenFromRequest, type TokenClaims, verifyToken } from './tokens.ts';
-import { toolsFor } from './tools.ts';
+import { type ToolContext, toolsFor } from './tools.ts';
 
 export interface HarnessApiOptions {
   db: Db;
   /** 影子模式：会引起外部写的工具不注册。 */
   shadow?: boolean;
+  /** 本机 ADE：只注册 open_child_session。和影子派工不是一条路。 */
+  ade?: boolean;
+  /** ade 时由装配传进来。没传，工具回「没接上」。 */
+  openChildSession?: ToolContext['openChildSession'];
   /** 断线太久落后超过这么多条就发 resync 不补发。默认 1000。 */
   replayCap?: number;
   /** SSE 每隔多久读一次新事件、核一次令牌（撤销最晚这么久后连接断开）。默认 1000ms。 */
@@ -82,8 +86,13 @@ export function createHarnessApi(options: HarnessApiOptions): HarnessApi {
     }
     // 无状态：每个请求按令牌的角色现建一份服务，只注册该角色能用的工具。
     const server = new McpServer({ name: 'fleet-harness', version: '0.0.0' });
-    const ctx = { db, sessionId: claims.sessionId, role: claims.role };
-    for (const tool of toolsFor(claims.role, shadow)) tool.register(server, ctx);
+    const ctx: ToolContext = {
+      db,
+      sessionId: claims.sessionId,
+      role: claims.role,
+      ...(options.openChildSession ? { openChildSession: options.openChildSession } : {}),
+    };
+    for (const tool of toolsFor(claims.role, shadow, options.ade === true)) tool.register(server, ctx);
     // SDK 的类型和本仓 exactOptionalPropertyTypes 对不上：无状态模式就是 sessionIdGenerator 给 undefined，在这里收口。
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

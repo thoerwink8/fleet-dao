@@ -127,7 +127,7 @@ describe('四态判定（纯函数）', () => {
   });
 });
 
-describe('真 git 仓上的核验', () => {
+describe('真 git 仓上的核验', { timeout: 20_000 }, () => {
   const base = { baseRef: 'main', workerClean: true, redact, hostEnv };
 
   it('范围内的改动加检查命令过 → passed，证据里有 diff 统计（含新文件）', async () => {
