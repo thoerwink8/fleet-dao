@@ -43,3 +43,4 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 - 先核三件：PR 已合并；工作树没有没提交的改动；没有别的会话还在用这棵树。有一件不满足就不删，报给创始人。
 - 删工作树（`removeWorktree` 或 `git worktree remove`）和这件活的本地、远端分支。
 - 删会话：`deleteSession {sessionKey}`。
+- 单的租约在 PR 合并后自动收，不跑 `pnpm work done`；挂了「本机做」的单尤其不许 `--release`：它会把单退回法国队列、摘掉「本机做」，引擎会把同一件活再做一遍（2026-11-13 真出过，#3981）。
