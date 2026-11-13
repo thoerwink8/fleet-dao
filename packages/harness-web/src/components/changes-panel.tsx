@@ -64,9 +64,18 @@ const KIND: Record<string, string> = {
 
 const OP: Record<string, string> = {
   'change.push': '推送',
-  'change.pr.open': '开 PR',
   'change.merge': '合并',
 };
+
+function reviewWord(forge: string): 'MR' | 'PR' {
+  return forge === 'gitlab' ? 'MR' : 'PR';
+}
+
+function forgeLabel(forge: string): string {
+  if (forge === 'gitlab') return 'GitLab';
+  if (forge === 'github') return 'GitHub';
+  return forge;
+}
 
 const STATE: Record<string, string> = {
   pending: '已排上',
@@ -195,6 +204,8 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
 
   const removable = data?.worktrees.filter((w) => w.removable) ?? [];
   const tracked = data?.upstream ? `领先 ${data.ahead ?? 0} · 落后 ${data.behind ?? 0}` : '没有上游';
+  const word = reviewWord(data?.forge ?? '');
+  const confirmsHead = data?.forge === 'github' || data?.forge === 'gitlab';
 
   return (
     <aside
@@ -220,7 +231,7 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
               <span className="font-mono">{data.branch || '游离'}</span>
               {data.head ? <span className="text-muted"> · {data.head.slice(0, 7)}</span> : null}
               <span className="text-muted"> · {tracked}</span>
-              {data.forge ? <span className="text-muted"> · {data.forge}</span> : null}
+              {data.forge ? <span className="text-muted"> · {forgeLabel(data.forge)}</span> : null}
             </p>
             <div className="mt-2 flex flex-wrap gap-1">
               <Button variant="outline" size="sm" disabled={busy} onClick={() => void act('pull')}>
@@ -230,14 +241,14 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
                 推送
               </Button>
               <Button variant="outline" size="sm" disabled={busy} onClick={() => void act('pr')}>
-                开 PR
+                开 {word}
               </Button>
               <Button
                 variant="outline"
                 size="sm"
-                disabled={busy || (data.forge === 'github' && !data.head)}
+                disabled={busy || (confirmsHead && !data.head)}
                 onClick={() => {
-                  if (data.forge === 'github') {
+                  if (confirmsHead) {
                     setMergeHead(data.head ?? '');
                     setMergeOpen(true);
                     return;
@@ -256,7 +267,8 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
                 {checks.pr ? (
                   <>
                     <p>
-                      PR #{checks.pr.number} {checks.pr.state}
+                      {word} #{checks.pr.number}{' '}
+                      <span title={checks.pr.state}>{checkStatusView(checks.pr.state).label}</span>
                       {checks.pr.url ? (
                         <>
                           {' '}
@@ -285,7 +297,7 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
                     )}
                   </>
                 ) : (
-                  <p className="text-muted">{checks.reason || '没有 PR'}</p>
+                  <p className="text-muted">{checks.reason || `没有 ${word}`}</p>
                 )}
               </div>
             ) : null}
@@ -293,7 +305,8 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
               <ul className="mt-2 text-2xs text-muted">
                 {data.ops.map((o) => (
                   <li key={o.key}>
-                    {OP[o.kind] ?? o.kind} · {STATE[o.state] ?? o.state}
+                    {o.kind === 'change.pr.open' ? `开 ${word}` : (OP[o.kind] ?? o.kind)} ·{' '}
+                    {STATE[o.state] ?? o.state}
                   </li>
                 ))}
               </ul>
@@ -465,7 +478,7 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
       </Dialog>
       <Dialog open={mergeOpen} onOpenChange={setMergeOpen}>
         <DialogContent
-          title="合并这个 PR"
+          title={`合并这个 ${word}`}
           description="按你看到的这次提交合并。确认时再对一次：分支上又有新提交就不会合。"
         >
           <p className="break-all font-mono text-2xs text-ink-2" data-testid="merge-head">
@@ -482,7 +495,11 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
               size="sm"
               disabled={busy || mergeHead === ''}
               onClick={() => {
-                void act('merge', { confirm: true, head: mergeHead }).then((ok) => {
+                void act('merge', {
+                  confirm: true,
+                  head: mergeHead,
+                  ...(data?.forge === 'gitlab' ? { method: 'merge' } : {}),
+                }).then((ok) => {
                   if (ok) setMergeOpen(false);
                 });
               }}

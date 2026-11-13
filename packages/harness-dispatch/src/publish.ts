@@ -195,6 +195,7 @@ export async function processOutbox(d: PublishDeps): Promise<OutboxReport> {
         continue;
       }
       if (forge === 'gitlab') {
+        // 面板上的 GitLab 在入队时已经领走做完。这里是内核自动发布，仍然不连 GitLab。
         await failOp(d.db, op, 'gitlab 还没实现', 0, 0);
         report.dead++;
         continue;

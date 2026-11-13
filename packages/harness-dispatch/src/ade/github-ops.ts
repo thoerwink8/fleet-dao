@@ -19,7 +19,7 @@ const redact = makeRedactor([]);
 const SHA = /^[0-9a-f]{40}$/;
 
 /** 内核自己跑 gh/git：带上家目录（gh 的登录在里面）和代理。不把 GH_TOKEN 抄进环境。 */
-function hostEnv(): Record<string, string> {
+export function panelHostEnv(extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of [
     'HOME',
@@ -55,11 +55,11 @@ function hostEnv(): Record<string, string> {
   }
   env.GIT_TERMINAL_PROMPT = '0';
   env.GIT_OPTIONAL_LOCKS = '0';
-  return env;
+  return { ...env, ...extra };
 }
 
 export function defaultGithubRun(cwd: string, command: readonly string[]): Promise<CmdResult> {
-  return runCommand({ command, cwd, timeoutMs: 60_000, redact, trustedEnv: hostEnv() }).then((r) => ({
+  return runCommand({ command, cwd, timeoutMs: 60_000, redact, trustedEnv: panelHostEnv() }).then((r) => ({
     ran: r.ran,
     exitCode: r.exitCode,
     stdout: r.stdout,
@@ -98,7 +98,6 @@ export function assertGithubRemote(url: string): string {
   const low = raw.toLowerCase();
   if (!low) throw new Error('没有 origin');
   if (low.includes('fleet-dao')) throw new Error('不往 fleet-dao 推');
-  if (low.includes('gitlab')) throw new Error('gitlab 还没实现');
   if (!low.includes('github.com')) throw new Error('这个远端不是 GitHub');
   return raw.replace(/\/\/[^@/]+@/, '//');
 }

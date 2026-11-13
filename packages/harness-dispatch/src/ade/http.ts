@@ -68,6 +68,25 @@ async function route(
     send(res, 201, { hosts: await ade.addSshHost(await readJson(req)) });
     return true;
   }
+  if (path === '/api/ade/gitlab-hosts' && method === 'GET') {
+    send(res, 200, { hosts: await ade.gitlabHosts() });
+    return true;
+  }
+  if (path === '/api/ade/gitlab-hosts' && method === 'POST') {
+    const body = await readJson(req);
+    send(res, 201, { hosts: await ade.addGitlabHost(str(body.host)) });
+    return true;
+  }
+  const gitlabHost = /^\/api\/ade\/gitlab-hosts\/([^/]+)$/.exec(path);
+  if (gitlabHost && method === 'DELETE') {
+    send(res, 200, { hosts: await ade.removeGitlabHost(decodeURIComponent(gitlabHost[1] ?? '')) });
+    return true;
+  }
+  if (path === '/api/ade/gitlab-token' && method === 'POST') {
+    const body = await readJson(req);
+    send(res, 200, await ade.saveGitlabToken(str(body.host), str(body.token)));
+    return true;
+  }
   if (path === '/api/ade/workspaces' && method === 'GET') {
     send(res, 200, { workspaces: await ade.listWorkspaces() });
     return true;

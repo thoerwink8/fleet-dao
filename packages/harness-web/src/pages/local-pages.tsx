@@ -232,6 +232,171 @@ export function HostsPage() {
   );
 }
 
+interface GitlabHostRow {
+  host: string;
+  hasToken: boolean;
+  builtin: boolean;
+}
+
+/** 登记自建 GitLab 主机名，令牌只写进本机数据目录。 */
+function GitlabHostForm() {
+  const [hosts, setHosts] = useState<GitlabHostRow[]>([]);
+  const [host, setHost] = useState('');
+  const [tokenHost, setTokenHost] = useState('gitlab.com');
+  const [token, setToken] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const load = () => {
+    adeGet<{ hosts: GitlabHostRow[] }>('/gitlab-hosts')
+      .then((r) => setHosts(r.hosts))
+      .catch((err: unknown) => setMsg(err instanceof Error ? err.message : '读不到 GitLab 主机'));
+  };
+  useEffect(() => {
+    let dead = false;
+    adeGet<{ hosts: GitlabHostRow[] }>('/gitlab-hosts')
+      .then((r) => {
+        if (!dead) setHosts(r.hosts);
+      })
+      .catch((err: unknown) => {
+        if (!dead) setMsg(err instanceof Error ? err.message : '读不到 GitLab 主机');
+      });
+    return () => {
+      dead = true;
+    };
+  }, []);
+  const add = async () => {
+    setBusy(true);
+    setMsg('');
+    try {
+      const res = await adeSend<{ hosts: GitlabHostRow[] }>('/gitlab-hosts', 'POST', { host });
+      setHosts(res.hosts);
+      setHost('');
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '没加上');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saveToken = async () => {
+    setBusy(true);
+    setMsg('');
+    try {
+      await adeSend('/gitlab-token', 'POST', { host: tokenHost, token });
+      setToken('');
+      load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '令牌没写下');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card title="GitLab">
+      <p className="mb-3">
+        gitlab.com 不用登记。自建的只写主机名。令牌只留在本机数据目录，不会出现在仓库和操作记录里。
+      </p>
+      <form
+        className="flex flex-col gap-2"
+        aria-label="登记 GitLab 主机"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void add();
+        }}
+      >
+        <label htmlFor="gitlab-host" className="flex flex-col gap-1">
+          <span className="text-ink">自建主机名</span>
+          <Input
+            id="gitlab-host"
+            data-testid="gitlab-host"
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+            placeholder="git.example.com"
+            autoComplete="off"
+          />
+        </label>
+        <div>
+          <Button data-testid="gitlab-add" type="submit" disabled={busy || !host.trim()}>
+            登记
+          </Button>
+        </div>
+      </form>
+      <form
+        className="mt-3 flex flex-col gap-2"
+        aria-label="保存 GitLab 令牌"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void saveToken();
+        }}
+      >
+        <label htmlFor="gitlab-token-host" className="flex flex-col gap-1">
+          <span className="text-ink">给哪台存令牌</span>
+          <Input
+            id="gitlab-token-host"
+            data-testid="gitlab-token-host"
+            value={tokenHost}
+            onChange={(e) => setTokenHost(e.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <label htmlFor="gitlab-token" className="flex flex-col gap-1">
+          <span className="text-ink">令牌</span>
+          <Input
+            id="gitlab-token"
+            data-testid="gitlab-token"
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <div>
+          <Button
+            data-testid="gitlab-token-save"
+            type="submit"
+            disabled={busy || !token.trim() || !tokenHost.trim()}
+          >
+            保存令牌
+          </Button>
+        </div>
+      </form>
+      {msg ? (
+        <p role="alert" className="mt-2 text-warning">
+          {msg}
+        </p>
+      ) : null}
+      <ul aria-label="GitLab 主机" className="mt-3 flex flex-col gap-2">
+        {hosts.map((row) => (
+          <li key={row.host} data-gitlab-host={row.host} className="flex flex-wrap items-baseline gap-2">
+            <span className="font-mono text-ink">{row.host}</span>
+            <span className="text-2xs text-muted">{row.hasToken ? '已存令牌' : '还没有令牌'}</span>
+            {row.builtin ? null : (
+              <Button
+                variant="ghost"
+                size="sm"
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true);
+                  setMsg('');
+                  void adeSend<{ hosts: GitlabHostRow[] }>(
+                    `/gitlab-hosts/${encodeURIComponent(row.host)}`,
+                    'DELETE',
+                  )
+                    .then((res) => setHosts(res.hosts))
+                    .catch((err: unknown) => setMsg(err instanceof Error ? err.message : '没去掉'))
+                    .finally(() => setBusy(false));
+                }}
+              >
+                去掉
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 export function LocalSettingsPage() {
   const { status, error, unauthorized } = useLocalStatus();
   return (
@@ -239,6 +404,7 @@ export function LocalSettingsPage() {
       <PageBar title="设置" />
       <div className="flex flex-col gap-3 p-3 md:p-6">
         <AccountsPanel />
+        <GitlabHostForm />
         {unauthorized ? <LoginPrompt /> : null}
         {error ? (
           <p role="alert" className="text-sm text-warning">

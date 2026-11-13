@@ -1,8 +1,8 @@
-// 会话页的 git 面板（#3926、#3948）。暂存、提交、拉取是本机 git。
+// 会话页的 git 面板（#3926、#3948、#3944）。暂存、提交、拉取是本机 git。
 // 推、开 PR、合并先入 change.* outbox，不另写一条绕过 outbox 的推送。
-// forge=github 由这次点击领走并做完（gh）；合并要带上看到的 head。GitLab 领到就停。
-// 删工作树要人确认。分支有已合并的 PR 就算已合并；没有 PR 再看是不是祖先，或改动已经在 main 上。
-// running 或有没提交的改动就不删。
+// forge=github 由这次点击领走并做完（gh）。forge=gitlab 走同一套 change.*，用 GitLab 接口开 MR、读流水线、按看到的 head 合并。
+// 合并要带上看到的 head。删工作树要人确认。分支有已合并的 PR 就算已合并；没有 PR 再看是不是祖先，或改动已经在 main 上。
+// running 或有没提交的改动就不删。内核自动发布领到的 GitLab 仍不做。
 import { randomBytes } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -29,6 +29,7 @@ import {
   defaultBase,
   fileDiffs,
   type GhPr,
+  inspectRepo,
   isAncestorOf,
   isClean,
   listWorktrees,
@@ -48,6 +49,18 @@ import {
   openPullRequest,
   pushCurrentBranch,
 } from './github-ops.ts';
+import { gitlabTokenPath, loadGitlabHosts, readGitlabToken } from './gitlab-hosts.ts';
+import {
+  defaultGitlabFetch,
+  defaultGitlabRun,
+  type GitlabFetch,
+  gitlabMergeBody,
+  mergeGitlabMr,
+  openGitlabMr,
+  parseGitlabRemote,
+  pushGitlabBranch,
+  readGitlabMr,
+} from './gitlab-ops.ts';
 
 export class GitPanelError extends Error {
   readonly status: number;
@@ -63,6 +76,8 @@ export interface GitCtx {
   dataDir: string;
   /** 测试注入。不给就走 runCommand。 */
   run?: CmdRun;
+  /** 测试注入的 GitLab 响应。不给就走 fetch。 */
+  gitlab?: GitlabFetch;
 }
 
 export interface WorktreeInfo {
@@ -256,7 +271,8 @@ export async function gitSnapshot(ctx: GitCtx, session: AdeSessionRow): Promise<
       files = [];
     }
   }
-  const worktrees = ws.isGit ? await describeWorktrees(ctx, ws.path, ws.path, ws.forge) : [];
+  const seen = await seenForge(ctx, session.cwd, ws.forge);
+  const worktrees = ws.isGit ? await describeWorktrees(ctx, ws.path, ws.path, seen.forge) : [];
   const issue = session.taskId && session.taskId > 0 ? session.taskId : 1;
   let ops: GitSnapshot['ops'] = [];
   try {
@@ -279,7 +295,7 @@ export async function gitSnapshot(ctx: GitCtx, session: AdeSessionRow): Promise<
     behind: info.behind,
     files,
     worktrees,
-    forge: ws.forge,
+    forge: seen.forge,
     ops,
   };
 }
@@ -319,12 +335,14 @@ async function enqueueChange(
   return { opKey: key, state: 'done' };
 }
 
-/** GitHub 这一下：先入 outbox，只领这一条，做成再标完成。对不上 head 就 409，行进 dead。 */
-async function runGithub(
+/** 这一下：先入 outbox，只领这一条，做成再标完成。对不上 head 就 409，行进 dead。 */
+async function runTracked(
   ctx: GitCtx,
   session: AdeSessionRow,
+  forge: Forge,
   kind: OutboxKind,
   extra: Record<string, unknown>,
+  fallback: CmdRun,
   exec: (run: CmdRun) => Promise<Record<string, unknown>>,
 ): Promise<Record<string, unknown>> {
   const ws = await workspaceOf(ctx, session);
@@ -336,12 +354,12 @@ async function runGithub(
     kind,
     ref,
     fencing: 0,
-    payload: { forge: 'github', sessionId: session.id, adeCwd: session.cwd, ...extra },
+    payload: { forge, sessionId: session.id, adeCwd: session.cwd, ...extra },
   });
   const claimed = await claimOpByKey(ctx.db, key, 60_000);
   if (!claimed) throw new GitPanelError('外送没领到', 500);
   try {
-    const result = await exec(ctx.run ?? defaultGithubRun);
+    const result = await exec(ctx.run ?? fallback);
     await completeOp(ctx.db, claimed, result);
     return result;
   } catch (err) {
@@ -353,6 +371,27 @@ async function runGithub(
     }
     throw new GitPanelError(msg, msg.includes('新提交') ? 409 : 400);
   }
+}
+
+async function seenForge(
+  ctx: GitCtx,
+  cwd: string,
+  stored: string,
+): Promise<{ forge: Forge; remote: string | null; hosts: string[] }> {
+  const hosts = await loadGitlabHosts(ctx.dataDir);
+  const looked = await inspectRepo(cwd, hosts);
+  return { forge: looked.isGit ? looked.forge : asForge(stored), remote: looked.remote, hosts };
+}
+
+async function gitlabCred(
+  ctx: GitCtx,
+  remote: string | null,
+): Promise<{ token: string; tokenFile: string } | null> {
+  if (!remote) throw new GitPanelError('没有 origin', 400);
+  const { host } = parseGitlabRemote(remote);
+  const token = await readGitlabToken(ctx.dataDir, host);
+  if (!token) return null;
+  return { token, tokenFile: gitlabTokenPath(ctx.dataDir, host) };
 }
 
 export async function gitAct(
@@ -367,8 +406,9 @@ export async function gitAct(
   const op = body.op;
   if (typeof op !== 'string' || !OPS.has(op)) throw new GitPanelError('不认识的操作', 400);
   const ws = await workspaceOf(ctx, session);
-  const forge = asForge(ws.forge);
   try {
+    const seen = await seenForge(ctx, session.cwd, ws.forge);
+    const forge = seen.forge;
     if (op === 'stage') {
       await stagePaths(session.cwd, pathsOf(body));
       return { ...(await gitSnapshot(ctx, session)), notice: '已暂存' };
@@ -390,16 +430,36 @@ export async function gitAct(
       const path = typeof body.path === 'string' ? body.path : '';
       return await fileDiffs(session.cwd, path);
     }
-    if (op === 'checks') return readChecks(session.cwd, ctx.run);
+    if (op === 'checks') return readChecks(ctx, session.cwd, forge, seen.remote, seen.hosts);
     if (op === 'worktree-remove') return removeSome(ctx, session, ws.path, body);
-    if (forge === 'gitlab') throw new GitPanelError('gitlab 还没实现', 501);
     const info = await branchInfo(session.cwd);
     rejectBranch(info.branch);
     if (op === 'push') {
       const diff = await worktreeDiff(session.cwd);
       if (forge === 'github') {
-        await runGithub(ctx, session, 'change.push', { patch: diff.diff, branch: info.branch }, (run) =>
-          pushCurrentBranch(run, session.cwd, info.branch),
+        await runTracked(
+          ctx,
+          session,
+          'github',
+          'change.push',
+          { patch: diff.diff, branch: info.branch },
+          defaultGithubRun,
+          (run) => pushCurrentBranch(run, session.cwd, info.branch),
+        );
+      } else if (forge === 'gitlab') {
+        const cred = await gitlabCred(ctx, seen.remote);
+        await runTracked(
+          ctx,
+          session,
+          'gitlab',
+          'change.push',
+          { patch: diff.diff, branch: info.branch },
+          defaultGitlabRun(cred?.tokenFile ?? null, cred?.token ?? null),
+          (run) =>
+            pushGitlabBranch(run, session.cwd, info.branch, {
+              tokenFile: cred?.tokenFile ?? null,
+              hosts: seen.hosts,
+            }),
         );
       } else {
         await enqueueChange(ctx, session, forge, 'change.push', {
@@ -413,15 +473,41 @@ export async function gitAct(
     if (op === 'pr') {
       const title = (typeof body.title === 'string' ? body.title.trim() : '') || session.title || info.branch;
       if (forge === 'github') {
-        const opened = await runGithub(
+        const opened = await runTracked(
           ctx,
           session,
+          'github',
           'change.pr.open',
           { branch: info.branch, title },
+          defaultGithubRun,
           (run) => openPullRequest(run, session.cwd, info.branch, title),
         );
         const notice =
           opened.opened === false ? `这个分支已经有 PR #${opened.number}` : `已开 PR #${opened.number}`;
+        return { ...(await gitSnapshot(ctx, session)), notice };
+      }
+      if (forge === 'gitlab') {
+        const cred = await gitlabCred(ctx, seen.remote);
+        if (!cred || !seen.remote) throw new GitPanelError('缺 GitLab 令牌', 400);
+        const opened = await runTracked(
+          ctx,
+          session,
+          'gitlab',
+          'change.pr.open',
+          { branch: info.branch, title },
+          defaultGitlabRun(cred.tokenFile, cred.token),
+          () =>
+            openGitlabMr(
+              ctx.gitlab ?? defaultGitlabFetch,
+              cred.token,
+              seen.remote ?? '',
+              info.branch,
+              title,
+              seen.hosts,
+            ),
+        );
+        const notice =
+          opened.opened === false ? `这个分支已经有 MR #${opened.number}` : `已开 MR #${opened.number}`;
         return { ...(await gitSnapshot(ctx, session)), notice };
       }
       await enqueueChange(ctx, session, forge, 'change.pr.open', { branch: info.branch, title });
@@ -432,14 +518,47 @@ export async function gitAct(
       if (body.confirm !== true) return { ...(await gitSnapshot(ctx, session)), notice: '还没合并，先确认' };
       const head = typeof body.head === 'string' ? body.head.trim() : '';
       if (!/^[0-9a-f]{40}$/.test(head)) throw new GitPanelError('要带上看到的 head', 400);
-      const merged = await runGithub(
+      const merged = await runTracked(
         ctx,
         session,
+        'github',
         'change.merge',
         { branch: info.branch, expectedHead: head },
+        defaultGithubRun,
         (run) => mergePullRequest(run, session.cwd, head),
       );
       return { ...(await gitSnapshot(ctx, session)), notice: `已合并 PR #${merged.number}` };
+    }
+    if (forge === 'gitlab') {
+      if (body.confirm !== true) return { ...(await gitSnapshot(ctx, session)), notice: '还没合并，先确认' };
+      const head = typeof body.head === 'string' ? body.head.trim() : '';
+      const method = typeof body.method === 'string' && body.method.trim() ? body.method.trim() : 'merge';
+      try {
+        gitlabMergeBody(method, head);
+      } catch (err) {
+        throw new GitPanelError(err instanceof Error ? err.message : '这个合并方式不行', 400);
+      }
+      const cred = await gitlabCred(ctx, seen.remote);
+      if (!cred) throw new GitPanelError('缺 GitLab 令牌', 400);
+      const merged = await runTracked(
+        ctx,
+        session,
+        'gitlab',
+        'change.merge',
+        { branch: info.branch, expectedHead: head, method },
+        defaultGitlabRun(cred.tokenFile, cred.token),
+        (run) =>
+          mergeGitlabMr(
+            run,
+            ctx.gitlab ?? defaultGitlabFetch,
+            cred.token,
+            session.cwd,
+            head,
+            method,
+            seen.hosts,
+          ),
+      );
+      return { ...(await gitSnapshot(ctx, session)), notice: `已合并 MR #${merged.number}` };
     }
     await enqueueChange(ctx, session, forge, 'change.merge', { branch: info.branch });
     return { ...(await gitSnapshot(ctx, session)), notice: '已记下合并，没有在本地合并' };
@@ -448,13 +567,34 @@ export async function gitAct(
   }
 }
 
-async function readChecks(cwd: string, run?: CmdRun): Promise<{ pr: GhPr | null; reason: string }> {
+async function readChecks(
+  ctx: GitCtx,
+  cwd: string,
+  forge: Forge,
+  remote: string | null,
+  hosts: readonly string[],
+): Promise<{ pr: GhPr | null; reason: string }> {
+  if (forge === 'gitlab') {
+    if (!remote) return { pr: null, reason: '没有 origin' };
+    const cred = await gitlabCred(ctx, remote);
+    if (!cred) return { pr: null, reason: '缺 GitLab 令牌' };
+    const info = await branchInfo(cwd);
+    try {
+      const mr = await readGitlabMr(ctx.gitlab ?? defaultGitlabFetch, cred.token, remote, info.branch, hosts);
+      if (!mr) return { pr: null, reason: '没有 MR' };
+      return { pr: { number: mr.number, url: mr.url, state: mr.state, checks: mr.checks }, reason: '' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '读 CI 没成';
+      return { pr: null, reason: msg.slice(0, 200) };
+    }
+  }
+  const run = ctx.run;
   const r = await (run ?? defaultGithubRun)(cwd, [
     'gh',
     'pr',
     'view',
     '--json',
-    'number,url,state,statusCheckRollup',
+    'number,url,state,isDraft,statusCheckRollup',
   ]);
   if (!r.ran || r.exitCode !== 0) {
     const why = (r.stderrTail || r.stdout || r.spawnError || '没有 PR').trim().slice(-200);
