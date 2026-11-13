@@ -68,8 +68,19 @@ export async function assembleLocal(
     // 当前用户名取自进程环境（给的 env 只是覆盖配置项，可以不带 USERNAME 这类系统变量）
     restrictToCurrentUserWindows(file, { ...process.env, ...env }, makeRedactor([])),
   );
+  const redact = makeRedactor([token]);
   const host = env.FLEET2_HOST === 'hostd' ? makeHostdHost() : defaultHost();
-  const ade = new AdeService({ db: store.db, dataDir, host, env: { ...process.env, ...env } });
+  const ade = new AdeService({
+    db: store.db,
+    dataDir,
+    host,
+    env: { ...process.env, ...env },
+    onScheduleError: (err) =>
+      log({
+        error: 'schedule',
+        message: redact(err instanceof Error ? err.message : String(err)),
+      }),
+  });
   // 工人已经在用 hostd 就共用那一个进程；否则等第一次开终端再单独起，缺二进制只让终端 503。
   bindPtyHost(
     ade,
@@ -82,6 +93,8 @@ export async function assembleLocal(
         }),
   );
   await ade.recover();
+  // 到点分辨率。测试不走这个间隔，直接把钟传给 runDue。
+  ade.startScheduleTicker(5_000);
   const cockpit = createCockpitApi({
     db: store.db,
     authorize: localAuthorize(token),
@@ -119,8 +132,6 @@ export async function assembleLocal(
       ],
     }),
   });
-  const redact = makeRedactor([token]);
-
   return {
     profile: 'local',
     gateway,
@@ -171,6 +182,7 @@ export async function assembleLocal(
       isolation: isolation.level,
     }),
     async close() {
+      ade.stopScheduleTicker();
       await gateway.close();
       await store.close();
     },

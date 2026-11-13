@@ -416,3 +416,33 @@ export const adeSessions = fleet2.table(
     check('ade_sessions_status', sql`${t.status} in ('idle', 'running')`),
   ],
 );
+
+/**
+ * 工作区上的一次性定时（#3929）。到点走和人手同一个 createSession。
+ * 到期与否由调用方拿自己的钟和 run_at 比，不用数据库 now()，测试才能换钟。
+ */
+export const adeSchedules = fleet2.table(
+  'ade_schedules',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull(),
+    agent: text('agent').notNull(),
+    model: text('model').notNull(),
+    /** 到点交给 createSession 的那句话。 */
+    prompt: text('prompt').notNull(),
+    runAt: timestamp('run_at', tz).notNull(),
+    /**
+     * active 等点；paused 人停了；firing 正在建会话；
+     * done 这一次已经建出会话；error 没建成，不再自动试。
+     */
+    status: text('status').notNull(),
+    sessionId: text('session_id'),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    index('ade_schedules_due_idx').on(t.runAt, t.id).where(sql`${t.status} = 'active'`),
+    check('ade_schedules_status', sql`${t.status} in ('active', 'paused', 'firing', 'done', 'error')`),
+  ],
+);

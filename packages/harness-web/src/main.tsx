@@ -10,6 +10,7 @@ import { TooltipProvider } from './ui/tooltip';
 applyTheme(readTheme());
 
 import { HostsPage, InboxPage, LocalSettingsPage } from './pages/local-pages';
+import { SchedulesPage } from './pages/schedules-page';
 import { Work } from './pages/work';
 import { Workbench } from './pages/workbench';
 
@@ -28,6 +29,7 @@ const router = createBrowserRouter(
         ...(IS_LOCAL
           ? [
               { path: 'inbox', element: <InboxPage /> },
+              { path: 'schedules', element: <SchedulesPage /> },
               { path: 'hosts', element: <HostsPage /> },
               { path: 'settings', element: <LocalSettingsPage /> },
             ]

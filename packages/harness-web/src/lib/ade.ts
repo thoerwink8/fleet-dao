@@ -100,6 +100,36 @@ export function adeQueueAct(id: string, index: number, op: 'drop' | 'jump'): Pro
   return adeSend(`/sessions/${encodeURIComponent(id)}/queue`, 'POST', { index, op });
 }
 
+export interface AdeSchedule {
+  id: string;
+  workspaceId: string;
+  agent: string;
+  model: string;
+  prompt: string;
+  runAt: string;
+  status: string;
+  sessionId: string | null;
+  lastError: string | null;
+}
+
+export function createSchedule(body: {
+  workspaceId: string;
+  agent: string;
+  model: string;
+  text: string;
+  runAt: string;
+}): Promise<{ schedule: AdeSchedule }> {
+  return adeSend('/schedules', 'POST', body);
+}
+
+export function pauseSchedule(id: string): Promise<{ schedule: AdeSchedule }> {
+  return adeSend(`/schedules/${encodeURIComponent(id)}/pause`, 'POST', {});
+}
+
+export function deleteSchedule(id: string): Promise<void> {
+  return adeSend(`/schedules/${encodeURIComponent(id)}`, 'DELETE');
+}
+
 export async function adeSend<T>(path: string, method: 'POST' | 'DELETE', body?: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}/ade${path}`, {
     method,
