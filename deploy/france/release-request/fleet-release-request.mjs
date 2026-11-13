@@ -122,7 +122,10 @@ export function fastForwardCheckout(runGit, sha, checkout = CHECKOUT) {
     return { ok: true };
   }
   if (runGit(['merge-base', '--is-ancestor', head, sha]).status !== 0) {
-    return { ok: false, why: `部署检出在 ${head.slice(0, 12)}，和主线分叉了（git merge-base --is-ancestor）` };
+    return {
+      ok: false,
+      why: `部署检出在 ${head.slice(0, 12)}，和主线分叉了（git merge-base --is-ancestor）`,
+    };
   }
   const merged = runGit(['merge', '--ff-only', '--quiet', sha]);
   if (merged.status !== 0) {
