@@ -16,6 +16,6 @@ Windows 桌面软件的外壳：起内核、开窗口、托盘。**不含业务�
 ## 构建和验证
 
 - `node apps/desktop/scripts/stage.ts`：备 `build/`（页面、打包内核加 `node.exe`、迁移目录、`jobrun.exe`），再 `cd apps/desktop && pnpm exec tauri build --bundles nsis` 出安装包（不签名；签名要掏钱，先问创始人）。`src-tauri` 是独立的 cargo workspace（仓根的 `cargo` 不编译它）。
-- `node apps/desktop/e2e/run.ts --app <装好的 fleet-desktop.exe> --tauri-driver <exe> --edge-driver <msedgedriver.exe>`：托盘和自启（`--selftest`）、真开窗口、五块导航、页面调不了外壳命令、1440 和 390 截图、单实例、强杀外壳后内核 2 秒内不在。msedgedriver 版本要和 WebView2 运行时一致。CI 的 `desktop` 台（不挡合并）整套跑。
+- `node apps/desktop/e2e/run.ts --app <装好的 fleet-desktop.exe> --tauri-driver <exe> --edge-driver <msedgedriver.exe>`：托盘和自启（`--selftest`）、真开窗口、五块导航、页面调不了外壳命令、1440 和 390 截图、单实例、强杀外壳后内核 2 秒内不在。msedgedriver 版本要和 WebView2 运行时一致。CI 的 `desktop` 台（不挡合并）整套跑。WebView2 150 起在提权进程里丢掉环境变量 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`（CI 的 runner 是提权的），调试口要经 `additional_browser_args` 交给 API；窗口因此在 `setup` 里建，`tauri.conf.json` 的 `create` 是 false。
 - Windows 上本机跑 cargo 要 MSVC 的 `link.exe` 排在 Git 的前面。
 - 安装包体积和闲置内存的实测在 `specs/3851-harness-shape/讨论稿.md` 6.4a。
