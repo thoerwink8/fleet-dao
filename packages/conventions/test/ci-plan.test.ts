@@ -1435,6 +1435,12 @@ describe('ci.yml 和这里对得上', () => {
     expect(win).toContain('cargo build -p jobrun');
     expect(win).toContain('vitest run packages/harness-runner');
     expect(win).not.toContain('secrets.');
+    // 缓存命中后全局虚拟仓里的 rolldown 原生绑定读不出来，vitest 回落到没装的 wasm（#3945）。和桌面台一样不开 pnpm 缓存。
+    const winBody = win
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n');
+    expect(winBody).not.toMatch(/cache:\s*pnpm/);
     for (const id of ids.filter((i) => i !== 'windows'))
       expect(job(id), id).not.toMatch(/needs:[^\n]*\bwindows\b/);
   });
