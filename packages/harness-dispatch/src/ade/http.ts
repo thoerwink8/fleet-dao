@@ -60,6 +60,14 @@ async function route(
 ): Promise<boolean> {
   const method = req.method ?? 'GET';
   if (await routeAccounts(ade, req, res, path)) return true;
+  if (path === '/api/ade/ssh-hosts' && method === 'GET') {
+    send(res, 200, { hosts: await ade.listSshHosts() });
+    return true;
+  }
+  if (path === '/api/ade/ssh-hosts' && method === 'POST') {
+    send(res, 201, { hosts: await ade.addSshHost(await readJson(req)) });
+    return true;
+  }
   if (path === '/api/ade/workspaces' && method === 'GET') {
     send(res, 200, { workspaces: await ade.listWorkspaces() });
     return true;
@@ -139,6 +147,7 @@ async function route(
       taskId: numOrNull(body.taskId),
       parentId: str(body.parentId) || null,
       text: str(body.text),
+      host: str(body.host) || null,
     });
     send(res, 201, { session: row });
     return true;

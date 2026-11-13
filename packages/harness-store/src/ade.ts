@@ -91,10 +91,12 @@ export async function insertAdeSession(
     worktree: boolean;
     cwd: string;
     title: string;
+    hostAlias?: string | null;
   },
 ): Promise<void> {
   await db.insert(adeSessions).values({
     ...row,
+    hostAlias: row.hostAlias ?? null,
     status: 'idle',
     hold: false,
     queue: [],

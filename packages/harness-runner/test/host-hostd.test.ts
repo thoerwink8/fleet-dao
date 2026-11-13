@@ -43,6 +43,9 @@ describe('hostd：版本握手', () => {
   it('hostd 报的协议版本和这边的不一样：拒用，起不来、不降级', async () => {
     const host = makeHostdHost({ launch: [process.execPath, FAKE_HOSTD_V2] });
     const proc = host.start({ command: ['x'], cwd: process.cwd(), env: {}, runId: 'ver-1' });
+    // 和开会话一样：握手还没完就把提示词写进 stdin。版本不对只能让这一轮失败，不能打垮进程。
+    proc.stdin.write('hi');
+    proc.stdin.end();
     const err = await new Promise<Error>((resolve) => proc.onError(resolve));
     expect(err).toBeInstanceOf(HostdVersionError);
     expect(err.message).toContain('拒用');

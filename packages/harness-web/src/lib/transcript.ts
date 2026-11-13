@@ -71,6 +71,41 @@ export function endLine(step: EndStep): string {
   return bits.filter((part): part is string => part !== null).join(' · ');
 }
 
+/**
+ * 输入框还算不算在跑。实时流里这一轮已经收场就不再算：
+ * 会话流上的 session.turn.settled，或这一轮过程流里的 transcript.result
+ * （时间线据此画「运行结束」）。流里还没有这一轮时，才看轮询来的会话状态。
+ * 本机宿主和 SSH 宿主同一条，不另等退出帧。
+ */
+export function composerStillRunning(
+  status: string | undefined,
+  sessionEvents: readonly FeedEvent[],
+  transcriptEvents: readonly FeedEvent[],
+): boolean {
+  let runId: string | undefined;
+  let phase: 'none' | 'open' | 'ended' = 'none';
+  for (const e of sessionEvents) {
+    if (e.type === 'session.turn.started') {
+      phase = 'open';
+      const id = e.payload.runId;
+      runId = typeof id === 'string' ? id : undefined;
+    } else if (e.type === 'session.turn.settled') {
+      const id = e.payload.runId;
+      if (phase === 'none' || typeof id !== 'string' || id === runId) phase = 'ended';
+    }
+  }
+  if (phase === 'ended') return false;
+  if (
+    phase === 'open' &&
+    runId !== undefined &&
+    transcriptEvents.some((e) => e.type === 'transcript.result' && e.payload.runId === runId)
+  ) {
+    return false;
+  }
+  if (phase === 'open') return true;
+  return status === 'running';
+}
+
 export interface DroppedStep {
   kind: 'dropped';
   id: number;
