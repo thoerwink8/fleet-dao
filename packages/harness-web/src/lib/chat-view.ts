@@ -58,13 +58,50 @@ export function summarizeDiff(diff: string): { files: number; add: number; del: 
 const READ = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'read_file', 'grep']);
 const EDIT = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'search_replace', 'write_file']);
 
-export function toolPhrase(steps: { name: string }[]): string {
+export function toolPhrase(steps: { name: string; status?: string }[]): string {
   if (steps.length === 0) return '调了工具';
   const reads = steps.filter((s) => READ.has(s.name)).length;
   const edits = steps.filter((s) => EDIT.has(s.name)).length;
   const shells = steps.filter((s) => s.name === 'Bash' || s.name === 'PowerShell').length;
   if (reads === steps.length) return `读了 ${reads} 个文件`;
   if (edits === steps.length) return `改了 ${edits} 个文件`;
-  if (shells === steps.length) return `跑了 ${shells} 条命令`;
+  if (shells === steps.length) {
+    // 还没有结果（含还在等审批）不能说已经跑了。
+    if (steps.every((s) => s.status === 'running')) return `要跑 ${shells} 条命令`;
+    return `跑了 ${shells} 条命令`;
+  }
   return `调了 ${steps.length} 个工具`;
+}
+
+export interface ApprovalInputView {
+  command?: string;
+  description?: string;
+  url?: string;
+  json?: string;
+}
+
+function objectInput(input: string): Record<string, unknown> | undefined {
+  try {
+    const v: unknown = JSON.parse(input);
+    if (v && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, unknown>;
+  } catch {
+    // 存下来的参数不是 JSON，按原文显示。
+  }
+  return undefined;
+}
+
+/** 跑命令显示命令和说明，联网显示 URL，其余才是原始 JSON。 */
+export function approvalInputView(category: string, input: string): ApprovalInputView {
+  const obj = objectInput(input);
+  if (category === 'command') {
+    const command = obj && typeof obj.command === 'string' ? obj.command : input;
+    const description = obj && typeof obj.description === 'string' ? obj.description : undefined;
+    return { command, ...(description ? { description } : {}) };
+  }
+  if (category === 'network') {
+    const url =
+      obj && typeof obj.url === 'string' ? obj.url : obj && typeof obj.query === 'string' ? obj.query : input;
+    return { url };
+  }
+  return { json: input };
 }

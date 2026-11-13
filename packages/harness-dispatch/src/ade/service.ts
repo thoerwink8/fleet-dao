@@ -163,9 +163,7 @@ export function adeCommand(
       '--permission-prompt-tool',
       'stdio',
       '--await-initialize',
-      // 用户级放行名单会把命令和联网一并放掉。本机审批只认工作区自己的 project/local。
-      '--setting-sources',
-      'project,local',
+      // 不排除用户级设置。放行名单是用户自己的选择，命中的工具不弹卡；环境变量（含 git bash 路径）要留着。
       '--model',
       model,
       ...(resume ? ['--resume', agentSessionId] : ['--session-id', agentSessionId]),

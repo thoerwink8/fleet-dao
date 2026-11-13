@@ -1,7 +1,7 @@
 import { ChevronRight } from 'lucide-react';
 import { Fragment, useState } from 'react';
 import { Link } from 'react-router';
-import { toolPhrase } from '../lib/chat-view';
+import { approvalInputView, toolPhrase } from '../lib/chat-view';
 import { dayKey, formatDay } from '../lib/format';
 import {
   APPROVAL_CATEGORY_LABEL,
@@ -60,11 +60,7 @@ export function ApprovalRow({
         <span className="text-ink-2"> · {category}</span>
       </p>
       <p className="mt-1 font-mono text-xs text-ink">{card.tool}</p>
-      {card.input ? (
-        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-subtle px-3 py-2 font-mono text-xs text-ink">
-          {card.input}
-        </pre>
-      ) : null}
+      <ApprovalInput category={card.category} input={card.input} />
       {who.length > 0 ? <p className="mt-2 text-2xs text-muted">{who.join(' · ')}</p> : null}
       {card.status === 'pending' ? (
         <div className="mt-3 flex flex-wrap gap-2">
@@ -84,6 +80,29 @@ export function ApprovalRow({
       ) : null}
       {error ? <p className="mt-2 text-xs text-danger">{error}</p> : null}
     </li>
+  );
+}
+
+function ApprovalInput({ category, input }: { category: string; input: string }) {
+  if (!input) return null;
+  const view = approvalInputView(category, input);
+  if (view.command !== undefined) {
+    return (
+      <>
+        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-subtle px-3 py-2 font-mono text-xs text-ink">
+          {view.command}
+        </pre>
+        {view.description ? <p className="mt-1 text-xs text-ink-2">{view.description}</p> : null}
+      </>
+    );
+  }
+  if (view.url !== undefined) {
+    return <p className="mt-2 break-all font-mono text-xs text-ink">{view.url}</p>;
+  }
+  return (
+    <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-subtle px-3 py-2 font-mono text-xs text-ink">
+      {view.json}
+    </pre>
   );
 }
 

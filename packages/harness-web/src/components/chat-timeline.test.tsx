@@ -14,7 +14,7 @@ const pending: TimelineItem = {
     approvalId: 'ap1',
     tool: 'Bash',
     category: 'command',
-    input: '{"command":"git init"}',
+    input: '{"command":"git init","description":"建仓库"}',
     status: 'pending',
   },
 };
@@ -27,6 +27,8 @@ describe('审批卡', () => {
     expect(card.textContent).toContain('跑命令');
     expect(card.textContent).toContain('Bash');
     expect(card.textContent).toContain('git init');
+    expect(card.textContent).toContain('建仓库');
+    expect(card.textContent).not.toContain('{"command"');
     fireEvent.click(screen.getByRole('button', { name: '允许' }));
     expect(allow).toHaveBeenCalledWith('ap1', 'allow');
     cleanup();
@@ -45,7 +47,7 @@ describe('审批卡', () => {
           approvalId: 'ap2',
           tool: 'WebFetch',
           category: 'network',
-          input: 'https://example.com',
+          input: '{"url":"https://example.com","prompt":"看一眼"}',
           status: 'denied',
           by: '本机',
           decidedAt: '2026-11-13T00:00:02.000Z',
@@ -58,6 +60,8 @@ describe('审批卡', () => {
     expect(card.textContent).toContain('本机');
     expect(card.textContent).toContain('已拒绝');
     expect(card.textContent).toContain('联网');
+    expect(card.textContent).toContain('https://example.com');
+    expect(card.textContent).not.toContain('prompt');
   });
 
   it('交不出逐条审批的就写明，不留按钮', () => {

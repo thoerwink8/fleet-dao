@@ -508,7 +508,7 @@ describe('真命令', () => {
     expect(flag(c1, '--permission-prompts')).toBe('host');
     expect(flag(c1, '--permission-prompt-tool')).toBe('stdio');
     expect(c1).toContain('--await-initialize');
-    expect(flag(c1, '--setting-sources')).toBe('project,local');
+    expect(c1).not.toContain('--setting-sources');
     expect(flag(c1, '--input-format')).toBe('stream-json');
     expect(c1.join(' ')).not.toContain('--permission-prompts none');
     const listed = await local.listAgents();
