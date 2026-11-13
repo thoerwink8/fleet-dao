@@ -148,7 +148,7 @@ export function LocalSessions({ className }: { className?: string }) {
     rows.length === 0 ? null : (
       <div key={label}>
         <p className="px-3 pt-3 pb-1 text-2xs text-muted">{label}</p>
-        <ul>{rows.map((r) => rowView(r))}</ul>
+        <ul className="min-w-0">{rows.map((r) => rowView(r))}</ul>
       </div>
     );
   const rowView = (r: SessionRow) => (
@@ -157,9 +157,9 @@ export function LocalSessions({ className }: { className?: string }) {
       data-session-id={r.id}
       data-running={r.running}
       data-parent-id={r.parentId ?? ''}
-      className="flex flex-col"
+      className="flex min-w-0 flex-col overflow-hidden"
     >
-      <div className="flex">
+      <div className="flex min-w-0">
         <NavLink
           to={`/s/${encodeURIComponent(r.id)}`}
           title={r.id}
@@ -171,7 +171,7 @@ export function LocalSessions({ className }: { className?: string }) {
             )
           }
         >
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <span className={cn('size-1.5 shrink-0 rounded-full', r.running ? 'bg-running' : 'bg-idle')} />
             {r.parentId ? <span className="shrink-0 text-2xs text-muted">子</span> : null}
             <span className="min-w-0 flex-1 truncate text-sm">{r.title}</span>
@@ -194,13 +194,13 @@ export function LocalSessions({ className }: { className?: string }) {
         </Button>
       </div>
       {r.children.length > 0 ? (
-        <ul className="ml-3 border-l border-line">{r.children.map((child) => rowView(child))}</ul>
+        <ul className="ml-3 min-w-0 border-l border-line">{r.children.map((child) => rowView(child))}</ul>
       ) : null}
     </li>
   );
 
   return (
-    <section aria-label="会话列表" className={cn('flex min-h-0 flex-col bg-sidebar', className)}>
+    <section aria-label="会话列表" className={cn('flex min-h-0 min-w-0 flex-col bg-sidebar', className)}>
       <div className="flex items-center gap-1 border-b border-line p-2">
         <Search className="ml-1 size-3.5 text-muted" />
         <Input
@@ -222,7 +222,7 @@ export function LocalSessions({ className }: { className?: string }) {
           </MenuContent>
         </Menu>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         {section('置顶', grouped.pinned)}
         {section('最近', grouped.recent)}
         {grouped.workspaces.map(([id, b]) => section(b.name || id || '内核', b.rows))}
