@@ -266,6 +266,69 @@ describe('SEC2：MCP 工具越权', () => {
   });
 });
 
+describe('ADE：open_child_session', () => {
+  it('只这一只工具，父会话号来自令牌，工人调不了', async () => {
+    const seen: { parentId: string; workspaceId: string; agent: string; model: string; text: string }[] = [];
+    const api = createHarnessApi({
+      db: t.db,
+      pollMs: 30,
+      heartbeatMs: 10_000,
+      ade: true,
+      openChildSession: async (parentId, input) => {
+        seen.push({ parentId, ...input });
+        return { id: 'child-from-tool' };
+      },
+    });
+    apis.push(api);
+    const base = `http://127.0.0.1:${await api.listen()}`;
+    const cmd = await issueToken(t.db, 'ade-parent', 'commander');
+    const wrk = await issueToken(t.db, 'ade-worker', 'worker');
+    const cc = await mcpClient(base, cmd.token);
+    const wc = await mcpClient(base, wrk.token);
+    expect((await cc.listTools()).tools.map((x) => x.name)).toEqual(['open_child_session']);
+    // 一个工具都没注册时，SDK 不提供 tools/list，工人调这只工具就是没有。
+    expect(
+      await call(cc, 'open_child_session', {
+        workspace_id: 'ws-1',
+        agent: 'claude',
+        model: 'default',
+        text: '读一下',
+      }),
+    ).toEqual({ opened: true, sessionId: 'child-from-tool', parentId: 'ade-parent' });
+    expect(seen).toEqual([
+      { parentId: 'ade-parent', workspaceId: 'ws-1', agent: 'claude', model: 'default', text: '读一下' },
+    ]);
+    expect(
+      await call(wc, 'open_child_session', {
+        workspace_id: 'ws-1',
+        agent: 'claude',
+        model: 'default',
+        text: '读一下',
+      }),
+    ).toBeNull();
+    expect(
+      await call(cc, 'open_child_session', { workspace_id: 'ws-1', agent: 'claude', model: 'default' }),
+    ).toBeNull();
+    expect(seen).toHaveLength(1);
+  });
+
+  it('没接回调时回没开成，不抛', async () => {
+    const api = createHarnessApi({ db: t.db, pollMs: 30, heartbeatMs: 10_000, ade: true });
+    apis.push(api);
+    const base = `http://127.0.0.1:${await api.listen()}`;
+    const cmd = await issueToken(t.db, 'ade-unwired', 'commander');
+    const cc = await mcpClient(base, cmd.token);
+    expect(
+      await call(cc, 'open_child_session', {
+        workspace_id: 'ws-1',
+        agent: 'claude',
+        model: 'default',
+        text: '读一下',
+      }),
+    ).toMatchObject({ opened: false });
+  });
+});
+
 describe('影子模式', () => {
   it('会引起外部写的工具不注册，只读和记账的还在', async () => {
     const { base } = await start({ shadow: true });

@@ -75,6 +75,7 @@ export async function assembleLocal(
     dataDir,
     host,
     env: { ...process.env, ...env },
+    mcp: true,
     onScheduleError: (err) =>
       log({
         error: 'schedule',
@@ -184,6 +185,7 @@ export async function assembleLocal(
     async close() {
       ade.stopScheduleTicker();
       await gateway.close();
+      await ade.close();
       await store.close();
     },
   };

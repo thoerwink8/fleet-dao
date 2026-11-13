@@ -8,10 +8,19 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { appendToSession, readSessionByTask, readSessionByType } from './events.ts';
 
+export interface OpenChildInput {
+  workspaceId: string;
+  agent: string;
+  model: string;
+  text: string;
+}
+
 export interface ToolContext {
   db: Db;
   sessionId: string;
   role: SessionRole;
+  /** 本机 ADE 才有。父会话号用令牌上的，不从参数里拿。没接上时工具回「没接上」，这个包不起进程。 */
+  openChildSession?(parentId: string, input: OpenChildInput): Promise<{ id: string }>;
 }
 
 export interface ToolEntry {
@@ -59,7 +68,37 @@ function defineTool<S extends z.ZodRawShape>(def: {
 const COMMANDER = ['commander'] as const;
 const WORKER = ['worker'] as const;
 
+/** 本机 ADE 给指挥官会话挂的那一只。内核的工具列表里没有它。 */
+export const OPEN_CHILD_SESSION = 'open_child_session';
+
 export const TOOLS: readonly ToolEntry[] = [
+  defineTool({
+    name: OPEN_CHILD_SESSION,
+    description:
+      '开一个子会话去做一件事。必填 workspace_id（工作区号，不是路径）、agent、model、text（第一句话）。子会话结束只给当前会话留一条回报，不会自动再开一轮。',
+    roles: COMMANDER,
+    externalWrite: true,
+    input: {
+      workspace_id: z.string().min(1),
+      agent: z.string().min(1),
+      model: z.string().min(1),
+      text: z.string().min(1),
+    },
+    async handler(ctx, args) {
+      if (!ctx.openChildSession) return { opened: false, why: '这台没有接开会话' };
+      try {
+        const row = await ctx.openChildSession(ctx.sessionId, {
+          workspaceId: args.workspace_id,
+          agent: args.agent,
+          model: args.model,
+          text: args.text,
+        });
+        return { opened: true, sessionId: row.id, parentId: ctx.sessionId };
+      } catch (err) {
+        return { opened: false, why: err instanceof Error ? err.message : '没开成' };
+      }
+    },
+  }),
   defineTool({
     name: 'spawn_worker',
     description: '派一个工人去做一件事。六项都必填：task、expected、must_do、must_not、context、stop_when。',
@@ -144,7 +183,13 @@ export const TOOLS: readonly ToolEntry[] = [
   }),
 ];
 
-/** 这个角色在当前模式下能用的工具。 */
-export function toolsFor(role: SessionRole, shadow: boolean): ToolEntry[] {
-  return TOOLS.filter((t) => t.roles.includes(role) && !(shadow && t.externalWrite));
+/**
+ * 这个角色在当前模式下能用的工具。
+ * ade：只要 open_child_session（本机指挥官开子会话）。内核不要这个，哪怕 shadow 是 false。
+ */
+export function toolsFor(role: SessionRole, shadow: boolean, ade = false): ToolEntry[] {
+  if (ade) return TOOLS.filter((t) => t.name === OPEN_CHILD_SESSION && t.roles.includes(role));
+  return TOOLS.filter(
+    (t) => t.name !== OPEN_CHILD_SESSION && t.roles.includes(role) && !(shadow && t.externalWrite),
+  );
 }

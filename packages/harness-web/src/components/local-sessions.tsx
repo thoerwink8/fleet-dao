@@ -6,6 +6,7 @@ import { type AdeSession, type AdeWorkspace, adeGet } from '../lib/ade';
 import { cn } from '../lib/cn';
 import { useSessions } from '../lib/hooks';
 import { previewText, sessionTitle } from '../lib/preview';
+import { matchingFamilies, type NestedSession, nestSessions } from '../lib/session-tree';
 import type { SessionSummary } from '../lib/types';
 import { Button } from '../ui/button';
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '../ui/dropdown-menu';
@@ -25,6 +26,7 @@ function readPins(): string[] {
 
 interface Row {
   id: string;
+  parentId: string | null;
   title: string;
   preview: string;
   workspaceId: string;
@@ -36,6 +38,8 @@ interface Row {
   lastAt: number;
 }
 
+type SessionRow = NestedSession<Row>;
+
 function buildRows(ade: AdeSession[], cockpit: SessionSummary[] | null, spaces: AdeWorkspace[]): Row[] {
   const byId = new Map((cockpit ?? []).map((s) => [s.id, s]));
   const names = new Map(spaces.map((w) => [w.id, w.name]));
@@ -46,6 +50,7 @@ function buildRows(ade: AdeSession[], cockpit: SessionSummary[] | null, spaces: 
     const c = byId.get(s.id);
     rows.push({
       id: s.id,
+      parentId: s.parentId ?? null,
       title: sessionTitle(s.title),
       preview: c ? previewText(c.lastType, c.lastPayload) : '',
       workspaceId: s.workspaceId,
@@ -61,6 +66,7 @@ function buildRows(ade: AdeSession[], cockpit: SessionSummary[] | null, spaces: 
     if (seen.has(s.id)) continue;
     rows.push({
       id: s.id,
+      parentId: null,
       title: sessionTitle(undefined),
       preview: previewText(s.lastType, s.lastPayload),
       workspaceId: '',
@@ -116,15 +122,19 @@ export function LocalSessions({ className }: { className?: string }) {
   };
   const grouped = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    const rows = buildRows(ade, sessions, spaces).filter((r) => {
-      if (!needle) return true;
-      return `${r.title} ${r.preview} ${r.workspaceName}`.toLowerCase().includes(needle);
-    });
-    const pinned = rows.filter((r) => pins.includes(r.id));
-    const rest = rows.filter((r) => !pins.includes(r.id)).sort((a, b) => b.lastAt - a.lastAt);
+    const flat = buildRows(ade, sessions, spaces);
+    const matched = needle
+      ? matchingFamilies(flat, (r) =>
+          `${r.title} ${r.preview} ${r.workspaceName}`.toLowerCase().includes(needle),
+        )
+      : flat;
+    const rows = nestSessions(matched);
+    const pinnedHere = (r: SessionRow): boolean => pins.includes(r.id) || r.children.some(pinnedHere);
+    const pinned = rows.filter(pinnedHere);
+    const rest = rows.filter((r) => !pinnedHere(r)).sort((a, b) => b.lastAt - a.lastAt);
     const recent = rest.slice(0, 8);
     const recentIds = new Set(recent.map((r) => r.id));
-    const buckets = new Map<string, { name: string; rows: Row[] }>();
+    const buckets = new Map<string, { name: string; rows: SessionRow[] }>();
     for (const r of rest) {
       if (recentIds.has(r.id)) continue;
       const b = buckets.get(r.workspaceId) ?? { name: r.workspaceName, rows: [] };
@@ -134,42 +144,58 @@ export function LocalSessions({ className }: { className?: string }) {
     return { pinned, recent, workspaces: [...buckets.entries()] };
   }, [ade, sessions, spaces, q, pins]);
 
-  const section = (label: string, rows: Row[]) =>
+  const section = (label: string, rows: SessionRow[]) =>
     rows.length === 0 ? null : (
       <div key={label}>
         <p className="px-3 pt-3 pb-1 text-2xs text-muted">{label}</p>
         <ul>{rows.map((r) => rowView(r))}</ul>
       </div>
     );
-  const rowView = (r: Row) => (
-    <li key={r.id} data-session-id={r.id} data-running={r.running} className="flex">
-      <NavLink
-        to={`/s/${encodeURIComponent(r.id)}`}
-        title={r.id}
-        className={({ isActive }) =>
-          cn('block min-w-0 flex-1 px-3 py-2', isActive ? 'bg-selected' : 'hover:bg-inset')
-        }
-      >
-        <div className="flex items-center gap-2">
-          <span className={cn('size-1.5 shrink-0 rounded-full', r.running ? 'bg-running' : 'bg-idle')} />
-          <span className="min-w-0 flex-1 truncate text-sm">{r.title}</span>
-        </div>
-        {r.preview ? <p className="mt-0.5 truncate pl-3.5 text-2xs text-muted">{r.preview}</p> : null}
-        <p className="mt-0.5 flex items-center gap-1 truncate pl-3.5 text-2xs text-muted">
-          <span className="min-w-0 flex-1 truncate">
-            {[r.model, r.agent, r.turns ? `${r.turns} 轮` : ''].filter(Boolean).join(' · ')}
-          </span>
-        </p>
-      </NavLink>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="mr-1 size-6 self-center"
-        aria-label={pins.includes(r.id) ? '取消置顶' : '置顶'}
-        onClick={() => togglePin(r.id)}
-      >
-        <Pin className="size-3" />
-      </Button>
+  const rowView = (r: SessionRow) => (
+    <li
+      key={r.id}
+      data-session-id={r.id}
+      data-running={r.running}
+      data-parent-id={r.parentId ?? ''}
+      className="flex flex-col"
+    >
+      <div className="flex">
+        <NavLink
+          to={`/s/${encodeURIComponent(r.id)}`}
+          title={r.id}
+          className={({ isActive }) =>
+            cn(
+              'block min-w-0 flex-1 px-3 py-2',
+              r.parentId ? 'pl-6' : '',
+              isActive ? 'bg-selected' : 'hover:bg-inset',
+            )
+          }
+        >
+          <div className="flex items-center gap-2">
+            <span className={cn('size-1.5 shrink-0 rounded-full', r.running ? 'bg-running' : 'bg-idle')} />
+            {r.parentId ? <span className="shrink-0 text-2xs text-muted">子</span> : null}
+            <span className="min-w-0 flex-1 truncate text-sm">{r.title}</span>
+          </div>
+          {r.preview ? <p className="mt-0.5 truncate pl-3.5 text-2xs text-muted">{r.preview}</p> : null}
+          <p className="mt-0.5 flex items-center gap-1 truncate pl-3.5 text-2xs text-muted">
+            <span className="min-w-0 flex-1 truncate">
+              {[r.model, r.agent, r.turns ? `${r.turns} 轮` : ''].filter(Boolean).join(' · ')}
+            </span>
+          </p>
+        </NavLink>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="mr-1 size-6 self-center"
+          aria-label={pins.includes(r.id) ? '取消置顶' : '置顶'}
+          onClick={() => togglePin(r.id)}
+        >
+          <Pin className="size-3" />
+        </Button>
+      </div>
+      {r.children.length > 0 ? (
+        <ul className="ml-3 border-l border-line">{r.children.map((child) => rowView(child))}</ul>
+      ) : null}
     </li>
   );
 
