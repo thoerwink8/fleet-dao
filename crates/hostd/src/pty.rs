@@ -217,14 +217,19 @@ fn pump(
 const WINDOWS_UTF8: &str =
     "[Console]::InputEncoding=[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding $false";
 
-/// First `git.exe` on `path`. Git for Windows puts a .NET QuietGit launcher at
-/// `cmd\git.exe` (`CREATE_NO_WINDOW`, then `AttachConsole`). ConPTY — inbox and
-/// Windows Terminal's OpenConsole, including node-pty — emits that child's
-/// frame after PowerShell has already drawn the next prompt, so the prompt and
-/// the first output line share a row. `bin\git.exe` beside it does not attach
-/// the console after the fact, so its output stays in order. Return that
-/// `bin\git.exe`. Any other first hit is left alone. There is no console API
-/// that waits for the late frame.
+/// `IMAGE_SUBSYSTEM_WINDOWS_GUI`. A console-subsystem `git.exe` is 3.
+const WINDOWS_GUI_SUBSYSTEM: u16 = 2;
+
+/// First `git.exe` on `path`, when that file is a GUI-subsystem stand-in.
+/// Some installs replace `cmd\git.exe` with a GUI-subsystem launcher so a
+/// program without a console can run git without a window flashing. The
+/// launcher starts the real git detached, then `AttachConsole`. ConPTY emits
+/// that child's frame after PowerShell has already drawn the next prompt, so
+/// the prompt and the first output line share a row. The `cmd\git.exe`
+/// shipped with Git for Windows is a console-subsystem binary and stays in
+/// order (PortableGit 2.56.1, three runs, `##` on its own line). Return
+/// `bin\git.exe` from the same install only for subsystem 2. Any other first
+/// hit is left alone. There is no console API that waits for the late frame.
 fn terminal_git(path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
     let path = path?;
     for dir in std::env::split_paths(path) {
@@ -237,12 +242,39 @@ fn terminal_git(path: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
             return None;
         }
         let bin = dir.parent()?.join("bin").join("git.exe");
-        if bin.is_file() && bin != found {
+        if bin.is_file() && bin != found && gui_subsystem(&found) {
             return Some(bin);
         }
         return None;
     }
     None
+}
+
+/// PE optional-header `Subsystem` is 2. Anything that is not a readable GUI
+/// image, including the stock console `git.exe`, is left alone.
+fn gui_subsystem(path: &std::path::Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut dos = [0u8; 64];
+    if file.read(&mut dos).ok() != Some(dos.len()) || &dos[0..2] != b"MZ" {
+        return false;
+    }
+    let Ok(e_lfanew) = dos[0x3C..0x40].try_into().map(u32::from_le_bytes) else {
+        return false;
+    };
+    if file.seek(SeekFrom::Start(u64::from(e_lfanew))).is_err() {
+        return false;
+    }
+    // Signature, COFF header, then Subsystem at offset 68 of the optional header.
+    let mut pe = [0u8; 4 + 20 + 70];
+    if file.read(&mut pe).ok() != Some(pe.len()) || &pe[0..4] != b"PE\0\0" {
+        return false;
+    }
+    let subsystem = u16::from_le_bytes([pe[92], pe[93]]);
+    subsystem == WINDOWS_GUI_SUBSYSTEM
 }
 
 fn windows_shell_command(path: Option<&std::ffi::OsStr>) -> String {
@@ -324,19 +356,33 @@ mod tests {
         assert!(!command.contains("-NoProfile"));
     }
 
+    fn write_pe(path: &std::path::Path, subsystem: u16) {
+        let mut bytes = vec![0u8; 64 + 4 + 20 + 70];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        bytes[0x3C..0x40].copy_from_slice(&64u32.to_le_bytes());
+        bytes[64..68].copy_from_slice(b"PE\0\0");
+        let at = 64 + 4 + 20 + 68;
+        bytes[at..at + 2].copy_from_slice(&subsystem.to_le_bytes());
+        std::fs::write(path, bytes).unwrap();
+    }
+
     #[test]
-    fn terminal_git_skips_the_cmd_launcher() {
+    fn terminal_git_replaces_only_a_gui_cmd_launcher() {
         let root = std::env::temp_dir().join(format!("hostd-git-{}", std::process::id()));
+        let cui = std::env::temp_dir().join(format!("hostd-git-cui-{}", std::process::id()));
         let bare = std::env::temp_dir().join(format!("hostd-git-bare-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&bare);
+        for dir in [&root, &cui, &bare] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         std::fs::create_dir_all(root.join("cmd")).unwrap();
         std::fs::create_dir_all(root.join("bin")).unwrap();
-        std::fs::write(root.join("cmd").join("git.exe"), b"shim").unwrap();
+        write_pe(&root.join("cmd").join("git.exe"), WINDOWS_GUI_SUBSYSTEM);
         std::fs::write(root.join("bin").join("git.exe"), b"real").unwrap();
         let path = std::env::join_paths([root.join("cmd")]).unwrap();
         let found = terminal_git(Some(path.as_os_str())).expect("bin git");
         assert_eq!(found, root.join("bin").join("git.exe"));
+        assert!(gui_subsystem(&root.join("cmd").join("git.exe")));
         let command = windows_shell_command(Some(path.as_os_str()));
         assert!(command.contains("function global:git"));
         assert!(command.contains(&found.to_string_lossy().replace('\'', "''")));
@@ -345,13 +391,22 @@ mod tests {
         let direct = std::env::join_paths([root.join("bin")]).unwrap();
         assert!(terminal_git(Some(direct.as_os_str())).is_none());
 
+        std::fs::create_dir_all(cui.join("cmd")).unwrap();
+        std::fs::create_dir_all(cui.join("bin")).unwrap();
+        write_pe(&cui.join("cmd").join("git.exe"), 3);
+        std::fs::write(cui.join("bin").join("git.exe"), b"real").unwrap();
+        let cui_path = std::env::join_paths([cui.join("cmd")]).unwrap();
+        assert!(terminal_git(Some(cui_path.as_os_str())).is_none());
+        assert!(!windows_shell_command(Some(cui_path.as_os_str())).contains("function global:git"));
+
         std::fs::create_dir_all(bare.join("cmd")).unwrap();
-        std::fs::write(bare.join("cmd").join("git.exe"), b"shim").unwrap();
+        write_pe(&bare.join("cmd").join("git.exe"), WINDOWS_GUI_SUBSYSTEM);
         let bare_path = std::env::join_paths([bare.join("cmd")]).unwrap();
         assert!(terminal_git(Some(bare_path.as_os_str())).is_none());
 
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&bare);
+        for dir in [&root, &cui, &bare] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[cfg(windows)]
