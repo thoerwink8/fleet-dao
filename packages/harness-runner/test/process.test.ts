@@ -114,8 +114,11 @@ describe('A2 总时限的原因不被盖掉', () => {
 describe('A3 会话号对账', () => {
   it('续会话时起来的会话号对不上：判冲突、停掉这一个，不交给调用方登记', async () => {
     const sessions: string[] = [];
+    // init 不算实质事件。FAST 的 400ms 是给「起来后无进展」用的；并行时进程冷启动一过这道线，
+    // 先记上的 no_progress 会把后到的会话冲突盖住。这里只等会话号，不测那 400ms。
+    const budget: Budget = { startupMs: 10_000, totalMs: 15_000, killGraceMs: 200 };
     const r = await runProcess(
-      spec('silent-after-progress', { expectSessionId: 'sess-old' }, { FAKE_SESSION: 'sess-new' }),
+      spec('session-mismatch', { expectSessionId: 'sess-old', budget }, { FAKE_SESSION: 'sess-new' }),
       {
         onSession: (s) => sessions.push(s),
       },
@@ -123,7 +126,7 @@ describe('A3 会话号对账', () => {
     expect(r.killed?.reason).toBe('session_conflict');
     expect(r.sessionId).toBe('sess-new');
     expect(sessions).toEqual([]);
-  });
+  }, 20_000);
 });
 
 describe('A4 子层继承上层的绝对截止时刻', () => {

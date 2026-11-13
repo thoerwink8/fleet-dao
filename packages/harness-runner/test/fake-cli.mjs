@@ -1,10 +1,13 @@
 // 假执行体：按 FAKE_MODE 吐 Claude Code stream-json 那样的行。测试里不起真的执行体。
 import { spawn } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readSync, writeSync } from 'node:fs';
 
 const mode = process.env.FAKE_MODE ?? 'work';
 const sid = process.env.FAKE_SESSION ?? 'sess-1';
-const out = (o) => process.stdout.write(`${typeof o === 'string' ? o : JSON.stringify(o)}\n`);
+// 同步写到管道上。stdout.write 要等事件循环，机器忙时第一行会晚过起步时限。
+const out = (o) => {
+  writeSync(1, `${typeof o === 'string' ? o : JSON.stringify(o)}\n`);
+};
 const init = () => out({ type: 'system', subtype: 'init', session_id: sid });
 const text = (t) =>
   out({ type: 'assistant', session_id: sid, message: { content: [{ type: 'text', text: t }] } });
@@ -15,19 +18,41 @@ const toolResult = () =>
 const hang = () => setInterval(() => {}, 1 << 30);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-let stdin = '';
-process.stdin.on('data', (c) => {
-  stdin += c;
-});
-await new Promise((r) => process.stdin.on('end', r));
+// 只有要原文复述提示词的模式才读 stdin，而且放在 init 之后。
+// 等 stdin 的 'end' 事件再吐会话号时，Windows 上这个事件一晚到，冲突就会被起步时限收成 no_progress。
+// 同步读到 EOF：父进程已经 end 过的管道立刻返回，不跟事件循环抢。管道被设成非阻塞时会 EAGAIN，原地等，不把控制权交回去。
+const pause = new Int32Array(new SharedArrayBuffer(4));
+const readStdin = () => {
+  const chunks = [];
+  const buf = Buffer.alloc(65536);
+  for (;;) {
+    try {
+      const n = readSync(0, buf);
+      if (n === 0) break;
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err ? err.code : '';
+      if (code !== 'EAGAIN' && code !== 'EWOULDBLOCK') throw err;
+      Atomics.wait(pause, 0, 0, 20);
+    }
+  }
+  return Buffer.concat(chunks).toString('utf8');
+};
 
 switch (mode) {
-  case 'work':
+  case 'work': {
     init();
-    text(`收到：${stdin}`);
+    const prompt = readStdin();
+    text(`收到：${prompt}`);
     toolUse('Bash');
     toolResult();
     out({ type: 'result', session_id: sid });
+    break;
+  }
+  case 'session-mismatch':
+    // 只报会话号就挂住，不读 stdin，也不吐实质事件。续会话对不上号要先被看见。
+    init();
+    hang();
     break;
   case 'stall-after-sync':
     out('Syncing config…');
