@@ -267,7 +267,8 @@ export function ChangesPanel({ sessionId, onClose }: { sessionId: string; onClos
                 {checks.pr ? (
                   <>
                     <p>
-                      {word} #{checks.pr.number} {checks.pr.state}
+                      {word} #{checks.pr.number}{' '}
+                      <span title={checks.pr.state}>{checkStatusView(checks.pr.state).label}</span>
                       {checks.pr.url ? (
                         <>
                           {' '}

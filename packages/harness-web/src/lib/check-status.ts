@@ -1,6 +1,18 @@
-/** 一条 CI 检查在面板上怎么写、点什么颜色。认大小写。对不上的状态原样留下，点用灰色。 */
+/**
+ * GitHub 和 GitLab 共用这一张表。PR/MR 状态和流水线状态都从这里取中文。
+ * 认大小写。对不上的原样留下，点用灰色。
+ */
 export function checkStatusView(state: string): { label: string; dot: string } {
   switch (state.toLowerCase()) {
+    case 'open':
+    case 'opened':
+      return { label: '开着', dot: 'bg-muted' };
+    case 'merged':
+      return { label: '已合并', dot: 'bg-muted' };
+    case 'closed':
+      return { label: '已关闭', dot: 'bg-muted' };
+    case 'draft':
+      return { label: '草稿', dot: 'bg-muted' };
     case 'queued':
     case 'pending':
     case 'waiting':

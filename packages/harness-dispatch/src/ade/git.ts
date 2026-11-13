@@ -378,7 +378,14 @@ function checkStamp(c: Record<string, unknown>): number {
   return 0;
 }
 
-/** `gh pr view --json number,url,state,statusCheckRollup` 的正文。认不出就 null。同名检查只留最新一次。 */
+/** 草稿不在平台的 state 里。开着的才写成 draft，已合并和已关闭不动。 */
+export function reviewState(state: string, draft: boolean): string {
+  const low = state.toLowerCase();
+  if (draft && low !== 'merged' && low !== 'closed') return 'draft';
+  return state;
+}
+
+/** `gh pr view --json number,url,state,isDraft,statusCheckRollup` 的正文。认不出就 null。同名检查只留最新一次。 */
 export function parseGhPr(json: unknown): GhPr | null {
   if (!json || typeof json !== 'object') return null;
   const o = json as Record<string, unknown>;
@@ -413,7 +420,7 @@ export function parseGhPr(json: unknown): GhPr | null {
   return {
     number: o.number,
     url: typeof o.url === 'string' ? o.url : '',
-    state: typeof o.state === 'string' ? o.state : '',
+    state: reviewState(typeof o.state === 'string' ? o.state : '', o.isDraft === true),
     checks: checks.map(({ name, state }) => ({ name, state })),
   };
 }

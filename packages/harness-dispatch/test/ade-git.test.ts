@@ -15,7 +15,7 @@ import { makeRedactor } from '@fleet-dao/harness-runner';
 import { enqueueOp, getOp, listOpsForTask, updateAdeSession } from '@fleet-dao/harness-store';
 import { createTestDb, type TestDb } from '@fleet-dao/harness-store/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { forgeOfRemote, parseGhPr, parsePorcelain } from '../src/ade/git.ts';
+import { forgeOfRemote, parseGhPr, parsePorcelain, reviewState } from '../src/ade/git.ts';
 import { gitAct, gitSnapshot } from '../src/ade/git-panel.ts';
 import type { CmdResult, CmdRun } from '../src/ade/github-ops.ts';
 import { gitlabHostsPath, gitlabTokenPath, saveGitlabToken } from '../src/ade/gitlab-hosts.ts';
@@ -59,6 +59,11 @@ describe('porcelain 和 CI 解析', () => {
       checks: [{ name: 'ci', state: 'success' }],
     });
     expect(parseGhPr({ state: 'open' })).toBeNull();
+    expect(parseGhPr({ number: 1, state: 'OPEN', isDraft: true })?.state).toBe('draft');
+    expect(parseGhPr({ number: 1, state: 'MERGED', isDraft: true })?.state).toBe('MERGED');
+    expect(reviewState('opened', true)).toBe('draft');
+    expect(reviewState('opened', false)).toBe('opened');
+    expect(reviewState('merged', true)).toBe('merged');
   });
 
   it('同一个检查只留开始时间最新的一次，列表里排在后面的旧运行不算', () => {

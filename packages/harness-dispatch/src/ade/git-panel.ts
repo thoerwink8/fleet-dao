@@ -594,7 +594,7 @@ async function readChecks(
     'pr',
     'view',
     '--json',
-    'number,url,state,statusCheckRollup',
+    'number,url,state,isDraft,statusCheckRollup',
   ]);
   if (!r.ran || r.exitCode !== 0) {
     const why = (r.stderrTail || r.stdout || r.spawnError || '没有 PR').trim().slice(-200);

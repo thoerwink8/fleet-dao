@@ -4,7 +4,7 @@
 import { fileURLToPath } from 'node:url';
 import { makeRedactor } from '@fleet-dao/harness-runner';
 import { runCommand } from '../command.ts';
-import { isGitlabHost, remoteHost } from './git.ts';
+import { isGitlabHost, remoteHost, reviewState } from './git.ts';
 import { type CmdResult, type CmdRun, panelHostEnv } from './github-ops.ts';
 
 export interface GitlabRequest {
@@ -149,6 +149,7 @@ interface MrRow {
   sha: string;
   webUrl: string;
   source: string;
+  draft: boolean;
 }
 
 function mrOf(json: unknown, token: string): MrRow {
@@ -163,6 +164,7 @@ function mrOf(json: unknown, token: string): MrRow {
     sha,
     webUrl: typeof o.web_url === 'string' ? o.web_url : '',
     source: typeof o.source_branch === 'string' ? o.source_branch : '',
+    draft: o.draft === true,
   };
 }
 
@@ -372,7 +374,13 @@ export async function readGitlabMr(
   const mr = opened[0] ?? (await listMrs(fetchImpl, token, remote, branch, 'all'))[0];
   if (!mr) return null;
   const checks = await pipelinesOf(fetchImpl, token, remote, mr.iid);
-  return { number: mr.iid, url: mr.webUrl, state: mr.state, sha: mr.sha, checks };
+  return {
+    number: mr.iid,
+    url: mr.webUrl,
+    state: reviewState(mr.state, mr.draft),
+    sha: mr.sha,
+    checks,
+  };
 }
 
 export async function mergeGitlabMr(
