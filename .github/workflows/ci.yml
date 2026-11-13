@@ -710,7 +710,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
+          # 不开 cache: pnpm。锁文件里装的是 @rolldown/binding-win32-x64-msvc，没有 wasm。
+          # 还原出来的仓是 D:\.pnpm-store\v11（含全局虚拟仓的链接目录）：缓存命中后 pnpm 报 Already up to date、不再重链，
+          # vitest 从链接目录加载 rolldown，原生绑定读不出来，加载器回落到没装的 @rolldown/binding-wasm32-wasi（#3945）。
+          # 第一次没有缓存、全新装是好的（run 43271756950）；和桌面台 #3894 同一层。
       - run: pnpm install --frozen-lockfile
       # runner 自带 Rust 和 MSVC；rustfmt、clippy 是 rustup 组件，显式装一遍不依赖镜像带不带
       - run: rustup component add rustfmt clippy
