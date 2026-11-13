@@ -8,7 +8,7 @@
 
 - `src/main.tsx`：路由表。五块一级信息架构（会话、任务、决策、法国运维、设置，见 `specs/3752-cockpit-rewrite/讨论稿.md`）都在导航里，这一片只有会话块有内容，其余四块是写明「哪一片做」的占位页。
 - `src/components/shell.tsx`：外壳。侧栏 208px（收起 64px，记在 localStorage），768px 以下换底部四格标签栏，顶栏 `PageBar` 56px，间距 4px。
-- `src/pages/workbench.tsx`：会话工作台。桌面左列会话列表、右边事件流；手机两个画面（`/` 列表，`/s/<号>` 事件流，左上角返回）。本机（`IS_LOCAL`）改成对话页：列表按置顶、最近、工作区分组，中间是对话（人的话右侧气泡、模型正文、工具一行可折叠），内部事件进「调试」；没选会话时是居中的新会话输入。香港 `/next/` 仍是事件流和按工人状态分组，e2e 走这一条。
+- `src/pages/workbench.tsx`：会话工作台。桌面左列会话列表、右边事件流；手机两个画面（`/` 列表，`/s/<号>` 事件流，左上角返回）。本机（`IS_LOCAL`）改成对话页：列表按置顶、最近、工作区分组，中间是对话（人的话右侧气泡且保持纯文本、模型正文按 GFM 渲染、工具一行可折叠），内部事件进「调试」；没选会话时是居中的新会话输入。助手正文用 react-markdown 和 remark-gfm，按需加载，不渲染原始 HTML，链接新窗口打开，表格在自己的框里横滚。消息区自己滚，整页不滚。香港 `/next/` 仍是事件流和按工人状态分组，e2e 走这一条。
 - `src/components/session-stream.tsx`、`event-card.tsx`：事件流和每种事件的展示（会话轮次、派工请求、叫停、工人起止、进度、交结果、交回核验，不认识的类型落到折叠的原始内容，不丢）。
 - 第二轮（#3781）：长输出和工具调用折叠、列表按状态排序。
   - 契约里没有单独的“工具调用”事件，这里的“工具调用”＝接口层 MCP 工具落成的四种事件（`worker.spawn.requested`、`worker.stop.requested`、`worker.progress.reported`、`worker.result.submitted`，对应 `spawn_worker`、`stop_worker`、`report_progress`、`submit_result`）。连续 3 条起折叠成一行「调了 N 次工具：report_progress×5…」（`src/lib/tool-runs.ts`），收起时卡片仍在页面里（`hidden`），事件号对账和展开都不重新取。
@@ -41,7 +41,7 @@
 
 本机定时（#3929，`src/pages/schedules-page.tsx`）：侧栏「定时」。表单选工作区、agent、模型、到点和第一句话；列表可暂停、删除。到点后的会话出现在会话列表。
 
-本机审批（#3932）：对话里同一条 `session.approval` 并成一张卡。待审批有允许、拒绝。跑命令显示命令文本和说明，联网显示 URL，其余才显示 JSON。还没跑完的命令不说「跑了」。`listAgents` 给的 `approvals` 是 `none` 时，对话区写「这家不支持逐条审批」。
+本机审批（#3932）：对话里同一条 `session.approval` 并成一张卡。待审批有允许、拒绝。跑命令显示命令文本和说明，联网显示 URL，其余才显示 JSON。还在等审批或还在跑时，时间线摘要写「要调 N 个工具」「要跑 N 条命令」，结束后才写「调了」「跑了」。`listAgents` 给的 `approvals` 是 `none` 时，对话区写「这家不支持逐条审批」。
 
 本机会话页（#3918，设计在 `specs/3918-fleet2-session-ui/方案.md`）：子会话（`parent_id`）缩进挂在父会话下面，父会话不在这一页时子会话自己一行（#3930）。`kind: report` 的 `session.message` 在对话里是「子会话回报」，不是人的气泡。参考了 mirasim 的分层思路和 token 分组（文字五档、surface/raised/panel/inset、running/idle），以及 cc-haha README 里的工作台交互（多会话、worktree、右栏 diff）。代码全部自写，或来自 MIT 的 Radix 与 shadcn/ui 的写法。没有从这两家拷代码、样式、色值或 class。色值和对照表在 `src/app.css` 和那份方案里。组件在 `src/ui/`，页面在 `composer.tsx`（新会话、底部输入、排队条、任务页开单）、`chat-timeline.tsx`、`local-sessions.tsx`、`changes-panel.tsx`。标题用会话上存的第一句，预览用 `src/lib/preview.ts`（跳过内部事件、解开 JSON、修把 UTF-8 当成 latin1 的乱码）。深浅色记在 `localStorage` 键 `fleet.next.theme`，侧栏可切。右栏是 git 面板（#3926、#3948、#3944）：GitLab 写 MR，不写 PR。`GET /api/ade/sessions/:id/changes` 给按文件的状态、分支、head、领先落后、工作树清单；暂存、提交、拉取、推送、开 PR、合并、看 CI、删工作树走 `POST .../git`。看 CI 同一检查名只留最新一次。PR/MR 状态和流水线状态共用 `src/lib/check-status.ts` 一张表（开着、已合并、已关闭、草稿；流水线是排队中、在跑、通过、失败），认不得的原样显示。流水线旁边一个颜色点。输入框下的报错在下一次会话读取成功时清掉，更早失败的回包不再写上。输入框是否还在跑，看实时流里这一轮有没有收场（session.turn.settled，或这一轮的 	ranscript.result，时间线据此画「运行结束」）；流里还没有这一轮时才看 3 秒轮询的会话状态。本机宿主和 SSH 宿主同一条。这些写操作先入 `change.*` outbox。GitHub 上的推送、开 PR、合并，以及 GitLab 上的推送、开 MR、合并，都由这次点击做完。设置页登记自建 GitLab 主机名和令牌，接口不把令牌送回来。GitHub：合并先确认，并带上看到的 head，分支上又有新提交就拒。删工作树先预览，人确认才删。分支有已合并的 PR 就算已合并；没有 PR 再看祖先，或改动已经在 main 上。有没提交的改动或会话在跑仍不删。排队的插队和撤回走 `POST /api/ade/sessions/:id/queue`。终端格在对话下方（窄屏盖住对话），走 hostd 的 pty.* 帧；xterm.js 按需加载。关掉页面不会接回还在跑的那条，流一断终端就退出。
 

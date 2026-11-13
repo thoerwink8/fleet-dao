@@ -58,19 +58,20 @@ export function summarizeDiff(diff: string): { files: number; add: number; del: 
 const READ = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'read_file', 'grep']);
 const EDIT = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'search_replace', 'write_file']);
 
+const stillRunning = (steps: { status?: string }[]): boolean => steps.some((s) => s.status === 'running');
+
 export function toolPhrase(steps: { name: string; status?: string }[]): string {
   if (steps.length === 0) return '调了工具';
   const reads = steps.filter((s) => READ.has(s.name)).length;
   const edits = steps.filter((s) => EDIT.has(s.name)).length;
   const shells = steps.filter((s) => s.name === 'Bash' || s.name === 'PowerShell').length;
-  if (reads === steps.length) return `读了 ${reads} 个文件`;
-  if (edits === steps.length) return `改了 ${edits} 个文件`;
+  // 还没有结果（含还在等审批、还在跑）不能说已经做完。命令单独说「要跑 / 跑了」。
   if (shells === steps.length) {
-    // 还没有结果（含还在等审批）不能说已经跑了。
-    if (steps.every((s) => s.status === 'running')) return `要跑 ${shells} 条命令`;
-    return `跑了 ${shells} 条命令`;
+    return stillRunning(steps) ? `要跑 ${shells} 条命令` : `跑了 ${shells} 条命令`;
   }
-  return `调了 ${steps.length} 个工具`;
+  if (!stillRunning(steps) && reads === steps.length) return `读了 ${reads} 个文件`;
+  if (!stillRunning(steps) && edits === steps.length) return `改了 ${edits} 个文件`;
+  return stillRunning(steps) ? `要调 ${steps.length} 个工具` : `调了 ${steps.length} 个工具`;
 }
 
 export interface ApprovalInputView {
