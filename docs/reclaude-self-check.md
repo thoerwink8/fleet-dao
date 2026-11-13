@@ -81,7 +81,7 @@ node deploy/reclaude-old-account-clean.mjs --org <编号> --apply    # 当前用
 
 输出只打条数和路径，不打邮箱。`sessions=none-found` 才是会话扫过、这串已经没有。`sessions=not-scanned` 或退出码 2 是没查成。
 
-## 2. 四步自检（全绿才算接上）
+## 2. 自检（①–④ 全绿才算接上）
 
 ```bash
 # ① 启动命令指谁（只读，看 Mirasim 设置 → Agents → Claude 的启动命令）
@@ -104,8 +104,64 @@ grep -rl "non_cc_client" ~/.mirasim/traffic/ | head
 #   绿：空。有 = 某个会话开局走了自有 → 400 → 上报（`upstreamHost=api.anthropic.com` + `status=400`）
 ```
 
+```bash
+# ⑤ 在跑的 grok / codex / pi 有没有带上 reclaude 的代理口（只打键名和判定，不打值）
+#   红只认：代理主机是本机回环，且端口等于 state.json 里 daemon.port。
+#   指挥会话的 shell 会被开会话钩子改成备用代理，不在这一步里核。
+#   Linux 直接跑（扫进程）。没有 /proc 的系统，到那个非 Claude 会话的 shell 里加 FLEET_CHECK_SELF=1 再跑。
+#   绿：status=clean（有这类进程，代理口对不上守护端口）
+#   不算绿也不算红：status=no-process（这回没有进程可核）
+#   红：status=inherited。③ 的条数没涨、leak_report 没从 false 变成 true、设备没被警告：记下，先不改启动命令
+#   红且条数涨了或设备被警告：按 docs/reclaude-in-mirasim.md「非 Claude 会话会带上这份代理」换启动命令
+#   没查成：status=unscanned 或退出码 2
+python3 -c '
+import json,os,pathlib,sys
+from urllib.parse import urlparse
+port=None
+for p in (pathlib.Path.home()/".reclaude/state.json", pathlib.Path.home()/".rec/state.json"):
+    try: port=json.loads(p.read_text())["daemon"]["port"]
+    except Exception: pass
+if not isinstance(port,int):
+    print("status=unscanned reason=no-state"); sys.exit(2)
+P=("HTTPS_PROXY","HTTP_PROXY","ALL_PROXY","https_proxy","http_proxy","all_proxy")
+def hit(env):
+    out=[]
+    for k in P:
+        v=env.get(k) or ""
+        if not v: continue
+        u=urlparse(v if "://" in v else "http://"+v)
+        if (u.hostname or "").lower() in ("127.0.0.1","localhost","::1") and u.port==port: out.append(k)
+    return out
+rows=[]
+if os.environ.get("FLEET_CHECK_SELF")=="1":
+    rows.append(("self","self",hit(os.environ)))
+elif pathlib.Path("/proc").is_dir():
+    for d in pathlib.Path("/proc").iterdir():
+        if not d.name.isdigit(): continue
+        try: comm=(d/"comm").read_text().strip()
+        except OSError: continue
+        if comm not in ("grok","codex","pi"): continue
+        try: raw=(d/"environ").read_bytes()
+        except OSError:
+            print("pid=%s status=unscanned"%d.name); sys.exit(2)
+        env={}
+        for it in raw.split(b"\0"):
+            if b"=" in it:
+                k,v=it.split(b"=",1); env[k.decode(errors="replace")]=v.decode(errors="replace")
+        rows.append((d.name,comm,hit(env)))
+else:
+    print("status=unscanned reason=no-proc"); sys.exit(2)
+if not rows:
+    print("status=no-process")
+else:
+    for pid,comm,h in rows:
+        print("pid=%s comm=%s status=%s keys=%s"%(pid,comm,"inherited" if h else "clean",",".join(h)))
+    print("status="+("inherited" if any(h for _,_,h in rows) else "clean"))
+'
+```
+
 判定口径（别搞反）：**账本里这些会话的用量显示「未知」是预期的**（接对之后请求不再经过 Mirasim 网关），
-不能用「用量有没有涨」当判据；判据是 ①② 两步 + ③④ 有没有**新的**上报。
+不能用「用量有没有涨」当判据。接上看 ①②，外加 ③④ 有没有**新的**上报。⑤ 不参加「接上」：没有非 Claude 进程是 `no-process`，记一笔这回没核，不是红。⑤ 红了但 ③ 的条数没涨、设备没被警告，是推测，先不改启动方式。
 
 ## 3. 绿了之后仍然会红的两件事
 
@@ -126,5 +182,6 @@ grep -rl "non_cc_client" ~/.mirasim/traffic/ | head
 - ② 在「这台机器根本没装 reclaude」时显式 skip（`no-reclaude`），不是绿；读不到 `user_email` 时记没查成，不是绿。
 - ③ `state.json` 读不到 = 没查成。
 - ④ `~/.mirasim/traffic/` 不存在 = 没查成（不是「干净」）。
+- ⑤ `status=unscanned` 或退出码 2 是没查成。`status=no-process` 是这回没有 grok / codex / pi，不是没查成，也不是干净。
 
-任何一步「没查成」，都按红处理。
+任何一步「没查成」，都按红处理。⑤ 的 `no-process` 除外，它不把「接上」打成红。
