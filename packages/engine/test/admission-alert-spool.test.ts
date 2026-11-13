@@ -21,12 +21,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import {
   type AdmissionAlertObservation,
+  AdmissionAlertObservationSchema,
   admissionAlertJson,
   admissionAlertKey,
   admissionAlertRecordHash,
 } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createAdmissionAlertSink } from '../src/real/admission-alert-process.ts';
+import { AlertObservationSchema } from '../src/real/admission-alert-protocol.ts';
 import {
   ALERT_SPOOL_LIMITS,
   formatSpoolCommitTiming,
@@ -97,6 +99,51 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
     d.close();
     // 257 次同步落盘（每次 fsync），慢盘上默认 5 秒不够。
   }, 30000);
+  it('已有近上限行重开只解码一次，不为每行再跑规范 JSON', () => {
+    const near = () => {
+      const o = observation();
+      o.identity.namespace = '\u0001'.repeat(300);
+      o.identity.workflowId = '\u0002'.repeat(300);
+      return o;
+    };
+    const stored = near();
+    expect(recordAdmissionAlert(path, stored).kind).toBe('spooled');
+    for (let n = 1; n < 32; n++) expect(recordAdmissionAlert(path, near()).kind).toBe('spooled');
+    const storedKey = admissionAlertKey(stored.identity);
+    const storedPayload = admissionAlertJson(stored);
+    const parseObservation = AdmissionAlertObservationSchema.parse;
+    const parseAlert = AlertObservationSchema.parse;
+    let observationParses = 0;
+    let alertParses = 0;
+    AdmissionAlertObservationSchema.parse = ((data: unknown) => {
+      observationParses++;
+      return parseObservation(data);
+    }) as typeof parseObservation;
+    AlertObservationSchema.parse = ((data: unknown) => {
+      alertParses++;
+      return parseAlert(data);
+    }) as typeof parseAlert;
+    try {
+      expect(recordAdmissionAlert(path, near()).kind).toBe('spooled');
+      const d = database();
+      expect(d.prepare('SELECT payload FROM pending WHERE key=?').get(storedKey)?.payload).toBe(
+        storedPayload,
+      );
+      d.close();
+    } finally {
+      AdmissionAlertObservationSchema.parse = parseObservation;
+      AlertObservationSchema.parse = parseAlert;
+    }
+    // 32 行各解码一次，加上这一条自己的 schema。每行再走 admissionAlertJson，或打开时再解码一遍，都会明显超过。
+    expect(alertParses, `alert=${alertParses} observation=${observationParses}`).toBeGreaterThanOrEqual(32);
+    expect(alertParses, `alert=${alertParses} observation=${observationParses}`).toBeLessThanOrEqual(32 + 2);
+    expect(observationParses, `alert=${alertParses} observation=${observationParses}`).toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(observationParses, `alert=${alertParses} observation=${observationParses}`).toBeLessThanOrEqual(
+      32 + 8,
+    );
+  });
   it('实际写锁第二连接fail-fast busy，原事务回滚后重开成功', () => {
     const o = observation();
     recordAdmissionAlert(path, o);

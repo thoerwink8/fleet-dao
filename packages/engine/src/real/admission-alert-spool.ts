@@ -1,5 +1,6 @@
 // 仅固定 child 调用。Linux 私有目录，SQLite 原生事务/恢复；不自建 WAL、TTL 锁或 tombstone。
 
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   constants,
@@ -78,6 +79,31 @@ const TABLE_SQL =
 const fail = (code: AlertUnknownCode): never => {
   throw new SpoolError(code);
 };
+// 已通过 schema 的对象直接出规范 JSON。admissionAlertJson 会再解析一遍，历史行不能走那条。
+function canonicalIdentity(identity: AdmissionAlertObservation['identity']): string {
+  return JSON.stringify({
+    version: identity.version,
+    category: identity.category,
+    namespace: identity.namespace,
+    workflowId: identity.workflowId,
+    runId: identity.runId,
+  });
+}
+function canonicalObservation(observation: AdmissionAlertObservation): string {
+  return JSON.stringify({
+    identity: {
+      version: observation.identity.version,
+      category: observation.identity.category,
+      namespace: observation.identity.namespace,
+      workflowId: observation.identity.workflowId,
+      runId: observation.identity.runId,
+    },
+    firstCode: observation.firstCode,
+  });
+}
+function digest(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
 class SpoolError extends Error {
   readonly code: AlertUnknownCode;
   constructor(code: AlertUnknownCode) {
@@ -304,7 +330,7 @@ class Spool {
         d.exec('COMMIT');
         this.path.sync();
       }
-      this.validate();
+      // 全表解码只在即将写入的事务里做一次。打开时再做，256 次独立 COMMIT 会在提交前超过原 15 秒。
     } catch (e) {
       this.close();
       throw e;
@@ -347,10 +373,11 @@ class Spool {
     } catch {
       return fail('corrupt');
     }
+    const payload = canonicalObservation(o);
     if (
-      row.payload !== admissionAlertJson(o) ||
-      row.key !== admissionAlertKey(o.identity) ||
-      row.record_hash !== admissionAlertRecordHash(o)
+      row.payload !== payload ||
+      row.key !== digest(canonicalIdentity(o.identity)) ||
+      row.record_hash !== digest(payload)
     )
       fail('corrupt');
     return o;
