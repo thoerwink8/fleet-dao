@@ -24,7 +24,7 @@ export function Workbench() {
   const [changes, setChanges] = useState(false);
   const [terminal, setTerminal] = useState(false);
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="flex h-[calc(100dvh-var(--bar-h))] max-h-[calc(100dvh-var(--bar-h))] min-h-0 min-w-0 flex-col overflow-hidden md:h-dvh md:max-h-dvh">
       <PageBar
         title={sessionId ? <span className="truncate text-sm">{IS_LOCAL ? '对话' : sessionId}</span> : '会话'}
         leading={
@@ -39,20 +39,19 @@ export function Workbench() {
           ) : null
         }
       />
-      <div className="grid min-h-0 min-w-0 flex-1 md:h-[calc(100dvh-var(--bar-h))] md:grid-cols-[280px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
+      <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden md:grid-cols-[280px_minmax(0,1fr)]">
         <div
           className={cn(
-            'min-h-0 min-w-0 flex-col border-line md:flex md:border-r',
+            'h-full min-h-0 min-w-0 flex-col overflow-hidden border-line md:flex md:border-r',
             sessionId || composing ? 'hidden' : 'flex',
-            'h-[calc(100dvh-var(--bar-h)*2)] md:h-auto',
           )}
         >
           <SessionList className="min-h-0 flex-1" />
         </div>
         <div
           className={cn(
-            'relative min-h-0 min-w-0 md:flex',
-            sessionId || composing ? 'flex h-[calc(100dvh-var(--bar-h)*2)] md:h-auto' : 'hidden',
+            'relative h-full min-h-0 min-w-0 flex-col overflow-hidden md:flex',
+            sessionId || composing ? 'flex' : 'hidden',
           )}
         >
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">

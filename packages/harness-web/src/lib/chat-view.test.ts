@@ -34,6 +34,16 @@ describe('对话主视图', () => {
     expect(toolPhrase([{ name: 'search_replace' }])).toBe('改了 1 个文件');
     expect(toolPhrase([{ name: 'Bash', status: 'running' }])).toBe('要跑 1 条命令');
     expect(toolPhrase([{ name: 'Bash', status: 'ok' }])).toBe('跑了 1 条命令');
+    expect(
+      toolPhrase([
+        { name: 'Bash', status: 'running' },
+        { name: 'Bash', status: 'ok' },
+      ]),
+    ).toBe('要跑 2 条命令');
+    expect(toolPhrase([{ name: 'Skill', status: 'running' }])).toBe('要调 1 个工具');
+    expect(toolPhrase([{ name: 'Skill', status: 'ok' }])).toBe('调了 1 个工具');
+    expect(toolPhrase([{ name: 'Read', status: 'running' }])).toBe('要调 1 个工具');
+    expect(toolPhrase([{ name: 'Edit', status: 'running' }])).toBe('要调 1 个工具');
     expect(approvalInputView('command', '{"command":"git init","description":"建仓库"}')).toEqual({
       command: 'git init',
       description: '建仓库',

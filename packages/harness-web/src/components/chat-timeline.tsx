@@ -1,5 +1,5 @@
 import { ChevronRight } from 'lucide-react';
-import { Fragment, useState } from 'react';
+import { Fragment, lazy, Suspense, useState } from 'react';
 import { Link } from 'react-router';
 import { approvalInputView, toolPhrase } from '../lib/chat-view';
 import { dayKey, formatDay } from '../lib/format';
@@ -13,6 +13,10 @@ import type { ApprovalView, TimelineItem } from '../lib/transcript';
 import { Button } from '../ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible';
 import { DroppedRow, EndRow, ToolRow, ToolRunRow } from './transcript-steps';
+
+const AssistantMarkdown = lazy(() =>
+  import('./assistant-markdown').then((m) => ({ default: m.AssistantMarkdown })),
+);
 
 export function ApprovalsNote({ mode }: { mode: 'per-call' | 'none' | undefined }) {
   if (mode !== 'none') return null;
@@ -107,23 +111,10 @@ function ApprovalInput({ category, input }: { category: string; input: string })
 }
 
 function MarkdownText({ text }: { text: string }) {
-  const chunks = text.split('```');
   return (
-    <div className="space-y-2 text-sm leading-6 break-words text-ink">
-      {chunks.map((chunk, i) =>
-        i % 2 === 1 ? (
-          // biome-ignore lint/suspicious/noArrayIndexKey: 一段正文按围栏切开，顺序就是身份
-          <pre key={`f${i}`} className="overflow-x-auto rounded-md bg-subtle px-3 py-2 font-mono text-xs">
-            {chunk.replace(/^[^\n]*\n/, '')}
-          </pre>
-        ) : (
-          // biome-ignore lint/suspicious/noArrayIndexKey: 一段正文按围栏切开，顺序就是身份
-          <p key={`t${i}`} className="whitespace-pre-wrap">
-            {chunk}
-          </p>
-        ),
-      )}
-    </div>
+    <Suspense fallback={<p className="whitespace-pre-wrap text-sm leading-6 break-words text-ink">{text}</p>}>
+      <AssistantMarkdown text={text} />
+    </Suspense>
   );
 }
 
@@ -249,7 +240,9 @@ export function ChatTimeline({
         const steps = item.kind === 'tool' ? [item.step] : item.kind === 'toolrun' ? item.steps : [];
         const key = item.kind === 'tool' ? item.step.id : item.kind === 'toolrun' ? item.key : 0;
         const isOpen = open.has(key);
+        const pending = steps.some((s) => s.status === 'running');
         const phrase =
+          !pending &&
           item.kind === 'toolrun' &&
           item.summary &&
           steps.some((s) => s.name === 'Edit' || s.name === 'Write')

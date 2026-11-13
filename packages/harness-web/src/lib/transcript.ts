@@ -219,13 +219,14 @@ export function buildSteps(events: readonly FeedEvent[]): Step[] {
   return out;
 }
 
-/** 一串连续工具调用的一句话：「调了 8 个工具：Read×3、Bash×5 · 1 个出错」，按首次出现的顺序。 */
+/** 一串连续工具调用的一句话：「调了 8 个工具：Read×3、Bash×5 · 1 个出错」，按首次出现的顺序。还在跑的写「要调」。 */
 export function summarizeToolRun(steps: readonly ToolStep[]): string {
   const counts = new Map<string, number>();
   for (const st of steps) counts.set(st.name, (counts.get(st.name) ?? 0) + 1);
   const parts = [...counts].map(([name, c]) => `${name}×${c}`);
   const failed = steps.filter((st) => st.status === 'error').length;
-  return `调了 ${steps.length} 个工具：${parts.join('、')}${failed > 0 ? ` · ${failed} 个出错` : ''}`;
+  const verb = steps.some((st) => st.status === 'running') ? '要调' : '调了';
+  return `${verb} ${steps.length} 个工具：${parts.join('、')}${failed > 0 ? ` · ${failed} 个出错` : ''}`;
 }
 
 /** 被人停掉的一轮：主视图用和「运行结束」同一行。用时是这一轮开始到收场。 */

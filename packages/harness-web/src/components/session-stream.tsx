@@ -288,7 +288,7 @@ export function SessionStream({
         <div
           ref={scroller}
           onScroll={onScroll}
-          className="h-full overflow-y-auto px-4 py-4 md:px-6"
+          className="absolute inset-0 overflow-y-auto overscroll-contain px-4 py-4 md:px-6"
           data-testid="stream"
         >
           {state.hasOlder || tState.hasOlder ? (
