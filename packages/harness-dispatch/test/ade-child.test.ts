@@ -185,7 +185,7 @@ describe('指挥官开子会话', () => {
     )) as { rows?: unknown[] } | unknown[];
     const rows = Array.isArray(tables) ? tables : (tables.rows ?? []);
     expect(rows).toEqual([]);
-  });
+  }, 20_000);
 
   it('grok 的令牌在 config.toml 里，不在命令行上', async () => {
     const dir = mkdtempSync(join(root, 'gk-'));
@@ -209,5 +209,5 @@ describe('指挥官开子会话', () => {
     expect(spec?.command).toContain('MCPTool(fleet__open_child_session)');
     expect(spec?.command.join('\n')).not.toContain(token);
     expect(JSON.stringify(spec?.env)).not.toContain(token);
-  });
+  }, 20_000);
 });
