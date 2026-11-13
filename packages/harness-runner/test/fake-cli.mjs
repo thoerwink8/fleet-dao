@@ -15,6 +15,11 @@ const toolResult = () =>
 const hang = () => setInterval(() => {}, 1 << 30);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 开口先写，不等 stdin 结束。并行全套里「等 stdin 再开口」会拖过起步时限，
+// 会话号对不上被收成 no_progress，只吐一行的用例也会停在「还没有输出」。
+if (mode === 'stall-after-sync') out('Syncing config…');
+else init();
+
 let stdin = '';
 process.stdin.on('data', (c) => {
   stdin += c;
@@ -23,34 +28,28 @@ await new Promise((r) => process.stdin.on('end', r));
 
 switch (mode) {
   case 'work':
-    init();
     text(`收到：${stdin}`);
     toolUse('Bash');
     toolResult();
     out({ type: 'result', session_id: sid });
     break;
   case 'stall-after-sync':
-    out('Syncing config…');
     hang();
     break;
   case 'init-only':
-    init();
     hang();
     break;
   case 'silent-after-progress':
-    init();
     text('开始');
     hang();
     break;
   case 'long-tool':
-    init();
     toolUse('Bash');
     await wait(Number(process.env.FAKE_TOOL_MS ?? 600));
     toolResult();
     out({ type: 'result', session_id: sid });
     break;
   case 'steady':
-    init();
     for (;;) {
       text('还在干');
       await wait(50);
@@ -59,7 +58,6 @@ switch (mode) {
     // 慢慢吐一串编号的行（故障用例：内核被杀时执行体还在写）：init、tick 1..N、result，共 N+2 行
     const n = Number(process.env.FAKE_TICKS ?? 40);
     const ms = Number(process.env.FAKE_TICK_MS ?? 50);
-    init();
     for (let i = 1; i <= n; i++) {
       out(`tick ${i}`);
       await wait(ms);
@@ -68,7 +66,6 @@ switch (mode) {
     break;
   }
   case 'leak-secret':
-    init();
     text(`令牌是 ${process.env.FAKE_TOKEN}`);
     process.stderr.write(`出错了 Authorization: Bearer ${process.env.FAKE_TOKEN}\n`);
     break;
@@ -79,7 +76,6 @@ switch (mode) {
       stdio: 'ignore',
     });
     g.unref();
-    init();
     text(`孙子 ${g.pid}`);
     break;
   }
@@ -101,7 +97,6 @@ switch (mode) {
         `g.unref(); require('node:fs').appendFileSync(${JSON.stringify(pids)}, g.pid + '\\n');${hold}`,
     );
     note(process.pid);
-    init();
     text('派生完了');
     hang();
     break;
@@ -115,7 +110,6 @@ switch (mode) {
     });
     c.unref();
     appendFileSync(process.env.FAKE_PIDS_FILE, `${c.pid}\n`);
-    init();
     text('孙子留着');
     break;
   }

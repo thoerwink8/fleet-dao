@@ -98,17 +98,23 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
     let reaped: { found: number; leftovers: number | undefined } | undefined;
     let closed = false;
     let finished = false;
+    let finishing = false;
     let splitter: ReturnType<typeof readLines> | undefined;
+    // 起步计时器响时一行都还没有：进程多半还没排上，先不停。第一行到了再判。
+    let startupQuiet = false;
     const record = (err: unknown) => {
       hookError ??= spec.redact(err instanceof Error ? err.message : String(err));
     };
 
     const finish = (extra: Partial<RunResult> = {}) => {
-      if (finished) return;
-      finished = true;
+      if (finished || finishing) return;
+      finishing = true;
       for (const t of timers) clearTimeout(t);
-      spec.signal?.removeEventListener('abort', onAbort);
+      timers.length = 0;
+      // 先消化管道里已经到达的行，再定案。否则起步计时器先响时，紧跟着的会话号会被丢掉。
       for (const line of splitter?.end() ?? []) handleLine(line);
+      finished = true;
+      spec.signal?.removeEventListener('abort', onAbort);
       resolve({
         exitCode: exitInfo?.code ?? null,
         signal: exitInfo?.signal ?? null,
@@ -132,8 +138,16 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       if (exitInfo && reaped && closed) finish();
     };
 
-    /** 第一个叫停的原因作数，后来的不盖掉它。 */
+    /** 第一个叫停的原因作数，后来的不盖掉它。例外：还没有实质事件时，会话号对不上盖过无进展。 */
     const kill = (reason: KillReason, detail: string) => {
+      if (
+        reason === 'session_conflict' &&
+        killed?.reason === 'no_progress' &&
+        firstProgressMs === undefined
+      ) {
+        killed = { reason, detail: spec.redact(detail), at: new Date().toISOString() };
+        return;
+      }
       if (killed || exitInfo || finished) return;
       killed = { reason, detail: spec.redact(detail), at: new Date().toISOString() };
       proc?.stop('term');
@@ -218,6 +232,10 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       } catch (err) {
         record(err);
       }
+      // 第一行来得晚：会话号对不上已经在上面停过，那个原因留下。来晚的实质事件也算无进展。
+      if (startupQuiet && !killed) {
+        kill('no_progress', `起来 ${fmtMs(spec.budget.startupMs)} 内没有实质事件，停在「${lastStep}」`);
+      }
     }
 
     child.onError((err) => {
@@ -246,11 +264,12 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
     child.stdin.on('error', () => {
       // 执行体提前退出时写 stdin 会 EPIPE，结果以退出码和输出为准
     });
-    child.stdin.end(spec.stdin);
+    // 先听输出再关 stdin，启动时已经写进管道的第一行不会落在监听前面。
     splitter = readLines(child.stdout, handleLine);
     child.stderr.on('data', (chunk: Buffer) => {
       stderrTail = (stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL);
     });
+    child.stdin.end(spec.stdin);
     child.onExit((code, signal) => {
       exitInfo = { code, signal };
       // 执行体退了：会话里还活着的一律收掉；它们握着 stdout 的话 close 永远等不来
@@ -272,11 +291,22 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       maybeFinish();
     });
 
+    const noProgressDetail = () => `起来 ${fmtMs(spec.budget.startupMs)} 内没有实质事件，停在「${lastStep}」`;
     timers.push(
       setTimeout(() => {
-        if (firstProgressMs === undefined) {
-          kill('no_progress', `起来 ${fmtMs(spec.budget.startupMs)} 内没有实质事件，停在「${lastStep}」`);
+        if (firstProgressMs !== undefined || killed || finished) return;
+        if (lines === 0) {
+          // 还没有输出：这是进程没排上，不是起来后空转。再等一段同样的起步时限。
+          // 第一行若是会话号对不上，handleLine 里先记冲突，不会被这里盖成无进展。
+          startupQuiet = true;
+          timers.push(
+            setTimeout(() => {
+              if (lines === 0 && firstProgressMs === undefined) kill('no_progress', noProgressDetail());
+            }, spec.budget.startupMs),
+          );
+          return;
         }
+        kill('no_progress', noProgressDetail());
       }, spec.budget.startupMs),
       setTimeout(() => kill('deadline', deadlineDetail()), spec.deadline.getTime() - t0),
     );
