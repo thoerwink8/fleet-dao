@@ -43,6 +43,9 @@ describe('buildPhoneConfig', () => {
     expect(g.filter).toBe(override['+proxy-groups'][0].filter);
     expect(g['include-all-proxies']).toBeUndefined();
     expect(main).toMatchObject({ name: MAIN_GROUP, type: 'select', use: [PROVIDER] });
+    // mihomo 默认选中 proxies 的第一个候选，第一个必须是代理组而不是 DIRECT，否则外网流量默认直连。
+    expect(main.proxies[0]).toBe(GROUP_NAME);
+    expect(main.proxies).toContain('DIRECT');
   });
   it('规则：覆写里的 Google 规则（去掉进程名）、AI、私网和国内直连、最后走节点选择', () => {
     const rules: string[] = cfg.rules;
