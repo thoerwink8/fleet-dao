@@ -57,10 +57,10 @@ describe('installFiles', () => {
 
 describe('覆写文件', () => {
   const patch = parse(readFileSync(OVERRIDE_SRC, 'utf8'));
-  it('只有一个仅美国的 url-test 组，规则全指向它，不引用订阅里的组名', () => {
+  it('只有一个仅美国的 select 组（手动选，固定出口 IP），规则全指向它，不引用订阅里的组名', () => {
     expect(patch['+proxy-groups']).toHaveLength(1);
     const g = patch['+proxy-groups'][0];
-    expect(g).toMatchObject({ name: GROUP_NAME, type: 'url-test', 'include-all-proxies': true });
+    expect(g).toMatchObject({ name: GROUP_NAME, type: 'select', 'include-all-proxies': true });
     const re = new RegExp(String(g.filter).replace(/^\(\?i\)/, ''), 'i');
     for (const n of ['US - 洛杉矶 - 02', 'US01', '美国 BGP', 'United States 3'])
       expect(re.test(n), n).toBe(true);
