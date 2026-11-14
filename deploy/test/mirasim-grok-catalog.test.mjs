@@ -1,12 +1,12 @@
 // 本机 grok 清单：探测失败要明说，`grok models` 列出来的模型走 route local。
 // 跑法：node --test deploy/test/mirasim-grok-catalog.test.mjs
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { runChild } from './child.mjs';
 
 const require = createRequire(import.meta.url);
 const catalog = require('../lib/mirasim-grok-catalog.cjs');
@@ -178,15 +178,14 @@ test('补丁把探测、清单帧、只走平台、开会话四处置换成等 g
 
 test('守卫 --require 之后清单函数在，服务端补丁钩子不影响别的异常退出', () => {
   const guard = join(import.meta.dirname, '../lib/mirasim-stream-guard.cjs');
-  const ok = spawnSync(
-    process.execPath,
-    ['--require', guard, '-e', 'if (typeof global.__mirasimPresentCatalog!=="function") process.exit(2)'],
-    { encoding: 'utf8' },
-  );
+  const ok = runChild(process.execPath, [
+    '--require',
+    guard,
+    '-e',
+    'if (typeof global.__mirasimPresentCatalog!=="function") process.exit(2)',
+  ]);
   assert.equal(ok.status, 0, ok.stderr);
-  const boom = spawnSync(process.execPath, ['--require', guard, '-e', 'throw new Error("boom-not-stream")'], {
-    encoding: 'utf8',
-  });
+  const boom = runChild(process.execPath, ['--require', guard, '-e', 'throw new Error("boom-not-stream")']);
   assert.equal(boom.status, 1);
   assert.match(boom.stderr, /boom-not-stream/);
 });
