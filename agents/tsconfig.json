@@ -56,6 +56,7 @@
     "local-sessions/push.mjs",
     "local-sessions/loop.mjs",
     "local-sessions/install.mjs",
-    "local-sessions/detach.mjs"
+    "local-sessions/detach.mjs",
+    "clash-party/install.mjs"
   ]
 }
