@@ -16,7 +16,7 @@
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
 | 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停）；`daihuo.service`（程序 `/opt/daihuo`、数据 `/var/lib/daihuo`）；两个 systemd 定时任务：`reclaude-refill-collector.timer`（每分钟，程序 `/opt/reclaude-refill`、数据 `/var/lib/reclaude-refill`）、`mirasim-radar-collector.timer`（每 5 分钟，程序 `/opt/mirasim-radar`、数据 `/var/lib/mirasim-radar`） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
-两机之间走 WireGuard 隧道 `10.99.0.0/24`：香港 `10.99.0.1` 是服务端；法国 `10.99.0.2` 是客户端，主动连、每 25 秒保活，所以法国不用开任何入站端口。
+两机之间走 WireGuard 隧道 `10.99.0.0/24`：香港 `10.99.0.1` 是服务端；法国 `10.99.0.2` 是客户端，主动连、每 25 秒保活，所以法国不用开任何入站端口。开发本机接入同一隧道时用 `10.99.0.3/32`（公钥填进香港 `hk.env` 的 `FLEET_WG_DEV_PUBLIC_KEY`）：香港只在 `wg-fleet` 网卡内互转 `10.99.0.0/24` 节点流量，不改公网端口和 nginx；法国 `8787`/`7346` 仍只对香港 `10.99.0.1` 放行。
 
 ## 二、端口表
 

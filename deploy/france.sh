@@ -122,6 +122,7 @@ NAMESPACE=fleet
 RETENTION_HOURS=720 # 30 天；Temporal 默认只留 24 小时，过后网页上查不到时间线
 
 WG_IF=wg-fleet
+WG_SUBNET=10.99.0.0/24
 WG_ADDR=10.99.0.2/24
 WG_HK_ADDR=10.99.0.1
 # 驾驶舱后端在隧道地址上的端口（packages/api 的 FLEET_COCKPIT_LISTEN）：只对香港开，只在隧道网卡上开
@@ -347,10 +348,10 @@ Address = $WG_ADDR
 PostUp = wg set %i private-key /etc/wireguard/%i.key
 
 [Peer]
-# 香港
+# 香港（开发本机 10.99.0.3 经香港 wg-fleet 中转访问法国隧道口，加密路由放 10.99.0.0/24；各端口对谁开仍由法国 ufw 按源地址分管）
 PublicKey = $FLEET_WG_HK_PUBLIC_KEY
 Endpoint = $FLEET_WG_HK_ENDPOINT
-AllowedIPs = $WG_HK_ADDR/32
+AllowedIPs = $WG_SUBNET
 PersistentKeepalive = 25"
   put_file "/etc/wireguard/$WG_IF.conf" root:root 600 "$conf"
   ensure_unit_running "wg-quick@$WG_IF.service" $((key_changed || WROTE))
