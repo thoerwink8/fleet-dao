@@ -25,6 +25,16 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 - 交代里给时限。子会话易在测试上越绕越远（降并发、加跳过、逐条追断言，#3988 的第二棒真遇到）；到点用上面的插队让它收尾，只报现状。
 - 长时间没回报：`listSessions` 看它的 `runState`、`failed`。grok 进程会异常退出（`grok exited`），退了就不会回报，发回原会话重跑。
 - 参考外部产品时写清授权边界：闭源软件和非开源许可（源码可见但限商用）的代码、样式一行都不进仓，只参考思路；MIT、Apache 类的库可以直接用。
+- agent 是 Antigravity、工作目录在 Windows 上时，交代再加下面「Windows 上的 Antigravity」两条。
+
+## Windows 上的 Antigravity
+
+agy 1.5.9 在 Windows 上跑 `run_command` 走 `pwsh`（也认 `powershell.exe`）。mirasim 0.0.425 起 agy 一律带 `windowsHide`（stdio 是管道，进程没有控制台）。stdout 为空时 agy 自己回「No output from the command」。冒烟时 `git --version`、`git log --oneline -1` 退出码是 0，agy 仍这么回；同一条命令把 stdout、stderr 重定向到文件，读文件能看到内容。读文件照常用。本仓钩子只回 `decision`，输出不经过钩子。agy 和 mirasim 的程序都不在本仓，创始人 Windows 上的 pwsh 配置这台机器也改不到。命令能把输出写进文件，空的是 agy 读到的 stdout。来源会话 `local-session 6b9c90a5-451b-4637-a440-a6903e3776a8`，单键 `73b6ed648d1febfb169c30e58db13cb4ec0d906f2e400ecc1ef2db33ee9df983`。
+
+这种会话的交代写死两条：
+
+1. 要看输出的命令把 stdout 和 stderr 重定向到工作树里的文件，再用读文件读回来。
+2. 退出码 0 且 agy 报没有输出，按没看到结果处理。Linux、macOS 上的 agy 不写这两条。
 
 ## 指挥会话自己
 
