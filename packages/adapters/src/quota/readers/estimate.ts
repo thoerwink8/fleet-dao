@@ -95,6 +95,31 @@ export function estimateWindows(
   return { windows, notes };
 }
 
+/**
+ * 一份日账 JSON → 一条用量记录。金额 = tokens × 每百万单价。
+ * 文件名不是 YYYY-MM-DD.json，或正文里没有有限的 tokens（字段改名、不是日账）：
+ * bad_response，不把用量写成 0。quota-read 把这个码记成该池 unknown。
+ */
+export function recordFromDailyTokenFile(
+  name: string,
+  doc: unknown,
+  usdPerMTok: number,
+  poolId: string,
+): UsageRecord {
+  const day = /^(\d{4}-\d{2}-\d{2})\.json$/.exec(name)?.[1];
+  if (!day) throw new QuotaReadError('bad_response', `日账文件名 ${name} 认不出日期`);
+  const tokens = isRecord(doc) ? num(doc.tokens) : undefined;
+  if (tokens === undefined) {
+    throw new QuotaReadError('bad_response', `日账 ${name} 格式认不出：没有 tokens，不当成用了 0`);
+  }
+  return {
+    poolId,
+    at: `${day}T00:00:00.000Z`,
+    inputTokens: tokens,
+    costUsd: (tokens * usdPerMTok) / 1e6,
+  };
+}
+
 /** 旧系统 Jev 日账 → 用量记录：每个 UTC 日一条，金额 = tokens × 每百万单价。 */
 export function dailyTokenFilesSource(
   source: DailyTokenFilesSource,
@@ -125,14 +150,7 @@ export function dailyTokenFilesSource(
       } catch {
         throw new QuotaReadError('bad_response', `日账 ${name} 读不了或不是 JSON`);
       }
-      const tokens = isRecord(doc) ? num(doc.tokens) : undefined;
-      if (tokens === undefined) throw new QuotaReadError('bad_response', `日账 ${name} 里没有 tokens`);
-      out.push({
-        poolId,
-        at: `${day}T00:00:00.000Z`,
-        inputTokens: tokens,
-        costUsd: (tokens * source.usdPerMTok) / 1e6,
-      });
+      out.push(recordFromDailyTokenFile(name, doc, source.usdPerMTok, poolId));
     }
     return out;
   };

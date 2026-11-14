@@ -39,6 +39,7 @@ function deps(over: Partial<QuotaReadJobDeps> = {}): {
     }),
     save: async (_s: PoolQuotaSnapshot) => undefined,
     lastReadOk: async () => new Map(),
+    disabledPools: async () => new Map(),
     raise: async (a) => {
       raised.push(a.key);
     },

@@ -159,7 +159,7 @@ describe('Jev 日账（旧系统 ~/.dao/judge-spend 的形状）', () => {
       return r.ok ? 'ok' : r.error.code;
     };
     expect(await run('{ broken')).toBe('bad_response');
-    expect(await run('{"calls":3}')).toBe('bad_response');
+    expect(await run(fixture('estimate-daily-renamed.json'))).toBe('bad_response');
   });
 
   it('目录在、这段时间一条记录都没有：照算 0，但写明这只是下限', async () => {

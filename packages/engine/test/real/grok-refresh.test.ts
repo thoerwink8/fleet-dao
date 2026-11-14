@@ -3,7 +3,7 @@
 import { SESSION_USERS } from '@fleet-dao/adapters';
 import { type PoolQuotaResult, type QuotaIo, readAllQuotas } from '@fleet-dao/adapters/quota';
 import { describe, expect, it } from 'vitest';
-import { runQuotaReadJob } from '../../src/jobs/quota-read.ts';
+import { QuotaReadFailedError, runQuotaReadJob } from '../../src/jobs/quota-read.ts';
 import type { UserCommand, UserCommandResult } from '../../src/real/exec.ts';
 import { DEFAULT_GROK_BIN } from '../../src/real/hosts.ts';
 import {
@@ -115,6 +115,7 @@ async function readRound(world: ReturnType<typeof fakeWorld>, withGrok = true) {
 
 async function alertBody(result: PoolQuotaResult, last: Date | null): Promise<string | undefined> {
   const raised: { body: string }[] = [];
+  // 唯一的池没读到时这一轮记 failed 并抛（#3592）；这里只看报警正文，吞掉这一声。
   await runQuotaReadJob({
     loadConfig: async () => ({ pools: [{ poolId: 'grok' }] }) as never,
     read: async () => ({
@@ -124,6 +125,7 @@ async function alertBody(result: PoolQuotaResult, last: Date | null): Promise<st
     }),
     save: async () => undefined,
     lastReadOk: async () => new Map([['grok', last]]),
+    disabledPools: async () => new Map(),
     raise: async (a) => {
       raised.push(a);
     },
@@ -131,6 +133,8 @@ async function alertBody(result: PoolQuotaResult, last: Date | null): Promise<st
     runs: { start: async () => 1, finish: async () => undefined },
     now: () => NOW,
     log: () => undefined,
+  }).catch((err: unknown) => {
+    if (!(err instanceof QuotaReadFailedError)) throw err;
   });
   return raised[0]?.body;
 }
