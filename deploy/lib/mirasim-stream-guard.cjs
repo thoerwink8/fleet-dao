@@ -1,4 +1,8 @@
 'use strict';
+// 本机 grok 清单不在这里判：旁边的 mirasim-grok-catalog.cjs 在进 server.cjs 之前打补丁
+// （探测失败不拿平台清单冒充本机清单）。文件不在会让 --require 失败、服务起不来，
+// 装机时和本文件一起写到 /usr/local/lib/fleet-dao/。流这一侧仍只挡下面这一种写。
+require('./mirasim-grok-catalog.cjs').install();
 // Mirasim 0.0.425 的 server.cjs 会在某条连接已经 end 之后再 write。
 // Node 24 这时不抛同步异常，而是在没有 error 监听的流上异步发出
 // ERR_STREAM_WRITE_AFTER_END；events 模块没人接就 throw，进程退出码 1。

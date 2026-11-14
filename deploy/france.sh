@@ -168,6 +168,8 @@ MIRASIM_LIVENESS_UNITS=(fleet-mirasim-liveness.service fleet-mirasim-liveness.ti
 # 常驻进程的流写守卫（deploy/lib/mirasim-stream-guard.cjs）：node --require 在 server.cjs 之前装上。
 # 必须先于单元重启写到磁盘，否则 ExecStart 的 --require 找不到文件，服务起不来。
 MIRASIM_STREAM_GUARD=/usr/local/lib/fleet-dao/mirasim-stream-guard.cjs
+# 守卫 require 同目录的清单补丁。单元重启前两份都得在盘上，缺一份 --require 直接起不来。
+MIRASIM_GROK_CATALOG=/usr/local/lib/fleet-dao/mirasim-grok-catalog.cjs
 # AI 会话跑在一个专用用户下（lib/session-user.sh：reclaude 设备上限，法国只占 1 台）；引擎（fleet）经 sudo 只能调
 # fleet-agent-scope 起会话。会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。
 # 旧系统的会话用户不用、不碰；停用的 fleet-agent-dedicated 不建、不查（已删）。
@@ -735,11 +737,14 @@ setup_grok() {
 # （docs/ops.md 第五节「会话用户的 Mirasim」）——这一步只把它做成常驻：本体还没到位就不装单元、记待配（不许把
 # 整个装机停下：这里改成一个 if 判断，不走「赋值 || rc=$?」那条容易踩坑的路，见 lib/mirasim.sh 顶上的注释）。
 
-# 已结束的流再 write 时不让整进程退出。put_file 开头会把 WROTE 清零，所以返回后的 WROTE 只反映守卫文件
-# 本身有没有变（目录元数据变了不必重启 Mirasim）。
+# 已结束的流再 write 时不让整进程退出，并带上本机 grok 清单补丁。put_file 开头会把 WROTE 清零，
+# 两份都写完后只要有一份变了就把 WROTE 留回 1（目录元数据变了不必重启 Mirasim）。
 install_mirasim_stream_guard() {
   ensure_dir /usr/local/lib/fleet-dao root:root 755
   put_file "$MIRASIM_STREAM_GUARD" root:root 644 "$(<"$DEPLOY_DIR/lib/mirasim-stream-guard.cjs")"
+  local wrote=$WROTE
+  put_file "$MIRASIM_GROK_CATALOG" root:root 644 "$(<"$DEPLOY_DIR/lib/mirasim-grok-catalog.cjs")"
+  if ((wrote)); then WROTE=1; fi
 }
 
 mirasim_retired() { [[ -e "$MIRASIM_RETIRED_FILE" ]]; }

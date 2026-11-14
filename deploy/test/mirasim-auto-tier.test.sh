@@ -164,6 +164,8 @@ has "首次：ensure_unit_running 带重启=1" "${CALLS[*]}" "ensure_unit_runnin
 has "首次：先装流守卫再重启（--require 的文件得先在）" "${CALLS[*]}" "install_mirasim_stream_guard.*ensure_unit_running fleet-mirasim-session.service 1"
 has "守卫脚本的安装路径钉在 france.sh" "$(<"$FRANCE_SH")" '^MIRASIM_STREAM_GUARD=/usr/local/lib/fleet-dao/mirasim-stream-guard\.cjs$'
 has "安装函数从仓里把守卫写出去" "$(fn_text install_mirasim_stream_guard)" 'DEPLOY_DIR/lib/mirasim-stream-guard\.cjs'
+has "安装函数从仓里把本机 grok 清单补丁写出去" "$(fn_text install_mirasim_stream_guard)" 'DEPLOY_DIR/lib/mirasim-grok-catalog\.cjs'
+has "清单补丁的安装路径钉在 france.sh" "$(<"$FRANCE_SH")" '^MIRASIM_GROK_CATALOG=/usr/local/lib/fleet-dao/mirasim-grok-catalog\.cjs$'
 check "首次：没有红、没有待配" "${#REDS[@]} ${#PENDING[@]}" "0 0"
 
 fresh
