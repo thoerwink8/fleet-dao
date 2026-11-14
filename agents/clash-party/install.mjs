@@ -197,7 +197,7 @@ async function main(argv) {
   const dataDir = di >= 0 ? rest[di + 1] : defaultDataDir();
   if (!dataDir || !['install', 'reload', 'phone-config'].includes(cmd)) {
     console.error(
-      '用法：pnpm clash-party install|reload|phone-config [--data-dir <目录>] [--no-reload]\n  phone-config 另有 [--profile <名或id>] [--url <订阅地址>] [--out <文件>] [--mihomo <路径>]',
+      '用法：pnpm clash-party install|reload|phone-config [--data-dir <目录>] [--no-reload]\n  phone-config 另有 [--profile <名或id>] [--url <订阅地址>] [--all] [--also <名,名>] [--google <名>] [--out <文件>] [--mihomo <路径>]',
     );
     return 1;
   }
@@ -211,6 +211,9 @@ async function main(argv) {
       overrideSrc: OVERRIDE_SRC,
       profile: opt('--profile'),
       url: opt('--url'),
+      all: flag('--all'),
+      also: opt('--also')?.split(',').filter(Boolean),
+      google: opt('--google'),
       out: opt('--out'),
       mihomo: opt('--mihomo'),
     });
