@@ -112,7 +112,8 @@ export function buildPhoneConfig({ url, override }) {
     // Google 美国放第一个；组本身（名字、filter）取自覆写文件，这里只把「全部节点」换成引用订阅。
     'proxy-groups': [
       { ...rest, use: [PROVIDER] },
-      { name: MAIN_GROUP, type: 'select', use: [PROVIDER], proxies: ['DIRECT'] },
+      // 默认落在 Google 美国（和 agy 同一出口），DIRECT 只做手动备选；直接写 DIRECT 在 mihomo 里会默认直连，外网全走直连。
+      { name: MAIN_GROUP, type: 'select', use: [PROVIDER], proxies: [google.name, 'DIRECT'] },
     ],
     rules: [
       ...googleRules,
