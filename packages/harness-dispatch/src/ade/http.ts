@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { localTokenOk } from '@fleet-dao/harness-api';
 import { routeAccounts } from './accounts-http.ts';
 import { readJson } from './body.ts';
+import { routeFiles } from './files.ts';
 import { AdeError, type AdeService } from './service.ts';
 import { routeTerminal } from './terminal.ts';
 
@@ -61,6 +62,11 @@ async function route(
 ): Promise<boolean> {
   const method = req.method ?? 'GET';
   if (await routeAccounts(ade, req, res, path)) return true;
+  const files = await routeFiles(ade, method, path, query);
+  if (files) {
+    send(res, files.status, files.body);
+    return true;
+  }
   if (path === '/api/ade/ssh-hosts' && method === 'GET') {
     send(res, 200, { hosts: await ade.listSshHosts() });
     return true;
