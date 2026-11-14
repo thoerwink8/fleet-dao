@@ -3,6 +3,7 @@
 //
 //   pnpm clash-party install [--data-dir <Clash Party 数据目录>] [--no-reload]
 //   pnpm clash-party reload  [--data-dir <...>]     只把现有配置热加载进正在跑的内核
+//   pnpm clash-party phone-config [...]             生成手机（Clash Meta for Android）用的整份配置，见 phone-config.mjs
 //
 // install 做三件事（幂等，重跑不重复）：① 把 agy-google-us.yaml 拷到 <数据目录>/override/；② 在 override.yaml 里登记成
 // global: true（其它覆写原样留着）；③ 把 mihomo.yaml 的 mode 设成 rule。然后如果内核在跑，自动 reload。
@@ -21,6 +22,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse, parseDocument, stringify } from 'yaml';
+import { phoneConfig } from './phone-config.mjs';
 
 export const OVERRIDE_ID = 'agy-google-us';
 export const OVERRIDE_NAME = 'Antigravity 美国出口';
@@ -193,9 +195,34 @@ async function main(argv) {
   const flag = (/** @type {string} */ n) => rest.includes(n);
   const di = rest.indexOf('--data-dir');
   const dataDir = di >= 0 ? rest[di + 1] : defaultDataDir();
-  if (!dataDir || !['install', 'reload'].includes(cmd)) {
-    console.error('用法：pnpm clash-party install|reload [--data-dir <目录>] [--no-reload]');
+  if (!dataDir || !['install', 'reload', 'phone-config'].includes(cmd)) {
+    console.error(
+      '用法：pnpm clash-party install|reload|phone-config [--data-dir <目录>] [--no-reload]\n  phone-config 另有 [--profile <名或id>] [--url <订阅地址>] [--out <文件>] [--mihomo <路径>]',
+    );
     return 1;
+  }
+  if (cmd === 'phone-config') {
+    const opt = (/** @type {string} */ n) => {
+      const i = rest.indexOf(n);
+      return i >= 0 ? rest[i + 1] : undefined;
+    };
+    const r = phoneConfig({
+      dataDir,
+      overrideSrc: OVERRIDE_SRC,
+      profile: opt('--profile'),
+      url: opt('--url'),
+      out: opt('--out'),
+      mihomo: opt('--mihomo'),
+    });
+    console.log(`已生成 ${r.out}（订阅：${r.subName}；文件里有订阅地址，别提交、别发人）`);
+    if (r.checked.ok === null)
+      console.log(`没校验（mihomo 没跑起来：${r.checked.output}）；用 --mihomo 指定内核再跑`);
+    else if (r.checked.ok) console.log(`mihomo -t 校验通过：${r.checked.output.split('\n').at(-1)}`);
+    else {
+      console.error(`mihomo -t 校验失败：\n${r.checked.output}`);
+      return 1;
+    }
+    return 0;
   }
   if (cmd === 'install') {
     installFiles(dataDir);

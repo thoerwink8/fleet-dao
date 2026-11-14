@@ -57,6 +57,7 @@
     "local-sessions/loop.mjs",
     "local-sessions/install.mjs",
     "local-sessions/detach.mjs",
-    "clash-party/install.mjs"
+    "clash-party/install.mjs",
+    "clash-party/phone-config.mjs"
   ]
 }
