@@ -3,7 +3,14 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { GROUP_NAME, OVERRIDE_SRC } from '../clash-party/install.mjs';
-import { buildPhoneConfig, MAIN_GROUP, PROVIDER, pickSubscription } from '../clash-party/phone-config.mjs';
+import {
+  buildPhoneConfig,
+  MAIN_GROUP,
+  maskUrls,
+  PROVIDER,
+  pickSubscription,
+  pickSubscriptions,
+} from '../clash-party/phone-config.mjs';
 
 const override = parse(readFileSync(OVERRIDE_SRC, 'utf8'));
 const profiles = [
@@ -55,5 +62,48 @@ describe('buildPhoneConfig', () => {
     expect(rules).toContain(`GEOSITE,category-ai-!cn,${GROUP_NAME}`);
     expect(rules.slice(-3)).toEqual(['GEOSITE,cn,DIRECT', 'GEOIP,CN,DIRECT', `MATCH,${MAIN_GROUP}`]);
     expect(rules.indexOf('IP-CIDR,192.168.0.0/16,DIRECT,no-resolve')).toBeGreaterThan(google.length);
+  });
+  it('单订阅：provider 叫「订阅」、不加前缀', () => {
+    expect(Object.keys(cfg['proxy-providers'])).toEqual([PROVIDER]);
+    expect(cfg['proxy-providers'][PROVIDER].override).toBeUndefined();
+  });
+});
+
+describe('多订阅', () => {
+  it('pickSubscriptions：默认只有 current；--all 全部 remote，current 在前；--also 指名；--google 换 Google 订阅', () => {
+    expect(pickSubscriptions(profiles).subs.map((s) => s.name)).toEqual(['乙']);
+    const all = pickSubscriptions(profiles, { all: true });
+    expect(all.subs.map((s) => s.name)).toEqual(['乙', '甲']);
+    expect(all.googleName).toBe('乙');
+    expect(pickSubscriptions(profiles, { also: ['甲'] }).subs).toHaveLength(2);
+    const g = pickSubscriptions(profiles, { all: true, google: '甲' });
+    expect(g.googleName).toBe('甲');
+    expect(g.subs.map((s) => s.name)).toEqual(['甲', '乙']);
+  });
+  it('maskUrls 只留域名', () => {
+    expect(maskUrls('get https://a.example/sub?token=abc ok')).toBe('get https://a.example/*** ok');
+  });
+  const subs = [
+    { name: '甲', url: 'https://a.example/sub' },
+    { name: '乙', url: 'https://b.example/sub' },
+  ];
+  const cfg = buildPhoneConfig({ subs, googleName: '甲', override });
+  it('每个订阅一个 provider，路径不重名；只有非 Google 订阅加前缀', () => {
+    const p = cfg['proxy-providers'];
+    expect(Object.keys(p)).toEqual(['甲', '乙']);
+    expect(p.甲.override).toBeUndefined();
+    expect(p.乙.override).toEqual({ 'additional-prefix': '乙 | ' });
+    expect(p.甲.path).not.toBe(p.乙.path);
+    expect(p.乙).toMatchObject({ interval: 3600, 'health-check': { enable: true } });
+  });
+  it('Google 美国只引用 Google provider；节点选择引用全部，Google 美国在前、DIRECT 在后', () => {
+    const [g, main] = cfg['proxy-groups'];
+    expect(g).toMatchObject({ name: GROUP_NAME, use: ['甲'] });
+    expect(g.filter).toBe(override['+proxy-groups'][0].filter);
+    expect(main.use).toEqual(['甲', '乙']);
+    expect(main.proxies).toEqual([GROUP_NAME, 'DIRECT']);
+  });
+  it('Google 订阅不在列表里就报错', () => {
+    expect(() => buildPhoneConfig({ subs, googleName: '丙', override })).toThrow(/不在订阅列表/);
   });
 });
