@@ -31,6 +31,7 @@
 | [3914-fleet2-ade](<3914-fleet2-ade/方案.md>) | Fleet2 做成 ADE：脱钩 GitHub（#3914） | 在做 | — |
 | [3918-fleet2-session-ui](<3918-fleet2-session-ui/方案.md>) | Fleet2 会话页换成对话界面（#3918） | 在做 | — |
 | [3923-ade-parity](<3923-ade-parity/对标.md>) | Fleet2 ADE 基础功能对标（#3923） | 在做 | — |
+| [3979-ade-merge](<3979-ade-merge/讨论稿.md>) | ade-merge（2026-11-15，讨论稿） | 讨论中 | — |
 
 ## 历史
 
