@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const catalog = require('../lib/mirasim-grok-catalog.cjs');
@@ -155,7 +155,10 @@ test('补丁把探测、清单帧、只走平台、开会话四处置换成等 g
   assert.match(rewritten.code, /await global\.__mirasimRefreshGrokModels\(!!_0x43fb30\['refresh'\]\)/);
   assert.match(rewritten.code, /__mirasimPresentCatalog\(_0x43fb30\['agent'\]/);
   assert.match(rewritten.code, /__mirasimGrokIsLocal\(_0x4299e1,_0x3b8862\)\)return !\(1\)/);
-  assert.match(rewritten.code, /if\(_0x10973c==='grok'\)\{await global\.__mirasimRefreshGrokModels\(false\);\}/);
+  assert.match(
+    rewritten.code,
+    /if\(_0x10973c==='grok'\)\{await global\.__mirasimRefreshGrokModels\(false\);\}/,
+  );
   assert.doesNotMatch(rewritten.code, /P_t\(\)/);
 
   const Xmr = [

@@ -236,7 +236,8 @@ function rewriteServerSource(src) {
   code = replaceOne(
     code,
     REFRESH_RE,
-    (full, req) => `if(${req}['agent']==='grok'){await global.__mirasimRefreshGrokModels(!!${req}['refresh']);}`,
+    (full, req) =>
+      `if(${req}['agent']==='grok'){await global.__mirasimRefreshGrokModels(!!${req}['refresh']);}`,
     'refresh',
     missed,
   );
@@ -281,7 +282,7 @@ function install() {
   for (const ext of ['.js', '.cjs']) {
     const orig = Module._extensions[ext];
     if (!orig || orig.__mirasimGrokCatalog) continue;
-    function wrapped(module, filename) {
+    const wrapped = function (module, filename) {
       if (filename.endsWith(`${path.sep}server.cjs`)) {
         const src = fs.readFileSync(filename, 'utf8');
         const rewritten = rewriteServerSource(src);
@@ -294,7 +295,7 @@ function install() {
         return;
       }
       return orig.call(this, module, filename);
-    }
+    };
     wrapped.__mirasimGrokCatalog = true;
     Module._extensions[ext] = wrapped;
   }
