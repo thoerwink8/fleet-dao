@@ -38,7 +38,9 @@ export function normalizeAgy(input, platform) {
     };
   }
   if (tool === 'read_file' || tool === 'view_file') {
-    const path = [args.AbsolutePath, args.Path, args.TargetFile].find((p) => typeof p === 'string' && p !== '');
+    const path = [args.AbsolutePath, args.Path, args.TargetFile].find(
+      (p) => typeof p === 'string' && p !== '',
+    );
     if (path === undefined) {
       return `fleet-guard：Antigravity 的 ${tool} 输入里认不出要读的路径（AbsolutePath、Path、TargetFile），按拦处理`;
     }
