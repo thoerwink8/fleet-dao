@@ -36,8 +36,10 @@ HK_FW_OURS=(22/tcp 80/tcp 443/tcp "${WG_PORT}/udp")
 # 别家登记：8443/tcp 不归本仓管（self-proxy-hk.service，ufw 注释 self-proxy，「别动」）。
 # 见 docs/ops.md 第二节香港端口表。setup_firewall 不添加、不删除它的 ufw 规则，读回时认它不算多开。
 HK_FW_FOREIGN=(8443/tcp)
+WG_SUBNET=10.99.0.0/24
 WG_ADDR=10.99.0.1/24
 WG_PEER_ADDR=10.99.0.2
+WG_DEV_ADDR=10.99.0.3
 # fail2ban 的 sshd jail（#1784）：内容在 deploy/hk/fail2ban-sshd.jail，放过隧道网段，法国在隧道里几次失败登录不会把发版链封死。
 # 机器上原来手放的 sshd.local 和它同名段叠加，装的时候挪成 sshd.local.bak-<日期>（不删）。
 FAIL2BAN_SSHD_JAIL=/etc/fail2ban/jail.d/fleet-dao-sshd.local
@@ -58,7 +60,7 @@ PROBE_ENV=/etc/fleet-dao/hk-probe.env
 PROBE_SERVICE=fleet-hk-france-probe.service
 PROBE_TIMER=fleet-hk-france-probe.timer
 ENV_FILE=/etc/fleet-dao/hk.env
-ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY FLEET_WEB_UPLOAD_PUBLIC_KEY
+ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY FLEET_WG_DEV_PUBLIC_KEY FLEET_WEB_UPLOAD_PUBLIC_KEY
   FLEET_GATEWAY_DEPLOY_PUBLIC_KEY FLEET_DEMO_PATH) # 两个已删的键（飞书网关、演示版#1223）：老的 hk.env 里可能还有，认下来、忽略
 # 驾驶舱静态文件归 root。法国的发布脚本经隧道用一把只能写这个目录的钥匙往里传（rrsync -wo），钥匙登记在 root 的
 # authorized_keys2：这份文件整份归 fleet-dao 管，root 原有的 authorized_keys 一行不碰
@@ -93,6 +95,7 @@ SELF_PROXY_SRC=/opt/self-proxy/src
 FLEET_DOMAIN=""
 FLEET_ACME_EMAIL=""
 FLEET_WG_FRANCE_PUBLIC_KEY=""
+FLEET_WG_DEV_PUBLIC_KEY=""
 FLEET_WEB_UPLOAD_PUBLIC_KEY=""
 # shellcheck disable=SC2034 # load_env 往里写，没人读
 FLEET_GATEWAY_DEPLOY_PUBLIC_KEY="" # 已删的键（飞书网关），只为认得老的 hk.env
@@ -282,7 +285,7 @@ readback_retired_gateway() {
 
 load_config() {
   load_env "$ENV_FILE" "${ENV_KEYS[@]}"
-  ok "本机配置 $ENV_FILE：域名 ${FLEET_DOMAIN:-（未配）}，法国公钥$(filled "$FLEET_WG_FRANCE_PUBLIC_KEY")"
+  ok "本机配置 $ENV_FILE：域名 ${FLEET_DOMAIN:-（未配）}，法国公钥$(filled "$FLEET_WG_FRANCE_PUBLIC_KEY")，开发本机公钥$(filled "$FLEET_WG_DEV_PUBLIC_KEY")"
 }
 
 # 读 ufw status verbose。成功时正文在 HK_FW_STATUS、第一行在 HK_FW_STATUS_LINE。
@@ -430,14 +433,25 @@ setup_wireguard() {
   fi
   # 公网放行不在这里：setup_firewall 的白名单含 UDP $WG_PORT。这里只起接口。
   ensure_wg_key "$WG_IF"
-  local key_changed=$WROTE conf
+  local key_changed=$WROTE conf post_up="wg set %i private-key /etc/wireguard/%i.key" route_rule
+  if [[ -n "$FLEET_WG_DEV_PUBLIC_KEY" ]]; then
+    if ! valid_wg_key "$FLEET_WG_DEV_PUBLIC_KEY"; then
+      red "$ENV_FILE 的 FLEET_WG_DEV_PUBLIC_KEY 不像 WireGuard 公钥（应为 44 个字符、以 = 结尾）"
+      return 1
+    fi
+    if [[ -n "$FLEET_WG_FRANCE_PUBLIC_KEY" && "$FLEET_WG_DEV_PUBLIC_KEY" == "$FLEET_WG_FRANCE_PUBLIC_KEY" ]]; then
+      red "$ENV_FILE 的 FLEET_WG_DEV_PUBLIC_KEY 不能和法国公钥相同"
+      return 1
+    fi
+    post_up+=" && sysctl -qw net.ipv4.conf.%i.forwarding=1"
+  fi
   echo "  香港公钥：$WG_PUBLIC_KEY"
   echo "  （填进法国 /etc/fleet-dao/france.env：FLEET_WG_HK_PUBLIC_KEY=这串，FLEET_WG_HK_ENDPOINT=<香港公网IP>:$WG_PORT）"
   conf="# fleet-dao 两机隧道，香港这头（服务端）。deploy/hk.sh 生成，别手改；私钥在 /etc/wireguard/$WG_IF.key。
 [Interface]
 Address = $WG_ADDR
 ListenPort = $WG_PORT
-PostUp = wg set %i private-key /etc/wireguard/%i.key"
+PostUp = $post_up"
   if [[ -n "$FLEET_WG_FRANCE_PUBLIC_KEY" ]]; then
     if ! valid_wg_key "$FLEET_WG_FRANCE_PUBLIC_KEY"; then
       red "$ENV_FILE 的 FLEET_WG_FRANCE_PUBLIC_KEY 不像 WireGuard 公钥（应为 44 个字符、以 = 结尾）"
@@ -450,8 +464,27 @@ PostUp = wg set %i private-key /etc/wireguard/%i.key"
 PublicKey = $FLEET_WG_FRANCE_PUBLIC_KEY
 AllowedIPs = $WG_PEER_ADDR/32"
   fi
+  if [[ -n "$FLEET_WG_DEV_PUBLIC_KEY" ]]; then
+    conf+="
+
+[Peer]
+# 开发本机
+PublicKey = $FLEET_WG_DEV_PUBLIC_KEY
+AllowedIPs = $WG_DEV_ADDR/32"
+  fi
   put_file "/etc/wireguard/$WG_IF.conf" root:root 600 "$conf"
   ensure_unit_running "wg-quick@$WG_IF.service" $((key_changed || WROTE))
+  if [[ -n "$FLEET_WG_DEV_PUBLIC_KEY" ]]; then
+    sysctl -qw "net.ipv4.conf.$WG_IF.forwarding=1"
+    route_rule="route allow in on $WG_IF out on $WG_IF from $WG_SUBNET to $WG_SUBNET"
+    if [[ "$(ufw show added 2>/dev/null)" == *"ufw $route_rule"* ]]; then
+      ok "ufw 已有隧道内互转：$route_rule"
+    else
+      # shellcheck disable=SC2086 # 规则按词拆开传给 ufw
+      ufw $route_rule comment 'fleet-dao wireguard peer relay' >/dev/null
+      changed "ufw $route_rule"
+    fi
+  fi
 }
 
 # 旧站点的默认应答（不带域名直接打本机 80/443）：重载前后应当一样
@@ -1002,6 +1035,28 @@ readback_wireguard() {
   age=$(($(date +%s) - latest))
   # 法国每 25 秒发一次保活，握手每两分钟换一次；超过三分钟没握手就是断了
   if ((age <= 180)); then ok "法国上次握手在 $age 秒前"; else red "法国 $age 秒没握手了"; fi
+  if [[ -n "$FLEET_WG_DEV_PUBLIC_KEY" ]]; then
+    local fwd route_rule dev_latest dev_age
+    fwd=$(sysctl -n "net.ipv4.conf.$WG_IF.forwarding" 2>/dev/null) || fwd=""
+    if [[ "$fwd" == 1 ]]; then
+      ok "隧道网卡 $WG_IF 已开转发（net.ipv4.conf.$WG_IF.forwarding=1）"
+    else
+      red "隧道网卡 $WG_IF 未开转发（现在是「${fwd:-读不到}」）：重跑 hk.sh"
+    fi
+    route_rule="route allow in on $WG_IF out on $WG_IF from $WG_SUBNET to $WG_SUBNET"
+    if [[ "$(ufw show added 2>/dev/null)" == *"ufw $route_rule"* ]]; then
+      ok "ufw 已放行隧道内互转（$WG_IF <-> $WG_IF，$WG_SUBNET）"
+    else
+      red "ufw 缺隧道内互转规则（$route_rule）：重跑 hk.sh"
+    fi
+    dev_latest=$(wg show "$WG_IF" latest-handshakes 2>/dev/null | awk -v k="$FLEET_WG_DEV_PUBLIC_KEY" '$1 == k { print $2 }') || dev_latest=""
+    if [[ -z "$dev_latest" || "$dev_latest" == 0 ]]; then
+      ok "开发本机（$WG_DEV_ADDR）已登记（当前未连入，关机或未起隧道时不判红）"
+    else
+      dev_age=$(($(date +%s) - dev_latest))
+      ok "开发本机（$WG_DEV_ADDR）已登记（上次握手在 $dev_age 秒前）"
+    fi
+  fi
 }
 
 readback_site() {
