@@ -26,7 +26,7 @@ afterEach(cleanup);
 const NOW = new Date('2026-10-09T16:00:00Z');
 const FILE = '~/.gemini/config/hooks.json';
 const AGY = HOOK_TARGETS.find((t) => t.format === 'agy');
-const MATCHER = '^(run_command|view_file|grep_search)$';
+const MATCHER = '^(run_command|read_file|view_file|grep_search)$';
 
 function machine() {
   const home = tempDir('home');
@@ -61,7 +61,7 @@ const OTHERS = {
 };
 
 describe('登记在哪、挂在哪', () => {
-  it('Antigravity 的目标：~/.gemini/config/hooks.json 的 fleet-dao 那一项，只有调工具前那条（锚定 run_command、view_file、grep_search）；没有开会话事件、写明为什么', () => {
+  it('Antigravity 的目标：~/.gemini/config/hooks.json 的 fleet-dao 那一项，只有调工具前那条（锚定 run_command、read_file、view_file、grep_search）；没有开会话事件、写明为什么', () => {
     expect(AGY?.settings.linux).toBe('.gemini/config/hooks.json');
     expect(AGY?.name).toBe('fleet-dao');
     expect(AGY?.hooks).toEqual([
@@ -70,7 +70,7 @@ describe('登记在哪、挂在哪', () => {
     expect(AGY?.lacks?.why).toContain('没有开会话事件');
     expect(HOOK_GAPS.agy).toBeUndefined();
     const re = new RegExp(MATCHER);
-    for (const name of ['run_command', 'view_file', 'grep_search'])
+    for (const name of ['run_command', 'read_file', 'view_file', 'grep_search'])
       expect([name, re.test(name)]).toEqual([name, true]);
     for (const name of ['list_dir', 'find_by_name', 'write_to_file', 'run_command_x', 'mcp_view_file'])
       expect([name, re.test(name)]).toEqual([name, false]);

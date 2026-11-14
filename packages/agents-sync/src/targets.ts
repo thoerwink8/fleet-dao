@@ -243,9 +243,9 @@ export interface HookTarget {
  *   「Lifecycle Hooks (hooks.json)」一页）。顶层每项是一个起了名字的钩子，本脚本那一项叫 fleet-dao。
  *   只有 PreToolUse、PostToolUse、PreInvocation、PostInvocation、Stop，没有开会话事件，开会话那条不登记（lacks）。
  *   调工具前的输入是 camelCase：{ toolCall: { name, args }, workspacePaths, … }，没有会话目录；回话是 stdout 一份 JSON：
- *   拦下 { decision: 'deny', reason }，没意见回 {}（decision 是空的按没意见处理，agy 的更新说明写过这一条；
- *   不回 allow：allow 是「不问人直接放行」，会绕过它自己的审批）。命令在 Windows 上经 cmd /c 跑，启动器照用；timeout 按秒算。
- *   matcher 是正则，锚定成 ^(…)$：run_command 跑命令，view_file 读文件，grep_search 搜内容。
+ *   拦下 { decision: 'deny', reason }，放行 { decision: 'allow' }（decision 必填，回 {} 在无头会话里按拦下，#4001）。
+ *   命令在 Windows 上经 cmd /c 跑，启动器照用；timeout 按秒算。
+ *   matcher 是正则，锚定成 ^(…)$：run_command 跑命令，read_file（旧名 view_file）读文件，grep_search 搜内容。
  * - Kimi Code：~/.kimi-code/config.toml 的 [[hooks]]（github.com/MoonshotAI/kimi-code docs/en/customization/hooks.md）。
  *   事件名、输入（tool_name、tool_input、cwd）和 Claude 一样，退出码 2 拦下、stderr 是理由；别的退出码、超时一律放行（它的
  *   fail-open，所以钩子脚本自己出错时要按拦处理并退出 2）。工具名就是 Bash、Read、Grep，matcher 锚定成 ^(Bash|Read|Grep)$。
@@ -319,7 +319,7 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     hooks: [
       {
         event: 'PreToolUse',
-        matcher: '^(run_command|view_file|grep_search)$',
+        matcher: '^(run_command|read_file|view_file|grep_search)$',
         script: 'pretool-agy.mjs',
         timeout: 10,
       },
