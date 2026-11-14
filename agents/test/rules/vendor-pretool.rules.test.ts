@@ -250,19 +250,31 @@ describe('Antigravity（~/.gemini/config/hooks.json 的 fleet-dao 那一项 → 
       { stepIdx: 1 },
       call('run_command', 'git status'),
       call('run_command', { Cwd: O }),
-      call('view_file', { Path: 'README.md' }),
+      call('view_file', { File: 'README.md' }),
+      call('read_file', {}),
       call('grep_search', { SearchPath: O }),
       '不是 JSON',
     ];
     for (const input of bad) expect([input, judge(input).code]).toEqual([input, 2]);
   });
 
-  it('回话照 Antigravity 的协议：拦下 { decision: deny, reason }；放行回 {}，不回 allow（allow 会绕过它自己的审批）', () => {
+  it('回话照 Antigravity 的协议：拦下 { decision: deny, reason }；放行 { decision: allow }（decision 必填，空的在无头会话里按拦下，#4001）', () => {
     expect(JSON.parse(agy.agyReply({ code: 2, message: '理由' }))).toEqual({
       decision: 'deny',
       reason: '理由',
     });
-    expect(JSON.parse(agy.agyReply({ code: 0 }))).toEqual({});
+    expect(JSON.parse(agy.agyReply({ code: 0 }))).toEqual({ decision: 'allow' });
+  });
+
+  it('read_file（新名）和 view_file（旧名）一样判，路径认 AbsolutePath、Path、TargetFile', () => {
+    for (const args of [
+      { AbsolutePath: `${HOME}/${RC}/device.json` },
+      { Path: `${HOME}/${RC}/device.json` },
+      { TargetFile: `${HOME}/${RC}/device.json` },
+    ]) {
+      expect(judge(call('read_file', args)).code).toBe(2);
+    }
+    expect(judge(call('read_file', { Path: '/work/other/README.md' }))).toEqual({ code: 0 });
   });
 
   it('命令行外壳：拦下、放行都退出 0，结论在 stdout 的 JSON 里', () => {
@@ -278,7 +290,7 @@ describe('Antigravity（~/.gemini/config/hooks.json 的 fleet-dao 那一项 → 
       'pretool-agy.mjs',
       JSON.stringify(call('run_command', { CommandLine: 'git status', Cwd: O })),
     );
-    expect([passed.status, JSON.parse(passed.stdout)]).toEqual([0, {}]);
+    expect([passed.status, JSON.parse(passed.stdout)]).toEqual([0, { decision: 'allow' }]);
     const garbage = run('pretool-agy.mjs', '不是 JSON');
     expect(JSON.parse(garbage.stdout).decision).toBe('deny');
   });

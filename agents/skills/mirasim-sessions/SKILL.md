@@ -20,7 +20,7 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
   1. 自己干，不派子代理。
   2. 一件活一棵工作树 `.claude/worktrees/<单号>-<短名>`、分支 `local/<单号>-<短名>`；不往别的会话的分支推，依赖别人的 PR 就基于那个分支开自己的，对方合了再 rebase。
   3. PR 开好、本机检查过了就停，不开自动合并、不自己合，也不等 CI；`pr:open` 顺手开了自动合并就 `gh pr merge <PR> --disable-auto` 摘掉。合并归验收的人，不然没验收的改动会先进主线（#3950 就是先合了、返工只能另开 #3951，还带红了主线 #3953）。
-  4. 回报：推完 PR 或卡在只有创始人能拍的事上，在同一轮里马上调 `prompt {clientRef, sessionKey: "<指挥会话的 key>", prompt: "[<活名> 回报] …"}`，写做到哪、PR 号、验证命令和真实结果、没做的和原因、要创始人拍的。小进度不发。交代里把这个 key 写死：指挥官自己的 key 用 `listSessions {workdir}` 找自己标题那一条；换棒（`commander-handoff`）后新交代写新 key。不许写「CI 绿了再回报」然后收轮：执行会话收了轮就没人叫醒它，回报永远发不出来。CI 归指挥会话盯。
+  4. 回报：推完 PR 或卡在只有创始人能拍的事上，在同一轮里马上调 `prompt {clientRef, sessionKey: "<指挥会话的 key>", prompt: "[<活名> 回报] …"}`，写做到哪、PR 号、验证命令和真实结果、没做的和原因、要创始人拍的。小进度不发。会话里没有 mirasim 工具的（Antigravity），从终端发：`node ~/.mirasim/app/<~/.mirasim/app/state.json 里 good 的版本>/server.cjs ui-cli call prompt --args '<同样的 JSON>'`（会话里不用带端口）。交代里把这个 key 写死：指挥官自己的 key 用 `listSessions {workdir}` 找自己标题那一条；换棒（`commander-handoff`）后新交代写新 key。不许写「CI 绿了再回报」然后收轮：执行会话收了轮就没人叫醒它，回报永远发不出来。CI 归指挥会话盯。
 - 关键约束（授权边界、别碰哪些分支、验收标准）在开会话的第一条里写全。中途补的话只是排进它的队列；`steer` 只有部分 agent 吃，grok 不吃。要改交代：`prompt` 排队，再 `stopAndRun {sessionKey, ref}`（`ref` 是那条 `prompt` 的 `clientRef`）插队打断。
 - 交代里给时限。子会话易在测试上越绕越远（降并发、加跳过、逐条追断言，#3988 的第二棒真遇到）；到点用上面的插队让它收尾，只报现状。
 - 长时间没回报：`listSessions` 看它的 `runState`、`failed`。grok 进程会异常退出（`grok exited`），退了就不会回报，发回原会话重跑。

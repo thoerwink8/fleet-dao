@@ -3,12 +3,12 @@
 // 协议见 antigravity.google/docs/hooks 和 agy 1.3.2 程序里带的「Lifecycle Hooks (hooks.json)」一页：
 // - 输入是 camelCase：{ toolCall: { name, args }, stepIdx, conversationId, workspacePaths, … }，没有 cwd。
 //   会话目录取 workspacePaths 的第一个；run_command 自己带 Cwd 的用它。
-// - 回话是 stdout 一份 JSON，退出码 0：拦下回 { decision: 'deny', reason }。没意见回 {}。
-//   decision 空着按没意见处理（agy 的更新说明：「safely handling empty decision strings returned by pre-tool hooks」）。
-//   不回 allow：allow 是「不问人直接放行」，会绕过 Antigravity 自己的审批。
+// - 回话是 stdout 一份 JSON，退出码 0：拦下回 { decision: 'deny', reason }，放行回 { decision: 'allow' }。
+//   decision 必填（agy 1.5.9 builtin/skills/agy-customizations/docs/hooks.md）：回 {} 在无头会话里按拦下处理、reason 是空的，
+//   mirasim 开的 agy 会话因此一条命令都跑不了（#4001）。
 // 挂的几个工具和参数（同一页的工具名表；参数名照 agy 程序里的字段名）：
 // - run_command：CommandLine、Cwd。
-// - view_file：AbsolutePath。
+// - read_file（旧名 view_file）：AbsolutePath，新版也写 Path、TargetFile。
 // - grep_search：SearchPath、Query（要搜的正则）、Includes（文件通配，数组）、MatchPerLine（true 才打出匹配的那几行）。
 // 跑命令按哪种终端判：Windows 上按 PowerShell（程序里认 powershell.exe、pwsh.exe），别处按 bash。
 import { isMainModule, isRecord, runVendor, shellToolOn } from './vendor-pretool.mjs';
@@ -37,11 +37,14 @@ export function normalizeAgy(input, platform) {
       ...(dir === undefined ? {} : { cwd: dir }),
     };
   }
-  if (tool === 'view_file') {
-    if (typeof args.AbsolutePath !== 'string') {
-      return 'fleet-guard：Antigravity 的 view_file 输入里认不出要读的路径（AbsolutePath），按拦处理';
+  if (tool === 'read_file' || tool === 'view_file') {
+    const path = [args.AbsolutePath, args.Path, args.TargetFile].find(
+      (p) => typeof p === 'string' && p !== '',
+    );
+    if (path === undefined) {
+      return `fleet-guard：Antigravity 的 ${tool} 输入里认不出要读的路径（AbsolutePath、Path、TargetFile），按拦处理`;
     }
-    return { tool_name: 'Read', tool_input: { file_path: args.AbsolutePath }, ...at };
+    return { tool_name: 'Read', tool_input: { file_path: path }, ...at };
   }
   if (tool === 'grep_search') {
     if (typeof args.Query !== 'string') {
@@ -69,7 +72,8 @@ export function normalizeAgy(input, platform) {
  * @param {Verdict} v
  * @returns {string}
  */
-export const agyReply = (v) => JSON.stringify(v.code === 0 ? {} : { decision: 'deny', reason: v.message });
+export const agyReply = (v) =>
+  JSON.stringify(v.code === 0 ? { decision: 'allow' } : { decision: 'deny', reason: v.message });
 
 if (isMainModule(import.meta)) {
   runVendor(normalizeAgy, 'Antigravity', (v) => {
