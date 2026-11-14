@@ -126,7 +126,7 @@ WG_ADDR=10.99.0.2/24
 WG_HK_ADDR=10.99.0.1
 # 驾驶舱后端在隧道地址上的端口（packages/api 的 FLEET_COCKPIT_LISTEN）：只对香港开，只在隧道网卡上开
 API_PORT=8787
-# 新驾驶舱只读口（自动档的单元 fleet2-cockpit.service，#3818）在隧道地址上的端口：同样只对香港开（ufw，人工档）、本机只许 root 和 fleet 连
+# 新驾驶舱只读口在隧道地址上的端口（#3818；服务已在 #4006 停用，批次 5 撤香港转发和防火墙前保留本机保护与隧道放行）
 FLEET2_COCKPIT_PORT=7346
 # 本机上只许 root 和 fleet 连的端口：Temporal 没开认证，库和驾驶舱后端也不该让会话直接碰（nft 表 inet fleet_dao）
 PROTECTED_PORTS=("$PG_PORT" "${TEMPORAL_PORTS[@]}" "$API_PORT" "$FLEET2_COCKPIT_PORT")
@@ -142,22 +142,6 @@ SSHD_SESSION_USER_DROPIN=/etc/ssh/sshd_config.d/51-fleet-dao-session-user.conf
 # 避开旧系统仍留着共用的 4316（wire.ts 的 assertNotRealMirasimInTests 连测试里都拒它）和同机可能还没清干净的
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
 MIRASIM_SESSION_PORT=4318
-# 新内核影子工人的出网限制（人工档，lib/human-tier.sh 的 setup_fleet2_shadow，#3775）：影子工人的进程都在这个 slice 下，
-# nft 表 inet fleet2_shadow 按它的 cgroup 把发往 443 的重定向到出网关（packages/harness-egress，只听回环）、其余出网拒
-FLEET2_SHADOW_SLICE=fleet2-shadow.slice
-FLEET2_EGRESS_PORT=7344
-FLEET2_SHADOW_NFT_FILE=/etc/fleet-dao/fleet2-shadow.nft
-# 出网关常驻（自动档，#3803）：单元写死听 7344（和上面的 FLEET2_EGRESS_PORT 一样，测试对照），名单从仓里装
-FLEET2_EGRESS_UNIT=fleet2-egress.service
-FLEET2_EGRESS_ALLOW=/etc/fleet-dao/fleet2-egress.allow
-# 新内核进程（自动档，#3811）：单元写死只听 127.0.0.1:7345；GitHub 只读用旧引擎同一个 App 的凭据文件（见 ENGINE_APP_JSON，
-# root:fleet 640，手放）现换短期令牌，文件不在就不起
-FLEET2_KERNEL_UNIT=fleet2-kernel.service
-FLEET2_KERNEL_PORT=7345
-# 新驾驶舱只读口（自动档，#3818）：单元写死只听隧道地址 10.99.0.2:7346（和上面的 WG_ADDR、FLEET2_COCKPIT_PORT 一样，测试对照）；
-# 密钥读旧后端同一个 session-secret.env（整套装机时生成，没有就不起）
-FLEET2_COCKPIT_UNIT=fleet2-cockpit.service
-FLEET2_COCKPIT_SECRET=/etc/fleet-dao/session-secret.env
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
 MIRASIM_RETIRED_FILE=$DEPLOY_DIR/france/mirasim-retired
 # 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
@@ -1021,124 +1005,6 @@ setup_footprint() {
   # 定时器本身换了才重启（重启会让 OnActiveSec 重新数 1 分钟）；服务是 oneshot，改了下一轮自然用新的
   ensure_unit_running fleet-footprint.timer "$unit_changed"
 }
-
-setup_fleet2_egress() {
-  step "新内核影子工人的出网关（$FLEET2_EGRESS_UNIT，只听 127.0.0.1:$FLEET2_EGRESS_PORT，名单 $FLEET2_EGRESS_ALLOW）"
-  local unit_changed=0 allow_changed=0
-  # /etc/fleet-dao 由人工档建（root:fleet 750），这里不再动它的权限
-  # 单元以 fleet 读它；/etc/fleet-dao 下的文件读回一律要求其他人无权限，所以 root:fleet 640
-  put_file "$FLEET2_EGRESS_ALLOW" root:fleet 640 "$(<"$DEPLOY_DIR/france/fleet2-egress.allow")"
-  if ((WROTE)); then allow_changed=1; fi
-  put_file "/etc/systemd/system/$FLEET2_EGRESS_UNIT" root:root 644 "$(<"$DEPLOY_DIR/france/$FLEET2_EGRESS_UNIT")"
-  if ((WROTE)); then
-    unit_changed=1
-    systemctl daemon-reload
-  fi
-  # 名单只在起进程时读：名单变了也要重启；代码跟着发版换，主进程还在上一版目录就重启接上新代码
-  if runs_stale_release "$FLEET2_EGRESS_UNIT" "$RELEASES_DIR/current"; then unit_changed=1; fi
-  ensure_unit_running "$FLEET2_EGRESS_UNIT" "$((unit_changed || allow_changed))"
-}
-readback_fleet2_egress() {
-  if [[ "$(systemctl is-active "$FLEET2_EGRESS_UNIT" 2>/dev/null)" != active ]]; then
-    red "$FLEET2_EGRESS_UNIT 没在跑：影子工人发往 443 的连接被重定向过去没人接，一律连不出去"
-  fi
-  if ! cmp -s -- "$FLEET2_EGRESS_ALLOW" "$DEPLOY_DIR/france/fleet2-egress.allow"; then
-    red "$FLEET2_EGRESS_ALLOW 和仓里的不一样（或没装）：重跑 bash $0 --auto-tier"
-  fi
-  if ! cmp -s -- "/etc/systemd/system/$FLEET2_EGRESS_UNIT" "$DEPLOY_DIR/france/$FLEET2_EGRESS_UNIT"; then
-    red "/etc/systemd/system/$FLEET2_EGRESS_UNIT 和仓里的不一样（或没装）"
-  fi
-  if [[ "$(systemctl show -p Slice --value "$FLEET2_EGRESS_UNIT" 2>/dev/null)" == "$FLEET2_SHADOW_SLICE" ]]; then
-    red "$FLEET2_EGRESS_UNIT 跑在 $FLEET2_SHADOW_SLICE 里：它自己连外面会被重定向回自己"
-  fi
-}
-
-# 新内核进程（#3811，包 packages/harness-dispatch）：影子模式，对外零写。影子工作目录放在工作树的根下 _fleet2
-# （打头的下划线撞不上 <owner>_<name> 的仓目录；不放 _tmp：旧引擎把那下面它不认得的会话临时目录当残留收），
-# 归 fleet：内核在这下面建目录，再经 fleet-agent-scope adopt 交给会话用户。镜像在单元的 StateDirectory（/var/lib/fleet2）下。
-setup_fleet2_kernel() {
-  step "新内核进程（$FLEET2_KERNEL_UNIT，影子模式，只听 127.0.0.1:$FLEET2_KERNEL_PORT）"
-  local unit_changed=0
-  ensure_dir "$WORK_DIR/_fleet2" fleet:fleet 755 || return 1
-  put_file "/etc/systemd/system/$FLEET2_KERNEL_UNIT" root:root 644 "$(<"$DEPLOY_DIR/france/$FLEET2_KERNEL_UNIT")"
-  if ((WROTE)); then
-    unit_changed=1
-    systemctl daemon-reload
-  fi
-  if [[ ! -f "$ENGINE_APP_JSON" ]]; then
-    pending "$FLEET2_KERNEL_UNIT 没起：等人放 GitHub App 凭据 $ENGINE_APP_JSON（root:fleet 640）"
-    return 0
-  fi
-  fix_meta "$ENGINE_APP_JSON" root:fleet 640
-  # 代码跟着发版换：单元变了重启；跑着的工人由内核收到 SIGTERM 后收尾
-  if runs_stale_release "$FLEET2_KERNEL_UNIT" "$RELEASES_DIR/current"; then unit_changed=1; fi
-  ensure_unit_running "$FLEET2_KERNEL_UNIT" "$unit_changed"
-}
-readback_fleet2_kernel() {
-  local listen
-  if ! cmp -s -- "/etc/systemd/system/$FLEET2_KERNEL_UNIT" "$DEPLOY_DIR/france/$FLEET2_KERNEL_UNIT"; then
-    red "/etc/systemd/system/$FLEET2_KERNEL_UNIT 和仓里的不一样（或没装）：重跑 bash $0 --auto-tier"
-  fi
-  if [[ "$(stat -c '%U:%G %a' -- "$WORK_DIR/_fleet2" 2>/dev/null)" != "fleet:fleet 755" ]]; then
-    red "$WORK_DIR/_fleet2 不是 fleet:fleet 755：内核建不了影子工作目录"
-  fi
-  if [[ ! -f "$ENGINE_APP_JSON" ]]; then
-    pending "$FLEET2_KERNEL_UNIT 没起：等人放 GitHub App 凭据（$ENGINE_APP_JSON）"
-    return 0
-  fi
-  if [[ "$(stat -c '%U:%G %a' -- "$ENGINE_APP_JSON" 2>/dev/null)" != "root:fleet 640" ]]; then
-    red "$ENGINE_APP_JSON 不是 root:fleet 640（里面有私钥）"
-  fi
-  if [[ "$(systemctl is-active "$FLEET2_KERNEL_UNIT" 2>/dev/null)" != active ]]; then
-    red "$FLEET2_KERNEL_UNIT 没在跑：journalctl -u $FLEET2_KERNEL_UNIT -n 50"
-    return 0
-  fi
-  if [[ "$(systemctl show -p Slice --value "$FLEET2_KERNEL_UNIT" 2>/dev/null)" == "$FLEET2_SHADOW_SLICE" ]]; then
-    red "$FLEET2_KERNEL_UNIT 跑在 $FLEET2_SHADOW_SLICE 里：它读 GitHub、拉镜像会被重定向到出网关"
-  fi
-  wait_listen "$FLEET2_KERNEL_PORT" 30 || true
-  listen=$(ss -Hltn "sport = :$FLEET2_KERNEL_PORT" 2>/dev/null | awk '{ print $4 }' | sort -u | tr '\n' ' ')
-  if [[ "$listen" != "127.0.0.1:$FLEET2_KERNEL_PORT " ]]; then
-    red "$FLEET2_KERNEL_UNIT 的接口层听的是「$listen」，应只听 127.0.0.1:$FLEET2_KERNEL_PORT"
-  fi
-}
-# 新驾驶舱只读口（#3818，包 packages/harness-api）：只听隧道地址、只读 fleet2.* 和 public.users，自己验旧驾驶舱的登录 Cookie。
-# 隧道没起时 bind 会失败，单元 Restart=always 自己重试，所以这里只管装、起、读回；端口对香港开不开归人工档的 ufw。
-setup_fleet2_cockpit() {
-  step "新驾驶舱只读口（$FLEET2_COCKPIT_UNIT，只听 ${WG_ADDR%/*}:$FLEET2_COCKPIT_PORT）"
-  local unit_changed=0
-  put_file "/etc/systemd/system/$FLEET2_COCKPIT_UNIT" root:root 644 "$(<"$DEPLOY_DIR/france/$FLEET2_COCKPIT_UNIT")"
-  if ((WROTE)); then
-    unit_changed=1
-    systemctl daemon-reload
-  fi
-  if [[ ! -f "$FLEET2_COCKPIT_SECRET" ]]; then
-    pending "$FLEET2_COCKPIT_UNIT 没起：$FLEET2_COCKPIT_SECRET 还没有（整套装机 bash $0 生成）"
-    return 0
-  fi
-  # 代码跟着发版换：单元变了重启；无状态，重启只断开着的 SSE，页面自己重连
-  if runs_stale_release "$FLEET2_COCKPIT_UNIT" "$RELEASES_DIR/current"; then unit_changed=1; fi
-  ensure_unit_running "$FLEET2_COCKPIT_UNIT" "$unit_changed"
-}
-readback_fleet2_cockpit() {
-  local listen
-  if ! cmp -s -- "/etc/systemd/system/$FLEET2_COCKPIT_UNIT" "$DEPLOY_DIR/france/$FLEET2_COCKPIT_UNIT"; then
-    red "/etc/systemd/system/$FLEET2_COCKPIT_UNIT 和仓里的不一样（或没装）：重跑 bash $0 --auto-tier"
-  fi
-  if [[ ! -f "$FLEET2_COCKPIT_SECRET" ]]; then
-    pending "$FLEET2_COCKPIT_UNIT 没起：$FLEET2_COCKPIT_SECRET 还没有（整套装机 bash $0 生成）"
-    return 0
-  fi
-  if [[ "$(systemctl is-active "$FLEET2_COCKPIT_UNIT" 2>/dev/null)" != active ]]; then
-    red "$FLEET2_COCKPIT_UNIT 没在跑：journalctl -u $FLEET2_COCKPIT_UNIT -n 50"
-    return 0
-  fi
-  wait_listen "$FLEET2_COCKPIT_PORT" 30 || true
-  listen=$(ss -Hltn "sport = :$FLEET2_COCKPIT_PORT" 2>/dev/null | awk '{ print $4 }' | sort -u | tr '\n' ' ')
-  if [[ "$listen" != "${WG_ADDR%/*}:$FLEET2_COCKPIT_PORT " ]]; then
-    red "$FLEET2_COCKPIT_UNIT 听的是「$listen」，应只听 ${WG_ADDR%/*}:$FLEET2_COCKPIT_PORT"
-  fi
-}
 readback_footprint() {
   local f u
   if [[ "$(systemctl is-active fleet-footprint.timer 2>/dev/null)" != active ]]; then
@@ -1262,7 +1128,6 @@ readback() {
   readback_mirasim
   readback_wireguard
   readback_firewall
-  readback_fleet2_shadow
   readback_sshd_hardening
   readback_session_ssh_scope
   readback_fail2ban_sshd "$DEPLOY_DIR/france/fail2ban-sshd.jail" 10.99.0.0/24
@@ -1273,9 +1138,6 @@ readback() {
   readback_auto_release
   readback_release_request
   readback_footprint
-  readback_fleet2_egress
-  readback_fleet2_kernel
-  readback_fleet2_cockpit
   readback_proxy_headers
   readback_node_report_gate
   readback_service_home
@@ -1858,9 +1720,6 @@ setup_auto_tier() {
   setup_auto_release
   setup_release_request_scripts
   setup_footprint
-  setup_fleet2_egress
-  setup_fleet2_kernel
-  setup_fleet2_cockpit
   # 只把这段原文抽出来跑的测试里，下面两个函数不在作用域；整份 france.sh 里都在。
   if declare -F install_scope_bin >/dev/null; then install_scope_bin; fi
   if declare -F ensure_work_tmp >/dev/null; then ensure_work_tmp; fi
@@ -1888,9 +1747,6 @@ readback_auto_tier() {
   done
   readback_release_request_scripts
   readback_footprint
-  readback_fleet2_egress
-  readback_fleet2_kernel
-  readback_fleet2_cockpit
   readback_mirasim_session_unit
   # 不对就红（句子里有目录路径），不在读回里改权限。抽出来跑的测试里这个函数不在。
   if declare -F readback_work_tmp >/dev/null; then readback_work_tmp || true; fi
@@ -1929,7 +1785,6 @@ main() {
     setup_user_slice_cap
     setup_sudoers
     setup_firewall
-    setup_fleet2_shadow
     setup_sshd_hardening
     setup_session_ssh
     setup_fail2ban_sshd "$DEPLOY_DIR/france/fail2ban-sshd.jail"
@@ -1944,9 +1799,6 @@ main() {
     setup_auto_release
     setup_release_request_scripts
     setup_footprint
-    setup_fleet2_egress
-    setup_fleet2_kernel
-    setup_fleet2_cockpit
     setup_release_request
     setup_agent_rules
     setup_cli_tools

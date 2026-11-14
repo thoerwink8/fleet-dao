@@ -132,7 +132,6 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /var/lib/fleet-hk-france-probe | root:root | 755 | deploy/hk.sh |
 | /var/lib/fleet-sessions | fleet:fleet | 711 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-work | root:root | 755 | deploy/lib/human-tier.sh |
-| /var/lib/fleet-work/_fleet2 | fleet:fleet | 755 | deploy/france.sh |
 | /var/lib/fleet-work/_tmp | fleet:fleet | 755 | deploy/lib/human-tier.sh |
 | /var/log/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/www/fleet-dao-acme | root:root | 755 | deploy/hk.sh |
@@ -966,7 +965,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 | `fleet-engine` | fleet | `node packages/engine/src/main.ts`（Temporal worker，任务队列 fleet） | `engine.env`（`FLEET_ENGINE_PORTS=real` 真端口 / `fake` 假端口，必须写；真端口另要机器名、工作树的根、reclaude 的路径，见期望 `deploy/france/desired-config.json`）、`github/`（两个 GitHub 机器人） |
 | `fleet-api` | fleet | `node packages/api/src/main.ts`：一个进程一个监听，驾驶舱接口 `10.99.0.2:8787`。端口由 `fleet-api.socket` 攥着，进程从 systemd 接手 fd | `api.env`、`session-secret.env`、`github/`（两个机器人的 json） |
 | `fleet-api.socket` | root | 不跑进程：`ListenStream` 攥着上面那个地址（`FreeBind=yes`，隧道没起也能先听上）。重启 `fleet-api` 时新连接排在内核队列里，等新进程起来接着 accept：后端停机时立刻收掉 SSE、不等满排空上限，排队的只有在途请求做完加新进程启动那几秒（#2186） | 不读配置。改监听地址要 `api.env`、`deploy/release.sh` 的 `COCKPIT` 常量、这个 socket 单元三处一起改 |
-| `fleet2-cockpit` | fleet | `node packages/harness-api/src/bin/cockpit.ts`（#3818）：新驾驶舱的只读口，只听隧道地址 `10.99.0.2:7346`；验旧驾驶舱的登录 Cookie 再读 `fleet2.*` 和 `public.users`，不发不存会话令牌。自动档装，跟着发版换，单元变了才重启 | `session-secret.env`（`FLEET_SESSION_SECRET`，和旧后端同一份）；库走本机 socket 的 peer 认证，其余配置写在单元里 |
+| `fleet2-cockpit` | fleet | `node packages/harness-api/src/bin/cockpit.ts`（#3818）：新驾驶舱的只读口，只听隧道地址 `10.99.0.2:7346`；验旧驾驶舱的登录 Cookie 再读 `fleet2.*` 和 `public.users`，不发不存会话令牌。已随新内核停用（#4006），发版和装机不再安装或拉起，单元在批次 5 清理 | `session-secret.env`（`FLEET_SESSION_SECRET`，和旧后端同一份）；库走本机 socket 的 peer 认证，其余配置写在单元里 |
 | `fleet-cli-upgrade.path` | root | 不跑进程：看见 `/var/lib/fleet-dao/cli-upgrade/request.json` 就起下面那个单元。跟着版本走，`release.sh` 切版本时装上 | 不读环境文件。升什么看这一版的 `deploy/france/desired-config.json` 里 `cliTools` |
 | `fleet-cli-upgrade.service` | root | `node packages/engine/src/cli-upgrade-main.ts`：空闲时升命令行工具，核对版本、跑一次 `--help`，不过就装回上一版 | 同上。超时 40 分钟，到点杀掉，免得会话起来之后还在换二进制 |
 
@@ -1294,6 +1293,8 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task correct-mer
 - 装机法国侧**不装**：这是 CI 的事，法国那台生产 Postgres 里没有 `fleet_test_template` 这张库，也不应该有——第二条已经讲过它只放 `fleet` 和 `temporal_*`。机器的 docker、镜像源都不为它配。
 
 ### 新内核真执行：推分支、开 PR，不合并（#3783，重写第 7 片）
+
+> 新内核三个服务（`fleet2-kernel`、`fleet2-cockpit`、`fleet2-egress`）已在法国停用（#4006），`france.sh`（含 `--auto-tier`）和 `human-tier.sh` 不再安装、启动或读回它们与 `fleet2-shadow`；法国上的单元文件留到批次 5 清理。
 
 `fleet2-kernel.service` 带 `FLEET2_PUBLISH=1`：对人冻结的**真执行批次**（影子批次不受影响）认领单、派工，工人交回后内核经 outbox 推分支 `fleet2/<单号>-<运行号>`、开 PR（正文 `Closes #单号`，记模型和核验结论）。**不开自动合并**，合不合由现有合并闸和人决定；内核里没有任何合并的调用（`packages/harness-dispatch/test/github-write.test.ts` 扫源码守着）。
 
