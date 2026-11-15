@@ -23,7 +23,6 @@ export function discussEnvFile(home = homedir()) {
 }
 
 export const DEFAULT_MAGPIE_BASE_URL = 'http://127.0.0.1:3425/v1';
-export const DEFAULT_MAGPIE_KEY = 'magpie-discuss';
 const MAGPIE_BASE_URL_KEY = 'DISCUSS_MAGPIE_BASE_URL';
 const MAGPIE_API_KEY_KEY = 'DISCUSS_MAGPIE_API_KEY';
 const MODEL_KEY_PREFIX = 'DISCUSS_MODEL_';
@@ -100,17 +99,45 @@ function discussEnvLookup(env, home, readFile) {
 }
 
 /**
- * magpie 的配置：baseUrl 和 key 都从 discuss.env（进程环境变量优先）来；
- * baseUrl 给了空值、key 给了空值，都当这台没开 magpie（返回 null）。
- * 默认端点是本机 3425，key 是本地网关随便一个值。
+ * 讨论网关。地址默认本机 magpie；DISCUSS_MAGPIE_BASE_URL 可改，显式空值等于没配。
+ * 不读 DISCUSS_GPT_BASE_URL：那是旧的单模型中转，拿来会把路由组送到别的主机。
+ * 密钥先看环境里的 magpie 密钥，没有就用 DISCUSS_GPT_API_KEY。不在仓里放默认密钥；没有密钥就是没配。
+ * 任一密钥被显式设成空也等于没配。
  * @param {{ env?: NodeJS.ProcessEnv, home?: string, readFile?: (path: string) => string }} [opts]
  * @returns {{ baseUrl: string, apiKey: string } | null}
  */
 export function magpieRelayConfig(opts = {}) {
-  const baseUrl = discussEnvValue(MAGPIE_BASE_URL_KEY, opts)?.replace(/\/+$/, '') ?? DEFAULT_MAGPIE_BASE_URL;
-  const apiKey = discussEnvValue(MAGPIE_API_KEY_KEY, opts) ?? DEFAULT_MAGPIE_KEY;
+  const configuredUrl = discussEnvValue(MAGPIE_BASE_URL_KEY, opts);
+  if (configuredUrl === '') return null;
+  const baseUrl = (configuredUrl ?? DEFAULT_MAGPIE_BASE_URL).replace(/\/+$/, '');
+  const magpieKey = discussEnvValue(MAGPIE_API_KEY_KEY, opts);
+  if (magpieKey === '') return null;
+  const fallbackKey = magpieKey ? undefined : discussEnvValue(API_KEY, opts);
+  if (fallbackKey === '') return null;
+  const apiKey = magpieKey || fallbackKey;
   if (!baseUrl || !apiKey) return null;
   return { baseUrl, apiKey };
+}
+
+/** 路由组名就是发给网关的 model。值是作者族；cn-pool 是国模组，单独一族。 */
+export const POOL_FAMILY = {
+  'gpt-pool': 'gpt',
+  'grok-pool': 'grok',
+  'deepseek-pool': 'deepseek',
+  'kimi-pool': 'kimi',
+  'glm-pool': 'glm',
+  'cn-pool': 'cn',
+};
+
+/** 反方不指定 --models 时按这个顺序问，不含国模组（要显式选）。 */
+export const POOL_ORDER = ['gpt-pool', 'grok-pool', 'deepseek-pool', 'kimi-pool', 'glm-pool'];
+
+export const GATEWAY_MISSING =
+  '这台没配讨论网关（~/.fleet-dao/discuss.env 要有密钥：DISCUSS_MAGPIE_API_KEY 或 DISCUSS_GPT_API_KEY；地址用 DISCUSS_MAGPIE_BASE_URL，不写就用本机默认网关，设成空等于没配）。没讨论成，不改走别的工具';
+
+/** 讨论走的网关，和 magpieRelayConfig 是同一条。 @param {{ env?: NodeJS.ProcessEnv, home?: string, readFile?: (path: string) => string }} [opts] */
+export function discussionGateway(opts = {}) {
+  return magpieRelayConfig(opts);
 }
 
 /**

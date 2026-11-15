@@ -1,4 +1,6 @@
 // second-opinion.mjs 拆出来的：各家执行体的档案、按作者族排候选、连不上换下一家。
+
+import { POOL_FAMILY } from './gpt-relay.mjs';
 import { NotChecked, RetryableStart, Stalled } from './so-common.mjs';
 import { NotInstalled } from './tools.mjs';
 
@@ -120,14 +122,16 @@ export function splitFamilies(raw, label = '--author-family') {
     .filter(Boolean);
   if (values.length === 0)
     throw new NotChecked(
-      `要 ${label} <gpt|swe|claude|deepseek|grok|kimi>：讨论不能确认作者模型族（可逗号分隔），不会从环境变量猜`,
+      `要 ${label} <${[...Object.keys(POOL_FAMILY), 'claude'].join('|')}>：讨论不能确认作者模型族（可逗号分隔，也认不带 -pool 的族名），不会从环境变量猜`,
     );
-  const unknown = values.filter((family) => ![...FAMILY_ORDER, 'swe'].includes(family));
+  const families = values.map((name) => (Object.hasOwn(POOL_FAMILY, name) ? POOL_FAMILY[name] : name));
+  const known = new Set([...FAMILY_ORDER, 'swe', 'glm', 'cn']);
+  const unknown = families.filter((family) => !known.has(family));
   if (unknown.length)
     throw new NotChecked(
-      `不认识的作者模型族：${unknown.join('、')}（可用：${[...FAMILY_ORDER, 'swe'].join('、')}）`,
+      `不认识的作者模型族：${unknown.join('、')}（可用：${[...Object.keys(POOL_FAMILY), 'claude'].join('、')}）`,
     );
-  return new Set(values);
+  return new Set(families);
 }
 
 /**
