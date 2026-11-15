@@ -24,7 +24,8 @@ const LOCKED = [
   ['sync', 'intervalMinutes'],
 ];
 
-const SECRET_FIELD = /^(apiKey|token|secret|password|passphrase|authorization|cookie|email|accessToken|refreshToken)$/i;
+const SECRET_FIELD =
+  /^(apiKey|token|secret|password|passphrase|authorization|cookie|email|accessToken|refreshToken)$/i;
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
 const SECRET_TEXT = /^(?:sk-|github_pat_|ghp_|Bearer )/;
 
