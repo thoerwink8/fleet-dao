@@ -24,6 +24,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_GPT_MODEL, gptRelayConfig } from './gpt-relay.mjs';
+import { MAGPIE_DEFAULT_KEYS, magpieAsk, magpieConfig, magpiePanel } from './magpie.mjs';
 import {
   DEFAULT_STALL_MIN,
   DEFAULT_TIMEOUT_MIN,
@@ -33,7 +34,14 @@ import {
   NotChecked,
   RUNS,
 } from './so-common.mjs';
-import { discussionProfiles, FAMILY_ORDER, PROFILES, UNAVAILABLE, withFallback } from './so-profiles.mjs';
+import {
+  discussionProfiles,
+  FAMILY_ORDER,
+  PROFILES,
+  splitFamilies,
+  UNAVAILABLE,
+  withFallback,
+} from './so-profiles.mjs';
 import {
   listSessions,
   OUR_SESSION_TITLE,
@@ -130,10 +138,11 @@ async function critique(o) {
     throw new NotChecked(`读不到 ${src}（${errCode(e) ?? messageOf(e)}）`);
   }
   if (!material.trim()) throw new NotChecked(`${src} 是空的`);
+  const magpie = await magpieConfig();
   const relay = gptRelayConfig();
   if (o.gptModel !== undefined && (!o.gptModel.trim() || o.gptModel.startsWith('--')))
     throw new NotChecked('--gpt-model 要带型号');
-  if (o.gptModel !== undefined && !relay)
+  if (o.gptModel !== undefined && !relay && !magpie)
     throw new NotChecked(
       '配了 --gpt-model，但这台没配讨论用的 GPT 接口（~/.fleet-dao/discuss.env 的 DISCUSS_GPT_BASE_URL 和 DISCUSS_GPT_API_KEY）',
     );
@@ -149,31 +158,35 @@ async function critique(o) {
   const out = join(RUNS, `critique-${name}-${stamp}.md`);
   try {
     const model = (o.gptModel ?? '').trim() || DEFAULT_GPT_MODEL;
-    const chain = discussionProfiles(o).map((p) =>
-      relay && p.family === 'gpt' ? { family: 'gpt', agent: 'gpt-relay', model, route: 'local' } : p,
-    );
+    const chain = magpie
+      ? []
+      : discussionProfiles(o).map((p) =>
+          relay && p.family === 'gpt' ? { family: 'gpt', agent: 'gpt-relay', model, route: 'local' } : p,
+        );
     const budgetSec = discussionBudgetSec(o);
     if (!Number.isFinite(budgetSec) || budgetSec <= 0)
       throw new NotChecked('--budget-sec 必须是正数（不给就是 --timeout-min 那一套，默认 15 分钟）');
     const budgetMs = budgetSec * 1000;
-    const r = await withFallback(
-      chain,
-      (s) => console.error(s),
-      (p, remainingMs) =>
-        runSession({
-          prompt: o.blind ? blindPrompt(material) : critiquePrompt(material),
-          profile: p,
-          workdir: dir,
-          timeoutMin: Math.min(o.timeoutMin, (remainingMs ?? o.timeoutMin * 60_000) / 60_000),
-          log: (s) => console.error(s),
-          pollMs: 1_000,
-          stallMin: o.stallMin ?? DEFAULT_STALL_MIN,
-          effort: o.effort,
-          discussion: true,
-          gptModel: o.gptModel,
-        }),
-      { budgetMs },
-    );
+    const r = magpie
+      ? await magpieCritique(o, material, budgetSec, magpie)
+      : await withFallback(
+          chain,
+          (s) => console.error(s),
+          (p, remainingMs) =>
+            runSession({
+              prompt: o.blind ? blindPrompt(material) : critiquePrompt(material),
+              profile: p,
+              workdir: dir,
+              timeoutMin: Math.min(o.timeoutMin, (remainingMs ?? o.timeoutMin * 60_000) / 60_000),
+              log: (s) => console.error(s),
+              pollMs: 1_000,
+              stallMin: o.stallMin ?? DEFAULT_STALL_MIN,
+              effort: o.effort,
+              discussion: true,
+              gptModel: o.gptModel,
+            }),
+          { budgetMs },
+        );
     const profile = r.profile;
     const v = o.blind ? (r.text.trim() ? { agree: true, objections: 0 } : null) : parseCritique(r.text);
     const head = [
@@ -181,6 +194,7 @@ async function critique(o) {
       '',
       `- 题面：${src}`,
       `- 会话：${r.sessionKey}（${r.model ?? profile.model ?? profile.agent}，思考强度 ${o.effort ?? '默认'}）${r.fallbackNote ? `；${r.fallbackNote}` : ''}`,
+      `- 厂商族：${profile.family}`,
       `- 账本：${r.ledgerNote}；${r.usage}`,
       `- 结论：${o.blind ? (v ? '答了' : '空的（没查成）') : v ? (v.agree ? '同意' : `有异议 ${v.objections} 条`) : '认不出（没查成）'}`,
       '',
@@ -198,12 +212,73 @@ async function critique(o) {
 }
 
 /**
+ * magpie 反方：固定候选只排不同厂商族；失败照实报，不能换回旧渠道冒充查成。
+ * @param {Options} o
+ * @param {string} material
+ * @param {number} budgetSec
+ * @param {NonNullable<Awaited<ReturnType<typeof magpieConfig>>>} relay
+ */
+async function magpieCritique(o, material, budgetSec, relay) {
+  if (o.authorFamily && o.excludeFamily)
+    throw new NotChecked('--author-family 和 --exclude-family 只能选一个');
+  const excluded = splitFamilies(o.authorFamily ?? o.excludeFamily);
+  const aliases = { code: 'gpt', cursor: 'gpt', 'grok-cli': 'grok' };
+  const agent = o.agent ? (aliases[o.agent] ?? o.agent) : undefined;
+  if (o.ui && agent === 'gpt') throw new NotChecked('界面题不选 GPT');
+  const keys = agent
+    ? [agent]
+    : MAGPIE_DEFAULT_KEYS.filter((k) => !excluded.has(k) && (!o.ui || k !== 'gpt'));
+  if (keys.some((k) => excluded.has(k === 'haiku' ? 'claude' : k)))
+    throw new NotChecked('不能选与作者同一模型族的执行体');
+  if (!keys.length) throw new NotChecked('没有可用的不同模型族');
+  const panel = magpiePanel(keys, {
+    gpt: o.gptModel,
+    swe: o.sweModel,
+    deepseek: o.deepseekModel,
+    grok: o.grokModel,
+    haiku: o.haikuModel,
+  });
+  const deadline = Date.now() + budgetSec * 1000;
+  const misses = [];
+  for (const who of panel) {
+    const remaining = (deadline - Date.now()) / 1000;
+    if (remaining <= 0) break;
+    const r = await magpieAsk(
+      who,
+      o.blind ? blindPrompt(material) : critiquePrompt(material),
+      Math.min(180, remaining),
+      relay,
+    );
+    if (!r.ok) {
+      const miss = `${who.family}/${who.model}：没查成：${r.why}`;
+      misses.push(miss);
+      console.error(miss);
+      continue;
+    }
+    return {
+      text: r.text,
+      sessionKey: `magpie:${process.pid}`,
+      model: who.model,
+      profile: { family: who.family, agent: 'magpie', model: who.model },
+      ledgerNote: '走 magpie OpenAI 兼容接口（chat/completions）',
+      usage: `${r.secs.toFixed(1)} 秒`,
+      fallbackNote: misses.join('；'),
+    };
+  }
+  throw new NotChecked(`magpie 不同族候选全没查成：${misses.join('；') || '讨论总预算用完'}`);
+}
+
+/**
  * @param {string[]} argv
  * @returns {Options}
  */
 export function args(argv) {
   /** @type {Options} */
-  const o = { timeoutMin: DEFAULT_TIMEOUT_MIN, stallMin: DEFAULT_STALL_MIN, ui: false };
+  const o = {
+    timeoutMin: DEFAULT_TIMEOUT_MIN,
+    stallMin: DEFAULT_STALL_MIN,
+    ui: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--timeout-min') o.timeoutMin = Number(argv[++i]);
@@ -222,6 +297,10 @@ export function args(argv) {
     else if (a === '--exclude-family') o.excludeFamily = argv[++i];
     else if (a === '--budget-sec') o.budgetSec = Number(argv[++i]);
     else if (a === '--gpt-model') o.gptModel = argv[++i] ?? '';
+    else if (a === '--swe-model') o.sweModel = argv[++i] ?? '';
+    else if (a === '--deepseek-model') o.deepseekModel = argv[++i] ?? '';
+    else if (a === '--grok-model') o.grokModel = argv[++i] ?? '';
+    else if (a === '--haiku-model') o.haikuModel = argv[++i] ?? '';
     else if (a === '--blind') o.blind = true;
     else throw new NotChecked(`不认识的参数 ${a}`);
   }

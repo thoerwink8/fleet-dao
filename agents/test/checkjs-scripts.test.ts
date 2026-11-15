@@ -19,6 +19,7 @@ const CHECKED = [
   'skills/commander/scripts/wait.mjs',
   'skills/discuss/scripts/tools.mjs',
   'skills/discuss/scripts/gpt-relay.mjs',
+  'skills/discuss/scripts/magpie.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
   'skills/discussion-draft/scripts/draft.mjs',
   'hooks/pretool.mjs',
@@ -65,7 +66,10 @@ function notIncluded(listed: string[] | undefined, files: string[]): string[] {
 }
 
 /** tsconfig 允许 // 注释：去掉整行注释再按 JSON 读。 */
-function readTsconfig(): { compilerOptions?: Record<string, unknown>; files?: string[] } {
+function readTsconfig(): {
+  compilerOptions?: Record<string, unknown>;
+  files?: string[];
+} {
   const raw = readFileSync(join(AGENTS, 'tsconfig.json'), 'utf8');
   return JSON.parse(raw.replace(/^\s*\/\/.*$/gm, ''));
 }
