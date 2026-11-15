@@ -46,10 +46,6 @@ sudo -u magpie env HOME=… XDG_CONFIG_HOME=… /opt/magpie/magpie
 
 核对用仓库里的 `install/magpie-verify.sh`（Windows 用 `install/magpie-verify.ps1`），对照 `templates/magpie-expected.json`。装目录用 `install/magpie-bootstrap`，`--dry-run` 不改在跑的配置。
 
-fleet-dao 的 `deploy/france.sh` 不装、不删 `magpie.service`。法国单元的运维细节仍以 [docs/ops.md](../ops.md) 里「法国 magpie 的 Cursor 登录」为准；那一节的内网 IP 不要抄进对外步骤，步骤里继续用 `<法国内网地址>`。
+法国单元的网页和网关只写 `<法国内网地址>`。Cursor 登录怎么续，见 [docs/ops.md](../ops.md) 里「法国 magpie 的 Cursor 登录」；那一节的内网地址不要抄进对外步骤。
 
-## 这次梳理
-
-单号 **#4035**。
-
-来源：local-session `DESKTOP-GET3DBC-2026-11-15T20:53:43.707Z`（单键 `b459e75e5600625a29edb03f4d14dbe8682fc21493a8cfec6e800ea6e97b7c7f`）。
+单号和来源在 [REPORT.md](REPORT.md)。

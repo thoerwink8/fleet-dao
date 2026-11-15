@@ -26,8 +26,8 @@
 
    | 名字 | 来源 |
    |---|---|
-   | 调用 key（每台一把，具体名字未查到） | 法国 magpie 网页里发给这台的调用方 key，落在这台的 `caller-keys.json`。不进同步 |
-   | 供应商 API key（供应商 id 未查到） | 各家控制台，或密码管理器里按供应商 id 记下的那把。`keys=no`，不进同步 |
+   | gateway-key（`magpie gateway-key add <名字>`，每台一把） | 法国 magpie 网页发给这台的调用方钥匙，落在这台的 `caller-keys.json`。不进同步。已有机器的名字在法国配置里，本会话读不到那个目录，按机器现起名字，不要猜 |
+   | 供应商 API key（deepseek、glm 以及其余直连渠道） | 各家控制台，或密码管理器里按供应商 id 记下的那把。`keys=no`，不进同步 |
 
 7. 核对：`install/magpie-verify.sh`（Windows 用 `install/magpie-verify.ps1`）。不一致会打印差异并退出非 0。对照的是 `templates/magpie-expected.json`。
 

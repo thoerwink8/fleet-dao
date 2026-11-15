@@ -16,21 +16,21 @@ Antigravity（Gemini）只在本机经 agy 用，不装上法国。
 
 ## grok-pool 的 2:1 和 fast 嵌套
 
-grok 池按 2:1 分流量，fast 嵌在组里面，不写进 `weight=` 的键。
+grok 池用 `routing=weight`，两个成员的份额是 2 和 1。fast 嵌在组上，用 `fast=` 点名走 fast 模式的成员，不把 `:fast` 写进 `weight=` 的键。
 
-比例、嵌的是哪个成员、fast 占多少：未查到。
+出处：2:1 和「fast 嵌套」是这张单要写明的取舍。决定 0128 和讨论稿 4026 没有写出这个比例，成文出处未查到。在跑的组是不是已经是这个比例，要读 magpie 用户的配置再对；本会话读不到那个目录，也没有改它。
 
 ## account-cap 按账号
 
 封顶按账号算，不按整个供应商一把算。程序命令是 `magpie provider account-cap <供应商> <账号> …`（0.1.4263 的帮助如此）。
 
-这套部署里每个账号的比例：未查到。
+这套部署里每个账号的百分比不在决定和讨论稿里，出处未查到。不要按猜的数字去改在跑的账号。
 
 ## deepseek / glm：免费轮流，付费兜底
 
 免费的 deepseek 和 glm 轮流用，付费渠道做兜底。
 
-组名、成员、用的是 `rotate` 还是别的路由：未查到。
+轮流是组的 `rotate`（每条消息换下一个）或 `drain`（一个用尽再换）。决定和讨论稿没有写用哪一种，出处未查到。付费兜底是渠道上的 fallback，不是再开一把总开关。
 
 ## 登录不同步
 
@@ -42,4 +42,4 @@ grok 池按 2:1 分流量，fast 嵌在组里面，不写进 `weight=` 的键。
 
 改完路由，对名为 smart 的那组做 md5，两边一致才算改完。
 
-对哪一段字节算、组的 id 是不是就叫 `smart`：未查到。算法不要对着带密钥或账号的输出算。步骤见 [OPERATIONS.md](OPERATIONS.md)。
+核对时用的组 id 是 `smart`（`magpie group smart`）。对哪一段字节算，出处未查到。算法不要对着带密钥或账号的输出算。步骤见 [OPERATIONS.md](OPERATIONS.md)。

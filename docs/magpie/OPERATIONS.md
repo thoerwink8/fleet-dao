@@ -16,7 +16,7 @@ sudo -u magpie env HOME=… XDG_CONFIG_HOME=… timeout 20 /opt/magpie/magpie <�
 timeout 30 magpie usage 30d
 ```
 
-当天用 `usage today`。`--csv` 是逐条请求，容易带上账号，只在这台看，不往外贴。汇总进 [INVENTORY.md](INVENTORY.md) 时只留合计，并去掉邮箱和账号 ID。2026-11-16 的合计未查到。
+当天用 `usage today`。`--csv` 是逐条请求，容易带上账号，只在这台看，不往外贴。汇总进 [INVENTORY.md](INVENTORY.md) 时只留合计，并去掉邮箱和账号 ID。2026-11-16 本会话读不到 magpie 用户的 `usage.jsonl`，清单里没有合计数字。
 
 ## 改权重和 fast 比例
 
@@ -27,7 +27,7 @@ timeout 20 magpie group set <组> routing=weight weight=<模型甲>=2,<模型乙
 timeout 20 magpie group set <组> fast=<要走-fast-的模型>
 ```
 
-grok 池的 2:1 和 fast 嵌套见 [DECISIONS.md](DECISIONS.md)。具体成员未查到，不要按猜的 id 去改在跑的组。
+grok 池的 2:1 和 fast 嵌套见 [DECISIONS.md](DECISIONS.md)。成员模型 id 在法国配置里，读到之前不要按猜的 id 去改在跑的组。
 
 改完按 [DECISIONS.md](DECISIONS.md) 对 smart 做 md5：先 `timeout 20 magpie group smart`，滤掉插件行，再去掉任何钥匙和账号，只对路由、成员和权重那几行算。两边的摘要要一致。对哪一段字节算的出处未查到；不要把命令输出贴出来。
 
@@ -72,6 +72,6 @@ WebDAV 的公开说明写冲突时保留较新的一份。GitHub 这条在 0.1.4
 
 **插件行要过滤。** `magpie providers` 和 `magpie groups` 的输出里会有社区插件订阅。拿去对配置或算 md5 之前先丢掉带 plugin / 插件的行，不然会把插件当成渠道 key。0.1.4263 在空配置下这两条没有插件行；在跑的实例上插件行的原文未查到。过滤时不要把剩下的行打进文档。
 
-**权重键里的 `:fast` 会整条失败。** `weight=` 的键只写模型 id。键里夹了 `:fast` 时，整条 `group set` 失败，这一组权重都没写上。fast 用单独的 `fast=`。2026-11-16 在临时空配置里，单独一条 `weight=<模型>:fast=<数字>` 被 0.1.4263 接受并写成了权重；仍然不要这么写，避免和会整条失败的写法混在一起。
+**权重键里的 `:fast` 会整条失败。** `weight=` 的键只写模型 id。成员上的 `:fast`（`models=<模型>:fast`）在这个模型没有 fast 模式时，整条 `group set` 失败，退出码 1，组保持原样。fast 用单独的 `fast=`。2026-11-16 在临时空配置里，`weight=<模型>:fast=<数字>` 被 0.1.4263 接受并写成了普通权重，fast 没有打开；仍然不要把 `:fast` 写进权重键。
 
 **命令要套超时。** `magpie` 会去拉模型列表或连同步，裸跑会挂住。Linux 用 `timeout 20`（用量用 `timeout 30`）。Windows 在 Git Bash 里同样套 `timeout`。超时到了就是没跑完，不要当成已经改好。
