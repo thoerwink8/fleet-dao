@@ -32,6 +32,7 @@
 | [3918-fleet2-session-ui](<3918-fleet2-session-ui/方案.md>) | Fleet2 会话页换成对话界面（#3918） | 在做 | — |
 | [3923-ade-parity](<3923-ade-parity/对标.md>) | Fleet2 ADE 基础功能对标（#3923） | 在做 | — |
 | [3979-ade-merge](<3979-ade-merge/讨论稿.md>) | ade-merge（2026-11-15，讨论稿） | 已定 | — |
+| [4026-magpie-vps](<4026-magpie-vps/讨论稿.md>) | 模型网关集中与仓的收拢（2026-11-15，讨论稿） | 在做 | — |
 
 ## 历史
 
