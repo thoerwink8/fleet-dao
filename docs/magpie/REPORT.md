@@ -1,12 +1,14 @@
-# fleet-setup 梳理回报
+# 梳理回报
 
 单号 **#4035**。
 
 来源：local-session `DESKTOP-GET3DBC-2026-11-15T20:53:43.707Z`（单键 `b459e75e5600625a29edb03f4d14dbe8682fc21493a8cfec6e800ea6e97b7c7f`）。
 
-创始人在 #4035 上写了：同一套梳理在私有仓 fleet-setup 的 PR <https://github.com/thoerwink8/fleet-setup/pull/1>，这张单只用来记这件事。该仓对未登录的接口是 404，本会话打不开那个 PR，也看不出那边的正文有没有写上 #4035。能随这次提交读到的回报是本文件，单号记在这里。
+创始人 2026-11-15 在 #4035 的评论里写了两句：fleet-setup 的梳理已经开了 PR，还没合，地址是 <https://github.com/thoerwink8/fleet-setup/pull/1>；这张单只用来记这件事，验收看那个 PR 里的 `docs/magpie/` 和 `install/magpie-verify`。
 
-本分支里的页面：
+2026-11-16 本会话用未登录的 GitHub 接口请求 `thoerwink8/fleet-setup`，返回 404。那个 PR 的正文、里面的 `docs/magpie/` 和回报都读不到，也写不进去。单号 #4035 记在本文件。本文件随 fleet-dao 这次提交，不是 fleet-setup 那个 PR 里的回报。
+
+本分支里能读到的页面：
 
 | 文件 | 内容 |
 |---|---|
@@ -18,4 +20,4 @@
 
 核对和准备目录的脚本在仓库的 `install/magpie-verify`、`install/magpie-bootstrap`，对照 `templates/magpie-expected.json`。
 
-2026-11-16 在法国这台核对程序版本 `0.1.4263`。在跑的配置目录属主是用户 `magpie`，权限 `750`，本会话列不出成员名单和用量，也没有改那份配置。
+2026-11-16 法国程序版本是 `0.1.4263`。在跑的配置目录属主是用户 `magpie`，权限 `750`。本会话没有读到组成员、workbuddy 与 raccoon 的账号个数和封顶、资源库正在下发的名单、在跑的 `settings.json`、近 30 天用量合计，也没有改那份配置。公开单 #4033 写过的组 id 记在 [INVENTORY.md](INVENTORY.md)，标了出处。
