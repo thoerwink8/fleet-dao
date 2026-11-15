@@ -6,7 +6,7 @@
 // - 闸分两类。「硬闸」任何情况下都不放行（--force 也不行）：不是 issue / 已关、作者不在白名单、母单子单、本机做、已派过
 //   （有一代任务工作流在跑或已结束；只有任务行、没有任何一代、行是 queued 或 stopped 的不算，接手那一行再派）、
 //   任务工作流没查成（不确定，不当成没有工作流）、碰 workflows、碰改标准的路径（standard-paths.json 列的，判法同拉单的
-//   standardPathIn；引擎的 PR 正文没有创始人原话，合并闸永远判红，决定 0093）、
+//   standardPathIn；引擎的 PR 正文没有改标准凭据，合并闸永远判红，决定 0093、#3990）、
 //   已有 PR 挂着、交代不全（任务工作流第一步会拒收，放行了只会起一条马上失败的工作流）、
 //   前置没等完（正文「前置：」那一行，判法和拉单共用 intake.ts 的 judgePrerequisites：日期没到、前置单还开着是 waiting_prerequisite；
 //   前置单开没开着读不到、结果缺号是 prerequisite_unknown，不当成都关了。开单顺手戳的 dispatch-issue 也走这里，#3298）。
@@ -242,7 +242,7 @@ async function hardFailure(
     return {
       failure: fail(
         'touches_standard',
-        `正文要动改标准的路径 ${standard.path}（清单的 ${standard.rule.path}）：引擎开的 PR 正文没有创始人原话，合并闸会一直判红，派了只会做完卡在合并；本机做`,
+        `正文要动改标准的路径 ${standard.path}（清单的 ${standard.rule.path}）：引擎开的 PR 正文没有改标准凭据，合并闸会一直判红，派了只会做完卡在合并；本机做`,
       ),
     };
   }

@@ -1,16 +1,16 @@
 // pnpm pr:open 自己生成 PR 正文（母单 #1066 第二片，审计第四节第 7 条）：工人原来要先写 _tmp/pr-body.md、再单跑一次
-// pnpm issue:new（62 秒）、再贴创始人原话，纸面活加起来每个 PR 约 1–1.5 分钟。现在不给 --body-file 就在这里拼好再交给 prOpen
+// pnpm issue:new（62 秒）、再贴改标准凭据，纸面活加起来每个 PR 约 1–1.5 分钟。现在不给 --body-file 就在这里拼好再交给 prOpen
 // （pr-open.ts）——开 PR、挂单、挂里程碑、挂自动合并的闸一处不改，这里只管「正文从哪来」：
 // - 「做了什么」：这条分支相对 origin/<base> 的提交说明（只取第一行；一条就是一句话，多条列成短列表）。
 // - 「需求」：--closes <号> → Closes #号；--refs <号> → Refs #号（分片、关不了它）（合并收口认这几个字才不关母单）；--no-issue "<理由>" 照旧由 prOpen 写成「无：理由」；
 //   --new-issue "<标题>" 当场开一张单（复用 issue-new.ts 的 issueNew，类别 --kind、里程碑 --milestone 必须给，缺了拒开）并 Closes 它。
 //   这张单一律贴「本机做」（--local 加了不报错，也不多贴一次）：随 PR 开出的单已经有人在做，不靠人记得加 --local（#1199）。
-// - 改标准：--founder-quote "<原话>" --at "<时间>" 在「需求」栏下面另起一行写「人闸：改标准」、再写一段「创始人原话」，并等价于
-//   --founder-approved（旧的 --founder-approved 加手写段落照旧能用）。
+// - 改标准：--founder-consent 在「需求」栏下面另起一行写「人闸：改标准」、再写一行「改标准凭据」（引用授权那条引导的编号、
+//   时间和挂的单，不贴原话，决定 0123），并等价于 --founder-approved（旧的 --founder-approved 加手写那一行照旧能用）。
 // - 写码模型：分支上各提交带 Co-Authored-By: Claude … 尾注时，正文末尾写一行「**写码模型**：claude-haiku-5-5」（pnpm subagent:stats 靠它认 Haiku 开的 PR，#2821）；
 //   没有尾注不写；读不到尾注照开 PR、提示一句。
-// 给了 --body-file 就一字不动交给 prOpen（原有用法照旧）；生成用的参数和 --body-file 不能混着用，只有 --founder-quote 加 --at 例外：
-// 它们把「人闸：改标准」和「创始人原话」追加到自己写的正文末尾。
+// 给了 --body-file 就一字不动交给 prOpen（原有用法照旧）；生成用的参数和 --body-file 不能混着用，只有 --founder-consent 例外：
+// 它把「人闸：改标准」和「改标准凭据」追加到自己写的正文末尾。
 // 退出码同 prOpen：0 开成了；1 用法不对、没单或单有问题（什么也没做，--new-issue 的单在 PR 之前开，PR 没开不回滚单，照报）；
 // 2 没做成（提交说明读不到、路径清单读不到、gh 没跑成……）。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -20,7 +20,7 @@ import { parseArgs } from 'node:util';
 import { type Gh as IssueGh, issueNew } from './issue-new.ts';
 import { requireAxis } from './labels.ts';
 import { type Gh, loadPathLists } from './pr-arm.ts';
-import { founderQuoteLine, GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
+import { founderConsentLine, GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
 import { branchIssue, type OpenDeps, PR_OPEN_USAGE, prOpen } from './pr-open.ts';
 import { writerLine, writerModelsFromTrailers } from './subagent-stats.ts';
 
@@ -42,8 +42,8 @@ export interface BodyParts {
   did: readonly string[];
   closes: readonly number[];
   refs: readonly number[];
-  /** 创始人原话和时间：给了就写「人闸：改标准」和「创始人原话」。 */
-  founder?: { quote: string; at: string } | undefined;
+  /** 给了就写「人闸：改标准」和「改标准凭据」那一行（引用授权那条引导，不贴原话）。 */
+  founderConsent?: boolean;
   /** --new-issue：需求栏写明这张单已贴本机做、引擎不拉。 */
   withNewIssue?: boolean;
   /** 分支上各提交 Co-Authored-By 尾注里的写码模型（完整 id）：有就在正文末尾写一行「**写码模型**：…」，pnpm subagent:stats 靠它认 Haiku 开的 PR。 */
@@ -64,7 +64,7 @@ export function composeBody(p: BodyParts): string {
     ...p.closes.map((n) => `Closes #${n}`),
     ...p.refs.map((n) => `Refs #${n}（分片、关不了它）`),
     ...(p.withNewIssue ? [NEW_ISSUE_LOCAL_LINE] : []),
-    ...(p.founder ? [GATE_LINE] : []),
+    ...(p.founderConsent ? [GATE_LINE] : []),
   ];
   const lines = [
     `**做了什么**：${p.did.length === 1 ? did : `\n${did}`}`,
@@ -72,8 +72,8 @@ export function composeBody(p: BodyParts): string {
     `**${ISSUE_COLUMN}**：`,
     ...need,
   ];
-  if (p.founder) {
-    lines.push('', founderQuoteLine(p.founder.quote, p.founder.at));
+  if (p.founderConsent) {
+    lines.push('', founderConsentLine());
   }
   const writer = writerLine(p.writers ?? []);
   if (writer) lines.push('', writer);
@@ -81,7 +81,7 @@ export function composeBody(p: BodyParts): string {
 }
 
 /** 新单的正文：issue-new 要场景、原话、已知的模块、怎么算做完四节；这里能写的都从 PR 来，写不出的照它认的老实写法。 */
-export function composeIssueBody(title: string, did: readonly string[], quote: string | undefined): string {
+export function composeIssueBody(title: string, did: readonly string[]): string {
   const scene = did.map((s) => `- ${s.replace(/\s+/g, ' ').trim()}`).join('\n');
   return [
     '## 场景',
@@ -93,7 +93,7 @@ export function composeIssueBody(title: string, did: readonly string[], quote: s
     '',
     '## 原话',
     '',
-    quote === undefined ? '无（AI 发现）' : `「${quote.replace(/\s+/g, ' ').trim()}」`,
+    '无（AI 发现）',
     '',
     '## 已知的模块',
     '',
@@ -133,8 +133,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         local: { type: 'boolean' },
         domain: { type: 'string' },
         nature: { type: 'string' },
-        'founder-quote': { type: 'string' },
-        at: { type: 'string' },
+        'founder-consent': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
       strict: true,
@@ -178,16 +177,8 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
       );
       return 1;
     }
-    const q = typeof values['founder-quote'] === 'string' ? values['founder-quote'].trim() : undefined;
-    const t = typeof values.at === 'string' ? values.at.trim() : undefined;
-    if (values['founder-quote'] === undefined && values.at === undefined) return prOpen(argv, deps);
-    if (!q || !t) {
-      err(
-        '--founder-quote "<原话>" 和 --at "<时间>" 要一起给、都不能是空的（正文里要写明创始人哪天哪时说的）：什么也没做。',
-      );
-      return 1;
-    }
-    // 自己写的正文：人闸一行和原话追加到末尾，再交给 prOpen（等价于 --founder-approved）
+    if (values['founder-consent'] !== true) return prOpen(argv, deps);
+    // 自己写的正文：人闸一行和改标准凭据追加到末尾，再交给 prOpen（等价于 --founder-approved）
     const srcPath = isAbsolute(values['body-file'])
       ? values['body-file']
       : resolve(deps.cwd, values['body-file']);
@@ -203,7 +194,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
       const merged = join(tmp, 'body.md');
       writeFileSync(
         merged,
-        `${src.replace(/\r\n?/g, '\n').trimEnd()}\n\n${GATE_LINE}\n\n${founderQuoteLine(q, t)}\n`,
+        `${src.replace(/\r\n?/g, '\n').trimEnd()}\n\n${GATE_LINE}\n\n${founderConsentLine()}\n`,
       );
       return prOpen(
         [
@@ -294,14 +285,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
       return 1;
     }
   }
-  const quote = typeof values['founder-quote'] === 'string' ? values['founder-quote'].trim() : undefined;
-  const at = typeof values.at === 'string' ? values.at.trim() : undefined;
-  if ((values['founder-quote'] !== undefined || values.at !== undefined) && (!quote || !at)) {
-    err(
-      '--founder-quote "<原话>" 和 --at "<时间>" 要一起给、都不能是空的（正文里要写明创始人哪天哪时说的）：什么也没做。',
-    );
-    return 1;
-  }
+  const consent = values['founder-consent'] === true;
 
   // 「做了什么」：分支上的提交说明
   const base = typeof values.base === 'string' ? values.base : 'main';
@@ -344,7 +328,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         return 2;
       }
       const issueBody = join(dir, 'issue.md');
-      writeFileSync(issueBody, composeIssueBody(newIssue, did, quote));
+      writeFileSync(issueBody, composeIssueBody(newIssue, did));
       try {
         const r = await issueNew(
           [
@@ -379,7 +363,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         did,
         closes: closeNumbers,
         refs: refs.filter((n): n is number => n !== undefined),
-        founder: quote && at ? { quote, at } : undefined,
+        founderConsent: consent,
         withNewIssue: newIssue !== undefined,
         writers,
       }),
@@ -393,7 +377,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         ...axisArgs,
         ...(values.draft === true ? ['--draft'] : []),
         ...(typeof values.base === 'string' ? ['--base', values.base] : []),
-        ...(values['founder-approved'] === true || quote ? ['--founder-approved'] : []),
+        ...(values['founder-approved'] === true || consent ? ['--founder-approved'] : []),
         ...(values['no-automerge'] === true ? ['--no-automerge'] : []),
         ...(noIssue ? ['--no-issue', String(values['no-issue'])] : []),
       ],

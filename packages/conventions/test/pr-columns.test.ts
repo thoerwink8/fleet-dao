@@ -2,8 +2,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  founderQuote,
-  founderQuoteLine,
+  founderConsent,
+  founderConsentLine,
   GATE_LINE,
   issueColumnLinks,
   issueColumnRefs,
@@ -129,14 +129,14 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
     expect(prColumns(added).get('做了什么')).toBe('x');
   });
 
-  it('withIssueColumn：需求栏里手写的原话段、说明原样留着（#1890：改标准的 PR 靠它证明创始人同意过）', () => {
+  it('withIssueColumn：需求栏里手写的凭据行、说明原样留着（#1890：改标准的 PR 靠它证明创始人授权过）', () => {
     const body = [
       '**做了什么**：x',
       '',
       '**需求**：<!-- 提示 -->',
       '这块要改。',
       '',
-      '创始人原话（2026-10-11 03:48）：「触类旁通」',
+      founderConsentLine(),
       '',
       '**还欠什么**：无',
       '',
@@ -149,7 +149,7 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
         '**需求**：无：理由',
         '这块要改。',
         '',
-        '创始人原话（2026-10-11 03:48）：「触类旁通」',
+        founderConsentLine(),
         '',
         '**还欠什么**：无',
         '',
@@ -160,23 +160,24 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
 
   it('withIssueColumn：需求栏下面另起一行的「人闸：改标准」留着，后面的栏也不动', () => {
     const body =
-      '**做了什么**：x\n\n**需求**：<!-- 提示 -->\n人闸：改标准\n\n**创始人原话**：「可以」（2026-10-05 18:30）\n';
+      `**做了什么**：x\n\n**需求**：<!-- 提示 -->\n人闸：改标准\n\n${founderConsentLine()}\n`;
     const out = withIssueColumn(body, '无：理由');
     expect(out).toContain(`**需求**：无：理由\n${GATE_LINE}\n`);
     expect(out).not.toContain('提示');
-    expect(prColumns(out).get('创始人原话')).toBe('「可以」（2026-10-05 18:30）');
+    expect(out).toContain(founderConsentLine());
     expect(issueColumnRefs('**需求**：Closes #12\n人闸：改标准\n')).toEqual({ closes: [12], refs: [] });
   });
 
-  it('withIssueColumn：原话写在栏名那行冒号后面（`**需求**：创始人原话：「同意」`）也不吞（#1890 返工）', () => {
-    const body = '**做了什么**：x\n\n**需求**：创始人原话：「同意」（2026-10-11 03:48）\n';
+  it('withIssueColumn：凭据写在栏名那行冒号后面（`**需求**：改标准凭据：…`）也不吞（#1890 返工）', () => {
+    const bare = founderConsentLine().replace(/^\*\*/, '').replace('**', '');
+    const body = `**做了什么**：x\n\n**需求**：${bare}\n`;
     const out = withIssueColumn(body, '无：理由');
-    expect(out).toBe('**做了什么**：x\n\n**需求**：无：理由\n创始人原话：「同意」（2026-10-11 03:48）\n');
-    expect(prColumns(out).get('需求')).toBe('无：理由\n创始人原话：「同意」（2026-10-11 03:48）');
+    expect(out).toBe(`**做了什么**：x\n\n**需求**：无：理由\n${bare}\n`);
+    expect(prColumns(out).get('需求')).toBe(`无：理由\n${bare}`);
 
-    // 栏名那行既有原话又有模板提示：提示丢掉，原话留着
-    const mixed = withIssueColumn('**需求**：创始人原话：「同意」 <!-- 单号 -->\n', '无：理由');
-    expect(mixed).toBe('**需求**：无：理由\n创始人原话：「同意」\n');
+    // 栏名那行既有凭据又有模板提示：提示丢掉，凭据留着
+    const mixed = withIssueColumn(`**需求**：${bare} <!-- 单号 -->\n`, '无：理由');
+    expect(mixed).toBe(`**需求**：无：理由\n${bare}\n`);
   });
 
   it('旧模板的「怎么验证的」「还欠什么」（#1066 删）读旧 PR 正文时还认得出栏的边界，不吞进需求栏', () => {
@@ -206,36 +207,36 @@ describe('issueColumnLinks：合并收口和对账靠它分开「做完了没人
   });
 });
 
-describe('创始人原话（founderQuote）：pr-open 的 --founder-approved 和合并闸同用的判据', () => {
-  it('认 founderQuoteLine 写出来的那一行（pnpm pr:open --founder-quote 写的就是它）', () => {
-    const line = founderQuoteLine('我都同意。\n只要有益处', ' 2026-10-14 16:30 +0800 ');
-    expect(line).toBe('**创始人原话**：「我都同意。 只要有益处」（2026-10-14 16:30 +0800）');
-    expect(founderQuote(`**需求**：\nCloses #7\n${GATE_LINE}\n\n${line}\n`)).toEqual({
-      quote: '我都同意。 只要有益处',
-      at: '2026-10-14 16:30 +0800',
+describe('改标准凭据（founderConsent）：pr-open 的 --founder-approved 和合并闸同用的判据', () => {
+  it('认 founderConsentLine 写出来的那一行（pnpm pr:open --founder-consent 写的就是它）', () => {
+    const line = founderConsentLine();
+    expect(line).toBe('**改标准凭据**：引导 20261015054500（2026-10-15 05:45 +0800），挂单 #2361');
+    expect(founderConsent(`**需求**：\nCloses #7\n${GATE_LINE}\n\n${line}\n`)).toEqual({
+      directive: '20261015054500',
+      at: '2026-10-15 05:45 +0800',
+      issue: 2361,
     });
   });
 
-  it('手写的时间放在栏名后面、跟在别的栏名后面也认', () => {
-    expect(founderQuote('创始人原话（2026-10-05 15:00）：「可以」')).toEqual({
-      quote: '可以',
-      at: '2026-10-05 15:00',
+  it('跟在别的栏名后面、加粗可有可无也认', () => {
+    const bare = founderConsentLine().replace(/^\*\*/, '').replace('**', '');
+    expect(founderConsent(`**需求**：${bare}`)).toEqual({
+      directive: '20261015054500',
+      at: '2026-10-15 05:45 +0800',
+      issue: 2361,
     });
-    expect(founderQuote('**需求**：创始人原话(10-11 03:48):「修」')).toEqual({
-      quote: '修',
-      at: '10-11 03:48',
-    });
+    expect(founderConsent(bare)).toEqual({ directive: '20261015054500', at: '2026-10-15 05:45 +0800', issue: 2361 });
   });
 
-  it('【故意造出的失败】只有「原话」二字、原话或时间空、写在 HTML 注释里：都读不到', () => {
+  it('【故意造出的失败】旧的「创始人原话」、引导编号或挂的单对不上、写在 HTML 注释里：都读不到', () => {
     for (const body of [
-      '贴了原话',
-      '**创始人原话**：「」（2026-10-14）',
-      '**创始人原话**：「同意」（）',
-      '**创始人原话**：「同意」',
-      '<!-- **创始人原话**：「同意」（2026-10-14） -->',
+      '贴了凭据',
+      '**创始人原话**：「接下来都你拍板」（2026-10-15 05:45 +0800）',
+      '**改标准凭据**：引导 20260101000000（2026-10-15 05:45 +0800），挂单 #2361',
+      '**改标准凭据**：引导 20261015054500（2026-10-15 05:45 +0800），挂单 #1',
+      `<!-- ${founderConsentLine()} -->`,
     ]) {
-      expect(founderQuote(body), body).toBeUndefined();
+      expect(founderConsent(body), body).toBeUndefined();
     }
   });
 });

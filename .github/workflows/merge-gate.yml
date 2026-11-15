@@ -2,9 +2,9 @@ name: merge-gate
 # fleet-ci-policy-bridge: v1
 # 合并闸（#74；#444 起只留四样；#555-2 起加一条冷调用；#654 起草稿、冲突交给 GitHub 自己拦；#1114 / 决定 0023 起去掉先审后合；
 # 决定 0093 起判改标准）: 在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个——碰了改标准路径
-# （packages/conventions/standard-paths.json）的 PR 正文里要有创始人原话那一行；引擎任务 PR 当前头上有通过的 cold-verify
+# （packages/conventions/standard-paths.json）的 PR 正文里要有改标准凭据那一行（#3990，不贴原话，决定 0123）；引擎任务 PR 当前头上有通过的 cold-verify
 # （#555，合前一次冷调用）；别的只看 CI。判法在 packages/conventions/src/merge-gate.ts，design 第五节「流程只为快」「人闸第四类：改标准」。
-# 闸读 PR 改了哪些文件和正文（只认创始人原话那一行），不看标签、里程碑。
+# 闸读 PR 改了哪些文件和正文（只认改标准凭据那一行），不看标签、里程碑。
 # 三处触发（#654 起主线推送只在「闸认的东西」变了才触发：冲突不判了，别的主线推送什么都没变）：
 # - PR 事件用 pull_request_target：fork 来的 PR 在 pull_request 里拿不到写状态的令牌。
 #   这里跑的是主线上的代码、检出的是主线，不检出也不跑 PR 里的代码；PR 的分支名按 API 现读。
@@ -31,7 +31,7 @@ on:
         required: false
         default: ''
   pull_request_target:
-    # 头变了（opened、reopened、synchronize）、正文改了（edited：改标准的 PR 补上创始人原话要重算，不然闸一直红）时重算；
+    # 头变了（opened、reopened、synchronize）、正文改了（edited：改标准的 PR 补上同意凭据要重算，不然闸一直红）时重算；
     # 草稿、冲突、标签、里程碑不是输入（#654），不因此重算。
     # edited 也包括改标题、改目标分支，多算一次无妨。
     types: [opened, reopened, synchronize, edited]
