@@ -104,23 +104,38 @@ function summarizeProviders(providers) {
   return lines;
 }
 
+function shownSetting(raw) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'value' in raw && 'default' in raw) {
+    if (JSON.stringify(raw.value) === JSON.stringify(raw.default)) return undefined;
+    return raw.value;
+  }
+  return raw;
+}
+
+function formatSetting(value) {
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value == null) return 'null';
+  if (typeof value === 'string') {
+    if (EMAIL.test(value) || SECRET_TEXT.test(value) || value.length > 80) return '已略';
+    return value;
+  }
+  return '已略';
+}
+
 function summarizeSettings(settings) {
   const lines = ['## 设置', ''];
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
     lines.push('没有 settings.json。', '');
     return lines;
   }
-  const changed = [];
-  for (const [key, value] of Object.entries(settings)) {
+  const parts = [];
+  for (const [key, raw] of Object.entries(settings)) {
     if (SECRET_FIELD.test(key)) continue;
-    if (value && typeof value === 'object' && 'value' in value && 'default' in value) {
-      if (JSON.stringify(value.value) === JSON.stringify(value.default)) continue;
-      changed.push(key);
-      continue;
-    }
-    changed.push(key);
+    const value = shownSetting(raw);
+    if (value === undefined) continue;
+    parts.push(`${key}=${formatSetting(value)}`);
   }
-  lines.push(changed.length ? changed.join('、') : '没有和默认值不同的键。', '');
+  lines.push(parts.length ? parts.join('、') : '没有和默认值不同的键。', '');
   return lines;
 }
 
@@ -229,9 +244,18 @@ function selfTest() {
   for (const word of forbidden) {
     if (text.includes(word)) throw new Error(`自测把不该出现的内容打出来了：${word}`);
   }
-  for (const word of ['grok-pool', 'weight', 'demo/m-one=2', 'demo/m-two=1', 'token 15', '费用 1.5']) {
+  for (const word of [
+    'grok-pool',
+    'weight',
+    'demo/m-one=2',
+    'demo/m-two=1',
+    'token 15',
+    '费用 1.5',
+    'theme=dark',
+  ]) {
     if (!text.includes(word)) throw new Error(`自测缺少 ${word}`);
   }
+  if (text.includes('lang=')) throw new Error('自测把和默认值相同的设置打出来了');
   if (!text.includes('账号 2 个')) throw new Error('自测没有账号个数');
   if (!text.includes('封顶 70%')) throw new Error('自测没有封顶');
   console.log('自测通过');
@@ -268,6 +292,7 @@ function summarizeFixture(now) {
     ...summarizeSettings({
       theme: { value: 'dark', default: 'light' },
       lang: { value: 'zh', default: 'zh' },
+      apiKey: 'fixture-secret-value',
     }),
   );
   lines.push(...summarizeLibrary({ skills: [{ name: 'fleet-rule' }], mcp: [{ name: 'local-tool' }] }));

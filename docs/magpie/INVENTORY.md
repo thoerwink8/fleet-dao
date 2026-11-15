@@ -4,7 +4,7 @@
 
 能写死的来自决定 0128、讨论稿 4026、公开单 #4027 / #4033、`docs/ops.md`，以及法国这台 `/opt/magpie/magpie` 的版本 `0.1.4263` 的帮助。在跑的配置在用户 `magpie` 的家里，目录权限 `750`。本会话不是这个用户，打不开 `providers.json`、`library.json`、`settings.json` 和 `usage.jsonl`。表里写「未查到」的，就是这几份文件里的实数，没有用空配置或讨论稿去填。
 
-有权限的人可以用 `install/magpie-inventory.sh --config <配置目录>` 把同一份目录收成不含密钥、邮箱和账号 ID 的摘要。2026-11-16 对本机 magpie 家目录跑过，退出码 2，读不到目录。下面的表因此没有换成那次输出。
+有权限的人可以用 `install/magpie-inventory.sh --config <配置目录>` 把同一份目录收成不含密钥、邮箱和账号 ID 的摘要。设置段打 `键=当前值`（和默认值相同的略去，密钥字段不打）。2026-11-16 对本机 magpie 家目录又跑过，退出码 2，读不到目录。全盘能遍历到的地方没有第二份 `providers.json`、`library.json` 或 `usage.jsonl`。网关不带钥匙返回 401，加入接口是关的。下面的表因此仍没有实数。
 
 ## 供应商
 
@@ -61,7 +61,7 @@ WorkBuddy（中国版 provider id `workbuddy`，国际版 `workbuddy-ai`）和 R
 
 在跑的设置是配置目录里的 `settings.json`。`magpie settings list` 打出每个键的当前值和默认值。
 
-空目录里这条命令打出的是程序默认值（`0.1.4263` 有 `theme`、`lang`、`workbuddyCheckin`、`redact` 等 90 个键）。那不是法国这台网关改过的值，不抄进这张表。在跑的键和当前值：未查到。
+空目录里这条命令打出的是程序默认值（`0.1.4263` 有 `theme`、`lang`、`workbuddyCheckin`、`redact` 等 90 个键）。那不是法国这台网关改过的值，不抄进这张表。在跑的键和当前值：未查到。清单脚本读到 `settings.json` 时会打非密钥字段的当前值；这次没有文件可打。
 
 ## 配置目录文件名
 
