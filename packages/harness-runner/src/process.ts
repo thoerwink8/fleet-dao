@@ -1,6 +1,6 @@
 // 起一个执行体进程（新内核所有子进程只走这一个起法，旧坑 A5）：提示词从 stdin 喂完就关，stdout 按行判帧。
 // 从旧 adapters/src/process.ts 复制改写，按旧坑改了四处：
-// - 起步看实质事件，不看第一行（A1）：只吐「Syncing config…」或 init 不算起来；
+// - 起步看实质事件，不看第一行（A1）：只吐「Syncing config…」或 init 不算起来；startupMs 从第一帧起算；
 // - 截止是上层给的绝对时刻（A2、A4）：到点的原因写「总时限 N 用完、停在哪一步」，外层同时叫停也不盖掉它；
 // - init 里的会话号交给调用方登记，续会话时对不上就判冲突、停掉这一个（A3）；
 // - 输出、stderr 一律过脱敏器再交出去（H1）。
@@ -85,6 +85,9 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
     const host = spec.host ?? defaultHost();
     let proc: HostProcess | undefined;
     const timers: NodeJS.Timeout[] = [];
+    // 起步时限从进程真起来再开始计：启动本身花的时间不算进 startupMs。
+    // 否则忙机上进程还没吐出第一帧，定时器已经到点，会话冲突被记成起来后无进展。
+    let started = false;
     let stderrTail = '';
     let lines = 0;
     let lastStep = '还没有输出';
@@ -140,6 +143,16 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       timers.push(setTimeout(() => proc?.stop('kill'), spec.budget.killGraceMs));
     };
     const deadlineDetail = () => `总时限 ${fmtMs(spec.deadline.getTime() - t0)}用完、停在「${lastStep}」`;
+    // 起步时限从第一帧开始计，不从调用时刻计（启动本身花的时间不算进去）。
+    const arm = () => {
+      timers.push(
+        setTimeout(() => {
+          if (firstProgressMs === undefined) {
+            kill('no_progress', `起来 ${fmtMs(spec.budget.startupMs)} 内没有实质事件，停在「${lastStep}」`);
+          }
+        }, spec.budget.startupMs),
+      );
+    };
     const onAbort = () => {
       // 外层到点和本层到点同时发生时，原因写时限，不写「被叫停」（A2）
       if (Date.now() >= spec.deadline.getTime()) return kill('deadline', deadlineDetail());
@@ -247,7 +260,13 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       // 执行体提前退出时写 stdin 会 EPIPE，结果以退出码和输出为准
     });
     child.stdin.end(spec.stdin);
-    splitter = readLines(child.stdout, handleLine);
+    splitter = readLines(child.stdout, (line) => {
+      if (!started) {
+        started = true;
+        arm();
+      }
+      handleLine(line);
+    });
     child.stderr.on('data', (chunk: Buffer) => {
       stderrTail = (stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL);
     });
@@ -272,14 +291,8 @@ export function runProcess(spec: RunSpec, hooks: RunHooks = {}): Promise<RunResu
       maybeFinish();
     });
 
-    timers.push(
-      setTimeout(() => {
-        if (firstProgressMs === undefined) {
-          kill('no_progress', `起来 ${fmtMs(spec.budget.startupMs)} 内没有实质事件，停在「${lastStep}」`);
-        }
-      }, spec.budget.startupMs),
-      setTimeout(() => kill('deadline', deadlineDetail()), spec.deadline.getTime() - t0),
-    );
+    // 总时限从调用时刻起算（截止是绝对时刻）；起步时限等第一帧再开始计。
+    timers.push(setTimeout(() => kill('deadline', deadlineDetail()), spec.deadline.getTime() - t0));
     const idleMs = spec.budget.idleMs;
     if (idleMs !== undefined) {
       const every = Math.max(20, Math.min(1_000, Math.floor(idleMs / 5)));
