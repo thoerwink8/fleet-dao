@@ -2,6 +2,7 @@
 // 先续本会话未完成工作并注入工人终态，后台任务条数不作为通知送达证明；无人值守开着（on）才做队列对账。
 // 起子代理、后台活不自动开；成功完成的新工作才重置无进展计数，三次无进展明确故障暂停。
 // 引擎的无头会话（FLEET_HEADLESS=1）、机器派的会话（工人、反方）直接放行。
+// mirasim 托管的会话（MIRASIM_SESSION_KEY）开着也不拦收轮（#4013）：接续靠子会话回报和定时心跳。
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
 // 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：不在 fleet-dao 检出里、又没开无人值守时，输出里出现 decision 或 hookSpecificOutput 会红。
 
@@ -104,7 +105,7 @@ export async function runStop(expectedCli) {
         noteReceipt(context, { phase: 'fault', decision: 'results_unknown' });
         notes.push(`后台完成结果没查成：${String(err)}`);
       }
-      const un = decideStop({ dir, sessionId, pending: pendingOf(input), completions });
+      const un = decideStop({ dir, sessionId, pending: pendingOf(input), completions, env: process.env });
       if (un.block) {
         const results = completions
           .filter((c) => !(initial?.ok ? (initial.state?.deliveredResults ?? []) : []).includes(c.key))
@@ -145,7 +146,9 @@ export async function runStop(expectedCli) {
                   ? 'expired'
                   : un.notice
                     ? 'paused'
-                    : 'not_on',
+                    : state?.state === 'on'
+                      ? 'mirasim_hosted'
+                      : 'not_on',
       });
     }
   } catch (err) {

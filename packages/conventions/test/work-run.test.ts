@@ -514,6 +514,8 @@ describe('pnpm work run：派之前过容量、领单、建工作树，经脱离
         CODEX_HOME: codexHome,
         FLEET_HEADLESS: '',
         FLEET_WORKER: '',
+        // 夹具会话不是 mirasim 托管的；留着宿主的标记会让 Stop 不挡（#4013）
+        MIRASIM_SESSION_KEY: '',
         FLEET_UNATTENDED_DIR: join(temp(), 'unattended'),
         FLEET_WORK_RUNS_DIR: w.runs,
       };

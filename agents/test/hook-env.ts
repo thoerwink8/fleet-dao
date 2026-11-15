@@ -3,6 +3,8 @@ export function interactiveHookEnv(inherited: NodeJS.ProcessEnv = process.env): 
   const {
     FLEET_HEADLESS: _headless,
     FLEET_WORKER: _worker,
+    // mirasim 托管标记跟着启动测试的宿主走，不该让夹具里的会话被当成托管的（#4013）
+    MIRASIM_SESSION_KEY: _mirasim,
     CLAUDE_CODE_SESSION_ID: _claude,
     CODEX_THREAD_ID: _thread,
     CODEX_SESSION_ID: _session,

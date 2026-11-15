@@ -902,7 +902,7 @@ function unattendedSessionLines({ dir, sessionId, agentId, cwd, env, now }) {
   const authority = unattendedAuthority({ env, cwd, hookId: sessionId, agentId });
   if (authority.kind === 'machine') return [];
   if (authority.kind === 'unknown') return [`无人值守身份没查成（${authority.code}），未读取父会话状态。`];
-  return unattendedLines({ dir: dir ?? stateDir(env), sessionId: session.id, now });
+  return unattendedLines({ dir: dir ?? stateDir(env), sessionId: session.id, now, env });
 }
 
 /** localGit 只跑本地命令（找临时调整表），限时比取远端短 */

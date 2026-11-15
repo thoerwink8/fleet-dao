@@ -56,6 +56,8 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
     FLEET_WORK_RUNS_DIR: join(dir, 'runs'),
     FLEET_WORKER: '',
     FLEET_HEADLESS: '',
+    // 夹具会话不是 mirasim 托管的；留着宿主的标记会让 Stop 不挡（#4013）
+    MIRASIM_SESSION_KEY: '',
     CLAUDE_CODE_SESSION_ID: cli === 'claude' ? sid : '',
     CODEX_THREAD_ID: cli === 'codex' ? sid : '',
     CODEX_SESSION_ID: '',

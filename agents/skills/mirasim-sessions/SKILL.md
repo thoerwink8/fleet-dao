@@ -28,7 +28,8 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 
 ## 指挥会话自己
 
-- 派完就收轮。回报是作为新消息排进指挥会话的队列的，指挥会话一轮不结束，回报就进不来；无人值守的 Stop 钩子把轮续下去，也会卡住回报。
+- 派完就收轮。回报是作为新消息排进指挥会话的队列的，指挥会话一轮不结束，回报就进不来。
+- 进无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 照样跑，mirasim 托管的会话它不拦收轮；同时开一个 30 分钟心跳定时任务（`mcp__mirasim__schedule_task`，`cron` 用 `*/30 * * * *`，`prompt` 写清「无人值守心跳：查子会话回报和队列，有活就接着派」，`once` 不设）。`on` 不排心跳，心跳没排上就收轮，这个会话没人叫醒。接续就靠子会话回报和这个心跳。收工（`unattended.mjs done`）后把心跳定时任务停掉。
 - 会话太长要换棒：照 `commander-handoff`。
 - 不轮询。要看状态用 `getTurnFacts`（给 `taskId`）或小 `limit` 的 `listSessions`；mirasim 的返回常常很大，只抽要的字段。
 

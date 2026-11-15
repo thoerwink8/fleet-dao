@@ -4,6 +4,7 @@
 //    退出码恒为 0，输出里不许有 decision（会拦下 Stop）、不许有 hookSpecificOutput（additionalContext 会让对话接着走）。
 // 2. 决定 0028（创始人 2026-10-07 约 02:27 推翻 0026 的「这一轮结束、收尾不拦」）：只有这个会话自己跑了 `on` 才挡；
 //    起子代理、监视、后台命令不自动开；off、done / needs-you、满 12 小时、总次数到上限都放行。
+//    mirasim 托管的会话（MIRASIM_SESSION_KEY）例外（#4013）：开着也不拦收轮，接续靠子会话回报和定时心跳。
 // 3. 无人值守未完成工作同步续轮；后台条数不能证明送达。成功新工作重置无进展计数，三次无进展明确暂停故障。
 // 命令行外壳：真 spawn 这个文件，喂 stdin，看退出码和 stdout——测的是钩子实际接到 Claude Code 输入时的样子，不是内部函数。
 // 这份文件每条都要起真的 node 子进程（本机实测一条 0.4 秒上下；满载并行跑时更慢），默认 5 秒的超时会误红（#718：13 个子进程 6057ms）。
@@ -433,12 +434,39 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     });
   });
 
+  it('mirasim 托管的会话（MIRASIM_SESSION_KEY）：on 不挡收轮，on 的回话改说靠回报和心跳（#4013）', () => {
+    const dir = temp('state');
+    const env = {
+      ...isolatedEnv(dir, SID),
+      MIRASIM_SESSION_KEY: 'claude:01234567-89ab-cdef-0123-456789abcdef',
+    };
+    const turned = cli(['on'], env);
+    expect(turned.status).toBe(0);
+    expect(turned.stdout).toContain('mirasim 托管');
+    expect(turned.stdout).toContain('不拦收轮');
+    expect(turned.stdout).not.toContain('经同步 Stop');
+    const r = stop(env, { stop_hook_active: true, background_tasks: [{ id: 'w', type: 'subagent' }] });
+    expect(r.status).toBe(0);
+    expect(blocked(r.stdout)).toBe(false);
+    expect(readS(dir).totalBlocks).toBe(0);
+    // 不是 mirasim 托管的同一会话照旧挡，判据只认这一个变量
+    const plain = isolatedEnv(dir, SID);
+    expect(blocked(stop(plain).stdout)).toBe(true);
+  });
+
+  it('MIRASIM_SESSION_KEY 认不出（不是 mirasim 写的样子）：不当成托管，照旧挡', () => {
+    const dir = temp('state');
+    const env = { ...isolatedEnv(dir, SID), MIRASIM_SESSION_KEY: 'not a session key' };
+    expect(cli(['on'], env).stdout).toContain('经同步 Stop');
+    expect(blocked(stop(env).stdout)).toBe(true);
+  });
+
   it('开会话钩子读得到：开着给一句话（有东西在跑可以结束、等完成通知；什么都没在跑不要空着收尾）、暂停给一句话、没开什么都不给', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
     // 经子进程调 sessionLines：.mjs 没有类型声明，不在 TS 里直接 import
     const lines = (): string[] => {
-      const code = `import { sessionLines } from ${JSON.stringify(UNATTENDED_URL)}; console.log(JSON.stringify(sessionLines({ dir: process.env.FLEET_UNATTENDED_DIR, sessionId: process.env.CLAUDE_CODE_SESSION_ID })));`;
+      const code = `import { sessionLines } from ${JSON.stringify(UNATTENDED_URL)}; console.log(JSON.stringify(sessionLines({ dir: process.env.FLEET_UNATTENDED_DIR, sessionId: process.env.CLAUDE_CODE_SESSION_ID, env: {} })));`;
       const r = runChild(process.execPath, ['--input-type=module', '-e', code], { env });
       expect(r.status, r.stderr).toBe(0);
       return JSON.parse(r.stdout.trim());

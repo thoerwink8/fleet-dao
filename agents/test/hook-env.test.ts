@@ -19,11 +19,13 @@ describe('交互钩子夹具不借启动测试的会话身份', { timeout: 0 }, 
       CODEX_THREAD_ID: 'host-codex-child',
       CODEX_SESSION_ID: 'host-codex-parent',
       CODEX_HOME: 'host-codex-home',
+      MIRASIM_SESSION_KEY: 'pi:host-mirasim-session',
       FLEET_HEADLESS: '1',
       FLEET_WORKER: '1',
     };
     const before = { ...inherited };
     expect(interactiveHookEnv(inherited)).toEqual({ PATH: 'fixture-tools' });
+    expect(interactiveHookEnv(inherited)).not.toHaveProperty('MIRASIM_SESSION_KEY');
     expect(inherited).toEqual(before);
   });
 

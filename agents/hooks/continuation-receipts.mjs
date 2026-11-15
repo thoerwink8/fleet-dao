@@ -56,6 +56,7 @@ const DECISIONS = new Set([
   'state_unknown',
   'results_unknown',
   'not_on',
+  'mirasim_hosted',
   'expired',
   'paused',
   'queue',

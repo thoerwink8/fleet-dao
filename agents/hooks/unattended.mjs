@@ -15,6 +15,8 @@
 //   非法来源不借别的会话号兜底。别的会话、别的机器、工人和反方（机器派的会话，on 直接拒）都不受影响。
 //   起子代理、监视、后台命令不自动开。会话号拿不到，on 明确失败。
 // - 放行：off、done / needs-you、12 小时到期；无进展/总次数到上限明确 paused 故障，不再仍标 on 却结束。
+// - mirasim 托管的会话（环境有它自己写的 MIRASIM_SESSION_KEY）不拦收轮（#4013）：子会话回报只有一轮结束才送得进来，
+//   接续靠回报和定时心跳，不靠把轮续住。
 // - background_tasks/session_crons 只说明登记存在，不证明完成通知会送达；开着时先同步续轮，显式等待并消费结果。
 // - 只有成功 PostToolUse 的新写入、验证、提交、收工才重置连续无进展计数；重复动作、sleep 和查询状态不算。
 // - 数值上限不扩大；故障暂停保留未完成状态，避免无限循环烧额度。
@@ -298,6 +300,17 @@ export function isMachineSession({ env = process.env, cwd } = {}) {
   return typeof cwd === 'string' && MACHINE_TREE.test(cwd);
 }
 
+/**
+ * mirasim 托管的会话：它启动每个 agent 进程都写 MIRASIM_SESSION_KEY（<agent>:<u8bbe置里的会话号>），
+ * 本机 mirasim 0.0.796 的源码里起进程都走这个变量。这种会话的接续靠子会话回报和定时心跳，不靠 Stop 挡回收轮：
+ * 轮收不掉，排进队列的回报就送不进来（#4013，2026-11-14 夜里实测）。只认它自己写的这一个变量，不按别的环境猜。
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function isMirasimHosted(env = process.env) {
+  const key = env.MIRASIM_SESSION_KEY;
+  return typeof key === 'string' && /^[a-z0-9]+:[\w-]{4,128}$/.test(key);
+}
+
 /** 必经身份闸：Codex当前来源未知时不读写无人值守，不借父会话状态；不充当hook根回合的消费证明。
  * @param {{ env?: NodeJS.ProcessEnv, cwd?: unknown, hookId?: unknown, agentId?: unknown, expectedCli?: 'codex'|undefined }} [opts]
  * @returns {{ kind: 'allowed'|'machine'|'unknown', code: string }}
@@ -313,14 +326,18 @@ export function unattendedAuthority({ env = process.env, cwd, hookId, agentId, e
 
 /**
  * 开会话钩子读的那一句：这个会话的无人值守开着（上下文被总结、重启之后还知道）；没开、读不了都是空数组。
- * @param {{ dir: string, sessionId: unknown, now?: number }} opts
+ * @param {{ dir: string, sessionId: unknown, now?: number, env?: Record<string, string | undefined> }} opts
  * @returns {string[]}
  */
-export function sessionLines({ dir, sessionId, now = Date.now() }) {
+export function sessionLines({ dir, sessionId, now = Date.now(), env = process.env }) {
   const r = readState(dir, sessionId);
   if (!r.ok) return [`无人值守状态${r.why}：收尾不再被挡住，这句只是没查成。`];
   const s = r.state;
   if (s === null || s.auto === true || now > Date.parse(s.expiresAt)) return [];
+  if (isMirasimHosted(env) && s.state === 'on')
+    return [
+      `无人值守开着（到 ${fmt(s.expiresAt)}），这个会话由 mirasim 托管：Stop 不拦收轮，子会话的回报要这一轮结束才送得进来。接续靠子会话回报和 30 分钟心跳定时任务；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
+    ];
   if (s.state === 'on')
     return [
       `无人值守开着（到 ${fmt(s.expiresAt)}）：未完成工作必须接到下一轮；有后台任务先用本 CLI 的阻塞等待工具收结果，不能只凭任务存在就结束。有实质进展才重置防空转计数；连续无进展会明确故障暂停。有进展就 pnpm progress note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
@@ -369,7 +386,7 @@ export function pendingOf(input) {
  * Stop 钩子要不要挡。返回 { block: true, reason } 或 { block: false, notice? }（notice 给 systemMessage，只在要说话时有）。
  * pending 只用于提示，不凭任务条数放行；completions 是可消费的本会话工人终态。
  * 不抛：任何一步出错都放行并写明。
- * @param {{ dir: string, sessionId: unknown, now?: number, pending?: Pending, completions?: { key: string, text: string }[] }} opts
+ * @param {{ dir: string, sessionId: unknown, now?: number, pending?: Pending, completions?: { key: string, text: string }[], env?: Record<string, string | undefined> }} opts
  * @returns {{ block: true, reason: string } | { block: false, notice?: string }}
  */
 export function decideStop({
@@ -378,9 +395,13 @@ export function decideStop({
   now = Date.now(),
   pending = { tasks: null, crons: null },
   completions = [],
+  env = process.env,
 }) {
   try {
     if (!cleanId(sessionId)) return { block: false };
+    // mirasim 托管的会话不拦收轮（#4013）：子会话回报排进队列，只有这一轮结束才送进来；
+    // 接续靠回报和定时心跳，不靠把轮续住。不改状态、不计次数。
+    if (isMirasimHosted(env)) return { block: false };
     const r = readState(dir, sessionId);
     if (!r.ok) {
       return {
@@ -572,7 +593,9 @@ export function main(argv, io) {
         },
       );
       io.out(
-        `无人值守状态已记 on，到 ${fmt(expiresAt)}；这只记录意图，不代表 Stop 已登记、信任或执行验证。Claude/Codex 未完成工作经同步 Stop 进入下一轮，后台任务先显式等待并消费结果，不能凭条数结束。成功的新工作重置计数，连续 ${MAX_STREAK} 次无实质进展明确故障暂停。其他 CLI 尚未接通时不得声称接续成功。做完 done、要他拍板 needs-you、他说停 off。`,
+        isMirasimHosted(env)
+          ? `无人值守状态已记 on，到 ${fmt(expiresAt)}。这个会话由 mirasim 托管：Stop 不拦收轮，接续靠子会话回报和 30 分钟心跳定时任务（mcp__mirasim__schedule_task，cron 间隔不少于 10 分钟）。这只记录意图，不代表心跳已经排上；心跳没排上，收了轮就没人叫醒这个会话。做完 done、要他拍板 needs-you、他说停 off。`
+          : `无人值守状态已记 on，到 ${fmt(expiresAt)}；这只记录意图，不代表 Stop 已登记、信任或执行验证。Claude/Codex 未完成工作经同步 Stop 进入下一轮，后台任务先显式等待并消费结果，不能凭条数结束。成功的新工作重置计数，连续 ${MAX_STREAK} 次无实质进展明确故障暂停。其他 CLI 尚未接通时不得声称接续成功。做完 done、要他拍板 needs-you、他说停 off。`,
       );
       return 0;
     }
