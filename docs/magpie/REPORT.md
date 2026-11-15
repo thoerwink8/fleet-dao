@@ -21,3 +21,5 @@
 核对和准备目录的脚本在仓库的 `install/magpie-verify`、`install/magpie-bootstrap`，对照 `templates/magpie-expected.json`。
 
 2026-11-16 法国程序版本是 `0.1.4263`。在跑的配置目录属主是用户 `magpie`，权限 `750`。本会话没有读到组成员、workbuddy 与 raccoon 的账号个数和封顶、资源库正在下发的名单、在跑的 `settings.json`、近 30 天用量合计，也没有改那份配置。公开单 #4033 写过的组 id 记在 [INVENTORY.md](INVENTORY.md)，标了出处。
+
+同一天加了 `install/magpie-inventory.sh`。它只读配置目录，汇总路由组、账号个数和封顶、资源库名字、改过的设置键、近 30 天 token 和费用，并去掉密钥、邮箱和账号 ID。自测用假数据。对着 magpie 家目录跑，因为权限退出 2，清单里的表没有改成那次输出。
