@@ -13,7 +13,7 @@
 ## 决定
 
 1. **法国 VPS 上的 magpie 是唯一的模型网关**。用 `magpie web` 带网页配置界面（不用只开网关的模式），网关和网页都只在 WireGuard 内网可达，创始人从本机浏览器经内网直接改配置。订阅号（Grok、Cursor、Devin）也登在这里。
-2. **各机器经香港内网用一把各自的 key 访问法国 magpie**。本机再装一层 magpie，只放本机独有的（reclaude 的 Claude 用量、Antigravity）和兜底用的直连中转站 key；公司电脑同样再加公司 key。公司电脑走法国 magpie 允许。
+2. **各机器用一把各自的调用 key 访问法国 magpie 的路由组**（如工程组）。本机经 WireGuard 内网访问；不在内网里的机器（公司电脑）经香港 VPS 对外的 HTTPS 入口访问，入口只放行网关的模型接口、凭调用 key 认证，网页配置界面不经这个入口。本机再装一层 magpie，只放本机独有的（reclaude 的 Claude 用量、Antigravity）和兜底用的直连中转站 key。公司电脑在自己的 mirasim 里把法国工程组当一个模型档案来用，创始人允许。
 3. **不上 VPS 的**：Antigravity（Gemini）只在本机经 agy 用；Claude 只走 reclaude。
 4. **新仓（私有）**只放 magpie 加密配置、装机脚本（omp 锁版本、mirasim 的 omp 接法、WireGuard 接入）和基础设施凭证（同一口令加密），不放代码。规矩、技能、指令改由 magpie 资源库下发。
 5. **fleet-dao 和 vault 在法国引擎迁进 fleet-ade 之后归档**（只读、可恢复，不删）。迁完前照 0126 只修不加。
