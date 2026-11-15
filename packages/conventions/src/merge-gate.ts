@@ -1,15 +1,16 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
 // 判红的输入：
 // - 改标准（人闸第四类，design 第五节「人闸第四类：改标准」）：PR 改到的文件（含改名前的名字）落进 standard-paths.json 的清单，
-//   正文里却没有创始人同意的记录（「创始人原话」那一行，原话、时间都不能空；认法是 pr-columns.ts 的 founderQuote，
-//   pnpm pr:open --founder-quote 写出来的就是它）。清单用跑这段代码的那一份（主线的）：PR 改不了自己的门槛。
+//   正文里却没有创始人同意的凭据（「改标准凭据」那一行，引用授权那条引导的编号和时间、挂的单；认法是 pr-columns.ts 的
+//   founderConsent，pnpm pr:open --founder-consent 写出来的就是它）。原话不进公开 PR（决定 0123，#3990）。
+//   清单用跑这段代码的那一份（主线的）：PR 改不了自己的门槛。
 // - 引擎任务工作流（#632）开的 PR（分支 fleet/<单号>-t<8 位>）当前头上要有通过的 cold-verify（合前一次冷调用，换家族验
 //   「单子说要的东西真做了没有」，#555-2）——**闸只读这条状态，不在这里起模型调用**（判法要确定，同一份代码什么时候跑
 //   结果都一样，design 第五节）；冷调用在装配侧（引擎）跑、结论贴成状态。别的 PR 不验，也就没有这条状态——
 //   那是「不用验」，不是「没验成」，两者在 coldVerifyNeed 里分开。
 // 本机 local 分支的显式受信退回由 readFeedback 判；未解决或读不到均不清绿。
 // 草稿、冲突 GitHub 自己拦。读不到、认不出（PR、文件列表、清单、提交状态）写 failure（没查成）。
-// merge-gate.yml 在 PR 事件（头变了、正文改了——补上原话要重算）或 cold-verify 状态写上来时跑它（后一种逐个重算所有开着的 PR）；
+// merge-gate.yml 在 PR 事件（头变了、正文改了——补上凭据要重算）或 cold-verify 状态写上来时跑它（后一种逐个重算所有开着的 PR）；
 // 主线推送只在闸认的东西（判法、清单、工作流本身）变了才触发、同样重算所有开着的 PR——判法收紧了，开着的 PR 上旧的 success
 // 不能留着（#654 第二意见）；不检出、不跑 PR 里的代码：判法和清单用跑这段代码的那一份（主线的）。
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -33,7 +34,7 @@ import {
   GATE_CONTEXT,
   statusDescription,
 } from './merge-gates.ts';
-import { founderQuote } from './pr-columns.ts';
+import { founderConsent } from './pr-columns.ts';
 import { type ChangedFile, type StandardPath, standardFiles } from './standard-paths.ts';
 import { loadStandardPaths } from './standard-paths-file.ts';
 
@@ -274,7 +275,7 @@ export interface LiveMeta {
   /** PR 的分支名（head.ref）：认「引擎任务工作流开的 PR」用。 */
   headRef: string;
   open: boolean;
-  /** PR 正文（空正文 GitHub 给 null，当成空串）：认改标准的创始人原话用。 */
+  /** PR 正文（空正文 GitHub 给 null，当成空串）：认改标准的同意凭据用。 */
   body: string;
 }
 
@@ -343,7 +344,7 @@ interface Verdict {
   lines: string[];
 }
 
-/** 改标准这一样：碰没碰清单、碰了正文里有没有创始人原话。读不到、认不出是没查成。 */
+/** 改标准这一样：碰没碰清单、碰了正文里有没有同意凭据。读不到、认不出是没查成。 */
 async function standardVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict> {
   const notChecked = (why: string): Verdict => ({ ok: false, notChecked: true, lines: [`没查成：${why}。`] });
   let list: StandardPath[];
@@ -367,19 +368,19 @@ async function standardVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict>
   const hits = standardFiles(files, list);
   if (hits.length === 0) return { ok: true, notChecked: false, lines: [] };
   const named = hits.map((h) => h.file).join('、');
-  const quote = founderQuote(meta.body);
-  if (!quote)
+  const consent = founderConsent(meta.body);
+  if (!consent)
     return {
       ok: false,
       notChecked: false,
       lines: [
-        `改标准缺创始人原话：碰了 ${named}；正文要有一行 **创始人原话**：「<原话>」（<时间>）（pnpm pr:open --founder-quote 写的就是）。`,
+        `改标准缺同意凭据：碰了 ${named}；正文要有一行 **改标准凭据**：引导 <编号>（<时间>），挂单 #<单号>（pnpm pr:open --founder-consent 写的就是；原话不进公开 PR，决定 0123）。`,
       ],
     };
   return {
     ok: true,
     notChecked: false,
-    lines: [`改标准：碰了 ${named}，正文贴了创始人原话（${quote.at}）。`],
+    lines: [`改标准：碰了 ${named}，正文引用了引导 ${consent.directive}（挂单 #${consent.issue}）。`],
   };
 }
 
@@ -438,7 +439,7 @@ async function managedVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict> 
 }
 
 /**
- * 判一个 PR。只读，不写状态。判红只有：碰了改标准路径、正文里没有创始人原话；引擎任务 PR 当前头上没有通过的 cold-verify；
+ * 判一个 PR。只读，不写状态。判红只有：碰了改标准路径、正文里没有改标准的同意凭据；引擎任务 PR 当前头上没有通过的 cold-verify；
  * 读不到、认不出（没查成）。草稿、冲突 GitHub 自己就合不了，这里不判（#654）。
  */
 export async function gatePr(number: number, deps: GateDeps): Promise<GateResult> {

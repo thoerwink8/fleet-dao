@@ -340,7 +340,7 @@ describe('wait.mjs pr 合并闸真实运输（#3173）', () => {
 
   it.each([
     '验收没过：cold-verify 是 failure',
-    '改标准缺创始人原话：docs/design.md',
+    '改标准缺同意凭据：docs/design.md',
     '等验收：cold-verify pending（另有 1 条，点详情看）',
     null,
   ])('真实拒绝或多理由仍红：%s', (description) => {

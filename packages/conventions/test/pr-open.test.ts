@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { allGreen, armable, type Gh, idlePrs, loadPathLists, type RunResult } from '../src/pr-arm.ts';
+import { founderConsentLine } from '../src/pr-columns.ts';
 import { parseCreatedPr, pickGitCwd, prOpen } from '../src/pr-open.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -224,21 +225,21 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
     expect(verbs(w.calls)).not.toContain('pr merge');
   });
 
-  it('改标准 + --founder-approved、正文贴了原话：挂', () => {
-    const w = world(
-      [CREATED, files('agents/shared-rules.md'), ok()],
-      `${BODY}\n创始人原话（2026-10-05 15:00）：「可以」\n`,
-    );
+  it('改标准 + --founder-approved、正文贴了凭据：挂', () => {
+    const w = world([CREATED, files('agents/shared-rules.md'), ok()], `${BODY}\n${founderConsentLine()}\n`);
     expect(w.run('--founder-approved')).toBe(0);
     expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
-    expect(w.text()).toContain('正文里贴了创始人原话');
+    expect(w.text()).toContain('正文引用了同意凭据');
   });
 
-  it('【故意造出的失败】--founder-approved 但正文没有「原话」：退出码 1，一次 gh 都不跑', () => {
+  it('【故意造出的失败】--founder-approved 但正文没有凭据（贴了旧的「创始人原话」也不算）：退出码 1，一次 gh 都不跑', () => {
     const w = world([]);
     expect(w.run('--founder-approved')).toBe(1);
     expect(w.calls).toEqual([]);
-    expect(w.text()).toContain('原话');
+    expect(w.text()).toContain('改标准凭据');
+    const old = world([], `${BODY}\n**创始人原话**：「可以」（2026-10-05 15:00）\n`);
+    expect(old.run('--founder-approved')).toBe(1);
+    expect(old.calls).toEqual([]);
   });
 
   it('草稿、--no-automerge：开 PR 不挂', () => {
@@ -441,9 +442,8 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、PR 不挂里程碑', ()
     }
   });
 
-  it('需求栏外和别仓 Refs 不改变本仓明确 Closes，原话仍保留', () => {
-    const body =
-      '**做了什么**：Refs #3\n\n**需求**：Closes #7\nRefs other/repo#9\n\n**创始人原话**：「保留」（2026-10-20）\n';
+  it('需求栏外和别仓 Refs 不改变本仓明确 Closes，凭据行仍保留', () => {
+    const body = `**做了什么**：Refs #3\n\n**需求**：Closes #7\nRefs other/repo#9\n\n${founderConsentLine()}\n`;
     const w = world([CREATED, files('a.ts'), ok()], body);
     expect(w.run()).toBe(0);
     expect(w.bodies).toEqual([body]);
@@ -476,34 +476,22 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、PR 不挂里程碑', ()
     expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
   });
 
-  it('--no-issue + --body-file：需求栏里手写的创始人原话留着，只在开头插「无：<理由>」（#1890）', () => {
-    const body = [
-      '**做了什么**：x',
-      '',
-      '**需求**：<!-- 单号 -->',
-      '创始人原话（2026-10-11 03:48）：「我反馈的这些问题，触类旁通，你站在我的角度上去思考，然后去修复」',
-      '',
-    ].join('\n');
+  it('--no-issue + --body-file：需求栏里手写的改标准凭据留着，只在开头插「无：<理由>」（#1890）', () => {
+    const body = ['**做了什么**：x', '', '**需求**：<!-- 单号 -->', founderConsentLine(), ''].join('\n');
     const w = world([CREATED, files('agents/shared-rules.md'), ok()], body, []);
     expect(w.run('--founder-approved', '--no-issue', '改标准，随 PR 一起')).toBe(0);
     const sent = w.bodies[0] ?? '';
-    expect(sent).toContain(`**需求**：无：改标准，随 PR 一起\n创始人原话（2026-10-11 03:48）`);
-    expect(sent).toContain('触类旁通');
+    expect(sent).toContain(`**需求**：无：改标准，随 PR 一起\n${founderConsentLine()}`);
     expect(sent).not.toContain('<!-- 单号 -->');
   });
 
-  it('--no-issue + --body-file：原话就写在栏名那行冒号后面，也不吞（#1890 返工）', () => {
-    const body = [
-      '**做了什么**：x',
-      '',
-      '**需求**：创始人原话（2026-10-11 03:48）：「我反馈的这些问题，触类旁通，你站在我的角度上去思考，然后去修复」',
-      '',
-    ].join('\n');
+  it('--no-issue + --body-file：凭据就写在栏名那行冒号后面，也不吞（#1890 返工）', () => {
+    const bare = founderConsentLine().replace(/^\*\*/, '').replace('**', '');
+    const body = ['**做了什么**：x', '', `**需求**：${bare}`, ''].join('\n');
     const w = world([CREATED, files('agents/shared-rules.md'), ok()], body, []);
     expect(w.run('--founder-approved', '--no-issue', '改标准，随 PR 一起')).toBe(0);
     const sent = w.bodies[0] ?? '';
-    expect(sent).toContain(`**需求**：无：改标准，随 PR 一起\n创始人原话（2026-10-11 03:48）`);
-    expect(sent).toContain('触类旁通');
+    expect(sent).toContain(`**需求**：无：改标准，随 PR 一起\n${bare}`);
     expect(sent).not.toContain('<!--');
   });
 

@@ -52,7 +52,7 @@ export function prColumns(body: string): Map<string, string> {
 interface ColumnSpan {
   name: string;
   value: string;
-  /** 栏名那行冒号后面的字原样留着（`**需求**：创始人原话：「同意」` 的「创始人原话：「同意」」），withIssueColumn 用。 */
+  /** 栏名那行冒号后面的字原样留着（`**需求**：改标准凭据：引导 …` 里那行凭据），withIssueColumn 用。 */
   head: string;
   /** 这一栏占的行：从栏名那行起，到下一栏（或小标题、正文结尾）前一行止（行号从 0 数，end 不含）。 */
   start: number;
@@ -104,7 +104,7 @@ export function withIssueColumn(body: string, value: string): string {
   const lines = text.split('\n');
   let end = span.end;
   while (end > span.start + 1 && !lines[end - 1]?.trim()) end--; // 栏后面隔开下一栏的空行留着
-  // 栏里原有的字留着：栏名那行冒号后面的字另起一行（`**需求**：创始人原话：「同意」` 里那段原话不算丢），
+  // 栏里原有的字留着：栏名那行冒号后面的字另起一行（`**需求**：改标准凭据：引导 …` 里那行凭据不算丢），
   // 下面各行照旧；空行也留（段与段之间靠它隔着），只有整行都是模板提示（HTML 注释）的不算内容
   const head = stripComments(span.head).trim();
   const kept = [
@@ -120,31 +120,42 @@ export function withIssueColumn(body: string, value: string): string {
 /** 改标准的 PR 在「需求」栏下面另起一行写这个（人闸第四类）；没有程序读它，给创始人和接手的人看。 */
 export const GATE_LINE = '人闸：改标准';
 
-/** 创始人同意改标准的那一段：pnpm pr:open --founder-quote 写进正文的样子就是它（pr-compose.ts 两处都用它拼）。 */
-export function founderQuoteLine(quote: string, at: string): string {
-  const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
-  return `**创始人原话**：「${oneLine(quote)}」（${oneLine(at)}）`;
+/**
+ * 改标准的同意凭据引用哪一条创始人授权（#3990，和决定 0123 统一）。
+ * 原话只在驾驶舱库，公开 PR 正文不再贴原话；凭据是授权那条引导的编号和时间，挂在哪张单上也写上，
+ * 合并闸只认这一行、不出去查账本。现在认的就一条：决定 0097 的授权，引导 20261015054500，挂在 #2361（已合并）。
+ * 加新的授权得改这一处和合并闸同一个 PR，改它就是改标准。
+ */
+export const STANDARD_CONSENT = {
+  issue: 2361,
+  directive: '20261015054500',
+  at: '2026-10-15 05:45 +0800',
+} as const;
+
+/** 创始人同意改标准的那一行：pnpm pr:open --founder-consent 写进正文的样子就是它（pr-compose.ts 两处都用它拼）。 */
+export function founderConsentLine(): string {
+  const c = STANDARD_CONSENT;
+  return `**改标准凭据**：引导 ${c.directive}（${c.at}），挂单 #${c.issue}`;
 }
 
-/**
- * 「创始人原话」那一行：栏名可加粗、可跟在别的栏名后面（「**需求**：创始人原话（时间）：「…」」）；时间写在原话后面
- * （founderQuoteLine 写的）或栏名后面（手写的「创始人原话（时间）：「…」」）都认。原话在「」里，一直到行尾。
- */
-const FOUNDER_QUOTE =
-  /创始人原话\s*(?:[（(]([^（）()\n]*)[)）])?\s*(?:\*\*)?\s*[：:]\s*(?:\*\*)?\s*「(.*)」\s*(?:[（(]([^（）()\n]*)[)）])?\s*$/;
+/** 合并闸认的那一行：引导编号、时间、挂的单都要和 STANDARD_CONSENT 一字不差；可加粗、可跟在别的栏名后面。 */
+const FOUNDER_CONSENT = new RegExp(
+  `改标准凭据\\s*(?:\\*\\*)?\\s*[：:]\\s*(?:\\*\\*)?\\s*引导 ${STANDARD_CONSENT.directive}（${STANDARD_CONSENT.at.replaceAll('+', '\\+')}），挂单 #${STANDARD_CONSENT.issue}\\s*$`,
+);
 
 /**
- * 正文里创始人同意改标准的记录：认 founderQuoteLine 写出来的那一行（手写的、时间放在栏名后面的也认）；
- * 原话、时间都非空才算，读不到返回 undefined。开 PR 那一步（pr-open.ts 的 --founder-approved）和合并闸（merge-gate.ts）
- * 都用它判，两边的判据只有这一处。HTML 注释（模板提示）不算。
+ * 正文里改标准的同意凭据：认 founderConsentLine 写出来的那一行，引导编号、时间、挂的单对不上都不算。
+ * 开 PR 那一步（pr-open.ts 的 --founder-approved）和合并闸（merge-gate.ts）都用它判，两边的判据只有这一处。HTML 注释（模板提示）不算。
  */
-export function founderQuote(body: string): { quote: string; at: string } | undefined {
+export function founderConsent(body: string): { directive: string; at: string; issue: number } | undefined {
   for (const line of stripComments(body.replace(/\r\n?/g, '\n')).split('\n')) {
-    const m = FOUNDER_QUOTE.exec(line);
-    if (!m) continue;
-    const quote = (m[2] ?? '').trim();
-    const at = (m[3] ?? m[1] ?? '').trim();
-    if (quote && at) return { quote, at };
+    if (FOUNDER_CONSENT.test(line)) {
+      return {
+        directive: STANDARD_CONSENT.directive,
+        at: STANDARD_CONSENT.at,
+        issue: STANDARD_CONSENT.issue,
+      };
+    }
   }
   return undefined;
 }

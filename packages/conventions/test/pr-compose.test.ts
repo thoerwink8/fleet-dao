@@ -159,14 +159,14 @@ describe('pnpm pr:open 自己生成正文', () => {
     expect(failed.text()).toContain('没读到提交尾注');
   });
 
-  it('改标准：写码模型那一行在创始人原话之后，原话照旧认得出', async () => {
+  it('改标准：写码模型那一行在改标准凭据之后，凭据照旧认得出', async () => {
     const w = world({
       trailers: ok('x\n\nCo-Authored-By: Claude Haiku 5.5 <n@a>\n\x1e'),
       replies: [CREATED, files('agents/shared-rules.md'), ok()],
     });
-    expect(await w.run('--closes', '7', '--founder-quote', '同意', '--at', '2026-10-16 19:52')).toBe(0);
+    expect(await w.run('--closes', '7', '--founder-consent')).toBe(0);
     expect(w.bodies[0]).toMatch(
-      /\*\*创始人原话\*\*：「同意」（2026-10-16 19:52）\n\n\*\*写码模型\*\*：claude-haiku-5-5\n$/,
+      /\*\*改标准凭据\*\*：引导 20261015054500（2026-10-15 05:45 \+0800），挂单 #2361\n\n\*\*写码模型\*\*：claude-haiku-5-5\n$/,
     );
   });
 
@@ -256,21 +256,21 @@ describe('pnpm pr:open 自己生成正文', () => {
     expect(w.out.join('\n')).toContain(note);
   });
 
-  it('改标准：--founder-quote 加 --at 生成「人闸：改标准」一行和「创始人原话」一段，并挂自动合并', async () => {
+  it('改标准：--founder-consent 生成「人闸：改标准」一行和「改标准凭据」一行，并挂自动合并', async () => {
     const w = world({ replies: [CREATED, files('agents/shared-rules.md'), ok()] });
-    expect(await w.run('--closes', '7', '--founder-quote', '就这么改', '--at', '2026-10-05 18:30')).toBe(0);
+    expect(await w.run('--closes', '7', '--founder-consent')).toBe(0);
     expect(w.bodies[0]).toBe(
-      `**做了什么**：加个东西\n\n**需求**：\nCloses #7\n${GATE_LINE}\n\n**创始人原话**：「就这么改」（2026-10-05 18:30）\n`,
+      `**做了什么**：加个东西\n\n**需求**：\nCloses #7\n${GATE_LINE}\n\n**改标准凭据**：引导 20261015054500（2026-10-15 05:45 +0800），挂单 #2361\n`,
     );
     expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
-    expect(w.text()).toContain('正文里贴了创始人原话');
+    expect(w.text()).toContain('正文引用了同意凭据');
   });
 
   it('改标准 + --no-issue：理由写进需求栏，「人闸：改标准」那一行留着', async () => {
     const w = world({ replies: [CREATED, files('agents/shared-rules.md'), ok()], lookups: [] });
-    expect(await w.run('--no-issue', '规矩小改', '--founder-quote', '可以', '--at', '18:30')).toBe(0);
+    expect(await w.run('--no-issue', '规矩小改', '--founder-consent')).toBe(0);
     expect(w.bodies[0]).toBe(
-      `**做了什么**：加个东西\n\n**需求**：无：规矩小改\n${GATE_LINE}\n\n**创始人原话**：「可以」（18:30）\n`,
+      `**做了什么**：加个东西\n\n**需求**：无：规矩小改\n${GATE_LINE}\n\n**改标准凭据**：引导 20261015054500（2026-10-15 05:45 +0800），挂单 #2361\n`,
     );
   });
 
@@ -319,9 +319,9 @@ describe('pnpm pr:open 自己生成正文', () => {
     expect(issueColumnRefs(body)).toEqual({ closes: [12], refs: [] });
   });
 
-  it('新单正文带齐 issue-new 要的四节；给了创始人原话就抄进「原话」', () => {
-    const body = composeIssueBody('标题', ['改了 A'], '照这么做');
-    expect(body).toContain('## 原话\n\n「照这么做」');
+  it('新单正文带齐 issue-new 要的四节；原话节写「无（AI 发现）」（原话不进公开单，决定 0123）', () => {
+    const body = composeIssueBody('标题', ['改了 A']);
+    expect(body).toContain('## 原话\n\n无（AI 发现）');
     expect(body).toContain('- 改了 A');
     expect(body).toContain('这张单随 PR 开出，已贴本机做，引擎不拉');
   });
@@ -401,17 +401,11 @@ describe('pnpm pr:open 生成正文：闸门（失败要真失败）', () => {
     }
   });
 
-  it('【故意造出的失败】--founder-quote 缺 --at（或反过来、或是空的）：退出码 1', async () => {
-    for (const args of [
-      ['--founder-quote', '可以'],
-      ['--at', '18:30'],
-      ['--founder-quote', ' ', '--at', '18:30'],
-    ]) {
-      const w = world();
-      expect(await w.run('--closes', '7', ...args), args.join(' ')).toBe(1);
-      expect(w.calls).toEqual([]);
-      expect(w.text()).toContain('--at');
-    }
+  it('【故意造出的失败】旧的 --founder-quote / --at 不再认：退出码 1，什么也不跑', async () => {
+    const w = world();
+    expect(await w.run('--closes', '7', '--founder-quote', '可以', '--at', '18:30')).toBe(1);
+    expect(w.calls).toEqual([]);
+    expect(w.text()).toContain('founder-quote');
   });
 
   it('【故意造出的失败】生成用的参数和 --body-file 混用：退出码 1，不跑 gh', async () => {
@@ -422,24 +416,20 @@ describe('pnpm pr:open 生成正文：闸门（失败要真失败）', () => {
     expect(w.text()).toContain('不能和 --body-file 一起用');
   });
 
-  it('--founder-quote 加 --at 能和 --body-file 一起用：人闸一行和原话追加到正文末尾，并挂自动合并', async () => {
+  it('--founder-consent 能和 --body-file 一起用：人闸一行和凭据追加到正文末尾，并挂自动合并', async () => {
     const w = world({ replies: [CREATED, files('agents/shared-rules.md'), ok()] });
     writeFileSync(join(w.cwd, 'body.md'), '**做了什么**：手写\n\n**需求**：\nCloses #7\n');
-    expect(
-      await w.run('--body-file', 'body.md', '--founder-quote', '全权授权', '--at', '2026-10-13 18:28'),
-    ).toBe(0);
+    expect(await w.run('--body-file', 'body.md', '--founder-consent')).toBe(0);
     expect(w.bodies).toEqual([
-      `**做了什么**：手写\n\n**需求**：\nCloses #7\n\n${GATE_LINE}\n\n**创始人原话**：「全权授权」（2026-10-13 18:28）\n`,
+      `**做了什么**：手写\n\n**需求**：\nCloses #7\n\n${GATE_LINE}\n\n**改标准凭据**：引导 20261015054500（2026-10-15 05:45 +0800），挂单 #2361\n`,
     ]);
     expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
-    expect(w.text()).toContain('创始人原话');
+    expect(w.text()).toContain('正文引用了同意凭据');
   });
 
-  it('【故意造出的失败】--body-file 配 --founder-quote 却缺 --at、或正文文件读不到：退出码 1，不跑 gh', async () => {
+  it('【故意造出的失败】--body-file 配 --founder-consent 但正文文件读不到：退出码 1，不跑 gh', async () => {
     const w = world();
-    writeFileSync(join(w.cwd, 'body.md'), '**需求**：\nCloses #7\n');
-    expect(await w.run('--body-file', 'body.md', '--founder-quote', '可以')).toBe(1);
-    expect(await w.run('--body-file', 'nope.md', '--founder-quote', '可以', '--at', '18:30')).toBe(1);
+    expect(await w.run('--body-file', 'nope.md', '--founder-consent')).toBe(1);
     expect(w.calls).toEqual([]);
   });
 

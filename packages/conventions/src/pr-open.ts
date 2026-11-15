@@ -1,9 +1,9 @@
 // 开 PR、挂自动合并收成一个必经命令（pnpm pr:open，全仓审查第 2 路清单 1 号）：最近 40 个 PR 里 9 个没挂自动合并、
 // CI 绿了闲着共 3993 秒，兜底的引擎又关着——挂不挂不再靠人记，开 PR 的这一步就判完、挂上。
 // - 没碰改标准路径（standard-paths.json）就当场 gh pr merge --auto --squash：CI 绿就合（#1114 起所有 PR 只看 CI）。
-// - 碰了改标准就不挂，打「人闸：改标准，等创始人同意」；带 --founder-approved 才挂（正文里要有「创始人原话」那一行——
-//   「」里是他的原话、括号里是时间，都不能空；认法是 pr-columns.ts 的 founderQuote，合并闸用同一个，开得出来的闸就认）。pnpm pr:open 的入口是 pr-compose.ts 的 prOpenCli：不给 --body-file
-//   时它生成正文（--founder-quote 生成那一段），再交给这里；这里的闸不管正文怎么来的。
+// - 碰了改标准就不挂，打「人闸：改标准，等创始人同意」；带 --founder-approved 才挂（正文里要有「改标准凭据」那一行——
+//   引用授权那条引导的编号、时间和挂的单，不贴原话；认法是 pr-columns.ts 的 founderConsent，合并闸用同一个，开得出来的闸就认）。
+//   pnpm pr:open 的入口是 pr-compose.ts 的 prOpenCli：不给 --body-file 时它生成正文（--founder-consent 生成那一行），再交给这里；这里的闸不管正文怎么来的。
 // - 草稿、带 --no-automerge 的不挂（工人领了改标准的活用后者）。
 // - 必挂单（#1052：37 个 PR 没一个挂单，v4 里程碑页上看不出进展）：正文「需求」栏里要读到 Closes #号 / Refs #号
 //   （认法在 pr-columns.ts），而且那张单真在本仓（GitHub 现查）；读不到、单不存在就一个 PR 也不开。确实没有单：
@@ -31,7 +31,13 @@ import {
 } from './labels.ts';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
-import { founderQuote, issueColumnRefs, unmarkedIssueRefs, withIssueColumn } from './pr-columns.ts';
+import {
+  founderConsent,
+  founderConsentLine,
+  issueColumnRefs,
+  unmarkedIssueRefs,
+  withIssueColumn,
+} from './pr-columns.ts';
 
 /**
  * 从 gh pr create 的输出里认 PR 号。gh 正常时最后一行是 PR 地址（…/pull/<N>）；输出里认不出 PR 号直接抛错——
@@ -57,13 +63,14 @@ export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> --domain <e
      --new-issue "<标题>" 当场开一张单并 Closes 它：要带 --kind 需求|缺陷|杂项、--milestone <当前|版本全名|v<N>|未排期>，缺了不开；
                           开出的单一律贴「本机做」，引擎不拉。--local 仍可加，加了不报错
      --no-issue "<理由>"  确实没有单：理由原样写进「需求」栏（「无：<理由>」）
-     --founder-quote "<原话>" --at "<时间>"  改标准、创始人已经同意：在「需求」栏下面写「人闸：改标准」、再写一段「创始人原话」，
-                          并挂自动合并（等价于 --founder-approved 加手写那一段）；也能配 --body-file，这两段追加到正文末尾
+     --founder-consent    改标准、创始人已经授权（决定 0097）：在「需求」栏下面写「人闸：改标准」、再写一行「改标准凭据」
+                          （引用授权那条引导的编号、时间和挂的单，不贴原话，决定 0123），并挂自动合并
+                          （等价于 --founder-approved 加手写那一行）；也能配 --body-file，这两段追加到正文末尾
   需求栏：做完关单写 Closes #号；分片写 Refs #号（分片、关不了它）。裸 Refs 会被旧收口机制自动关单，新建时拒绝。
   需求栏读不到关联、单不存在就不开。PR 不挂里程碑（里程碑页只数单子）。
   --no-issue 在 --body-file 下也能用；需求栏已经挂了单就不能再带
   分支是 local/<单号>-、fleet/<单号>-：需求栏没挂单就自动补 Closes #<单号>；不能带 --no-issue，需求栏挂的单要含这张单
-  --founder-approved  改标准、创始人已经同意（自己写正文时用）：正文里要有一行 **创始人原话**：「<原话>」（<时间>）
+  --founder-approved  改标准、创始人已经授权（自己写正文时用）：正文里要有一行 ${founderConsentLine()}
   --no-automerge      只开 PR、不挂自动合并`;
 
 /**
@@ -155,9 +162,9 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
     return 1;
   }
   const founderApproved = values['founder-approved'] === true;
-  if (founderApproved && founderQuote(body) === undefined) {
+  if (founderApproved && founderConsent(body) === undefined) {
     err(
-      '带了 --founder-approved，正文里却没有创始人原话那一行（写成 **创始人原话**：「<原话>」（<时间>），原话和时间都不能空；合并闸也照这个认）：什么也没做。',
+      `带了 --founder-approved，正文里却没有改标准凭据那一行（写成 ${founderConsentLine()}，引导编号、时间、挂的单都要照这个；合并闸也照这个认）：什么也没做。`,
     );
     return 1;
   }
@@ -462,7 +469,7 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
   }
   if (verdict.standard.length > 0 && !founderApproved) {
     out(
-      `人闸：改标准，等创始人同意（碰了 ${listOf(verdict.standard)}）。没挂自动合并；他同意后把原话和时间贴进正文，再跑 ${manual}`,
+      `人闸：改标准，等创始人同意（碰了 ${listOf(verdict.standard)}）。没挂自动合并；他授权后把改标准凭据那一行贴进正文，再跑 ${manual}`,
     );
     return 0;
   }
@@ -476,7 +483,7 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
     return 2;
   }
   out(
-    `挂上了自动合并（squash）${verdict.standard.length > 0 ? '：改标准，正文里贴了创始人原话' : ''}；检查全绿就自己合。`,
+    `挂上了自动合并（squash）${verdict.standard.length > 0 ? '：改标准，正文引用了同意凭据' : ''}；检查全绿就自己合。`,
   );
   return 0;
 }

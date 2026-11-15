@@ -18,7 +18,7 @@
 //   正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
 //   留一句话。有「已知的模块」一节时只看这一节列出的路径，其余段落里提到的不算；没有这一节的老单仍看场景、已知的模块、怎么算做完）→
 //   没写改标准的路径（有「已知的模块」时同样只看这一节；没有这一节的老单仍看「已知的模块」和「怎么算做完」。清单是这个仓
-//   档案里 standardPathsFile 指的那份，文件不在＝没有改标准路径；决定 0093：引擎的 PR 正文没有创始人原话，合并闸会永远判红；
+//   档案里 standardPathsFile 指的那份，文件不在＝没有改标准路径；决定 0093、#3990：引擎的 PR 正文没有改标准凭据，合并闸会永远判红；
 //   写了的同样贴一次「本机做」、留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→
 //   交代齐不齐（四节齐，「怎么算做完」至少一条；
 //   缺则留一次言，不拉）→「怎么算做完」没有要 diff 外证据的条目（截图、线上、现场、审计、看日志、飞书收到……，判据是 conventions 的
@@ -428,7 +428,7 @@ function refTouches(ref: { path: string; kind: 'file' | 'dir' }, rule: StandardP
 /**
  * 单正文里写到的第一个改标准的路径（清单是这个仓自己的那份）；没写回 null。
  * 有「已知的模块」时只看这一节列出的路径，怎么算做完、场景、原话里提到的不算。没有这一节的老单仍看「已知的模块」和「怎么算做完」。
- * 引擎开的 PR 正文里没有创始人原话，合并闸（merge-gate）碰了标准路径就判红，拉了只会做完卡在合并（决定 0093）。
+ * 引擎开的 PR 正文里没有改标准凭据，合并闸（merge-gate）碰了标准路径就判红，拉了只会做完卡在合并（决定 0093、#3990）。
  * 正文不是文字（读不到）就抛：不当成「没写」。
  */
 export function standardPathIn(
@@ -459,9 +459,9 @@ export function standardPathComment(path: string, rule: StandardPath, listFile?:
   const where = listFile ?? '这个仓的改标准路径清单';
   return [
     `引擎想拉起这张单，可正文里要动的 \`${path}\` 是改标准的路径（${where} 的 \`${rule.path}\`：${rule.why}）。`,
-    '改标准要创始人同意：PR 正文里得有他的原话，引擎开的 PR 没有，合并闸会一直判红，拉了只会做完卡在合并，先没派。',
+    '改标准要创始人授权：PR 正文里得有改标准凭据那一行，引擎开的 PR 没有，合并闸会一直判红，拉了只会做完卡在合并，先没派。',
     '',
-    `已给这张单贴了「${LOCAL_LABEL}」，留给本机做（\`pnpm pr:open --founder-quote\` 带上原话），引擎以后不再拉它。`,
+    `已给这张单贴了「${LOCAL_LABEL}」，留给本机做（\`pnpm pr:open --founder-consent\`），引擎以后不再拉它。`,
   ].join('\n');
 }
 
@@ -1031,7 +1031,7 @@ async function admitIssue(
     });
     return null;
   }
-  // 要改标准（standard-paths.json 列的路径）：引擎的 PR 正文没有创始人原话，合并闸永远判红，不拉（决定 0093）。清单读不到就抛，记没查成
+  // 要改标准（standard-paths.json 列的路径）：引擎的 PR 正文没有改标准凭据，合并闸永远判红，不拉（决定 0093、#3990）。清单读不到就抛，记没查成
   const standard = standardPathIn(issue.body, await ctx.rules());
   if (standard !== null) {
     await holdForLocal(deps, t, repo, issue, {

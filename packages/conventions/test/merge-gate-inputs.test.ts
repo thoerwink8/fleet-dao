@@ -12,7 +12,7 @@ const gates = src('merge-gates.ts');
 
 /** 合并闸从 GitHub 读、往 GitHub 写的口子（merge-gate.ts 的 GitHubReads），一样一行写清看的是什么。 */
 const ALLOWED_READS: Record<string, string> = {
-  pr: 'PR 本身：当前头、分支名、开着还是关了、正文里的创始人原话（草稿、冲突 GitHub 自己拦，必填栏没有了，#654）',
+  pr: 'PR 本身：当前头、分支名、开着还是关了、正文里的改标准凭据（草稿、冲突 GitHub 自己拦，必填栏没有了，#654）',
   files: 'PR 改了哪些文件：判碰没碰改标准路径（standard-paths.json，决定 0093）',
   statuses: '当前头上的提交状态（逐条的）：合前一次冷调用的结论（#555-2）',
   openPrs: '冷调用写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
@@ -140,7 +140,7 @@ describe('合并闸的判定输入变了，开着的 PR 要重算（#654 第二�
     expect(unwatchedInputs(narrowed)).toEqual(['packages/conventions/standard-paths.json']);
   });
 
-  it('PR 正文改了也重算（edited）：补上创始人原话后闸要跟着变', () => {
+  it('PR 正文改了也重算（edited）：补上改标准凭据后闸要跟着变', () => {
     const doc = parse(workflow) as { on?: { pull_request_target?: { types?: unknown } } } | null;
     expect(doc?.on?.pull_request_target?.types).toContain('edited');
   });

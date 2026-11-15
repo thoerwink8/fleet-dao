@@ -13,7 +13,7 @@ import {
   runMergeGate,
   targetPrs,
 } from '../src/merge-gate.ts';
-import { founderQuoteLine, GATE_LINE } from '../src/pr-columns.ts';
+import { founderConsentLine, GATE_LINE } from '../src/pr-columns.ts';
 
 const HEAD = 'a'.repeat(40);
 const MERGE = 'b'.repeat(40);
@@ -278,16 +278,16 @@ describe('合并闸：#555-2 引擎任务工作流开的 PR，合前一次冷调
   });
 });
 
-describe('合并闸：改标准（人闸第四类，决定 0093）——碰了标准路径，正文里要有创始人原话', () => {
+describe('合并闸：改标准（人闸第四类，决定 0093）——碰了标准路径，正文里要有同意凭据（#3990）', () => {
   const STD = 'packages/conventions/standard-paths.json';
-  const QUOTE = founderQuoteLine('我都同意。', '2026-10-14 16:30 +0800');
+  const CONSENT = founderConsentLine();
   const touched = (filename: string, extra: Record<string, unknown> = {}) => ({
     filename,
     status: 'modified',
     ...extra,
   });
 
-  it('碰了标准、正文没有原话 → failure，点名命中的路径和「缺创始人原话」', async () => {
+  it('碰了标准、正文没有凭据 → failure，点名命中的路径和「缺同意凭据」', async () => {
     const w = world({
       files: [touched('packages/web/src/x.ts'), touched(STD), touched('agents/skills/a/SKILL.md')],
       prOver: { body: `**做了什么**：改清单\n\n**需求**：\nCloses #7\n${GATE_LINE}\n` },
@@ -295,50 +295,50 @@ describe('合并闸：改标准（人闸第四类，决定 0093）——碰了�
     const r = await gatePr(80, deps(w));
     expect(r).toMatchObject({ state: 'failure', notChecked: false });
     expect(r.lines).toHaveLength(1);
-    expect(r.lines[0]).toMatch(/^改标准缺创始人原话：碰了 /);
+    expect(r.lines[0]).toMatch(/^改标准缺同意凭据：碰了 /);
     expect(r.lines[0]).toContain(STD);
     expect(r.lines[0]).toContain('agents/skills/a/SKILL.md');
     expect(r.lines[0]).not.toContain('packages/web/src/x.ts');
   });
 
-  it('【故意造出的失败】只写了「原话」二字、原话或时间是空的：都不算同意', async () => {
+  it('【故意造出的失败】旧的「创始人原话」、引导编号或时间对不上、写在注释里：都不算凭据', async () => {
     for (const body of [
-      '正文里提到原话，但没贴',
-      '**创始人原话**：「」（2026-10-14 16:30）',
-      '**创始人原话**：「同意」（ ）',
-      '**创始人原话**：「同意」',
-      '<!-- **创始人原话**：「同意」（2026-10-14） -->',
+      '正文里提到凭据，但没贴',
+      '**创始人原话**：「我都同意。」（2026-10-14 16:30 +0800）',
+      '**改标准凭据**：引导 20261015054500（2026-10-15 05:45 +0800），挂单 #9999',
+      '**改标准凭据**：引导 20260101000000（2026-10-15 05:45 +0800），挂单 #2361',
+      `<!-- ${CONSENT} -->`,
     ]) {
       const r = await gatePr(80, deps(world({ files: [touched(STD)], prOver: { body } })));
       expect(r.state, body).toBe('failure');
-      expect(r.lines[0], body).toMatch(/缺创始人原话/);
+      expect(r.lines[0], body).toMatch(/缺同意凭据/);
     }
   });
 
-  it('碰了标准、正文有 pnpm pr:open --founder-quote 写的那一行 → 不因此判红', async () => {
+  it('碰了标准、正文有 pnpm pr:open --founder-consent 写的那一行 → 不因此判红', async () => {
     const r = await gatePr(
       80,
       deps(
         world({
           files: [touched(STD)],
-          prOver: { body: `**需求**：\nCloses #7\n${GATE_LINE}\n\n${QUOTE}\n` },
+          prOver: { body: `**需求**：\nCloses #7\n${GATE_LINE}\n\n${CONSENT}\n` },
         }),
       ),
     );
     expect(r).toMatchObject({ state: 'success', notChecked: false });
     expect(r.lines).toEqual([
       '能合：不是引擎任务 PR，只看 CI。',
-      `改标准：碰了 ${STD}，正文贴了创始人原话（2026-10-14 16:30 +0800）。`,
+      `改标准：碰了 ${STD}，正文引用了引导 20261015054500（挂单 #2361）。`,
     ]);
   });
 
-  it('手写的「创始人原话（时间）：「…」」也认（pr-open 的 --founder-approved 认的同一种）', async () => {
+  it('手写的「**需求**：改标准凭据：…」也认（pr-open 的 --founder-approved 认的同一种）', async () => {
     const r = await gatePr(
       80,
       deps(
         world({
           files: [touched(STD)],
-          prOver: { body: '**需求**：创始人原话（2026-10-11 03:48）：「你站在我的角度上去修」' },
+          prOver: { body: `**需求**：${CONSENT.replace(/^\*\*/, '').replace('**', '')}` },
         }),
       ),
     );
@@ -365,7 +365,7 @@ describe('合并闸：改标准（人闸第四类，决定 0093）——碰了�
     );
     expect(r.state).toBe('failure');
     expect(r.lines[0]).toMatch(/^还没验：/);
-    expect(r.lines[1]).toMatch(/^改标准缺创始人原话/);
+    expect(r.lines[1]).toMatch(/^改标准缺同意凭据/);
   });
 
   it('没碰标准：结论和原来一样，正文怎么写都不管', async () => {
