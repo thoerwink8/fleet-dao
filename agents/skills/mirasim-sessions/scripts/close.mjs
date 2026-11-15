@@ -2,6 +2,8 @@
 // 为什么先拆联接：Windows 上工作树里的 node_modules 常是指回主检出的目录联接，git worktree remove 会顺着联接
 // 把主检出的依赖删空（同一台机器踩过三次，最近 2026-11-12）。这里只 unlink 链接本身，不进链接里面。
 // 地址和令牌只从这次要收的仓读（远端 URL、环境变量、仓本地 git config），脚本里不写任何主机名。
+// 推其余远端时，推送地址是 DISABLED（只读）或 git remote get-url --push 失败的远端跳过，输出写明跳过了哪个。
+// fleet-ade 的 upstream 推送地址故意是 DISABLED，推它会让后面的删除全停（2026-11-16 #155）。不加开关。
 // 每一步失败就停、退出码非 0，并写明下一步怎么手工接。已经做成的步骤再跑会跳过（看仓库现状，不另记进度文件）。
 import { spawnSync } from 'node:child_process';
 import {
@@ -603,6 +605,19 @@ export async function closeRun(argv, io = {}) {
       const others = remotes.filter((r) => r.name !== source.name);
       if (others.length === 0) say('[快进] 没有其余远端');
       for (const other of others) {
+        // 推送地址故意设成 DISABLED（只读）或根本读不出来的远端推不出去。
+        // fleet-ade 的 upstream 就是这样：推它会 fatal: 'DISABLED' does not appear to be a git repository，
+        // 后面的删工作树、删分支、删会话全停（2026-11-16 #155）。跳过，不加开关。
+        const pushUrl = git(exec, main, ['remote', 'get-url', '--push', other.name]);
+        const pushTarget = pushUrl.stdout.trim();
+        if (pushUrl.code !== 0 || pushTarget === 'DISABLED') {
+          const why =
+            pushUrl.code !== 0
+              ? `读推送地址没成：${(pushUrl.stderr || pushUrl.stdout).trim().slice(0, 200)}`
+              : '推送地址是 DISABLED';
+          say(`[快进] 跳过 ${other.name}：${why}`);
+          continue;
+        }
         const pushed = git(exec, main, [
           'push',
           other.name,
