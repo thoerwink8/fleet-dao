@@ -103,6 +103,7 @@
 | [0125](0125-acceptance-gate-and-two-installs.md) | 新 harness 整体形态：AI 调度、可配置验收闸、自定义模型渠道、一套代码两种装法 | 2026-11-03 | 生效 | 0126（第 8 条：本机装法是 fleet-ade） |
 | [0126](0126-fleet-ade-sole-product.md) | fleet-ade 是唯一产品：法国引擎分三步迁进去，fleet-dao 只修坏的、不加新功能 | 2026-11-15 | 生效 | — |
 | [0127](0127-standard-consent-is-a-directive-ref.md) | 改标准 PR 的同意凭据改成引用引导，不再贴原话 | 2026-11-16 | 生效 | — |
+| [0128](0128-magpie-central-gateway-and-repo-consolidation.md) | 模型网关集中到法国 VPS，规矩和装机改由 magpie 资源库加新仓下发，fleet-dao 和 vault 迁完归档 | 2026-11-15 | 生效 | — |
 
 ## 历史
 
