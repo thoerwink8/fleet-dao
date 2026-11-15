@@ -126,6 +126,7 @@
 | [docs/PROGRESS.md](docs/PROGRESS.md) | 生效中的临时调整（创始人引导在驾驶舱库、仓里只有 docs/directive-digest/ 的周汇总和 docs/directives/ 的旧档案，进度流水在置顶单 #1055，`pnpm progress read`） | 有新的临时调整时 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
 | [docs/reclaude.md](docs/reclaude.md) | reclaude 的门口：文档、清理脚本、以及「〈编号〉账号被封了，根据文档清理痕迹」这句提示词 | 入口或提示词变了 |
+| [docs/magpie/](docs/magpie/README.md) | magpie 怎么摆、怎么装到新机器、怎么核对 | 路由、同步或装法变了 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 里怎么用 reclaude（启动命令填 reclaude 绝对路径）、自有/平台怎么分、别填错的后果，以及 Linux 与 Fleet 的分工。从 [docs/reclaude.md](docs/reclaude.md) 进 | 装法或 Mirasim 的启动方式变了 |
 | [docs/reclaude-self-check.md](docs/reclaude-self-check.md) | 上机前自检和被封号的细则。从 [docs/reclaude.md](docs/reclaude.md) 进 | 清法与判据变了 |
 | [AGENTS.md](AGENTS.md) | 给 AI 的本仓约定，只当目录（一屏读完，细则指到包和 docs/） | 本仓规则变了 |

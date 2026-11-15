@@ -1,0 +1,21 @@
+{
+  "webPort": 3430,
+  "gatewayPort": 3425,
+  "windows": {
+    "binary": "D:\\magpie\\magpie.exe",
+    "configDir": "~/.config/magpie"
+  },
+  "linux": {
+    "user": "magpie",
+    "binary": "/opt/magpie/magpie",
+    "envFile": "/etc/magpie.env"
+  },
+  "sync": {
+    "address": "github://thoerwink8/fleet-setup/magpie",
+    "encrypted": true,
+    "keys": false,
+    "signIns": false,
+    "delete": false,
+    "intervalMinutes": 3
+  }
+}
