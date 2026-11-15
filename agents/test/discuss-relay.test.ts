@@ -57,7 +57,12 @@ const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const close of closers.splice(0)) await close();
   for (const dir of made.splice(0))
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    rmSync(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 50,
+    });
 });
 
 function temp(name: string): string {
@@ -73,7 +78,16 @@ interface Hit {
   content: string | undefined;
   stream: boolean | undefined;
 }
-type Mode = 'ok' | 'empty' | 'http' | 'hang' | 'garbage' | 'array';
+type Mode =
+  | 'ok'
+  | 'empty'
+  | 'http'
+  | 'hang'
+  | 'garbage'
+  | 'array'
+  | 'magpie'
+  | 'magpie-parallel'
+  | 'magpie-partial';
 
 /** 单独的进程：ask.mjs 用同步子进程，假服务器若挤在测试进程里，事件循环转不动，请求没人接。 */
 async function fakeRelay(mode: Mode, answer: string) {
@@ -92,7 +106,13 @@ async function fakeRelay(mode: Mode, answer: string) {
       'const hitsFile = process.argv[3];',
       'const answer = readFileSync(process.argv[4], "utf8");',
       'const hits = [];',
+      'const pending = [];',
       'const server = createServer((req, res) => {',
+      "    if (req.url === '/v1/models') {",
+      "      res.writeHead(200, { 'content-type': 'application/json' });",
+      "      res.end(JSON.stringify({ data: ['recodex/gpt-6-astra', 'recodex/gpt-6-luna', 'devin/swe-2', 'chaeng/deepseek-v4.1-flash', 'grok/grok-4.7', 'devin/gpt-custom', 'cursor/claude-haiku-5-5@300k'].map(id => ({ id })) }));",
+      '      return;',
+      '    }',
       '  const chunks = [];',
       "  req.on('data', (c) => chunks.push(c));",
       "  req.on('end', () => {",
@@ -103,7 +123,15 @@ async function fakeRelay(mode: Mode, answer: string) {
       '    } catch { /* 留空 */ }',
       '    hits.push({ url: req.url, auth: String(req.headers.authorization ?? ""), model, content, stream });',
       '    writeFileSync(hitsFile, JSON.stringify(hits));',
-      "    if (mode === 'hang') return;",
+      "    if (mode === 'hang' || (mode === 'magpie-partial' && model === 'devin/swe-2')) return;",
+      "    if (mode === 'magpie-parallel') {",
+      '      pending.push(res);',
+      '      if (pending.length >= 3) for (const r of pending.filter(r => !r.writableEnded)) {',
+      "        r.writeHead(200, { 'content-type': 'application/json' });",
+      '        r.end(JSON.stringify({ choices: [{ message: { content: answer } }] }));',
+      '      }',
+      '      return;',
+      '    }',
       "    if (mode === 'http') {",
       "      res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' });",
       '      res.end("echo " + (req.headers.authorization ?? ""));',
@@ -184,6 +212,7 @@ function run(
   o: { home: string; path?: string; env?: Record<string, string> },
 ) {
   const env: Record<string, string> = {
+    DISCUSS_MAGPIE_BASE_URL: '',
     HOME: o.home,
     USERPROFILE: o.home,
     PATH: o.path ?? temp('empty'),
@@ -193,8 +222,16 @@ function run(
     const v = process.env[k];
     if (v !== undefined && env[k] === undefined) env[k] = v;
   }
-  const r = runChild(process.execPath, [join(SCRIPTS, script), ...args], { env, cwd: temp('cwd') });
-  return { code: r.status, out: r.stdout, err: r.stderr, all: `${r.stdout}\n${r.stderr}` };
+  const r = runChild(process.execPath, [join(SCRIPTS, script), ...args], {
+    env,
+    cwd: temp('cwd'),
+  });
+  return {
+    code: r.status,
+    out: r.stdout,
+    err: r.stderr,
+    all: `${r.stdout}\n${r.stderr}`,
+  };
 }
 
 function topic(text: string): string {
@@ -217,18 +254,31 @@ describe('gpt-relay：配置和核对码判法', () => {
   it('文件里两个都有才算配了；引号、export、注释认得出；末尾斜杠去掉', () => {
     expect(
       parseEnvFile('# c\nexport DISCUSS_GPT_BASE_URL="http://127.0.0.1:9/v1/"\nDISCUSS_GPT_API_KEY=\'k\'\n'),
-    ).toEqual({ DISCUSS_GPT_BASE_URL: 'http://127.0.0.1:9/v1/', DISCUSS_GPT_API_KEY: 'k' });
+    ).toEqual({
+      DISCUSS_GPT_BASE_URL: 'http://127.0.0.1:9/v1/',
+      DISCUSS_GPT_API_KEY: 'k',
+    });
     const home = temp('home');
     const readFile = () => 'DISCUSS_GPT_BASE_URL=http://127.0.0.1:9/v1/\nDISCUSS_GPT_API_KEY=file-key\n';
     expect(gptRelayConfig({ home, env: {}, readFile })).toEqual({
       baseUrl: 'http://127.0.0.1:9/v1',
       apiKey: 'file-key',
     });
-    expect(gptRelayConfig({ home, env: { DISCUSS_GPT_API_KEY: 'env-key' }, readFile })?.apiKey).toBe(
-      'env-key',
-    );
+    expect(
+      gptRelayConfig({
+        home,
+        env: { DISCUSS_GPT_API_KEY: 'env-key' },
+        readFile,
+      })?.apiKey,
+    ).toBe('env-key');
     expect(gptRelayConfig({ home, env: { DISCUSS_GPT_BASE_URL: '' }, readFile })).toBeNull();
-    expect(gptRelayConfig({ home, env: { DISCUSS_GPT_API_KEY: KEY }, readFile: () => '' })).toBeNull();
+    expect(
+      gptRelayConfig({
+        home,
+        env: { DISCUSS_GPT_API_KEY: KEY },
+        readFile: () => '',
+      }),
+    ).toBeNull();
     expect(
       gptRelayConfig({
         home,
@@ -242,8 +292,14 @@ describe('gpt-relay：配置和核对码判法', () => {
 
   it('核对码：空、没有、去掉那一行；只剩核对码仍算答上', () => {
     expect(judgeCursorText('  ', 'abc')).toEqual({ kind: 'empty' });
-    expect(judgeCursorText('无法读取', 'abc', 4)).toEqual({ kind: 'nonce', sample: '无法读取'.slice(0, 4) });
-    expect(judgeCursorText('abc\n真正的答案\n', 'abc')).toEqual({ kind: 'ok', text: '真正的答案' });
+    expect(judgeCursorText('无法读取', 'abc', 4)).toEqual({
+      kind: 'nonce',
+      sample: '无法读取'.slice(0, 4),
+    });
+    expect(judgeCursorText('abc\n真正的答案\n', 'abc')).toEqual({
+      kind: 'ok',
+      text: '真正的答案',
+    });
     expect(judgeCursorText('abc', 'abc')).toEqual({ kind: 'ok', text: '' });
   });
 
@@ -282,7 +338,13 @@ describe('completeChat：假的 chat/completions', () => {
   it('非 2xx 不读正文，空回答、不是 JSON、挂住，各是一种没答上', async () => {
     const http = await fakeRelay('http', '');
     expect(
-      await completeChat({ baseUrl: http.baseUrl, apiKey: KEY, model: 'm', prompt: 'q', timeoutMs: 5_000 }),
+      await completeChat({
+        baseUrl: http.baseUrl,
+        apiKey: KEY,
+        model: 'm',
+        prompt: 'q',
+        timeoutMs: 5_000,
+      }),
     ).toEqual({
       ok: false,
       kind: 'http',
@@ -290,7 +352,13 @@ describe('completeChat：假的 chat/completions', () => {
     });
     const empty = await fakeRelay('empty', '');
     expect(
-      await completeChat({ baseUrl: empty.baseUrl, apiKey: KEY, model: 'm', prompt: 'q', timeoutMs: 5_000 }),
+      await completeChat({
+        baseUrl: empty.baseUrl,
+        apiKey: KEY,
+        model: 'm',
+        prompt: 'q',
+        timeoutMs: 5_000,
+      }),
     ).toEqual({
       ok: false,
       kind: 'empty',
@@ -310,7 +378,13 @@ describe('completeChat：假的 chat/completions', () => {
     });
     const hang = await fakeRelay('hang', '');
     expect(
-      await completeChat({ baseUrl: hang.baseUrl, apiKey: KEY, model: 'm', prompt: 'q', timeoutMs: 300 }),
+      await completeChat({
+        baseUrl: hang.baseUrl,
+        apiKey: KEY,
+        model: 'm',
+        prompt: 'q',
+        timeoutMs: 300,
+      }),
     ).toEqual({
       ok: false,
       kind: 'timeout',
@@ -319,6 +393,216 @@ describe('completeChat：假的 chat/completions', () => {
 });
 
 const SLOW = { timeout: 0 };
+
+const magpieLib = (await import(pathToFileURL(join(SCRIPTS, 'magpie.mjs')).href)) as {
+  magpieFamily(model: string): string | null;
+  magpieConfig(opts: {
+    env: Record<string, string>;
+    fetchImpl?: typeof fetch;
+    probeMs?: number;
+  }): Promise<unknown>;
+  magpiePanel(
+    keys?: string[],
+    overrides?: Record<string, string>,
+    opts?: { env: Record<string, string>; readFile: () => string },
+  ): Array<{ key: string; model: string }>;
+};
+
+function magpieEnv(baseUrl: string) {
+  return { DISCUSS_MAGPIE_BASE_URL: baseUrl };
+}
+
+function critiqueBody(r: ReturnType<typeof run>) {
+  return readFileSync(r.out.trim().split(/\r?\n/).at(-1) ?? '', 'utf8');
+}
+
+describe('magpie：默认四族、Haiku 可选、独立失败、不冒充同意', SLOW, () => {
+  it('真并行：假网关等三家请求都到齐才回；输出型号和族，不启动 Cursor', async () => {
+    const relay = await fakeRelay('magpie-parallel', '答案第一行\n答案第二行');
+    const r = run('ask.mjs', ['--text', topic('2+2？'), '--round', '0', '--limit', '3'], {
+      home: temp('home'),
+      env: magpieEnv(relay.baseUrl),
+    });
+    expect(r.code).toBe(0);
+    expect(relay.hits().map((h) => h.model)).toEqual([
+      'recodex/gpt-6-astra',
+      'grok/grok-4.7',
+      'chaeng/deepseek-v4.1-flash',
+      'devin/swe-2',
+    ]);
+    for (const family of ['gpt', 'grok', 'deepseek', 'swe']) expect(r.out).toContain(`厂商族：${family}`);
+    expect(r.out).not.toContain('没查成');
+  });
+
+  it('单家超时照实标没查成；其他家保留答案；不读 HTTP 错误正文', async () => {
+    const relay = await fakeRelay('magpie-partial', '有答案');
+    const r = run('ask.mjs', ['--text', topic('题目'), '--round', '0', '--limit', '0.3'], {
+      home: temp('home'),
+      env: magpieEnv(relay.baseUrl),
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('没查成：超过 0.3 秒');
+    expect(r.out.match(/有答案/g)).toHaveLength(3);
+    expect(relay.hits()).toHaveLength(4);
+  });
+
+  it('参数只选指定族且能覆盖型号；env 可加 Haiku', async () => {
+    const relay = await fakeRelay('magpie', '答案');
+    const one = run(
+      'ask.mjs',
+      ['--text', topic('题目'), '--round', '0', '--models', 'gpt', '--gpt-model', 'devin/gpt-custom'],
+      {
+        home: temp('home'),
+        env: magpieEnv(relay.baseUrl),
+      },
+    );
+    expect(one.code).toBe(0);
+    expect(relay.hits().map((h) => h.model)).toEqual(['devin/gpt-custom']);
+    const home = temp('home');
+    mkdirSync(join(home, '.fleet-dao'));
+    writeFileSync(
+      join(home, '.fleet-dao', 'discuss.env'),
+      `DISCUSS_MAGPIE_BASE_URL=${relay.baseUrl}\nDISCUSS_MODELS=gpt,swe,deepseek,grok,haiku\nDISCUSS_MODEL_GPT=devin/gpt-custom\n`,
+    );
+    const four = run('ask.mjs', ['--text', topic('题目'), '--round', '0'], {
+      home,
+      env: magpieEnv(relay.baseUrl),
+    });
+    expect(four.code).toBe(0);
+    expect(four.out).toContain('厂商族：claude');
+    expect(relay.hits()).toHaveLength(6);
+    expect(relay.hits().filter((h) => h.model === 'devin/gpt-custom')).toHaveLength(2);
+  });
+
+  it('端点没开照旧走 GPT 中转；探测失败返回 null，不抛错', async () => {
+    const relay = await fakeRelay('ok', '旧路答案');
+    const r = run('ask.mjs', ['--text', topic('题目'), '--round', '0'], {
+      home: temp('home'),
+      env: {
+        ...relayEnv(relay.baseUrl),
+        ...magpieEnv('http://127.0.0.1:1/v1'),
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('旧路答案');
+    const failedFetch: typeof fetch = async () => {
+      throw new Error('unavailable');
+    };
+    expect(await magpieLib.magpieConfig({ env: {}, fetchImpl: failedFetch })).toBeNull();
+  });
+
+  it('禁用渠道、路由组、未知模型和同族伪装不发请求；跨渠道仍按实际厂商族', () => {
+    for (const id of [
+      'claude/claude-opus-5-5',
+      'antigravity/gpt-6',
+      'gemini/gemini-4',
+      'group/smart',
+      'auto/gpt-6',
+      'cursor/gemini-4-carbon',
+      'cursor/kimi-k3',
+      'cursor/claude-opus-5-5@300k',
+      'cursor/gpt-6-astra',
+    ]) {
+      expect(magpieLib.magpieFamily(id)).toBeNull();
+      expect(() => magpieLib.magpiePanel(['gpt'], { gpt: id })).toThrow('被禁用');
+    }
+    expect(magpieLib.magpieFamily('devin/gpt-6-sol')).toBe('gpt');
+    expect(magpieLib.magpieFamily('recodex/gpt-6-astra')).toBe('gpt');
+    expect(magpieLib.magpieFamily('cursor/claude-haiku-5-5@300k')).toBe('claude');
+    expect(magpieLib.magpieFamily('devin/swe-2')).toBe('swe');
+    expect(() => magpieLib.magpiePanel(['swe'], { swe: 'devin/gpt-6-sol' })).toThrow('同族');
+    expect(() => magpieLib.magpiePanel(['gpt', 'gpt'])).toThrow('重复');
+  });
+
+  it('反方排除作者族，SWE 是独立族；Grok 可作唯一不同族候选', async () => {
+    const relay = await fakeRelay('magpie', CRITIQUE);
+    const r = run('second-opinion.mjs', ['--text', topic(LONG), '--author-family', 'gpt,grok,deepseek'], {
+      home: temp('home'),
+      env: magpieEnv(relay.baseUrl),
+    });
+    expect(r.code).toBe(0);
+    expect(relay.hits()[0]?.model).toBe('devin/swe-2');
+    expect(critiqueBody(r)).toContain('厂商族：swe');
+    const grok = run('second-opinion.mjs', ['--text', topic(LONG), '--author-family', 'gpt,swe,deepseek'], {
+      home: temp('home'),
+      env: magpieEnv(relay.baseUrl),
+    });
+    expect(grok.code).toBe(0);
+    expect(relay.hits()[1]?.model).toBe('grok/grok-4.7');
+    const invalid = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--author-family', 'gpt', '--agent', 'code'],
+      {
+        home: temp('home'),
+        env: magpieEnv(relay.baseUrl),
+      },
+    );
+    expect(invalid.code).toBe(2);
+    expect(relay.hits()).toHaveLength(2);
+  });
+
+  it('Haiku 只有显式选才发起，厂商族为 Claude，不能给 Claude 作者作反方', async () => {
+    const relay = await fakeRelay('magpie', CRITIQUE);
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--author-family', 'gpt', '--agent', 'haiku'],
+      {
+        home: temp('home'),
+        env: magpieEnv(relay.baseUrl),
+      },
+    );
+    expect(r.code).toBe(0);
+    expect(relay.hits()[0]?.model).toBe('cursor/claude-haiku-5-5@300k');
+    expect(critiqueBody(r)).toContain('厂商族：claude');
+    const blocked = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--author-family', 'claude', '--agent', 'haiku'],
+      {
+        home: temp('home'),
+        env: magpieEnv(relay.baseUrl),
+      },
+    );
+    expect(blocked.code).toBe(2);
+    expect(relay.hits()).toHaveLength(1);
+  });
+
+  it('网关探测有两秒预算、坏名单不能用，配置空值明确停用', async () => {
+    const env = magpieEnv('http://127.0.0.1:1234/v1');
+    const aborting: typeof fetch = async (_url, init) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    };
+    expect(await magpieLib.magpieConfig({ env, fetchImpl: aborting, probeMs: 30 })).toBeNull();
+    const malformed: typeof fetch = async () => new Response(JSON.stringify({ models: [] }));
+    expect(await magpieLib.magpieConfig({ env, fetchImpl: malformed })).toBeNull();
+    expect(
+      await magpieLib.magpieConfig({ env: { DISCUSS_MAGPIE_BASE_URL: '' }, fetchImpl: malformed }),
+    ).toBeNull();
+  });
+
+  it('反方全失败或结论格式认不出，退出码 2，绝不算同意', async () => {
+    const relay = await fakeRelay('hang', '');
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--author-family', 'swe', '--budget-sec', '0.3'],
+      {
+        home: temp('home'),
+        env: magpieEnv(relay.baseUrl),
+      },
+    );
+    expect(r.code).toBe(2);
+    expect(critiqueBody(r)).toContain('没查成');
+    const bad = await fakeRelay('magpie', '我没写结论');
+    const unparsed = run('second-opinion.mjs', ['--text', topic(LONG), '--author-family', 'swe'], {
+      home: temp('home'),
+      env: magpieEnv(bad.baseUrl),
+    });
+    expect(unparsed.code).toBe(2);
+    expect(critiqueBody(unparsed)).toContain('认不出（没查成）');
+  });
+});
 
 describe('ask.mjs：配了就问中转，没配才问 Cursor', SLOW, () => {
   it('没装 cursor-agent 也能答上，默认型号，题面里的中文送到了', async () => {
@@ -391,7 +675,9 @@ describe('ask.mjs：配了就问中转，没配才问 Cursor', SLOW, () => {
       join(home, '.fleet-dao', 'discuss.env'),
       `DISCUSS_GPT_BASE_URL=${relay.baseUrl}\nDISCUSS_GPT_API_KEY=${KEY}\n`,
     );
-    const fromFile = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], { home });
+    const fromFile = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
+      home,
+    });
     expect(fromFile.code).toBe(0);
     expect(fromFile.out).toContain('来自文件');
     expectClean(fromFile.all);

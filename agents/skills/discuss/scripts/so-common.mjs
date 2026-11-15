@@ -10,7 +10,7 @@ import { dataDir } from './tools.mjs';
 /** @typedef {{ prompt: string, profile: Profile, workdir: string, timeoutMin: number, log: Log, pollMs?: number, stallMin?: number, effort?: string | undefined, discussion?: boolean, gptModel?: string | undefined }} SessionOpts runSession 要的 */
 /**
  * 命令行参数（args() 整理出来的）。
- * @typedef {{ timeoutMin: number, stallMin?: number, ui: boolean, selftest?: boolean, ping?: boolean, keepSession?: boolean, sessions?: boolean, stopStale?: boolean, text?: string | undefined, name?: string | undefined, effort?: string | undefined, agent?: string | undefined, authorFamily?: string, excludeFamily?: string | undefined, budgetSec?: number, blind?: boolean, gptModel?: string | undefined }} Options
+ * @typedef {{ timeoutMin: number, stallMin?: number, ui: boolean, selftest?: boolean, ping?: boolean, keepSession?: boolean, sessions?: boolean, stopStale?: boolean, text?: string | undefined, name?: string | undefined, effort?: string | undefined, agent?: string | undefined, authorFamily?: string, excludeFamily?: string | undefined, budgetSec?: number, blind?: boolean, gptModel?: string | undefined, sweModel?: string | undefined, deepseekModel?: string | undefined, grokModel?: string | undefined, haikuModel?: string | undefined }} Options
  */
 
 /**

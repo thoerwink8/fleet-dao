@@ -33,7 +33,11 @@ interface SecondOpinionLib {
     agent: string;
     model: string | null;
   }>;
-  args(argv: string[]): { timeoutMin: number; stallMin: number; budgetSec?: number };
+  args(argv: string[]): {
+    timeoutMin: number;
+    stallMin: number;
+    budgetSec?: number;
+  };
   discussionBudgetSec(o: { timeoutMin: number; budgetSec?: number }): number;
 }
 interface FakeProfile {
@@ -219,6 +223,7 @@ function run(
   o: { home: string; path?: string; env?: Record<string, string> },
 ) {
   const env: Record<string, string> = {
+    DISCUSS_MAGPIE_BASE_URL: '',
     HOME: o.home,
     USERPROFILE: o.home,
     PATH: o.path ?? temp('empty'),
@@ -232,7 +237,12 @@ function run(
     env,
     cwd: temp('cwd'),
   });
-  return { code: r.status, out: r.stdout, err: r.stderr, all: `${r.stdout}\n${r.stderr}` };
+  return {
+    code: r.status,
+    out: r.stdout,
+    err: r.stderr,
+    all: `${r.stdout}\n${r.stderr}`,
+  };
 }
 
 function topic(text: string): string {
@@ -265,19 +275,27 @@ describe('ask.mjs：参数不对、题面不对，一家都不问', SLOW, () => 
     let r = run('ask.mjs', ['--text', good], { home });
     expect(r.code).toBe(2);
     expect(r.all).toContain('--round');
-    r = run('ask.mjs', ['--text', bare, '--round', '1', '--models', 'nosuch'], { home });
+    r = run('ask.mjs', ['--text', bare, '--round', '1', '--models', 'nosuch'], {
+      home,
+    });
     expect(r.code).toBe(2);
     expect(r.all).toContain('【推演】');
-    r = run('ask.mjs', ['--text', bare, '--round', '0', '--models', 'nosuch'], { home });
+    r = run('ask.mjs', ['--text', bare, '--round', '0', '--models', 'nosuch'], {
+      home,
+    });
     expect(r.all).toContain('不认识的模型');
-    r = run('ask.mjs', ['--text', good, '--round', '2', '--models', 'nosuch'], { home });
+    r = run('ask.mjs', ['--text', good, '--round', '2', '--models', 'nosuch'], {
+      home,
+    });
     expect(r.all).toContain('不认识的模型');
   });
 });
 
 describe('ask.mjs：这台机器缺 cursor-agent', SLOW, () => {
   it('没装：退出码 2，明说这台机器没装 cursor-agent，不去问', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], { home: temp('home') });
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
+      home: temp('home'),
+    });
     expect(r.code).toBe(2);
     expect(r.err).toContain('这台机器没装 cursor-agent');
   });
@@ -389,7 +407,10 @@ describe('ask.mjs：按当前 Cursor 账号能力选择，family 之间不冒充
   });
 
   it.each([
-    { FAKE_MODELS: 'Available models\ngpt-current-high - GPT\n', FAKE_MODELS_EXIT: '9' },
+    {
+      FAKE_MODELS: 'Available models\ngpt-current-high - GPT\n',
+      FAKE_MODELS_EXIT: '9',
+    },
     { FAKE_MODELS: '格式变了，不能认作空列表' },
   ])('列表没读成时一家都不问，也不使用静态旧 id', (failure) => {
     const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
@@ -529,7 +550,9 @@ describe('second-opinion.mjs（反方）：缺东西照实报', SLOW, () => {
   });
 
   it('--stop-stale：这台没装 Mirasim 时退出 2，不报「清掉 0 个」', () => {
-    const r = run('second-opinion.mjs', ['--stop-stale'], { home: temp('home') });
+    const r = run('second-opinion.mjs', ['--stop-stale'], {
+      home: temp('home'),
+    });
     expect(r.code).toBe(2);
     expect(r.err).toContain('这台机器没装 Mirasim');
     expect(r.out).not.toContain('清掉');
@@ -552,7 +575,12 @@ describe('second-opinion.mjs（反方）：缺东西照实报', SLOW, () => {
 // 挂着同一条注释）。second-opinion.mjs 起 cursor-agent 的会话大多是从 Git Bash 起的，spawn 默认整份带过去，
 // 摘掉这几个变量让它猜成本机原生的壳，钩子才跑得动；摘的是环境变量，不碰钩子本身的判断，密钥路径照样拦。
 describe('cursorAgentEnv：起 cursor-agent 时把 Git Bash 留的几个变量摘掉，别的原样', () => {
-  const dirty = { SHELL: '/bin/bash.exe', MSYSTEM: 'MINGW64', TERM: 'xterm-256color', PATH: '/x' };
+  const dirty = {
+    SHELL: '/bin/bash.exe',
+    MSYSTEM: 'MINGW64',
+    TERM: 'xterm-256color',
+    PATH: '/x',
+  };
 
   it('win32：SHELL、MSYSTEM、MSYSTEM_PREFIX、MSYSTEM_CHOST、TERM 都摘掉，别的（PATH）留着', () => {
     const got = so.cursorAgentEnv('win32', dirty);
@@ -575,10 +603,15 @@ describe('cursorAgentEnv：起 cursor-agent 时把 Git Bash 留的几个变量�
 });
 
 describe('tools.mjs：cursor-agent 能不能用，逐样说清', () => {
-  const bin = (): Record<string, string> => ({ PATH: fakeCursor(), PATHEXT: '.COM;.EXE;.BAT;.CMD' });
+  const bin = (): Record<string, string> => ({
+    PATH: fakeCursor(),
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+  });
   it('没装、查登录超时、输出认不出、没登录、登了：各是一句', () => {
     expect(tools.cursorAgentProblem({ env: { PATH: temp('empty') } })).toContain('没装 cursor-agent');
-    const timeout = Object.assign(new Error('spawnSync ETIMEDOUT'), { code: 'ETIMEDOUT' });
+    const timeout = Object.assign(new Error('spawnSync ETIMEDOUT'), {
+      code: 'ETIMEDOUT',
+    });
     expect(tools.cursorAgentProblem({ env: bin(), run: () => ({ error: timeout }) })).toContain('30 秒没回');
     const garbled = tools.cursorAgentProblem({
       env: bin(),
@@ -603,13 +636,25 @@ describe('tools.mjs：cursor-agent 能不能用，逐样说清', () => {
 
 describe('second-opinion.mjs 的纯判断（原来 --selftest 的那几条）', () => {
   it('结论行：认得出的两种，认不出回 null', () => {
-    expect(so.parseVerdict('## 必须改\n无\n结论：通过')).toEqual({ pass: true, blocking: 0 });
-    expect(so.parseVerdict('…\n**结论：必须改 2 条**\n')).toEqual({ pass: false, blocking: 2 });
+    expect(so.parseVerdict('## 必须改\n无\n结论：通过')).toEqual({
+      pass: true,
+      blocking: 0,
+    });
+    expect(so.parseVerdict('…\n**结论：必须改 2 条**\n')).toEqual({
+      pass: false,
+      blocking: 2,
+    });
     expect(so.parseVerdict('结论：必须改 0 条')).toBeNull();
     expect(so.parseVerdict('结论：通过\n另外一句')).toBeNull();
     expect(so.parseVerdict('')).toBeNull();
-    expect(so.parseCritique('## 漏掉的\n无\n结论：同意')).toEqual({ agree: true, objections: 0 });
-    expect(so.parseCritique('**结论：有异议 3 条**')).toEqual({ agree: false, objections: 3 });
+    expect(so.parseCritique('## 漏掉的\n无\n结论：同意')).toEqual({
+      agree: true,
+      objections: 0,
+    });
+    expect(so.parseCritique('**结论：有异议 3 条**')).toEqual({
+      agree: false,
+      objections: 3,
+    });
     expect(so.parseCritique('结论：有异议 0 条')).toBeNull();
     expect(so.parseCritique('结论：通过')).toBeNull();
   });
@@ -670,7 +715,9 @@ describe('cloud 能力和本次计费账本', () => {
   });
 
   it('能力拒绝沿原候选链继续，收到异议后不再换家，同族始终排除', async () => {
-    const chain = so.discussionProfiles({ authorFamily: 'gpt' }) as FakeProfile[];
+    const chain = so.discussionProfiles({
+      authorFamily: 'gpt',
+    }) as FakeProfile[];
     const called: string[] = [];
     const logs: string[] = [];
     const result = await profilesLib.withFallback(
@@ -690,7 +737,10 @@ describe('cloud 能力和本次计费账本', () => {
       },
     );
     expect(called).toEqual(['grok', 'reclaude']);
-    expect(so.parseCritique(result.text)).toEqual({ agree: false, objections: 2 });
+    expect(so.parseCritique(result.text)).toEqual({
+      agree: false,
+      objections: 2,
+    });
     expect(chain.every((profile) => profile.family !== 'gpt')).toBe(true);
     expect(logs.join('\n')).toContain('未发出模型调用');
   });
@@ -738,11 +788,17 @@ describe('cloud 能力和本次计费账本', () => {
     });
     const index = join(dir, 'index-test.ndjson');
     writeFileSync(index, `${JSON.stringify(row())}\n`);
-    expect(sessionsLib.readLedger('session', root)).toMatchObject({ readable: true, rows: [row()] });
+    expect(sessionsLib.readLedger('session', root)).toMatchObject({
+      readable: true,
+      rows: [row()],
+    });
     for (const malformed of ['{secret-do-not-print', 'null', '[]', '42']) {
       writeFileSync(index, `${JSON.stringify(row())}\n${malformed}`);
       const reading = sessionsLib.readLedger('session', root);
-      expect(reading).toMatchObject({ readable: false, why: expect.stringContaining('第 2 行') });
+      expect(reading).toMatchObject({
+        readable: false,
+        why: expect.stringContaining('第 2 行'),
+      });
       expect(JSON.stringify(reading)).not.toContain('secret-do-not-print');
     }
     rmSync(index);
@@ -1127,7 +1183,11 @@ describe('Claude 讨论端点：只经 reclaude 的无头 JSON', SLOW, () => {
     const r = run(
       'second-opinion.mjs',
       ['--text', topic(LONG), '--name', 'budget', '--author-family', 'gpt', '--budget-sec', '0.05'],
-      { home: temp('home'), path: fakeReclaude(), env: { FAKE_RECLAUDE_SLEEP_MS: '100' } },
+      {
+        home: temp('home'),
+        path: fakeReclaude(),
+        env: { FAKE_RECLAUDE_SLEEP_MS: '100' },
+      },
     );
     expect(r.code).toBe(2);
     expect(r.err).toContain('讨论总预算已用完');

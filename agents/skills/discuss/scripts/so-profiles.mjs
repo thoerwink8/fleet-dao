@@ -20,18 +20,58 @@ export const PROFILES = {
   // Claude 必须经 reclaude；不要直接起 claude。model 留空，由 reclaude 的 JSON 输出报告实际模型。
   claude: { family: 'claude', agent: 'reclaude', model: null, route: 'local' },
   // Mirasim modelRosterCache：dsh/deepseek-flash。若这台 Mirasim 没有 dsh，照实换下一家。
-  deepseek: { family: 'deepseek', agent: 'dsh', model: 'deepseek-flash', route: 'cloud' },
+  deepseek: {
+    family: 'deepseek',
+    agent: 'dsh',
+    model: 'deepseek-flash',
+    route: 'cloud',
+  },
   // 保留 cloud 请求；原生 Grok 不支持中继，由 requireCloudCapability 在调用前明确拒绝，候选链继续。
   grok: { family: 'grok', agent: 'grok', model: null, route: 'cloud' },
   // Mirasim modelRosterCache：kimi/kimi-code/k3。
-  kimi: { family: 'kimi', agent: 'kimi', model: 'kimi-code/k3', route: 'cloud' },
+  kimi: {
+    family: 'kimi',
+    agent: 'kimi',
+    model: 'kimi-code/k3',
+    route: 'cloud',
+  },
   // 旧显式参数保留兼容，但不进入新的族顺序；它们仍带 family，不能绕过同族排除。
-  code5: { family: 'gpt', agent: 'codex', model: 'gpt-5.6-luna', route: 'cloud' },
-  cursor: { family: 'gpt', agent: 'cursor-cli', model: 'gpt-5.6-luna-high', route: 'local' },
-  glm: { family: 'glm', agent: 'cursor-cli', model: 'glm-5.2-high', route: 'local' },
-  kimi3: { family: 'kimi', agent: 'cursor-cli', model: 'kimi-k3-high', route: 'local' },
-  'grok-cli': { family: 'grok', agent: 'cursor-cli', model: 'grok-4.7-medium', route: 'local' },
-  ui: { family: 'gemini', agent: 'antigravity', model: 'gemini-3.8-flash-high', route: null },
+  code5: {
+    family: 'gpt',
+    agent: 'codex',
+    model: 'gpt-5.6-luna',
+    route: 'cloud',
+  },
+  cursor: {
+    family: 'gpt',
+    agent: 'cursor-cli',
+    model: 'gpt-5.6-luna-high',
+    route: 'local',
+  },
+  glm: {
+    family: 'glm',
+    agent: 'cursor-cli',
+    model: 'glm-5.2-high',
+    route: 'local',
+  },
+  kimi3: {
+    family: 'kimi',
+    agent: 'cursor-cli',
+    model: 'kimi-k3-high',
+    route: 'local',
+  },
+  'grok-cli': {
+    family: 'grok',
+    agent: 'cursor-cli',
+    model: 'grok-4.7-medium',
+    route: 'local',
+  },
+  ui: {
+    family: 'gemini',
+    agent: 'antigravity',
+    model: 'gemini-3.8-flash-high',
+    route: null,
+  },
 };
 /** @type {Record<string, Profile | undefined>} */
 const PROFILE_BY_FAMILY = {
@@ -74,17 +114,19 @@ function pickProfile(name) {
  * @param {unknown} raw
  * @param {string} [label]
  */
-function splitFamilies(raw, label = '--author-family') {
+export function splitFamilies(raw, label = '--author-family') {
   const values = (Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,]+/))
     .map((s) => String(s).trim().toLowerCase())
     .filter(Boolean);
   if (values.length === 0)
     throw new NotChecked(
-      `要 ${label} <gpt|claude|deepseek|grok|kimi>：讨论不能确认作者模型族（可逗号分隔），不会从环境变量猜`,
+      `要 ${label} <gpt|swe|claude|deepseek|grok|kimi>：讨论不能确认作者模型族（可逗号分隔），不会从环境变量猜`,
     );
-  const unknown = values.filter((family) => !FAMILY_ORDER.includes(family));
+  const unknown = values.filter((family) => ![...FAMILY_ORDER, 'swe'].includes(family));
   if (unknown.length)
-    throw new NotChecked(`不认识的作者模型族：${unknown.join('、')}（可用：${FAMILY_ORDER.join('、')}）`);
+    throw new NotChecked(
+      `不认识的作者模型族：${unknown.join('、')}（可用：${[...FAMILY_ORDER, 'swe'].join('、')}）`,
+    );
   return new Set(values);
 }
 

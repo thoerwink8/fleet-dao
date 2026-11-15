@@ -1,6 +1,5 @@
-// 讨论问 GPT 的一条路：本机 ~/.fleet-dao/discuss.env（进程环境变量优先）里
-// DISCUSS_GPT_BASE_URL 和 DISCUSS_GPT_API_KEY 都有，才走 OpenAI 兼容的 /chat/completions。
-// 缺一个就返回 null，调用方走原来的执行体。失败不改道。
+// 讨论共用的 OpenAI 兼容接口：magpie 和旧 GPT 中转都用 completeChat，失败不改道。
+// 本机 ~/.fleet-dao/discuss.env 的配置由进程环境变量覆盖（包括显式空值）。
 // 报错只留状态和错误码：fetch 的 message 里常带着地址，响应正文可能把密钥回显回来，都不往外带。
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -22,6 +21,12 @@ const API_KEY = 'DISCUSS_GPT_API_KEY';
 export function discussEnvFile(home = homedir()) {
   return join(home, '.fleet-dao', 'discuss.env');
 }
+
+export const DEFAULT_MAGPIE_BASE_URL = 'http://127.0.0.1:3425/v1';
+export const DEFAULT_MAGPIE_KEY = 'magpie-discuss';
+const MAGPIE_BASE_URL_KEY = 'DISCUSS_MAGPIE_BASE_URL';
+const MAGPIE_API_KEY_KEY = 'DISCUSS_MAGPIE_API_KEY';
+const MODEL_KEY_PREFIX = 'DISCUSS_MODEL_';
 
 /**
  * @param {string} text
@@ -55,9 +60,35 @@ export function parseEnvFile(text) {
  * @returns {{ baseUrl: string, apiKey: string } | null}
  */
 export function gptRelayConfig(opts = {}) {
+  const baseUrl = discussEnvValue(URL_KEY, opts)?.replace(/\/+$/, '');
+  const apiKey = discussEnvValue(API_KEY, opts);
+  if (!baseUrl || !apiKey) return null;
+  return { baseUrl, apiKey };
+}
+
+/**
+ * discuss.env 的值：进程环境里出现过的名字盖过文件（空字符串也算盖过）。
+ * @param {string} key
+ * @param {{ env?: NodeJS.ProcessEnv, home?: string, readFile?: (path: string) => string }} [opts]
+ * @returns {string | undefined} 配了值；undefined = 文件里和进程里都没这个键
+ */
+export function discussEnvValue(key, opts = {}) {
   const env = opts.env ?? process.env;
   const home = opts.home ?? homedir();
   const readFile = opts.readFile ?? ((path) => readFileSync(path, 'utf8'));
+  const { env: e, file } = discussEnvLookup(env, home, readFile);
+  if (Object.hasOwn(e, key) && e[key] !== undefined) return String(e[key]).trim();
+  if (Object.hasOwn(file, key)) return String(file[key]).trim();
+  return undefined;
+}
+
+/**
+ * 读 discuss.env 的文件值；读不到返回空表。返回值带进程环境，调用方自己取。
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} home
+ * @param {(path: string) => string} readFile
+ */
+function discussEnvLookup(env, home, readFile) {
   /** @type {Record<string, string>} */
   let file = {};
   try {
@@ -65,14 +96,31 @@ export function gptRelayConfig(opts = {}) {
   } catch {
     file = {};
   }
-  const pick = (/** @type {string} */ key) => {
-    if (Object.hasOwn(env, key) && env[key] !== undefined) return String(env[key]).trim();
-    return (file[key] ?? '').trim();
-  };
-  const baseUrl = pick(URL_KEY).replace(/\/+$/, '');
-  const apiKey = pick(API_KEY);
+  return { env, file };
+}
+
+/**
+ * magpie 的配置：baseUrl 和 key 都从 discuss.env（进程环境变量优先）来；
+ * baseUrl 给了空值、key 给了空值，都当这台没开 magpie（返回 null）。
+ * 默认端点是本机 3425，key 是本地网关随便一个值。
+ * @param {{ env?: NodeJS.ProcessEnv, home?: string, readFile?: (path: string) => string }} [opts]
+ * @returns {{ baseUrl: string, apiKey: string } | null}
+ */
+export function magpieRelayConfig(opts = {}) {
+  const baseUrl = discussEnvValue(MAGPIE_BASE_URL_KEY, opts)?.replace(/\/+$/, '') ?? DEFAULT_MAGPIE_BASE_URL;
+  const apiKey = discussEnvValue(MAGPIE_API_KEY_KEY, opts) ?? DEFAULT_MAGPIE_KEY;
   if (!baseUrl || !apiKey) return null;
   return { baseUrl, apiKey };
+}
+
+/**
+ * discuss.env 里 DISCUSS_MODEL_<族>（大写族名）改过就换；环境变量优先；空值当没改。
+ * @param {string} key
+ * @param {{ env?: NodeJS.ProcessEnv, home?: string, readFile?: (path: string) => string }} [opts]
+ * @returns {string | undefined}
+ */
+export function discussModelOverride(key, opts = {}) {
+  return discussEnvValue(`${MODEL_KEY_PREFIX}${key.toUpperCase()}`, opts) || undefined;
 }
 
 /**
@@ -199,6 +247,10 @@ export async function completeChat(opts) {
     return { ok: true, text };
   } catch (e) {
     if (isTimeout(e)) return { ok: false, kind: 'timeout' };
-    return { ok: false, kind: 'network', code: safeCode(readCode(e instanceof Error ? e.cause : undefined)) };
+    return {
+      ok: false,
+      kind: 'network',
+      code: safeCode(readCode(e instanceof Error ? e.cause : undefined)),
+    };
   }
 }
