@@ -107,6 +107,10 @@ describe('只读文件树', () => {
     writeFileSync(join(root, 'hello.txt'), TEXT);
     writeFileSync(join(root, 'dir', 'note.txt'), '子目录\n');
     writeFileSync(outside, OUTSIDE_BODY);
+    // 绝对路径指向测试自己建的文件，不读本机才有的路径（Windows 没有 /etc/passwd）。
+    const hostFile = join(scratch, 'host-marker.txt');
+    const hostBody = '宿主标记正文-不在工作区';
+    writeFileSync(hostFile, `${hostBody}\n`);
     symlinkSync(outside, join(root, 'leak'));
     const handle = handlerFor([{ id: 'w1', path: root }]);
     const up = '..';
@@ -128,9 +132,8 @@ describe('只读文件树', () => {
     expect(nestedEntries.map((e) => e.path)).toEqual(['dir/note.txt']);
     expect(await stays(root, 'dir/note.txt')).toBe(true);
 
-    const probes = [`${up}/${'secret.txt'}`, outside, 'leak', `dir/${up}/${up}/secret.txt`, '/etc/passwd'];
-    const passwd = readFileSync('/etc/passwd', 'utf8').split('\n')[0] ?? '';
-    expect(passwd.length).toBeGreaterThan(0);
+    const probes = [`${up}/${'secret.txt'}`, outside, 'leak', `dir/${up}/${up}/secret.txt`, hostFile];
+    expect(readFileSync(hostFile, 'utf8')).toContain(hostBody);
     for (const rel of probes) {
       for (const which of ['files', 'file']) {
         const res = await call(
@@ -141,7 +144,7 @@ describe('只读文件树', () => {
         expect(res.status).toBeGreaterThanOrEqual(400);
         expect(res.status).toBeLessThan(500);
         expect(res.raw).not.toContain(OUTSIDE_BODY);
-        expect(res.raw).not.toContain(passwd);
+        expect(res.raw).not.toContain(hostBody);
       }
     }
   });
