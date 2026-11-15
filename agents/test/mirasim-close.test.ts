@@ -1,5 +1,4 @@
 // close.mjs：收单时先拆目录联接再删工作树。联接指回主检出的依赖目录，跟着删会把主检出删空。
-import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -14,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChildOk } from './child.ts';
 
 const SCRIPT = fileURLToPath(new URL('../skills/mirasim-sessions/scripts/close.mjs', import.meta.url));
 
@@ -60,16 +60,11 @@ afterEach(() => {
 });
 
 function git(cwd: string, args: string[]): string {
-  const r = spawnSync(
+  return runChildOk(
     'git',
     ['-c', 'user.name=close-test', '-c', 'user.email=close-test@example.com', ...args],
-    {
-      cwd,
-      encoding: 'utf8',
-    },
+    { cwd },
   );
-  if (r.status !== 0) throw new Error(`${args.join(' ')}\n${r.stderr || r.stdout}`);
-  return r.stdout;
 }
 
 /** 主检出 + 已合进 main 的分支工作树。node_modules 被忽略，里面放两份文件。 */
