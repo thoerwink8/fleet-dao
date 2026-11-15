@@ -338,7 +338,7 @@ describe('合并闸：改标准（人闸第四类，决定 0093）——碰了�
       deps(
         world({
           files: [touched(STD)],
-          prOver: { body: `**需求**：${CONSENT.replace(/^\*\*/, '').replace('\*\*', '')}` },
+          prOver: { body: `**需求**：${CONSENT.replace(/^\*\*/, '').replace('**', '')}` },
         }),
       ),
     );

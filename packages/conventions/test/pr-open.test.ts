@@ -226,10 +226,7 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
   });
 
   it('改标准 + --founder-approved、正文贴了凭据：挂', () => {
-    const w = world(
-      [CREATED, files('agents/shared-rules.md'), ok()],
-      `${BODY}\n${founderConsentLine()}\n`,
-    );
+    const w = world([CREATED, files('agents/shared-rules.md'), ok()], `${BODY}\n${founderConsentLine()}\n`);
     expect(w.run('--founder-approved')).toBe(0);
     expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
     expect(w.text()).toContain('正文引用了同意凭据');
@@ -446,8 +443,7 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、PR 不挂里程碑', ()
   });
 
   it('需求栏外和别仓 Refs 不改变本仓明确 Closes，凭据行仍保留', () => {
-    const body =
-      `**做了什么**：Refs #3\n\n**需求**：Closes #7\nRefs other/repo#9\n\n${founderConsentLine()}\n`;
+    const body = `**做了什么**：Refs #3\n\n**需求**：Closes #7\nRefs other/repo#9\n\n${founderConsentLine()}\n`;
     const w = world([CREATED, files('a.ts'), ok()], body);
     expect(w.run()).toBe(0);
     expect(w.bodies).toEqual([body]);
@@ -481,13 +477,7 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、PR 不挂里程碑', ()
   });
 
   it('--no-issue + --body-file：需求栏里手写的改标准凭据留着，只在开头插「无：<理由>」（#1890）', () => {
-    const body = [
-      '**做了什么**：x',
-      '',
-      '**需求**：<!-- 单号 -->',
-      founderConsentLine(),
-      '',
-    ].join('\n');
+    const body = ['**做了什么**：x', '', '**需求**：<!-- 单号 -->', founderConsentLine(), ''].join('\n');
     const w = world([CREATED, files('agents/shared-rules.md'), ok()], body, []);
     expect(w.run('--founder-approved', '--no-issue', '改标准，随 PR 一起')).toBe(0);
     const sent = w.bodies[0] ?? '';

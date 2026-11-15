@@ -31,7 +31,13 @@ import {
 } from './labels.ts';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
-import { founderConsent, founderConsentLine, issueColumnRefs, unmarkedIssueRefs, withIssueColumn } from './pr-columns.ts';
+import {
+  founderConsent,
+  founderConsentLine,
+  issueColumnRefs,
+  unmarkedIssueRefs,
+  withIssueColumn,
+} from './pr-columns.ts';
 
 /**
  * 从 gh pr create 的输出里认 PR 号。gh 正常时最后一行是 PR 地址（…/pull/<N>）；输出里认不出 PR 号直接抛错——

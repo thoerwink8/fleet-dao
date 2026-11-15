@@ -159,8 +159,7 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
   });
 
   it('withIssueColumn：需求栏下面另起一行的「人闸：改标准」留着，后面的栏也不动', () => {
-    const body =
-      `**做了什么**：x\n\n**需求**：<!-- 提示 -->\n人闸：改标准\n\n${founderConsentLine()}\n`;
+    const body = `**做了什么**：x\n\n**需求**：<!-- 提示 -->\n人闸：改标准\n\n${founderConsentLine()}\n`;
     const out = withIssueColumn(body, '无：理由');
     expect(out).toContain(`**需求**：无：理由\n${GATE_LINE}\n`);
     expect(out).not.toContain('提示');
@@ -225,7 +224,11 @@ describe('改标准凭据（founderConsent）：pr-open 的 --founder-approved �
       at: '2026-10-15 05:45 +0800',
       issue: 2361,
     });
-    expect(founderConsent(bare)).toEqual({ directive: '20261015054500', at: '2026-10-15 05:45 +0800', issue: 2361 });
+    expect(founderConsent(bare)).toEqual({
+      directive: '20261015054500',
+      at: '2026-10-15 05:45 +0800',
+      issue: 2361,
+    });
   });
 
   it('【故意造出的失败】旧的「创始人原话」、引导编号或挂的单对不上、写在 HTML 注释里：都读不到', () => {
