@@ -14,9 +14,38 @@
 | 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端、经隧道探法国 healthz |
 | 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787、7346 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
-| 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停）；`daihuo.service`（程序 `/opt/daihuo`、数据 `/var/lib/daihuo`）；两个 systemd 定时任务：`reclaude-refill-collector.timer`（每分钟，程序 `/opt/reclaude-refill`、数据 `/var/lib/reclaude-refill`）、`mirasim-radar-collector.timer`（每 5 分钟，程序 `/opt/mirasim-radar`、数据 `/var/lib/mirasim-radar`） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
+| 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停）；`daihuo.service`（程序 `/opt/daihuo`、数据 `/var/lib/daihuo`）；两个 systemd 定时任务：`reclaude-refill-collector.timer`（每分钟，程序 `/opt/reclaude-refill`、数据 `/var/lib/reclaude-refill`）、`mirasim-radar-collector.timer`（每 5 分钟，程序 `/opt/mirasim-radar`、数据 `/var/lib/mirasim-radar`）；magpie（单元 `magpie.service`，见「法国 magpie 的 Cursor 登录」一节） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
 两机之间走 WireGuard 隧道 `10.99.0.0/24`：香港 `10.99.0.1` 是服务端；法国 `10.99.0.2` 是客户端，主动连、每 25 秒保活，所以法国不用开任何入站端口。开发本机接入同一隧道时用 `10.99.0.3/32`（公钥填进香港 `hk.env` 的 `FLEET_WG_DEV_PUBLIC_KEY`）：香港只在 `wg-fleet` 网卡内互转 `10.99.0.0/24` 节点流量，不改公网端口和 nginx；法国 `8787`/`7346` 仍只对香港 `10.99.0.1` 放行。
+
+### 法国 magpie 的 Cursor 登录
+
+法国 magpie 不归本仓装机管：`deploy/france.sh` 不装、不删 `magpie.service`。
+它以用户 `magpie` 跑，家目录 `/var/lib/magpie`，程序 `/opt/magpie/magpie`。
+网页绑在 `10.99.0.2:3430`，网关地址是单元环境里的 `MAGPIE_ADDR`（现在是 `10.99.0.2:3425`），只在 WireGuard 内网。
+Cursor 订阅走社区插件 `@magpie-community/opencode-cursor-auth`。
+登录文件是 `/var/lib/magpie/.config/cursor/auth.json`，从创始人电脑拷来。
+这不是第五节「会话用户的 Cursor 密钥」那把 API 密钥，也不是会话用户 `fleet-agent-carpool` 家里的 cursor-agent。
+
+插件说明写着两件事。
+浏览器登录拿到的访问令牌大约两个月过期，Cursor 不给命令行续这一类，到期要再登录。
+cursor-agent 自己的登录写在同一份 `auth.json`（macOS 在钥匙串）。
+剩下不到 5 分钟时，插件跑 `cursor-agent status`，由 CLI 自己续，插件不改这个文件。
+magpie 用户没有 cursor-agent，所以现在这份拷来的登录不会自己续。
+Grok 的令牌由法国已有的 grok 命令行续，不在这里。
+
+2026-12 中旬前做下面两样里的一样。
+令牌不上屏幕，不进对话、单子、提交和日志。
+读回只看路径、属主、权限、字节数，不读内容。
+
+1. 再从创始人电脑拷一次。先确认那边仍有效的 `~/.config/cursor/auth.json`（cursor-agent 若把登录写在别处，拷它正在用的那份）。以 magpie 用户换上 `/var/lib/magpie/.config/cursor/auth.json`：同目录里先落临时文件，改成普通文件、属 magpie、600，再换名。已经过期的再拷一次还是过期。
+2. 或者在法国给 magpie 用户装 cursor-agent 并登录。以 magpie 自己的身份把 `https://cursor.com/install` 整份下下来再跑，不要 `curl | bash`，然后 `cursor-agent login`。登录文件要落在 `/var/lib/magpie/.config/cursor/auth.json`，不要装进会话用户家里。装好以后，CLI 那种登录由插件在快到期时跑 `cursor-agent status` 续。浏览器登录那种大约两个月的令牌，命令行仍然续不了，到期还是要再登录一次。
+
+做完用法国 magpie 已有的调用 key，向网关打一条 cursor 模型请求，HTTP 状态要是 200。
+401 是登录失效，照上面再做。key 和令牌都不打出来。
+
+来源：local-session `6b9c90a5-451b-4637-a440-a6903e3776a8`（单键 `670a174b7f9f8e8eb80ca7f1d6ff84eaa4d73b5ebf949300883cb8cdd650ffdb`）。
+私有仓 fleet-dao-vault 的 magpie/README.md 不在这次检出里，做法写在这一节。
 
 ## 二、端口表
 
