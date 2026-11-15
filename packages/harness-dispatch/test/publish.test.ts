@@ -35,6 +35,13 @@ let remote: string;
 let gh: FakeGitHub;
 let specs: CommandSpec[];
 
+/** 每个用例自己的远端裸仓：上一例超时或失败后留下的分支不会流到下一例。 */
+async function freshRemote(): Promise<void> {
+  remote = join(await mkdtemp(join(tmpdir(), 'fleet2-pub-remote-')), 'r.git');
+  git(tmpdir(), 'clone', '-q', '--bare', src, remote);
+  gh = fakeGitHub(remote);
+}
+
 /** 在源仓的临时副本里改文件，抓一份和工人抓补丁同样写法的 diff。 */
 function makePatch(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'fleet2-patch-src-'));
@@ -52,8 +59,6 @@ beforeAll(async () => {
   await mkdir(join(mirrorRoot, 'o'), { recursive: true });
   git(mirrorRoot, 'clone', '-q', '--bare', src, join(mirrorRoot, 'o', 'r.git'));
   tmpRoot = await mkdtemp(join(tmpdir(), 'fleet2-pub-tmp-'));
-  remote = join(await mkdtemp(join(tmpdir(), 'fleet2-pub-remote-')), 'r.git');
-  git(tmpdir(), 'clone', '-q', '--bare', src, remote);
 }, 60_000);
 afterAll(async () => {
   await t.close();
@@ -63,18 +68,16 @@ beforeEach(async () => {
   await t.pg.exec(
     'truncate fleet2.events, fleet2.outbox, fleet2.publish_runs, fleet2.real_batch_items, fleet2.command_receipts restart identity',
   );
-  // 远端只留 main
-  for (const b of git(remote, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').split('\n')) {
-    if (b && b !== 'main') git(remote, 'branch', '-D', b);
-  }
-  gh = fakeGitHub(remote);
+  // 每个用例自己的远端裸仓，超时或失败留下的分支不会流到下一例。
+  await freshRemote();
   specs = [];
   await freezeRealBatch(
     t.db,
     'b1',
     [1, 2, 3, 4].map((issue) => ({ repo: 'o/r', issue, baseSha, snapshotAt: new Date() })),
   );
-});
+  // 这个文件每例都起真 git（含上面重建裸仓）。并行时 git 启动被拖慢，默认 5 秒（含钩子）会把还在跑的用例判超时。
+}, 60_000);
 
 const deps = (over: Partial<PublishDeps> = {}): PublishDeps => ({
   db: t.db,
@@ -118,7 +121,7 @@ describe('外送种类', () => {
     expect(publishAction('github.pr.open')).toBe('open');
     expect(publishAction('change.pr.open')).toBe('open');
     expect(publishAction('change.merge')).toBeNull();
-  });
+  }, 60_000);
 });
 
 describe('记账：该推的才排推送', () => {
@@ -129,7 +132,7 @@ describe('记账：该推的才排推送', () => {
     expect(await states()).toEqual(['change.push:pending']);
     const rows = await t.pg.query('select count(*)::int as n from fleet2.publish_runs');
     expect((rows.rows[0] as { n: number }).n).toBe(1);
-  });
+  }, 60_000);
 
   it('核验没过、没查成、工人被叫停、没有改动：都不推（held / empty），只留产物', async () => {
     const cases: [Partial<PublishCollected>, string][] = [
@@ -142,11 +145,11 @@ describe('记账：该推的才排推送', () => {
       expect((await record(over, i + 1)).state).toBe(want);
       expect(await states(i + 1)).toEqual([]);
     }
-  });
+  }, 60_000);
 
   it('passed 也推', async () => {
     expect((await record({ verdict: 'passed' })).state).toBe('ready');
-  });
+  }, 60_000);
 });
 
 describe('推分支、开 PR', () => {
@@ -174,7 +177,7 @@ describe('推分支、开 PR', () => {
     expect(chain).toEqual(['publish.pushed', 'publish.pr.opened']);
     // 没有任何合并的调用
     expect(gh.calls.join('\n')).not.toMatch(/merge/i);
-  });
+  }, 60_000);
 
   it('S4：开 PR 建成了但响应丢了（超时）→ 记 unknown；重来先查到已有的 PR，不开第二个', async () => {
     await record();
@@ -188,7 +191,7 @@ describe('推分支、开 PR', () => {
     expect(gh.calls.filter((c) => c.startsWith('openPr'))).toHaveLength(1);
     const op = await getOp(t.db, opKey('change.pr.open', ref(), 3, 'd1-a1'));
     expect(op?.result).toMatchObject({ number: gh.prs[0]?.number, opened: false });
-  });
+  }, 60_000);
 
   it('GH2：推送已经做过、收尾前崩了 → 重来看到分支在、内容对，不再推第二次', async () => {
     await record();
@@ -201,7 +204,7 @@ describe('推分支、开 PR', () => {
     expect(specs.filter((s) => s.command.includes('push'))).toHaveLength(1);
     expect(await states()).toEqual(['change.push:done', 'change.pr.open:done']);
     expect(gh.prs).toHaveLength(1);
-  });
+  }, 60_000);
 
   it('O1：这张单已经易手（令牌对不上）→ 动作进 dead，分支没推、PR 没开', async () => {
     await record();
@@ -209,7 +212,7 @@ describe('推分支、开 PR', () => {
     expect(await states()).toEqual(['change.push:dead']);
     expect(git(remote, 'branch', '--list', 'fleet2/*').trim()).toBe('');
     expect(gh.prs).toHaveLength(0);
-  });
+  }, 60_000);
 
   it('读不到所有权令牌：按没做成退避，不当成对得上；不动 GitHub', async () => {
     await record();
@@ -223,7 +226,7 @@ describe('推分支、开 PR', () => {
     expect(rep).toMatchObject({ failed: 1, done: 0 });
     expect(await states()).toEqual(['change.push:pending']);
     expect(git(remote, 'branch', '--list', 'fleet2/*').trim()).toBe('');
-  });
+  }, 60_000);
 
   it('GH1：这张单已经有别人开着的 PR → 不开第二个，进 dead', async () => {
     await record();
@@ -232,7 +235,7 @@ describe('推分支、开 PR', () => {
     expect(await processOutbox(deps())).toMatchObject({ dead: 1 });
     expect(gh.prs).toHaveLength(1);
     expect(await states()).toEqual(['change.push:done', 'change.pr.open:dead']);
-  });
+  }, 60_000);
 
   it('GH3：PR 被人手动关了 → 不再开第二个，进 dead；合了就认', async () => {
     await record();
@@ -244,7 +247,7 @@ describe('推分支、开 PR', () => {
     );
     expect(await processOutbox(deps())).toMatchObject({ dead: 1 });
     expect(gh.prs).toHaveLength(1);
-  });
+  }, 60_000);
 
   it('远端同名分支已经有别的内容 → 不覆盖，进 dead', async () => {
     git(remote, 'branch', 'fleet2/1-d1-a1', 'main');
@@ -252,13 +255,13 @@ describe('推分支、开 PR', () => {
     expect(await processOutbox(deps())).toMatchObject({ dead: 1 });
     expect(git(remote, 'rev-parse', 'refs/heads/fleet2/1-d1-a1').trim()).toBe(baseSha);
     expect(await states()).toEqual(['change.push:dead']);
-  });
+  }, 60_000);
 
   it('补丁打不上基线 → 进 dead，不推', async () => {
     await record({ patch: 'diff --git a/nope b/nope\n--- a/nope\n+++ b/nope\n@@ -1 +1 @@\n-x\n+y\n' });
     expect(await processOutbox(deps())).toMatchObject({ dead: 1 });
     expect(git(remote, 'branch', '--list', 'fleet2/*').trim()).toBe('');
-  });
+  }, 60_000);
 
   it('GitHub 查证超时（没得到答案）→ 记 unknown，下一轮再查；重试到上限进 dead', async () => {
     await record();
@@ -272,7 +275,7 @@ describe('推分支、开 PR', () => {
     expect(await states()).toEqual(['change.push:unknown']);
     expect(await processOutbox(deps({ github: flaky, maxAttempts: 2 }))).toMatchObject({ dead: 1 });
     expect(await states()).toEqual(['change.push:dead']);
-  });
+  }, 60_000);
 
   it('H1：令牌和认证头不在任何命令行里，只有推送那一条的环境里有，别的 git 没有', async () => {
     await record();
@@ -287,7 +290,7 @@ describe('推分支、开 PR', () => {
     expect(withAuth[0]?.command).toContain('push');
     // 家目录指到临时目录：读不到宿主的全局配置和凭据助手
     expect(withAuth[0]?.trustedEnv?.HOME).toContain('fleet2-publish-');
-  });
+  }, 60_000);
 
   it('合并、评论没有处理器：领到就进 dead，GitHub 一个调用都不发', async () => {
     await enqueueOp(t.db, {
@@ -299,7 +302,7 @@ describe('推分支、开 PR', () => {
     });
     expect(await processOutbox(deps())).toMatchObject({ dead: 1 });
     expect(gh.calls).toEqual([]);
-  });
+  }, 60_000);
 
   it('同一个提交号：同样的基线加补丁不管推几次都是同一个提交（操作键稳）', async () => {
     await record({}, 1);
@@ -307,7 +310,7 @@ describe('推分支、开 PR', () => {
     const a = git(remote, 'rev-parse', 'refs/heads/fleet2/1-d1-a1').trim();
     expect(a).toMatch(/^[0-9a-f]{40}$/);
     expect(publishBranch(1, 'd1-a1')).toBe('fleet2/1-d1-a1');
-  });
+  }, 60_000);
 });
 
 describe('PR 正文', () => {
@@ -328,5 +331,5 @@ describe('PR 正文', () => {
     expect(body).toContain('passed（检查退出码 0）');
     expect(body).toContain('61 秒');
     expect(body).toContain('没有开自动合并');
-  });
+  }, 60_000);
 });

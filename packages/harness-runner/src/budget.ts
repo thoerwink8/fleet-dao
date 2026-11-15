@@ -2,7 +2,7 @@
 // 不各算各的相对时限（旧系统驱动和插头各算一份，先到的回 aborted 盖掉真原因）。
 
 export interface Budget {
-  /** 起进程后多久还没有实质事件就判「起来后无进展」（A1）。reclaude 首跑卡在「Syncing config…」上百秒，给足。 */
+  /** 第一帧之后多久还没有实质事件就判「起来后无进展」（A1）；进程还没吐出第一帧的时间不算进去。reclaude 首跑卡在「Syncing config…」上百秒，给足。 */
   startupMs: number;
   /** 这一层的总时限，含收尾和回写。 */
   totalMs: number;
