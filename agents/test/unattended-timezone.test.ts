@@ -24,9 +24,9 @@ it.each([
       const lines = [];
       const io = { env, now, out: s => lines.push(s), err: s => { throw Error(s); } };
       if (main(['on'], io) !== 0 || main(['status'], io) !== 0) throw Error('CLI failed');
-      lines.push(...sessionLines({ dir, sessionId, now }));
+      lines.push(...sessionLines({ dir, sessionId, now, env: {} }));
       const stored = JSON.parse(readFileSync(join(dir, sessionId + '.json'), 'utf8'));
-      const stopped = decideStop({ dir, sessionId, now: Date.parse(expiresAt) + 1 });
+      const stopped = decideStop({ dir, sessionId, now: Date.parse(expiresAt) + 1, env: {} });
       console.log(JSON.stringify({ lines, stored, stopped }));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   `;

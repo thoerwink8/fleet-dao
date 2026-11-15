@@ -23,6 +23,8 @@ function session(cli: 'claude' | 'codex') {
     FLEET_WORK_RUNS_DIR: join(dir, 'runs'),
     FLEET_WORKER: '',
     FLEET_HEADLESS: '',
+    // 夹具会话不是 mirasim 托管的；留着宿主的标记会让 Stop 不挡（#4013）
+    MIRASIM_SESSION_KEY: '',
     CLAUDE_CODE_SESSION_ID: cli === 'claude' ? sid : '',
     CODEX_THREAD_ID: cli === 'codex' ? sid : '',
     CODEX_SESSION_ID: '',
@@ -103,7 +105,7 @@ describe('各 CLI 真实 Stop → PostToolUse → 下一轮协议接续', { time
     for (let i = 0; i < 4; i++) s.run('stop');
     const before = s.state();
     expect(before.state).toBe('paused');
-    const lines = sessionLines({ dir: s.dir, sessionId: s.sid }).join('\n');
+    const lines = sessionLines({ dir: s.dir, sessionId: s.sid, env: {} }).join('\n');
     expect(lines).toContain('新请求照常执行、检查和验证');
     expect(lines).not.toContain('这一轮可以结束');
     expect(s.state()).toEqual(before);

@@ -42,7 +42,7 @@ try {
     noteReceipt(context, { phase: 'fault', decision: 'identity_unknown' });
   else if (!state?.ok) noteReceipt(context, { phase: 'fault', decision: 'state_unknown' });
   if (session.ok && process.env.FLEET_HEADLESS !== '1' && !input.agent_id && authority.kind === 'allowed') {
-    const lines = sessionLines({ dir: stateDir(), sessionId: session.id });
+    const lines = sessionLines({ dir: stateDir(), sessionId: session.id, env: process.env });
     if (lines.length)
       process.stdout.write(
         `${JSON.stringify({

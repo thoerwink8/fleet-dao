@@ -53,6 +53,8 @@ function fixture(id = parent, source: unknown = 'vscode', ancestor?: string) {
     ...process.env,
     FLEET_WORKER: '',
     FLEET_HEADLESS: '',
+    // 夹具会话不是 mirasim 托管的；留着宿主的标记会让 Stop 不挡（#4013）
+    MIRASIM_SESSION_KEY: '',
     CLAUDE_CODE_SESSION_ID: '',
     CODEX_THREAD_ID: id,
     CODEX_SESSION_ID: '',
