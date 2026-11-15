@@ -27,8 +27,8 @@ node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓�
   2. 一件活一棵工作树 `.claude/worktrees/<单号>-<短名>`、分支 `local/<单号>-<短名>`；不往别的会话的分支推，依赖别人的 PR 就基于那个分支开自己的，对方合了再 rebase。
   3. PR 开好、本机检查过了就停，不开自动合并、不自己合，也不等 CI；`pr:open` 顺手开了自动合并就 `gh pr merge <PR> --disable-auto` 摘掉。合并归验收的人，不然没验收的改动会先进主线（#3950 就是先合了、返工只能另开 #3951，还带红了主线 #3953）。
   4. 回报：推完 PR 或卡在只有创始人能拍的事上，在同一轮里马上调 `prompt {clientRef, sessionKey: "<指挥会话的 key>", prompt: "[<活名> 回报] …"}`，写做到哪、PR 号、验证命令和真实结果、没做的和原因、要创始人拍的。小进度不发。会话里没有 mirasim 工具的（Antigravity），从终端发：`node ~/.mirasim/app/<~/.mirasim/app/state.json 里 good 的版本>/server.cjs ui-cli call prompt --args '<同样的 JSON>'`（会话里不用带端口）。交代里把这个 key 写死：指挥官自己的 key 用 `listSessions {workdir}` 找自己标题那一条；换棒（`commander-handoff`）后新交代写新 key。不许写「CI 绿了再回报」然后收轮：执行会话收了轮就没人叫醒它，回报永远发不出来。CI 归指挥会话盯。同理，交代里写明「长命令前台跑、套 timeout、每段 ≤10 分钟，不许丢后台再收轮」：Antigravity 的后台任务跑完不会唤醒它（11-14 #127、#123 各停了约 1 小时），指挥官巡检看到会话 done 却没回报，先读它最后一轮，插队让它读输出接着做。
-- 关键约束（授权边界、别碰哪些分支、验收标准）在开会话的第一条里写全。中途补的话只是排进它的队列；`steer` 只有部分 agent 吃，grok 不吃。要改交代：`prompt` 排队，再 `stopAndRun {sessionKey, ref}`（`ref` 是那条 `prompt` 的 `clientRef`）插队打断。
-- 交代里给时限。子会话易在测试上越绕越远（降并发、加跳过、逐条追断言，#3988 的第二棒真遇到）；到点用上面的插队让它收尾，只报现状。
+- 关键约束（授权边界、别碰哪些分支、验收标准）在开会话的第一条里写全。`steer` 只有部分 agent 吃，grok 不吃。给在跑的子会话发任何新消息（补充、返工、回报转发），都用 `prompt` 再 `stopAndRun {sessionKey, ref}`（`ref` 填那条 `prompt` 的 `clientRef`）才会送达（2026-11-16 创始人：每次都要插队才收得到）；代价是它正在跑的那条命令被打断，所以尽量攒成一条再发。它已经 done 的会话直接 `prompt` 即可，不用插队。
+- 交代里给时限。子会话易在测试上越绕越远（降并发、加跳过、逐条追断言，#3988 的第二棒真遇到）；到点用上面的 `stopAndRun` 让它收尾，只报现状。
 - 长时间没回报：`listSessions` 看它的 `runState`、`failed`（pi 不在这份列表里，改看会话目录的 `record.json` 加 `getTurnFacts`）。grok 进程会异常退出（`grok exited`），退了就不会回报，发回原会话重跑。
 - 参考外部产品时写清授权边界：闭源软件和非开源许可（源码可见但限商用）的代码、样式一行都不进仓，只参考思路；MIT、Apache 类的库可以直接用。
 
@@ -56,7 +56,7 @@ node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓�
 node scripts/close.mjs --repo <主检出> --branch <分支> [--pr <号>|--mr <号>] [--session <sessionKey>]
 ```
 
-- 按序：合并（GitHub 用 `gh`，GitLab 用这个仓远端自己的地址和令牌，脚本里不写地址）→ 主检出快进到合并后的默认分支并推其余远端 → 先拆工作树里的目录联接和目录软链（只拆不跟），核主检出依赖目录项数没变，再删工作树和本地、远端分支 → 给了 `--session` 就删会话，没给就打印「不适用」。
+- 按序：合并（GitHub 用 `gh`，GitLab 用这个仓远端自己的地址和令牌，脚本里不写地址）→ 主检出快进到合并后的默认分支，再推其余远端（推送地址是 DISABLED，或 `git remote get-url --push` 失败的远端跳过，输出写明跳过了哪个）→ 先拆工作树里的目录联接和目录软链（只拆不跟），核主检出依赖目录项数没变，再删工作树和本地、远端分支 → 给了 `--session` 就删会话，没给就打印「不适用」。
 - 先核再删：分支已在默认分支里，或 MR/PR 已合；工作树没有未提交改动；联接拆完后没有剩余联接。有一件不满足就停，不删。
 - 某一步失败就停，退出码非 0，输出停在哪一步、下一步怎么手工接。重跑同一条命令会跳过已经做成的步骤。
 - 不要直接 `git worktree remove` 或 `removeWorktree`：Windows 上工作树里的依赖目录常常是指回主检出的目录联接，跟着联接会把主检出的依赖删空。

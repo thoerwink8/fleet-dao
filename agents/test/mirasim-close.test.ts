@@ -12,9 +12,10 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
-import { runChildOk } from './child.ts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { runChild, runChildOk } from './child.ts';
 
+vi.setConfig({ testTimeout: 20_000 });
 const SCRIPT = fileURLToPath(new URL('../skills/mirasim-sessions/scripts/close.mjs', import.meta.url));
 
 interface ExecResult {
@@ -44,6 +45,7 @@ interface CloseMod {
     argv: string[],
     io?: {
       log?: (line: string) => void;
+      exec?: (cmd: string, args: string[]) => ExecResult;
       deleteSession?: (key: string) => Promise<{ skipped: boolean; detail: string }>;
     },
   ): Promise<number>;
@@ -65,6 +67,14 @@ function git(cwd: string, args: string[]): string {
     ['-c', 'user.name=close-test', '-c', 'user.email=close-test@example.com', ...args],
     { cwd },
   );
+}
+/** close.mjs 自己调的 git：参数里已带 -C，这里只补提交身份。 */
+function realGit(cmd: string, args: string[]): ExecResult {
+  const r = runChild(
+    cmd,
+    cmd === 'git' ? ['-c', 'user.name=close-test', '-c', 'user.email=close-test@example.com', ...args] : args,
+  );
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
 /** 主检出 + 已合进 main 的分支工作树。node_modules 被忽略，里面放两份文件。 */
@@ -160,6 +170,51 @@ describe('close.mjs 删工作树不跟着目录联接', () => {
     expect(existsSync(wt)).toBe(false);
     expect(readFileSync(join(main, 'node_modules', 'keep.txt'), 'utf8')).toBe('keep\n');
     expect(depCount(main)).toBe(2);
+    expect(git(main, ['branch', '--list', branch]).trim()).toBe('');
+  });
+});
+
+describe('推其余远端时跳过推不出去的', () => {
+  /** 另加一个本地远端当「其余远端」。origin 仍是快进来源，这个不该挡住后面的删除。 */
+  function withOther(pushUrl: string): { main: string; wt: string; branch: string } {
+    const repo = mergedRepo();
+    const bare = join(repo.main, '..', 'other.git');
+    git(repo.main, ['init', '--bare', bare]);
+    git(repo.main, ['remote', 'add', 'origin', bare]);
+    git(repo.main, ['push', '-u', 'origin', 'main']);
+    git(repo.main, ['remote', 'set-head', 'origin', 'main']);
+    git(repo.main, ['remote', 'add', 'upstream', bare]);
+    git(repo.main, ['remote', 'set-url', '--push', 'upstream', pushUrl]);
+    return repo;
+  }
+
+  it('推送地址是 DISABLED：跳过并写明，工作树和分支照样删', async () => {
+    const { main, wt, branch } = withOther('DISABLED');
+    const { code, out } = await runClose(main, branch);
+    expect(code, out).toBe(0);
+    expect(out).toMatch(/跳过 upstream：推送地址是 DISABLED/);
+    expect(out).not.toMatch(/停在：/);
+    expect(existsSync(wt)).toBe(false);
+    expect(git(main, ['branch', '--list', branch]).trim()).toBe('');
+    expect(depCount(main)).toBe(2);
+  });
+
+  it('git remote get-url --push 失败：跳过并写明，工作树照样删', async () => {
+    const { main, wt, branch } = withOther('DISABLED');
+    const lines: string[] = [];
+    const code = await mod.closeRun(['--repo', main, '--branch', branch], {
+      log: (line) => lines.push(line),
+      exec: (cmd, args) => {
+        if (cmd === 'git' && args.includes('--push') && args.at(-1) === 'upstream') {
+          return { code: 1, stdout: '', stderr: "error: No such remote 'upstream'" };
+        }
+        return realGit(cmd, args);
+      },
+    });
+    const out = lines.join('\n');
+    expect(code, out).toBe(0);
+    expect(out).toMatch(/跳过 upstream：读推送地址没成/);
+    expect(existsSync(wt)).toBe(false);
     expect(git(main, ['branch', '--list', branch]).trim()).toBe('');
   });
 });
