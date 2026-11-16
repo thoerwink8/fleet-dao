@@ -21,6 +21,7 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <仓根> --prompt "<交代>" [--report-to <指挥会话key>]
 ```
 
+- 给在跑或已收轮的会话发后续消息（返工、补验证、接着做），一律用 `scripts/send.mjs --to <会话key> --file <消息文件>`，不要裸调 `prompt`：它会把「回报，必做」和指挥会话号追加到每条消息末尾。只靠开场交代里的那一段，会话做完第二件事时会忘（11-16 #33 做完开了 PR 却没回报，我的后续消息里只写了「回报」两个字）。
 - **干活的会话一律是 omp，不用原版 pi**（2026-11-16 创始人定）。mirasim 里 omp 的 agent 名是 `kimi`（启动方式经 ACP 到 omp），脚本默认 `--agent kimi`，`--agent pi` 直接退出码 2。omp 用的模型由它自己的配置（`~/.omp/agent/config.yml` 的角色，指向 `gateway/group/smart`）定，不要给 kimi 传 `--model`：ACP 不认 `set_model`，会话开场就报错（11-16 实测）。原因：我们的 omp 定制（单轮输出上限、技能目录、结束前检查扩展，在配置仓里）只管 omp；原版 pi 读另一套配置，今天派的 pi 会话没吃到这些，还出现过工具调用名字为空导致整轮被停的事。
 - 标题写 `【omp】`，和实际一致。
 

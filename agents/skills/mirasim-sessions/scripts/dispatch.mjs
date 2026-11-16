@@ -247,7 +247,7 @@ export function reportFooter(reportTo, reportScript = REPORT_SCRIPT) {
  * @param {Record<string, unknown>} args
  * @param {NodeJS.ProcessEnv} env
  */
-function callAtom(exec, nodePath, server, port, atom, args, env) {
+export function callAtom(exec, nodePath, server, port, atom, args, env) {
   /** @type {string[]} */
   const argv = [server, 'ui-cli'];
   if (port) argv.push('--port', port);
