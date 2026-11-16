@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -233,5 +241,103 @@ describe('各 CLI 真实 Stop → PostToolUse → 下一轮协议接续', { time
     expect(next.decision).toBe('block');
     expect(next.reason).toContain('后台完成结果没查成');
     expect(s.state().state).toBe('on');
+  });
+
+  it('一次 PostToolUse 的合并或派工记入进展，连续三次纯查询后仍 paused', () => {
+    const s = session('codex');
+    const post = (command: string, response: object = { exit_code: 0 }) =>
+      s.run('continuation-progress', {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_response: response,
+      });
+    const receipts = () => {
+      const dir = join(s.dir, `${s.sid}.progress`);
+      return existsSync(dir) ? readdirSync(dir) : [];
+    };
+    // 纯查询、sleep、取消合并、失败的合并都不落凭据。
+    for (const command of [
+      'gh pr view 1 --json state',
+      'gh pr checks 1',
+      'gh pr list --state open',
+      'gh pr diff 1',
+      'pnpm progress read',
+      'pnpm work queue',
+      'pnpm work runs',
+      'node scripts/check-reports.mjs',
+      'node scripts/wait.mjs',
+      'sleep 1; gh pr merge 9 --squash',
+      'git merge --abort',
+      'git merge --quit',
+      'git merge-base HEAD main',
+      'git status',
+    ]) {
+      expect(post(command).status).toBe(0);
+    }
+    expect(post('gh pr merge 9 --squash', { exit_code: 1 }).status).toBe(0);
+    expect(receipts()).toHaveLength(0);
+    // 三次纯查询接续：每次 Stop 把 streak +1。存盘到 3 之后，下一次 Stop 才写 paused。
+    for (const [i, command] of ['gh pr view 2', 'gh pr checks 2', 'pnpm work queue'].entries()) {
+      expect(post(command).status).toBe(0);
+      expect(receipts()).toHaveLength(0);
+      expect(JSON.parse(s.run('stop').stdout).decision).toBe('block');
+      expect(s.state()).toMatchObject({ state: 'on', streak: i + 1 });
+    }
+    expect(post('pnpm progress read').status).toBe(0);
+    const paused = JSON.parse(s.run('stop').stdout);
+    expect(paused.systemMessage).toContain('接续失败');
+    expect(s.state()).toMatchObject({
+      state: 'paused',
+      streak: 3,
+      note: '接续故障：连续 3 次没有实质进展',
+    });
+
+    expect(s.cliCommand('on')).toBe(0);
+    expect(s.state()).toMatchObject({ state: 'on', streak: 0 });
+    expect(post('gh pr checks 3').status).toBe(0);
+    expect(JSON.parse(s.run('stop').stdout).decision).toBe('block');
+    expect(post('pnpm work runs').status).toBe(0);
+    expect(JSON.parse(s.run('stop').stdout).decision).toBe('block');
+    expect(s.state()).toMatchObject({ state: 'on', streak: 2 });
+    expect(receipts()).toHaveLength(0);
+
+    expect(post('gh pr merge 2 --squash --delete-branch').status).toBe(0);
+    expect(receipts()).toHaveLength(1);
+    expect(post('gh pr merge 2 --squash --delete-branch').status).toBe(0);
+    expect(receipts()).toHaveLength(1);
+    const merged = JSON.parse(s.run('stop').stdout);
+    // 新凭据让 decideStop 的工作 streak 归零，再记成重置后的第 1 次接续。
+    expect(merged.decision).toBe('block');
+    expect(merged.reason).toContain('重置后第 1 次接续');
+    expect(s.state()).toMatchObject({ state: 'on', streak: 1 });
+
+    const substantive = [
+      'git merge origin/main',
+      'pnpm work run 4060',
+      'pnpm work rework 4060',
+      'pnpm issue:new --title 派工',
+      'node scripts/dispatch.mjs --title t --workdir /tmp --prompt 做',
+      'node scripts/send.mjs --to kimi:abcd --file note.md',
+      'node scripts/close.mjs --repo /tmp/repo --branch fleet/x --pr 2',
+      'node scripts/wait.mjs pr 2',
+      'node scripts/wait.mjs pr-head 2 --after abcdefabcdefabcdefabcdefabcdefabcd',
+      'pnpm progress note "合了 #2"',
+    ];
+    for (const command of substantive) expect(post(command).status).toBe(0);
+    expect(receipts()).toHaveLength(1 + substantive.length);
+    expect(
+      s.run('continuation-progress', {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Agent',
+        tool_input: { description: '派工', prompt: '做 4060', subagent_type: 'general-purpose' },
+        tool_response: { status: 'running', agent_id: 'child-1' },
+      }).status,
+    ).toBe(0);
+    expect(receipts()).toHaveLength(2 + substantive.length);
+    const dispatched = JSON.parse(s.run('stop').stdout);
+    expect(dispatched.decision).toBe('block');
+    expect(dispatched.reason).toContain('重置后第 1 次接续');
+    expect(s.state()).toMatchObject({ state: 'on', streak: 1 });
   });
 });

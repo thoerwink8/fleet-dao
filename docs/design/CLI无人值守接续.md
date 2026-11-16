@@ -19,7 +19,9 @@ Codex 原生子代理没有 `FLEET_WORKER` 时，也不能凭继承的旧用户�
 
 同步 Stop 不凭 background_tasks 或 session_crons 非空就放行。它把未完成工作交给下一轮，提示用 CLI 的阻塞等待工具收结果，避免模型 sleep 或轮询。工人终态从本机运行记录读，dispatcher 必须匹配本会话；旧 watcher 的 reported 只表示曾发通知，不能代替模型已消费，故同步续轮独立去重。记录读失败明确报错。
 
-防空转仍是连续三次、总共 200 次、最长 12 小时，均不放宽。只有成功 PostToolUse 的新写入、验证、提交或工人结果才算进展，重复相同动作不重置；有进展时可持续跨过多个三轮周期。三次无进展后写 paused 和接续故障，不保持 on 假装正常收尾；错误提示保留未完成状态。检查链路后才重新 on。
+防空转仍是连续三次、总共 200 次、最长 12 小时，均不放宽。进展只认成功的 PostToolUse，同一工具名加同一参数只登记一次；失败、中断、仍在跑的后台壳、`run_in_background` 都不登记。算进展：写入（Write、Edit、MultiEdit、apply_patch）；仓库规定的验证（`pnpm` 的 check/test/typecheck/hygiene/vitest/biome/build、`npx vitest run`、`node --test`）；提交与推送（`git commit` / `git push`、`gh pr create`、`gh issue create`）；收工（已结束的 Agent/Task/SubagentHandback，成功的 TaskOutput、wait、wait_agent、write_stdin）；收结果（`wait.mjs` 的 pr、pr-head、main-ci、issue）；合并（`gh pr merge`、`git merge`，不含 `--abort` / `--quit` 和 `merge-base`；`close.mjs` 收口）；派工（`pnpm work run`、`pnpm work rework`、`pnpm issue:new`、`dispatch.mjs`、`send.mjs`，以及已经成功启动、工人仍可在跑的 Agent/Task）；记进展（`pnpm progress note`）。不算进展：sleep、重复同一动作、状态查询（`gh pr view` / `checks` / `list` / `diff`、`pnpm progress read`、`pnpm work queue`、`pnpm work runs`、`check-reports.mjs`、`git status`）。不凭脚本文件名里带 check/verify 就认成验证。
+
+streak 不在 PostToolUse 里加。`recordProgress` 只在 `<会话号>.progress` 落新凭据。下一次 `decideStop` 才算：凭据数高于 `consumedProgress`，或有尚未投递的工人终态，工作变量 streak 先归零，再写成重置后的第 1 次接续（存盘 streak 为 1）；否则沿用存盘 streak，并在这次仍挡下时加 1（`streak: streak + 1`）。存盘 streak 已经到 3，这次 Stop 写 `paused`、note 为接续故障，不再挡。所以纯查询连续三次接续之后，下一次 Stop 仍会 paused。有进展就能跨过多个三轮周期。三次无进展后不保持 on 假装正常收尾；检查链路后才重新 on。
 
 验证命令识别覆盖仓库规定的 `npx vitest run` 和 Node 原生 `node --test`，自检脚本也可交给 `node --test` 执行；不凭任意脚本文件名含 check/verify 就认成验证，状态查询脚本不能续命。故障 paused 只暂停自动续轮，不取消新收到的用户任务；开场提示仍要求执行新请求，不能复述暂停便跳过检查。新请求本身不重置旧窗口或自动 on。
 
