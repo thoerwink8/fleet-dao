@@ -23,7 +23,7 @@ node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓�
 - `agent`、`model`、`effort` 照创始人指定的，`route` 用 `local`（走个人账号，不扣 Mirasim 额度）。没给 `--port` 时用环境变量 `MIRASIM_HOST_PORT`；会话里两个都没有就不带端口。版本读 `~/.mirasim/app/state.json` 里 `good` 的那一版，不写死。
 - 走个人账号要整机路由是「自有」（`setRelayMode {mode: "local"}`）。派之前先 `getCatalog {agent}` 确认要的模型在目录里；会话报「只有平台提供」（422）或目录里没有，先 `getCatalog {agent, refresh: true}` 刷新再发，不换成差一档的模型凑合。刷新本身也会探残（本机网络一抖：grok-4.7 标 `routeByModel: relay`、`ownOnlyModels` 里没有 fast）：看到残的就再刷，刷到正常再发，别据此判「这个模型只剩平台」，以本机 `grok models` 列出的为准。grok 一律 `grok-4.7` + `route: "local"`。不要写 `grok-4.7-low-fast`、`grok-4.7-high-fast`、`grok-4.7-build-fast`，也不要开 priority。
 - 快档是路由送的，不是这 488 次各自点了另一个模型（11-16 往前 24 小时 `magpie usage`）。cursor `grok-4.7@500k` 1661 次里 488 次 `tier_sent=priority`，模型名仍是 grok-4.7。仓里会点名快档的只有讨论脚本的偏好 `grok-4.7-low-fast`（已改成 `grok-4.7`；名单里只剩 `-fast` 就不选）。那个偏好对不上这 488 次，也对不上另外 30 次 `grok-4.7-high-fast`（约 30.06 美元）：仓里没有这个 id，对得上路由把高档模型加上 fast 之后的名字。法国 magpie 的组定义这次读不到，还不能把 `fast=` 那一行原文对上。
-- `grok-4.7-build-fast@500k`（grok 渠道）1097 次、0 错，中位 8.0 秒、首字 5.4 秒；同渠道 `grok-4.7` 是 1978 次、中位 6.0 秒、首字 3.7 秒。花费 148.5 美元对 149.4 美元，单次约 1.8 倍。又慢又贵，grok-pool 里移出，不留权重当后备。Grok Build 周额度这次 usage 里没有。
+- `grok-4.7-build-fast@500k`（grok 渠道）1097 次、0 错，中位 8.0 秒、首字 5.4 秒；同渠道 `grok-4.7` 是 1978 次、中位 6.0 秒、首字 3.7 秒。花费 148.5 美元对 149.4 美元，单次约 1.8 倍。又慢又贵，从 `group/grok-pool` 移出，不留权重当后备。Grok Build 周额度这次 usage 里没有。
 - 交代照 commander「派活」写全（单号、要改什么、怎么算做完、别碰什么、跑哪些测试），另加四条：
   1. 自己干，不派子代理。
   2. 一件活一棵工作树 `.claude/worktrees/<单号>-<短名>`、分支 `local/<单号>-<短名>`；不往别的会话的分支推，依赖别人的 PR 就基于那个分支开自己的，对方合了再 rebase。
