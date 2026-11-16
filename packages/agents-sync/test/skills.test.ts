@@ -28,10 +28,11 @@ const CHAIN = { 'SKILL.md': '---\nname: chain-first\n---\n先查断链。\n' };
 function machine(
   skills: Record<string, Record<string, string>> | null,
   installed: AgentId[] = ['claude', 'codex'],
+  tier?: 'home' | 'company' | 'france',
 ) {
   const home = tempDir('home');
   let repo = makeRepo(skills);
-  const ctx = ctxFor(home, installed);
+  const ctx = { ...ctxFor(home, installed), ...(tier === undefined ? {} : { tier }) };
   const manifest = () => readManifest(manifestPath(home, PLATFORM));
   return {
     home,
@@ -250,6 +251,87 @@ describe('没有 skill、清单读不懂', () => {
     expect(readManifest(file).ok).toBe(false);
     const file2 = put(tempDir('m'), 'agents-sync.json', JSON.stringify({ skills: [] }));
     expect(readManifest(file2).ok).toBe(false);
+  });
+});
+
+describe('omp 和机器档', () => {
+  const ALL = {
+    commander: { 'SKILL.md': '---\nname: commander\n---\n派给法国引擎。\n' },
+    'commander-handoff': { 'SKILL.md': '---\nname: commander-handoff\n---\n交接。\n' },
+    discuss: { 'SKILL.md': '---\nname: discuss\n---\n挑错。\n' },
+  };
+
+  it('只装了 omp：skill 进 ~/.agents/skills，和仓里逐字一样；再跑一遍不写', () => {
+    const m = machine(ALL, ['omp']);
+    const first = m.apply();
+    expect(
+      first
+        .filter((l) => l.kind === 'changed')
+        .map((l) => l.key)
+        .sort(),
+    ).toEqual([
+      '~/.agents/skills/commander',
+      '~/.agents/skills/commander-handoff',
+      '~/.agents/skills/discuss',
+    ]);
+    expect(get(m.home, '.agents/skills/commander/SKILL.md')).toBe(ALL.commander['SKILL.md']);
+    expect(existsSync(join(m.home, '.claude'))).toBe(false);
+    expect(existsSync(join(m.home, '.agent'))).toBe(false);
+    expect(existsSync(join(m.home, '.omp'))).toBe(false);
+    expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
+    expect(exitCode(m.check())).toBe(0);
+  });
+
+  it('Claude 和 omp 都在：两边都有、内容一致', () => {
+    const m = machine({ discuss: ALL.discuss }, ['claude', 'omp']);
+    m.apply();
+    const claude = get(m.home, '.claude/skills/discuss/SKILL.md');
+    const omp = get(m.home, '.agents/skills/discuss/SKILL.md');
+    expect(omp).toBe(claude);
+    expect(omp).toBe(ALL.discuss['SKILL.md']);
+    expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
+  });
+
+  it('公司档不装指挥官和法国引擎派活的那两份，别的照装；装过的再跑会撤；第二遍不写', () => {
+    const m = machine(ALL, ['claude', 'omp'], 'company');
+    const first = m.apply();
+    expect(first.filter((l) => l.kind === 'changed').map((l) => l.key)).toEqual([
+      '~/.claude/skills/discuss',
+      '~/.agents/skills/discuss',
+    ]);
+    expect(first.filter((l) => l.key.startsWith('agents/skills/')).map((l) => l.key)).toEqual([
+      'agents/skills/commander',
+      'agents/skills/commander-handoff',
+    ]);
+    expect(existsSync(join(m.home, '.agents', 'skills', 'commander'))).toBe(false);
+    expect(get(m.home, '.claude/skills/discuss/SKILL.md')).toBe(
+      get(m.home, '.agents/skills/discuss/SKILL.md'),
+    );
+    expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
+
+    const homeTier = machine(ALL, ['omp'], 'home');
+    homeTier.apply();
+    const company = { ...ctxFor(homeTier.home, ['omp']), tier: 'company' as const };
+    const repo = makeRepo(ALL);
+    const pulled = applySkills(company, sources(repo), homeTier.manifest());
+    expect(pulled.filter((l) => l.kind === 'changed').map((l) => l.key)).toEqual([
+      '~/.agents/skills/commander',
+      '~/.agents/skills/commander-handoff',
+    ]);
+    expect(
+      pulled.filter((l) => l.kind === 'changed').every((l) => l.text.includes('撤掉了（这一档不装）')),
+    ).toBe(true);
+    expect(existsSync(join(homeTier.home, '.agents', 'skills', 'commander'))).toBe(false);
+    expect(existsSync(join(homeTier.home, '.agents', 'skills', 'discuss'))).toBe(true);
+    expect(exitCode(checkSkills(company, sources(repo), homeTier.manifest()))).toBe(0);
+  });
+
+  it('france 档和 home 一样全装', () => {
+    const m = machine(ALL, ['omp'], 'france');
+    m.apply();
+    expect(existsSync(join(m.home, '.agents', 'skills', 'commander'))).toBe(true);
+    expect(existsSync(join(m.home, '.agents', 'skills', 'commander-handoff'))).toBe(true);
+    expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
   });
 });
 

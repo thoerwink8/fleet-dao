@@ -21,6 +21,8 @@ import { isBad, type Line, line } from './report.ts';
 import {
   type AgentId,
   agentNames,
+  COMPANY_SKILL_DENY,
+  type MachineTier,
   type Platform,
   placeOn,
   RULES_TARGETS,
@@ -63,6 +65,8 @@ export interface Ctx {
    * 要分清「桌面机还是 Linux 服务器」的地方看这个（决定 0092 的「装了启动器的桌面机」）；不给就按 Linux 处理。
    */
   os?: NodeJS.Platform;
+  /** 不写按 home（全装）。company 不装 COMPANY_SKILL_DENY 里的自研 skill */
+  tier?: MachineTier;
 }
 
 export const code = (err: unknown): string => (err as NodeJS.ErrnoException).code ?? String(err);
@@ -398,6 +402,39 @@ function nothingToDo(src: Sources, m: Manifest): boolean {
   return repoEmpty && Object.values(m.skills).every((names) => names.length === 0);
 }
 
+/** 按机器档收窄要装的 skill。company 拿掉指挥官和法国引擎派活那两份；第三方不动。--no-skills 已经是空的，不再改 */
+export function scopeSkills(src: Sources, tier: MachineTier = 'home'): Sources {
+  if (tier !== 'company' || src.skillsOff !== undefined) return src;
+  let dropped = false;
+  const skills = new Map(src.skills);
+  for (const name of COMPANY_SKILL_DENY) {
+    if (skills.has(name) && !src.vendor.has(name)) {
+      skills.delete(name);
+      dropped = true;
+    }
+  }
+  return dropped ? { ...src, skills } : src;
+}
+
+function tierDenied(src: Sources, tier: MachineTier, name: string): boolean {
+  return (
+    tier === 'company' &&
+    src.skills.has(name) &&
+    !src.vendor.has(name) &&
+    (COMPANY_SKILL_DENY as readonly string[]).includes(name)
+  );
+}
+
+function deniedLines(src: Sources, tier: MachineTier): Line[] {
+  if (tier !== 'company') return [];
+  const out: Line[] = [];
+  for (const name of COMPANY_SKILL_DENY) {
+    if (src.skills.has(name) && !src.vendor.has(name))
+      out.push(line('skip', `agents/skills/${name}`, '公司档不装（指挥官或法国引擎相关）'));
+  }
+  return out;
+}
+
 function noSkillsLine(src: Sources): Line {
   if (src.skillsOff !== undefined) return line('skip', 'agents/skills', src.skillsOff);
   return line(
@@ -417,10 +454,16 @@ export function checkSkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
       ),
     ];
   }
-  if (nothingToDo(src, manifest.value)) return [noSkillsLine(src)];
-  const out: Line[] = [];
+  const tier = ctx.tier ?? 'home';
+  const scoped = scopeSkills(src, tier);
+  const denied = deniedLines(src, tier);
+  if (nothingToDo(scoped, manifest.value)) {
+    if (src.skills.size > 0 && scoped.skills.size === 0) return denied;
+    return [noSkillsLine(src)];
+  }
+  const out: Line[] = [...denied];
   const owner = expectedOwner(ctx);
-  const want = src.skills;
+  const want = scoped.skills;
   for (const t of SKILL_TARGETS) {
     const { rel, abs, key } = relOf(ctx, t.dir);
     const { installed, who } = readersOf(ctx, t);
@@ -477,9 +520,9 @@ export function checkSkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
     }
     for (const name of mine) {
       if (want.has(name)) continue;
+      const why = tierDenied(src, tier, name) ? '这一档不装，这里还在' : '仓里已经删了，这里还在';
       try {
-        if (lstatOrNull(join(abs, name)) !== null)
-          out.push(line('drift', `${key}/${name}`, '漂移——仓里已经删了，这里还在'));
+        if (lstatOrNull(join(abs, name)) !== null) out.push(line('drift', `${key}/${name}`, `漂移——${why}`));
       } catch (err) {
         out.push(line('unknown', `${key}/${name}`, `没查成——读不了（${code(err)}）`));
       }
@@ -504,12 +547,18 @@ export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
       ),
     ];
   }
-  if (nothingToDo(src, manifest.value)) return [noSkillsLine(src)];
+  const tier = ctx.tier ?? 'home';
+  const scoped = scopeSkills(src, tier);
+  const denied = deniedLines(src, tier);
+  if (nothingToDo(scoped, manifest.value)) {
+    if (src.skills.size > 0 && scoped.skills.size === 0) return denied;
+    return [noSkillsLine(src)];
+  }
   const file = manifestPath(ctx.home, ctx.platform);
   // 子代理那一项原样带着：这里只改 skill，写回清单时不能把它丢了
   const m: Manifest = { ...manifest.value, skills: { ...manifest.value.skills } };
-  const want = src.skills;
-  const out: Line[] = [];
+  const want = scoped.skills;
+  const out: Line[] = [...denied];
   for (const t of SKILL_TARGETS) {
     const { rel, abs, key } = relOf(ctx, t.dir);
     const { installed, who } = readersOf(ctx, t);
@@ -573,7 +622,13 @@ export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
         } else {
           if (lstatOrNull(dest) !== null) {
             removeEntry(dest);
-            out.push(line('changed', k, '撤掉了（仓里已经删了）'));
+            out.push(
+              line(
+                'changed',
+                k,
+                tierDenied(src, tier, s.name) ? '撤掉了（这一档不装）' : '撤掉了（仓里已经删了）',
+              ),
+            );
           }
           mine.delete(s.name);
         }

@@ -12,7 +12,7 @@
 
 ## 怎么分发
 
-由规矩同步脚本 `packages/agents-sync` 分发，见 `docs/design.md`「三、已定（共识）」第 16 条：这里有几个目录就分发几个，拷进各家 AI 的 skill 目录；从这里删掉的，下次同步会从各家那里撤掉。`agents/skills-vendor/` 里核过锁文件的第三方 skill 同一趟一起装、一起撤；两边有同名的，同步脚本直接报错、一个都不发。
+由规矩同步脚本 `packages/agents-sync` 分发，见 `docs/design.md`「三、已定（共识）」第 16 条：这里有几个目录就分发几个，拷进各家 AI 的 skill 目录；从这里删掉的，下次同步会从各家那里撤掉。omp 和 Codex、pi 一样读 `~/.agents/skills`（`<名>/SKILL.md`），装了 omp 就往那里装，不另放 `~/.omp/agent`、也不另放 `~/.agent/skills`。机器档是 home、company、france（`--tier`，或 `FLEET_MACHINE_TIER`，或 `~/.fleet-dao/machine-tier`）；没写按 home。公司档不装 `commander`、`commander-handoff`（指挥官和法国引擎派活），装过的下次同步撤掉；home 和 france 全装。法国会话用户仍用 `--no-skills`，一个都不装。`agents/skills-vendor/` 里核过锁文件的第三方 skill 同一趟一起装、一起撤，三档都装；两边有同名的，同步脚本直接报错、一个都不发。
 
 ## 加新 skill 的门槛
 

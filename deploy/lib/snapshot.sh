@@ -192,7 +192,7 @@ snapshot_agents_sync() {
     h=$(getent passwd "$u" | cut -d: -f6) || h=""
     if [[ -z "$h" || ! -d "$h" ]]; then continue; fi
     for p in .claude/CLAUDE.md .codex/AGENTS.md .pi/agent/AGENTS.md .kimi-code/AGENTS.md .dsh/AGENTS.md .gemini/GEMINI.md \
-      .fleet-dao/agents-sync.json; do
+      .omp/agent/AGENTS.md .fleet-dao/agents-sync.json; do
       if [[ -e "$h/$p" || -L "$h/$p" ]]; then snapshot_tree_line "$u ~/$p" "$h/$p"; fi
     done
     for d in .claude/skills .agents/skills .gemini/config/skills; do

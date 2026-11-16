@@ -26,9 +26,32 @@ export const AGENTS = {
   dsh: { name: 'dsh', bins: ['dsh'] },
   agy: { name: 'Antigravity', bins: ['agy'] },
   gemini: { name: 'Gemini CLI', bins: ['gemini'] },
+  // 官方安装在 %LOCALAPPDATA%\omp\omp.exe，也进 PATH（本机 omp 18.20.2）
+  omp: { name: 'omp', bins: ['omp'] },
 } as const satisfies Record<string, Agent>;
 
 export type AgentId = keyof typeof AGENTS;
+
+/** 机器档：home 全装；company 不装 COMPANY_SKILL_DENY；france 和 home 一样全装（法国会话用户仍走 --no-skills，决定 0093） */
+export const MACHINE_TIERS = ['home', 'company', 'france'] as const;
+export type MachineTier = (typeof MACHINE_TIERS)[number];
+
+/** 一行：home、company 或 france。没有这个文件、也没有 --tier / FLEET_MACHINE_TIER，按 home */
+export const MACHINE_TIER_FILE: Place = {
+  win32: '.fleet-dao\\machine-tier',
+  linux: '.fleet-dao/machine-tier',
+};
+
+/**
+ * 公司档不装这些自研 skill（目录名）。
+ * commander、commander-handoff 是指挥官；commander 的正文就是派给法国引擎。
+ * 第三方 skill 不在这里，三档都装。
+ */
+export const COMPANY_SKILL_DENY = ['commander', 'commander-handoff'] as const;
+
+export function isMachineTier(value: string): value is MachineTier {
+  return (MACHINE_TIERS as readonly string[]).includes(value);
+}
 
 /** 一个落点在两个平台上的相对路径（相对家目录） */
 export interface Place {
@@ -80,6 +103,13 @@ export const RULES_TARGETS: readonly RulesTarget[] = [
   { file: { win32: '.kimi-code\\AGENTS.md', linux: '.kimi-code/AGENTS.md' }, readers: ['kimi'] },
   { file: { win32: '.dsh\\AGENTS.md', linux: '.dsh/AGENTS.md' }, readers: ['dsh'] },
   { file: { win32: '.gemini\\GEMINI.md', linux: '.gemini/GEMINI.md' }, readers: ['agy', 'gemini'] },
+  // omp 18.20.2：用户级说明是 agentDir 下的 AGENTS.md。agentDir 默认是 <家>/.omp/agent
+  // （configRoot 默认 ".omp"，再拼 "agent"；be() 返回 agentDir，加载函数把它和 "AGENTS.md" 拼起来）。
+  // ~/.claude/CLAUDE.md 只有 omp 判定这台装了 claude 才读，omp 单独一台读不到，所以不借那一份。
+  {
+    file: { win32: '.omp\\agent\\AGENTS.md', linux: '.omp/agent/AGENTS.md' },
+    readers: ['omp'],
+  },
 ];
 
 /**
@@ -92,6 +122,11 @@ export const RULES_TARGETS: readonly RulesTarget[] = [
  *   Devin 不扫 ~/.claude/skills（它借 Claude 的只有项目里的 .claude/skills），Grok 两处都扫、同名去重。
  * - ~/.gemini/config/skills：Antigravity 命令行的全局 skill。官方网页写的是 ~/.gemini/antigravity-cli/skills，
  *   agy 1.2.11 程序里却只认 ~/.gemini/config/skills（和桌面版共用的全局配置目录，本机核过）。
+ * - omp 18.20.2 也读 ~/.agents/skills（和 ~/.agent/skills）：程序里的说明是
+ *   “Load skills from .agent/skills and .agents/skills (project walk-up + user home)”。
+ *   本机 `omp skill list --json` 把这两处列成 source `agents:user`，格式是 `<名>/SKILL.md`（frontmatter 有 name、description）。
+ *   ~/.omp/agent 没有技能目录：skill-descriptions.db 只是描述缓存；文档里的 ~/.omp/agent/managed-skills 是自动学习写的，不是安装位。
+ *   另外只有 ~/.claude/skills 时 omp 列不出来，不能靠 Claude 那一处。~/.agent/skills 不另放：和 ~/.agents/skills 同名会各加载一份。
  */
 export const SKILL_TARGETS: readonly SkillTarget[] = [
   {
@@ -101,7 +136,7 @@ export const SKILL_TARGETS: readonly SkillTarget[] = [
   },
   {
     dir: { win32: '.agents\\skills', linux: '.agents/skills' },
-    readers: ['codex', 'pi', 'kimi', 'devin', 'grok'],
+    readers: ['codex', 'pi', 'kimi', 'devin', 'grok', 'omp'],
   },
   {
     dir: { win32: '.gemini\\config\\skills', linux: '.gemini/config/skills' },

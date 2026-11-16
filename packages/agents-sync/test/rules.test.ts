@@ -91,6 +91,7 @@ describe('没装的不算绿', () => {
       '~/.kimi-code/AGENTS.md',
       '~/.dsh/AGENTS.md',
       '~/.gemini/GEMINI.md',
+      '~/.omp/agent/AGENTS.md',
     ]) {
       expectKind(lines, key, 'skip');
       expect(lines.find((l) => l.key === key)?.text).toContain('没装');
@@ -98,7 +99,7 @@ describe('没装的不算绿', () => {
     expect(lines.filter((l) => l.kind === 'ok')).toHaveLength(1);
     expect(exitCode(lines)).toBe(0);
     expect(summary(lines)).toContain('一致 1');
-    expect(summary(lines)).toContain('没装或没东西（跳过）5');
+    expect(summary(lines)).toContain('没装或没东西（跳过）6');
   });
 
   it('没装的那家的文件一个字不写', () => {
