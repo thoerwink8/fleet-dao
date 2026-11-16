@@ -21,8 +21,12 @@ it('只读机器 id，兼容 CRLF/ANSI/重复项，显示标签不能改变厂�
 });
 
 it('grok 只偏好 grok-4.7；有快档也不选，只剩快档就不派', () => {
-  expect(models.resolveModel('grok', ['grok-4.7-low-fast', 'grok-4.7', 'grok-4.7-high-fast'])).toBe('grok-4.7');
-  expect(models.resolveModel('grok', ['grok-4.7-build-fast', 'grok-4.7-high-fast', 'grok-4.7-low-fast'])).toBeNull();
+  expect(models.resolveModel('grok', ['grok-4.7-low-fast', 'grok-4.7', 'grok-4.7-high-fast'])).toBe(
+    'grok-4.7',
+  );
+  expect(
+    models.resolveModel('grok', ['grok-4.7-build-fast', 'grok-4.7-high-fast', 'grok-4.7-low-fast']),
+  ).toBeNull();
   expect(models.resolveModel('grok', ['cursor-grok-4.7', 'grok-4.7-low-fast'])).toBe('cursor-grok-4.7');
 });
 
