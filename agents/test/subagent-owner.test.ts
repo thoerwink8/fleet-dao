@@ -203,3 +203,25 @@ describe('命令与钩子', () => {
     expect(rows[0]?.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });
+
+describe('交接规矩', () => {
+  const skill = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  const commander = skill('../skills/commander/SKILL.md');
+  const handoff = skill('../skills/commander-handoff/SKILL.md');
+
+  it('换会话前先停或把归属写进交接，冲突的旧说法不留', () => {
+    for (const text of [commander, handoff]) {
+      expect(text).toContain('agentId');
+      expect(text).toContain('进程号');
+      expect(text).toContain('工作树');
+      expect(text).toContain('pnpm agents:stop');
+      expect(text).not.toContain('每 20 分钟巡子代理');
+      expect(text).not.toContain('不在本会话定时巡子代理');
+      expect(text).not.toContain('换了会话现查接着干');
+      expect(text).not.toContain('真卡死就起新的');
+    }
+    expect(handoff).toContain('先停掉或等完');
+    expect(commander).toContain('不另起一个顶上');
+    expect(commander).toContain('不按启动时间找进程');
+  });
+});
