@@ -89,7 +89,7 @@ function git(exec, repo, args) {
  * @param {string} a
  * @param {string} b
  */
-function samePath(a, b) {
+export function samePath(a, b) {
   const norm = (p) => {
     try {
       return realpathSync.native(p);

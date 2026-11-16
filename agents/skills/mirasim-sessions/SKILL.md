@@ -63,7 +63,7 @@ agy 1.5.9 在 Windows 上跑 `run_command` 走 `pwsh`（也认 `powershell.exe`�
 
 - 派活：`scripts/dispatch.mjs`（测试在 `agents/test/mirasim-dispatch.test.ts`：缺参数不调 prompt，找不到指挥会话不派，接受帧的会话号用来改名）
 - 回报：`scripts/report.mjs`（测试在 `agents/test/mirasim-report.test.ts`）
-- 收尾：`scripts/close.mjs`
+- 收尾：`scripts/close.mjs`；PR 合并走唯一入口 `pnpm pr:merge <号>`（`scripts/pr-merge.mjs`，测试 `agents/test/mirasim-pr-merge.test.ts`）；残留盘点 `pnpm leftovers`（`scripts/leftovers.mjs`，只读）
 - 心跳：`heartbeat.md`
 
 装到各家技能目录用仓里的 `pnpm agents:sync`（整个技能目录一起装，包括 `scripts/` 和 `heartbeat.md`）。通用做法在 magpie 的记忆里，换机登录同一账号后按关键词搜；Claude 项目记忆目录只留这一台机器的事。哪一条记忆收进哪里，见 `docs/4040-memory-triage.md`。
@@ -83,18 +83,21 @@ node <仓根>/agents/skills/mirasim-sessions/scripts/dispatch.mjs
 1. PR 的 CI 全绿、合并闸过：回报或巡检一进来就现查 `gh pr checks <PR>`，不靠跨轮的后台 `--watch`（新消息进来 mirasim 会重起指挥会话进程，后台任务跟着被停，11-14 实测）。
 2. 对着交代里「怎么算做完」逐条核；截图自己看。拿假模型、假环境代替真的跑出来的，不算过。
 3. 不过：发回原会话返工，写明哪一条没过。
-4. 过了：指挥会话自己合（`gh pr merge <PR> --squash`），合进去再清理。
+4. 过了：指挥会话用 `pnpm pr:merge <PR>` 收单（内部就是 `close.mjs`，合并、删工作树、删分支、删会话一条做完），不要裸 `gh pr merge`。
+5. 报回处理完就关会话：`pnpm pr:merge` 会自动按工作树找到会话删掉；明确不合的用 `close.mjs --repo <主检出> --branch <分支> --session <agent>:<会话id>`（工作树和分支已不在时也会删会话）。要返工的会话留着。
+## 合并和清理
 
-## 合并后清理
+工人的 PR 一律走 `pnpm pr:merge <号>`，这是唯一入口，禁止裸 `gh pr merge` / `gh pr merge --auto`（它只合远端，工作树、分支和会话全留成残；fleet-setup #14、#15 和 fleet-ade #42、#43 都是这么漏的）。脚本自己解出分支、主检出、工作树和这棵树上派活的会话，整条交给 `close.mjs`。
 
-验收过了要收单时，用本技能目录里的 `scripts/close.mjs` 一条做完，不要分步手工删：
-
+没走 PR 的收尾（GitLab MR、已合完的补删、只删会话），用本技能目录里的 `scripts/close.mjs` 一条做完，不要分步手工删：
 ```
 node scripts/close.mjs --repo <主检出> --branch <分支> [--pr <号>|--mr <号>] [--session <sessionKey>]
 ```
+
 
 - 按序：合并（GitHub 用 `gh`，GitLab 用这个仓远端自己的地址和令牌，脚本里不写地址）→ 主检出快进到合并后的默认分支，再推其余远端（推送地址是 DISABLED，或 `git remote get-url --push` 失败的远端跳过，输出写明跳过了哪个）→ 先拆工作树里的目录联接和目录软链（只拆不跟），核主检出依赖目录项数没变，再删工作树和本地、远端分支 → 给了 `--session` 就删会话，没给就打印「不适用」。
 - 先核再删：分支已在默认分支里，或 MR/PR 已合；工作树没有未提交改动；联接拆完后没有剩余联接。有一件不满足就停，不删。
 - 某一步失败就停，退出码非 0，输出停在哪一步、下一步怎么手工接。重跑同一条命令会跳过已经做成的步骤。
 - 不要直接 `git worktree remove` 或 `removeWorktree`：Windows 上工作树里的依赖目录常常是指回主检出的目录联接，跟着联接会把主检出的依赖删空。
 - 单的租约在 PR 合并后自动收，不跑 `pnpm work done`；挂了「本机做」的单尤其不许 `--release`：它会把单退回法国队列、摘掉「本机做」，引擎会把同一件活再做一遍（2026-11-13 真出过，#3981）。
+- 巡检残留用 `pnpm leftovers`（只读）：列出每棵工作树的 PR 状态、有没有未提交，和每个会话的回报、在跑状态；删的一律走 `pnpm pr:merge` / `close.mjs`。
