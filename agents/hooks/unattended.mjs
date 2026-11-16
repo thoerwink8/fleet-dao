@@ -18,7 +18,8 @@
 // - mirasim 托管的会话（环境有它自己写的 MIRASIM_SESSION_KEY）不拦收轮（#4013）：子会话回报只有一轮结束才送得进来，
 //   接续靠回报和定时心跳，不靠把轮续住。
 // - background_tasks/session_crons 只说明登记存在，不证明完成通知会送达；开着时先同步续轮，显式等待并消费结果。
-// - 只有成功 PostToolUse 的新写入、验证、提交、收工才重置连续无进展计数；重复动作、sleep 和查询状态不算。
+// - 只有成功 PostToolUse 的新写入、验证、提交、收工，以及收结果、合并、派工、记进展，才重置连续无进展计数；
+//   重复动作、sleep 和纯查询不算。streak 不在 PostToolUse 里加，见 decideStop。
 // - 数值上限不扩大；故障暂停保留未完成状态，避免无限循环烧额度。
 // - 钩子里任何一步出错一律放行（只提示），绝不抛、不拦：这里是兜底，不是新的故障点。
 import { createHash, randomUUID } from 'node:crypto';
@@ -62,8 +63,34 @@ export const MAX_STREAK = 3;
 export const MAX_TOTAL_BLOCKS = 200;
 
 /**
- * 只记已成功完成的写入、验证、提交、派工/收工；重复命令、sleep、状态轮询不续命。
- * PostToolUse 才调用，PreToolUse 不能把「打算做」当进展。
+ * 指挥会话里已经成功做完的实质命令。调用方已排除失败、中断和后台壳。
+ * 收结果：wait.mjs 的 pr / pr-head / main-ci / issue。
+ * 合并：gh pr merge、git merge（不含 --abort / --quit，也不含 merge-base）、close.mjs。
+ * 派工：pnpm work run、pnpm work rework、pnpm issue:new、dispatch.mjs、send.mjs。
+ * 记进展：pnpm progress note。
+ * 纯查询（pr view/checks/list/diff、progress read、work queue/runs、check-reports）、sleep 都不算。
+ * @param {string} command
+ */
+function substantiveCommand(command) {
+  if (/\b(sleep|Start-Sleep)\b/i.test(command)) return false;
+  if (/\bwait\.mjs\s+(?:pr-head|pr|main-ci|issue)\b/.test(command)) return true;
+  if (/\bgh\s+pr\s+merge\b/.test(command)) return true;
+  if (/\bgit\s+merge(?:\s|$)/.test(command) && !/\bgit\s+merge\s+--(?:abort|quit)\b/.test(command))
+    return true;
+  if (/\bclose\.mjs\b/.test(command)) return true;
+  if (/\bpnpm\s+work\s+run\b/.test(command)) return true;
+  if (/\bpnpm\s+work\s+rework\b/.test(command)) return true;
+  if (/\bpnpm\s+issue:new\b/.test(command)) return true;
+  if (/\bdispatch\.mjs\b/.test(command)) return true;
+  if (/\bsend\.mjs\b/.test(command)) return true;
+  if (/\bpnpm\s+progress\s+note\b/.test(command)) return true;
+  return false;
+}
+
+/**
+ * 只记已成功完成的写入、验证、提交、收工，以及上面的收结果、合并、派工、记进展。
+ * 重复命令、sleep、状态轮询不续命。PostToolUse 才调用，PreToolUse 不能把「打算做」当进展。
+ * 这里只落凭据，不改 streak；下一次 decideStop 看见新凭据才把无进展计数归零。
  * @param {{ dir: string, sessionId: unknown, input: unknown }} opts
  */
 export function recordProgress({ dir, sessionId, input }) {
@@ -74,6 +101,8 @@ export function recordProgress({ dir, sessionId, input }) {
   const name = get('tool_name');
   const args = get('tool_input');
   const response = get('tool_response');
+  // Agent/Task 启动成功就是派工：工人仍在跑也要记。其它工具还在跑、后台壳、失败都不记。
+  const launchingAgent = typeof name === 'string' && /^(Agent|Task)$/.test(name);
   if (args && typeof args === 'object' && Reflect.get(args, 'run_in_background') === true) return;
   if (
     response &&
@@ -83,7 +112,7 @@ export function recordProgress({ dir, sessionId, input }) {
       Reflect.get(response, 'interrupted') === true ||
       typeof Reflect.get(response, 'session_id') === 'number' ||
       Reflect.get(response, 'shell_id') !== undefined ||
-      ['running', 'in_progress'].includes(Reflect.get(response, 'status')) ||
+      (['running', 'in_progress'].includes(Reflect.get(response, 'status')) && !launchingAgent) ||
       (typeof Reflect.get(response, 'exit_code') === 'number' && Reflect.get(response, 'exit_code') !== 0))
   )
     return;
@@ -110,7 +139,9 @@ export function recordProgress({ dir, sessionId, input }) {
     typeof response === 'object' &&
     Reflect.get(response, 'timed_out') !== true &&
     (Reflect.get(response, 'exit_code') === 0 || /"completed"\s*:/.test(JSON.stringify(response)));
-  if (!writing && !validating && !finished && !waited) return;
+  const coordinating = typeof command === 'string' && substantiveCommand(command);
+  const dispatched = launchingAgent && response !== undefined;
+  if (!writing && !validating && !finished && !waited && !coordinating && !dispatched) return;
   const hash = createHash('sha256')
     .update(JSON.stringify([name, args]))
     .digest('hex');
@@ -422,6 +453,8 @@ export function decideStop({
     const fresh = completions.filter((c) => !(s.deliveredResults ?? []).includes(c.key));
     const progressCount = countProgress(dir, sessionId);
     const advanced = progressCount > (s.consumedProgress ?? 0) || fresh.length > 0;
+    // 有新凭据或未投递的工人终态：无进展 streak 先归零，下面再记成重置后的第 1 次接续（存盘为 1）。
+    // 没有则沿用存盘值。加 1 发生在这次仍要挡的 writeState；存盘值已经到 MAX_STREAK 时这次改写 paused，不再加。
     const streak = advanced ? 0 : Number.isInteger(s.streak) ? Number(s.streak) : 0;
     if (s.totalBlocks >= MAX_TOTAL_BLOCKS) {
       const why = `已经挡了 ${MAX_TOTAL_BLOCKS} 次，到上限`;
