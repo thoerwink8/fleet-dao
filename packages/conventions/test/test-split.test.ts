@@ -409,7 +409,10 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     // 8 台的合计 = 必过 test 台文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按所在包的均值估（guessMs），
     // 和装箱同一个估法。不拿整张表的合计比：表一过期（加了测试文件、删了旧的）两边就差几秒，这条就红（#700 写的
     // 那种比法，主线上新加了测试文件之后改到 conventions 的 PR 全跑时都红在这）。最重的台和最轻的差不过 2 倍（LPT 的效果）。
-    const expected = PACKED_FILES.reduce((t, f) => t + (REAL_TIMINGS.files[f] ?? guessMs(f, REAL_TIMINGS)), 0);
+    const expected = PACKED_FILES.reduce(
+      (t, f) => t + (REAL_TIMINGS.files[f] ?? guessMs(f, REAL_TIMINGS)),
+      0,
+    );
     expect(r.boxes.reduce((t, b) => t + b.estMs, 0)).toBe(expected);
     expect(Math.max(...seconds)).toBeLessThanOrEqual(Math.min(...seconds) * 2);
   });
