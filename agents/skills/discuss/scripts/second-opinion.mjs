@@ -5,7 +5,7 @@
 //
 //   node second-opinion.mjs --text 分析.md --author-family <族[,族…]> [--models <路由组[,…]>] [--name 短名]
 //     [--budget-sec 秒] [--limit 180] [--blind] [--ui] [--timeout-min 15]
-//     退出码 0 同意 / 1 有异议 / 2 没查成。--models 不给时问作者族以外的 gpt、grok、deepseek、kimi、glm 路由组，不含 cn-pool。
+//     退出码 0 同意 / 1 有异议 / 2 没查成。--models 不给时问作者族以外的 gpt、grok、deepseek、kimi、glm 路由组，不含 cn-pool、gemini-pool（点名才问）。
 //   node second-opinion.mjs --sessions | --stop-stale：列本机 Mirasim 上的会话 / 清掉已停的反方会话。
 //   node second-opinion.mjs --ping：走一遍起会话、判完工、核账本，不问东西。
 //   node second-opinion.mjs --selftest

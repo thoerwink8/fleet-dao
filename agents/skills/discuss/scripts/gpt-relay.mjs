@@ -119,7 +119,7 @@ export function magpieRelayConfig(opts = {}) {
   return { baseUrl, apiKey };
 }
 
-/** 路由组名就是发给网关的 model。值是作者族；cn-pool 是国模组，单独一族。 */
+/** 路由组名就是发给网关的 model。值是作者族；cn-pool 是国模组、gemini-pool 是看图用的，都单独一族，不进默认那五家。 */
 export const POOL_FAMILY = {
   'gpt-pool': 'gpt',
   'grok-pool': 'grok',
@@ -127,6 +127,7 @@ export const POOL_FAMILY = {
   'kimi-pool': 'kimi',
   'glm-pool': 'glm',
   'cn-pool': 'cn',
+  'gemini-pool': 'gemini',
 };
 
 /** 反方不指定 --models 时按这个顺序问，不含国模组（要显式选）。 */

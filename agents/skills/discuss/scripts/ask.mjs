@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 讨论用的一问一答：只走本机讨论网关（OpenAI 兼容 chat/completions）的路由组。
-// --models 写 gpt-pool、grok-pool、deepseek-pool、kimi-pool、glm-pool、cn-pool，模型名就是路由组名。
+// --models 写 gpt-pool、grok-pool、deepseek-pool、kimi-pool、glm-pool、cn-pool、gemini-pool，模型名就是路由组名。cn-pool、gemini-pool 不进默认那五家，点名才问。
 // 密钥在 ~/.fleet-dao/discuss.env（DISCUSS_MAGPIE_API_KEY 或 DISCUSS_GPT_API_KEY，进程环境变量优先）。
 // 没配、超时、非 2xx、空回答、不是 JSON、连不上都记「没答上」，不改走 cursor-agent 或别的工具。
 //
