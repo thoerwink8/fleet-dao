@@ -35,9 +35,27 @@ node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓�
 ## 指挥会话自己
 
 - 派完就收轮。回报是作为新消息排进指挥会话的队列的，指挥会话一轮不结束，回报就进不来。
-- 进无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 照样跑，mirasim 托管的会话它不拦收轮；同时开一个 30 分钟心跳定时任务（`mcp__mirasim__schedule_task`，`cron` 用 `*/30 * * * *`，`prompt` 写清「无人值守心跳：查子会话回报和队列，有活就接着派」，`once` 不设）。`on` 不排心跳，心跳没排上就收轮，这个会话没人叫醒。接续就靠子会话回报和这个心跳。收工（`unattended.mjs done`）后把心跳定时任务停掉。
+- 进无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 照样跑，mirasim 托管的会话它不拦收轮；同时开一个 30 分钟心跳定时任务（`mcp__mirasim__schedule_task`，`cron` 用 `*/30 * * * *`，`prompt` 写「无人值守心跳：打开 `mirasim-sessions` 技能的 `heartbeat.md`，把占位换成这一轮的仓和指挥会话，查子会话回报和队列，有活就接着派」，`once` 不设）。清单本身是本技能目录的 `heartbeat.md`，不含具体单号、内网地址和盘符路径。`on` 不排心跳，心跳没排上就收轮，这个会话没人叫醒。接续就靠子会话回报和这个心跳。收工（`unattended.mjs done`）后把心跳定时任务停掉。
 - 会话太长要换棒：照 `commander-handoff`。
 - 不轮询。要看状态用 `getTurnFacts`（给 `taskId`）或小 `limit` 的 `listSessions`（pi 会话不在 `listSessions` 里，见上面「先查老会话」）；mirasim 的返回常常很大，只抽要的字段。
+
+## 换一台机器
+
+脚本和心跳模板都在本技能目录，跟仓走，不放 `_tmp/`：
+
+- 派活：`scripts/dispatch.mjs`（测试在 `agents/test/mirasim-dispatch.test.ts`：缺参数不调 prompt，拿不到会话号就停、不重派）
+- 收尾：`scripts/close.mjs`
+- 心跳：`heartbeat.md`
+
+装到各家技能目录用仓里的 `pnpm agents:sync`（整个技能目录一起装，包括 `scripts/` 和 `heartbeat.md`）。通用做法在 magpie 的记忆里，换机登录同一账号后按关键词搜；Claude 项目记忆目录只留这一台机器的事。哪一条记忆收进哪里，见 `docs/4040-memory-triage.md`。
+
+核对（装完或换机跑一次）：
+
+```
+node <仓根>/agents/skills/mirasim-sessions/scripts/dispatch.mjs
+```
+
+不带参数应退出码 2，并打印用法。记忆用 magpie 搜「换一台机器要拿同一套派活脚本」。
 
 ## 验收
 
