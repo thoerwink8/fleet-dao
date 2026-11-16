@@ -2,14 +2,18 @@
 // 拿不到会话号就退出码 1、不再调 prompt（重调会再派一个会话）。参数不对是退出码 2。
 // 版本读 ~/.mirasim/app/state.json 里 good 的那一版，不写死版本号；用户目录用 USERPROFILE / HOME / os.homedir()。
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const USAGE = `用法：node dispatch.mjs --title <侧栏名> --workdir <目录> --prompt <交代> [--agent <名>] [--model <名>] [--effort <档>] [--route local|cloud] [--port <端口>]
-派活并立刻改名，只调一次 prompt。拿不到会话号退出码 1、不重派；参数不对退出码 2。
-没给 --port 时用环境变量 MIRASIM_HOST_PORT；两个都没有就不带端口（会话里 mirasim 自己认宿主）。`;
+export const USAGE = `用法：node dispatch.mjs --title <侧栏名> --workdir <目录> --prompt <交代> [--agent <名>] [--model <名>] [--effort <档>] [--route local|cloud] [--port <端口>] [--report-to <会话key>]
+派活并立刻改名，只调一次 prompt。交代末尾自动加上回报去向。找不到指挥会话退出码 2、一次都不派；拿不到会话号退出码 1、不重派；参数不对退出码 2。
+没给 --port 时用环境变量 MIRASIM_HOST_PORT；两个都没有就不带端口（会话里 mirasim 自己认宿主）。
+没给 --report-to 时，在本机 claude 会话目录里找正在跑、工作目录以 fleet-dao 结尾、标题不是无人值守心跳的会话，用最近更新的那一个。`;
+
+/** 和本脚本放在一起的回报脚本，换机器不写死盘符。 */
+export const REPORT_SCRIPT = fileURLToPath(new URL('./report.mjs', import.meta.url));
 
 export const REQUIRED = ['title', 'workdir', 'prompt'];
 
@@ -60,7 +64,7 @@ export function realExec(cmd, args, opts = {}) {
 export function parseArgs(argv) {
   /** @type {Record<string, string>} */
   const got = {};
-  const known = ['title', 'workdir', 'prompt', 'agent', 'model', 'effort', 'route', 'port'];
+  const known = ['title', 'workdir', 'prompt', 'agent', 'model', 'effort', 'route', 'port', 'report-to'];
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (token === '--') break;
@@ -138,12 +142,100 @@ export function sessionsIn(frames) {
  * @returns {string | null}
  */
 export function pickSessionKey(parsed, want) {
+  const accepted = acceptedKey(parsed);
+  if (accepted) return accepted;
   const matched = sessionsIn(framesOf(parsed)).filter((item) => {
     return item.agent === want.agent && item.workdir === want.workdir && typeof item.sessionKey === 'string';
   });
   matched.sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
   const key = matched[0]?.sessionKey;
   return typeof key === 'string' && key.length > 0 ? key : null;
+}
+
+/**
+ * 接受帧上的会话号优先：prompt 当场认下的就是刚开的那一个。
+ * @param {unknown} parsed
+ * @returns {string | null}
+ */
+export function acceptedKey(parsed) {
+  for (const frame of framesOf(parsed)) {
+    if (frame.type === 'accepted' && typeof frame.sessionKey === 'string' && frame.sessionKey.length > 0) {
+      return frame.sessionKey;
+    }
+  }
+  return null;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is { runState?: unknown, title?: unknown, workdir?: unknown, sessionId?: unknown, updatedAt?: unknown }}
+ */
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object';
+}
+
+/**
+ * 指挥会话：正在跑、工作目录以 fleet-dao 结尾、标题不是无人值守心跳。多个时取 updatedAt 最大的。
+ * @param {unknown[]} records
+ * @returns {string | null}
+ */
+export function findCommander(records) {
+  const matched = records.filter(isRecord).filter((item) => {
+    const title = typeof item.title === 'string' ? item.title : '';
+    const workdir = typeof item.workdir === 'string' ? item.workdir.replace(/[\\/]+$/, '') : '';
+    return (
+      item.runState === 'running' &&
+      !title.startsWith('无人值守心跳') &&
+      /fleet-dao$/i.test(workdir) &&
+      typeof item.sessionId === 'string' &&
+      item.sessionId.length > 0
+    );
+  });
+  matched.sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')));
+  const id = matched[0]?.sessionId;
+  return typeof id === 'string' ? `claude:${id}` : null;
+}
+
+/**
+ * 读本机 claude 会话目录。目录不在就当没有。
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {unknown[]}
+ */
+export function readCommanderRecords(env) {
+  const home = env.USERPROFILE || env.HOME || homedir();
+  const root = join(home, '.mirasim', 'sessions', 'claude');
+  let names = [];
+  try {
+    names = readdirSync(root);
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return [];
+    throw new Stop('派活', `读不了 ${root}，加 --report-to 再派`);
+  }
+  /** @type {unknown[]} */
+  const out = [];
+  for (const name of names) {
+    try {
+      out.push(JSON.parse(readFileSync(join(root, name, 'record.json'), 'utf8')));
+    } catch {
+      // 单个会话读不了就跳过
+    }
+  }
+  return out;
+}
+
+/**
+ * @param {string} reportTo
+ * @param {string} [reportScript]
+ * @returns {string}
+ */
+export function reportFooter(reportTo, reportScript = REPORT_SCRIPT) {
+  return (
+    `\n\n【回报，必做】做完、或卡在只有人能拍的事上，在同一轮里发回报，发完才算做完：` +
+    `把回报正文写进一个文件，再运行 node ${reportScript} --to ${reportTo} --title "<活名>" --file <正文文件>，` +
+    `看到输出 ok 才行，失败就重试并把失败原因写进最后一条消息。` +
+    `正文写：做到哪、PR 号、头提交、git ls-remote 和 gh pr view 的输出、验证命令和真实结果、没做的和原因、要人拍的。` +
+    `不许写「CI 绿了再回报」然后收轮；命令超过约 60 秒会被钩子自动转后台：测试按单个文件分开跑，每条命令尽量 60 秒内；同一条查看命令（比如反复 tail 同一个日志）最多连发 2 次，之后必须换做法，连续 8 次相同调用会被系统停掉整轮，停了就既不提交也不回报；不许丢到后台再收轮。`
+  );
 }
 
 /**
@@ -181,6 +273,7 @@ function callAtom(exec, nodePath, server, port, atom, args, env) {
  *   server?: string,
  *   nodePath?: string,
  *   now?: number,
+ *   records?: unknown[],
  * }} [io]
  * @returns {number}
  */
@@ -192,6 +285,10 @@ export function dispatchRun(argv, io = {}) {
   try {
     const opt = parseArgs(argv);
     const agent = opt.agent || 'pi';
+    const reportTo = opt['report-to'] || findCommander(io.records ?? readCommanderRecords(env));
+    if (!reportTo) {
+      throw new Stop('派活', '找不到指挥会话，加 --report-to <会话key>；这次不派，免得做完没处回报', 2);
+    }
     const server = io.server ?? mirasimServer(env);
     const nodePath = io.nodePath ?? process.execPath;
     const port = opt.port || (env.MIRASIM_HOST_PORT ? String(env.MIRASIM_HOST_PORT) : '');
@@ -200,7 +297,7 @@ export function dispatchRun(argv, io = {}) {
       clientRef: `d-${io.now ?? Date.now()}`,
       agent,
       workdir: opt.workdir,
-      prompt: opt.prompt,
+      prompt: `${opt.prompt}${reportFooter(reportTo)}`,
     };
     if (opt.model) promptArgs.model = opt.model;
     if (opt.effort) promptArgs.effort = opt.effort;

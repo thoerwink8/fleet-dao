@@ -14,10 +14,11 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 
 ## 开会话
 
-- 派活一律用本技能目录里的 `scripts/dispatch.mjs`，不要自己先 `prompt` 再 `renameSession`：漏改名侧栏看不懂，多调一次 `prompt` 会再开一个会话（2026-11-15 两次漏改名、一次重派）。一条命令只调一次 `prompt`，拿到会话号立刻改名；拿不到会话号就退出码 1、不重派。
+- 派活一律用本技能目录里的 `scripts/dispatch.mjs`，不要自己先 `prompt` 再 `renameSession`：漏改名侧栏看不懂，多调一次 `prompt` 会再开一个会话（2026-11-15 两次漏改名、一次重派）。一条命令只调一次 `prompt`，拿到会话号立刻改名。改名用 prompt 接受帧上的会话号；没有接受帧才在同 agent、同目录里取最新的。拿不到会话号就退出码 1、不重派。
+- 派活交代必须带回报去向。不给 `--report-to` 时，脚本在本机 claude 会话目录里找正在跑、工作目录以 fleet-dao 结尾、标题不是无人值守心跳的那一个（多个取最近更新），把「回报，必做」追加到交代末尾，指到同目录的 `scripts/report.mjs`。找不到指挥会话就退出码 2，一次都不派。
 
 ```
-node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓根> --prompt "<交代>" [--agent pi] [--model <模型>] [--effort <档>] [--route local]
+node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓根> --prompt "<交代>" [--agent pi] [--model <模型>] [--effort <档>] [--route local] [--report-to <指挥会话key>]
 ```
 
 - `agent`、`model`、`effort` 照创始人指定的，`route` 用 `local`（走个人账号，不扣 Mirasim 额度）。没给 `--port` 时用环境变量 `MIRASIM_HOST_PORT`；会话里两个都没有就不带端口。版本读 `~/.mirasim/app/state.json` 里 `good` 的那一版，不写死。
@@ -26,7 +27,7 @@ node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓�
   1. 自己干，不派子代理。
   2. 一件活一棵工作树 `.claude/worktrees/<单号>-<短名>`、分支 `local/<单号>-<短名>`；不往别的会话的分支推，依赖别人的 PR 就基于那个分支开自己的，对方合了再 rebase。
   3. PR 开好、本机检查过了就停，不开自动合并、不自己合，也不等 CI；`pr:open` 顺手开了自动合并就 `gh pr merge <PR> --disable-auto` 摘掉。合并归验收的人，不然没验收的改动会先进主线（#3950 就是先合了、返工只能另开 #3951，还带红了主线 #3953）。
-  4. 回报：推完 PR 或卡在只有创始人能拍的事上，在同一轮里马上调 `prompt {clientRef, sessionKey: "<指挥会话的 key>", prompt: "[<活名> 回报] …"}`，写做到哪、PR 号、验证命令和真实结果、没做的和原因、要创始人拍的。小进度不发。会话里没有 mirasim 工具的（Antigravity），从终端发：`node ~/.mirasim/app/<~/.mirasim/app/state.json 里 good 的版本>/server.cjs ui-cli call prompt --args '<同样的 JSON>'`（会话里不用带端口）。交代里把这个 key 写死：指挥官自己的 key 用 `listSessions {workdir}` 找自己标题那一条；换棒（`commander-handoff`）后新交代写新 key。不许写「CI 绿了再回报」然后收轮：执行会话收了轮就没人叫醒它，回报永远发不出来。CI 归指挥会话盯。同理，交代里写明「长命令前台跑、套 timeout、每段 ≤10 分钟，不许丢后台再收轮」：Antigravity 的后台任务跑完不会唤醒它（11-14 #127、#123 各停了约 1 小时），指挥官巡检看到会话 done 却没回报，先读它最后一轮，插队让它读输出接着做。
+  4. 回报去向由 `scripts/dispatch.mjs` 写进交代，不要再手写一套。做完或卡住时，把正文写进文件，运行交代里的 `scripts/report.mjs --to <指挥会话key> --title <活名> --file <正文>`，看到输出 ok 才算发出。正文写做到哪、PR 号、头提交、`git ls-remote` 和 `gh pr view` 的输出、验证命令和真实结果、没做的和原因。不许写「CI 绿了再回报」然后收轮。命令超过约 60 秒会被钩子自动转后台：让会话把测试按单个文件分开跑、每条命令尽量 60 秒内，同一条查看命令最多连发 2 次，连续 8 次相同调用系统会停掉整轮（11-16 #11 实测），停了就既不提交也不回报；不许丢到后台再收轮。会话自己回报覆盖不了它自己被停、崩溃、模型报错（11-16 还有一例开场 422），所以每轮巡检都跑 `node scripts/check-reports.mjs`，有 ALERT 行就读该会话最后一轮，插队让它接着做或重派。
 - 关键约束（授权边界、别碰哪些分支、验收标准）在开会话的第一条里写全。`steer` 只有部分 agent 吃，grok 不吃。给在跑的子会话发任何新消息（补充、返工、回报转发），都用 `prompt` 再 `stopAndRun {sessionKey, ref}`（`ref` 填那条 `prompt` 的 `clientRef`）才会送达（2026-11-16 创始人：每次都要插队才收得到）；代价是它正在跑的那条命令被打断，所以尽量攒成一条再发。它已经 done 的会话直接 `prompt` 即可，不用插队。
 - 交代里给时限。子会话易在测试上越绕越远（降并发、加跳过、逐条追断言，#3988 的第二棒真遇到）；到点用上面的 `stopAndRun` 让它收尾，只报现状。
 - 长时间没回报：`listSessions` 看它的 `runState`、`failed`（pi 不在这份列表里，改看会话目录的 `record.json` 加 `getTurnFacts`）。grok 进程会异常退出（`grok exited`），退了就不会回报，发回原会话重跑。
@@ -35,9 +36,28 @@ node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓�
 ## 指挥会话自己
 
 - 派完就收轮。回报是作为新消息排进指挥会话的队列的，指挥会话一轮不结束，回报就进不来。
-- 进无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 照样跑，mirasim 托管的会话它不拦收轮；同时开一个 30 分钟心跳定时任务（`mcp__mirasim__schedule_task`，`cron` 用 `*/30 * * * *`，`prompt` 写清「无人值守心跳：查子会话回报和队列，有活就接着派」，`once` 不设）。`on` 不排心跳，心跳没排上就收轮，这个会话没人叫醒。接续就靠子会话回报和这个心跳。收工（`unattended.mjs done`）后把心跳定时任务停掉。
+- 进无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 照样跑，mirasim 托管的会话它不拦收轮；同时开一个 30 分钟心跳定时任务（`mcp__mirasim__schedule_task`，`cron` 用 `*/30 * * * *`，`prompt` 写「无人值守心跳：打开 `mirasim-sessions` 技能的 `heartbeat.md`，把占位换成这一轮的仓和指挥会话，查子会话回报和队列，有活就接着派」，`once` 不设）。清单本身是本技能目录的 `heartbeat.md`，不含具体单号、内网地址和盘符路径。`on` 不排心跳，心跳没排上就收轮，这个会话没人叫醒。接续就靠子会话回报和这个心跳。收工（`unattended.mjs done`）后把心跳定时任务停掉。
 - 会话太长要换棒：照 `commander-handoff`。
 - 不轮询。要看状态用 `getTurnFacts`（给 `taskId`）或小 `limit` 的 `listSessions`（pi 会话不在 `listSessions` 里，见上面「先查老会话」）；mirasim 的返回常常很大，只抽要的字段。
+
+## 换一台机器
+
+脚本和心跳模板都在本技能目录，跟仓走，不放 `_tmp/`：
+
+- 派活：`scripts/dispatch.mjs`（测试在 `agents/test/mirasim-dispatch.test.ts`：缺参数不调 prompt，找不到指挥会话不派，接受帧的会话号用来改名）
+- 回报：`scripts/report.mjs`（测试在 `agents/test/mirasim-report.test.ts`）
+- 收尾：`scripts/close.mjs`
+- 心跳：`heartbeat.md`
+
+装到各家技能目录用仓里的 `pnpm agents:sync`（整个技能目录一起装，包括 `scripts/` 和 `heartbeat.md`）。通用做法在 magpie 的记忆里，换机登录同一账号后按关键词搜；Claude 项目记忆目录只留这一台机器的事。哪一条记忆收进哪里，见 `docs/4040-memory-triage.md`。
+
+核对（装完或换机跑一次）：
+
+```
+node <仓根>/agents/skills/mirasim-sessions/scripts/dispatch.mjs
+```
+
+不带参数应退出码 2，并打印用法。记忆用 magpie 搜「换一台机器要拿同一套派活脚本」。
 
 ## 验收
 
