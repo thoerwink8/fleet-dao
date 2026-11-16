@@ -5,7 +5,7 @@ description: 当指挥官时读：和创始人讨论需求、写成单和验收�
 
 # commander：指挥官
 
-和创始人说话的会话就是指挥官，不设座位、不认领，换了会话现查接着干。脚本在本技能 `scripts/`，下面写成 `$S`（Claude Code：`~/.claude/skills/commander/scripts`；别家：`~/.agents/skills/commander/scripts`）。
+和创始人说话的会话就是指挥官，不设座位、不认领。换会话前照 `commander-handoff`：先停掉或等完在跑的子代理；做不到就把 agentId、会话 id、进程号、工作树写进交接。不在本会话定时巡子代理（换会话后管不到）。要停用 `pnpm agents:stop`，按归属记录发给派出它的会话，不按启动时间猜进程，不杀整个进程。脚本在本技能 `scripts/`，下面写成 `$S`（Claude Code：`~/.claude/skills/commander/scripts`；别家：`~/.agents/skills/commander/scripts`）。
 
 ## 接手
 先读 `AGENTS.md`；`pnpm progress read` 办归本会话的引导（引导办没办完看它挂的单：干活的 PR 写 `Closes #单号`，单关了就算办完，没有认领、标已处理这两步；记引导 `pnpm progress directive` 会挂单，不给 `--issue` 就顺手开一张）；要看版本先后用 `pnpm plan`，看法国用 `node $S/france.mjs`。状态一律现查，不凭记忆。`docs/goals.md` 定需求时再读。
