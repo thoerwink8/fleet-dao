@@ -69,7 +69,6 @@ const { CPU_SAMPLE_MS } = (await import(pathToFileURL(join(HOOKS, 'capacity.mjs'
   CPU_SAMPLE_MS: number;
 };
 
-
 const PROXY = { HTTPS_PROXY: 'http://127.0.0.1:59822', HTTP_PROXY: 'http://127.0.0.1:59822' };
 const refused = (): R => ({
   status: 128,
@@ -229,8 +228,6 @@ describe('起子代理前取远端的时间预算', () => {
     expect(lib.SUBAGENT_DIRECT_MS).toBe(3_000);
     expect(lib.SUBAGENT_FALLBACK_MS).toBe(3_000);
   });
-
-
 
   it('不建工作树的派工（没写 isolation、remote）：一条 git 命令都不跑，直接放行；建工作树的照旧取', () => {
     for (const input of [
