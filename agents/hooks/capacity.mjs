@@ -1,52 +1,78 @@
 // 本机容量（单 #2731，决定 0094）：派写码工人前、收轮前对账时由代码判「本机还接得下一个工人吗」，不再靠一段文字。
 // 判法只有两条，不设任何个数上限：空闲内存不少于 MIN_FREE_BYTES（4G）；1 分钟负载不超过核数 × LOAD_PER_CORE（0.8）。
-// 读数：Windows 用 CIM（Win32_OperatingSystem.FreePhysicalMemory，Win32_Processor.LoadPercentage 的平均，折成「负载 = 忙的比例 × 核数」，
-// Windows 没有 loadavg）；Linux 读 /proc/meminfo 的 MemAvailable 和 /proc/loadavg 的第一个数；macOS 读 vm_stat 的
+// 读数：Windows 用 node 的 os.freemem() 和 os.cpus() 隔 250 毫秒两次采样的忙比例，折成「负载 = 忙的比例 × 核数」
+// （Windows 没有 loadavg；不起 PowerShell）；Linux 读 /proc/meminfo 的 MemAvailable 和 /proc/loadavg 的第一个数；macOS 读 vm_stat 的
 // 空闲 + 不活跃 + 预读 + 可清除页（和 Linux 的 MemAvailable 同一个意思：不用换出就能给新进程的），负载用 os.loadavg()。
 // 别的平台、读不到、认不出一律 { ok: false, why }——调用方要明说「没查成」，不当成够。
 // 纯 node、不起常驻进程；agents-sync 原样装到 ~/.fleet-dao/hooks/，pretool.mjs 和 queue-stop.mjs 引它。
-import { execFile, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { availableParallelism, loadavg } from 'node:os';
+import { availableParallelism, cpus, freemem, loadavg } from 'node:os';
 
 /** 空闲内存至少这么多（字节）才派新工人 */
 export const MIN_FREE_BYTES = 4 * 1024 ** 3;
 /** 1 分钟负载不超过核数 × 这个数才派新工人 */
 export const LOAD_PER_CORE = 0.8;
-/** 读 CIM 的 PowerShell 最多等多久（毫秒）：起 PowerShell 本身就要一两秒；收尾钩子整个只有 10 秒 */
-export const CIM_TIMEOUT_MS = 7000;
 /** 读 vm_stat 最多等多久（毫秒） */
 export const VM_STAT_TIMEOUT_MS = 3000;
+/** Windows 隔多久采第二次 CPU 时间（毫秒）：两次之差折成「忙的比例」 */
+export const CPU_SAMPLE_MS = 250;
 
 /** @typedef {{ ok: true, freeBytes: number, load1: number, cores: number, how: string } | { ok: false, why: string }} Reading 一次读数 */
 /**
+ * @typedef {{ user: number, nice: number, sys: number, idle: number, irq: number }} CpuTimes
+ * @typedef {{ times: CpuTimes[], freeBytes: number }} WinSample
  * @typedef {{
  *   platform?: NodeJS.Platform,
  *   cores?: number,
- *   runCim?: () => { status: number | null, stdout: string, stderr: string, error?: Error | undefined },
+ *   samples?: () => [WinSample, WinSample],
  *   readText?: (path: string) => string,
  *   runVmStat?: () => { status: number | null, stdout: string, stderr: string, error?: Error | undefined },
  *   loadavg?: () => number[],
  * }} ReadDeps 测试换掉读数的那几下
  */
 
-const CIM_SCRIPT =
-  '$ErrorActionPreference="Stop";' +
-  '$o=Get-CimInstance Win32_OperatingSystem;' +
-  '$p=(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average;' +
-  'Write-Output ("{0} {1}" -f $o.FreePhysicalMemory,$p)';
-
-const CIM_ARGS = ['-NoProfile', '-NonInteractive', '-Command', CIM_SCRIPT];
-
-/** 真的 CIM：Windows PowerShell 读一次空闲内存（KB）和 CPU 忙的百分比 */
-function realCim() {
-  const r = spawnSync('powershell.exe', CIM_ARGS, {
-    encoding: 'utf8',
-    timeout: CIM_TIMEOUT_MS,
-    windowsHide: true,
+/**
+ * os.cpus() 两次采样之间 CPU 忙的百分比
+ * @param {CpuTimes[]} t0
+ * @param {CpuTimes[]} t1
+ * @returns {number}
+ */
+function busyPercent(t0, t1) {
+  let busy = 0;
+  let total = 0;
+  t1.forEach((b, i) => {
+    const a = t0[i];
+    if (!a) return;
+    const user = b.user - a.user;
+    const nice = b.nice - a.nice;
+    const sys = b.sys - a.sys;
+    const irq = b.irq - a.irq;
+    const idle = b.idle - a.idle;
+    total += user + nice + sys + irq + idle;
+    busy += user + nice + sys + irq;
   });
-  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error };
+  return total > 0 ? (100 * busy) / total : 0;
 }
+
+/** @returns {WinSample} */
+const realSample = () => ({ times: cpus().map((c) => c.times), freeBytes: freemem() });
+
+/**
+ * Windows 读两次：先采、隔 CPU_SAMPLE_MS、再采。
+ * 以前起 PowerShell 读 CIM，单次 2～8 秒，同一轮派几个 Agent 时叠过钩子 10 秒上限、整批超时被拦；
+ * 改用 node 自带的 os.freemem()、os.cpus()，不起子进程。
+ * @param {(ms: number) => void} pause
+ * @returns {[WinSample, WinSample]}
+ */
+function sampleTwice(pause) {
+  const first = realSample();
+  pause(CPU_SAMPLE_MS);
+  return [first, realSample()];
+}
+
+/** @param {number} ms */
+const waitMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /** 真的 vm_stat：macOS 读一次页统计 */
 function realVmStat() {
@@ -58,32 +84,14 @@ function realVmStat() {
 const VM_STAT_AVAILABLE = ['Pages free', 'Pages inactive', 'Pages speculative', 'Pages purgeable'];
 
 /**
- * 不堵着的读一次（收尾钩子和读队列并行跑，省下起 PowerShell 的一两秒）。Windows 以外照同步的读。
+ * 不堵着的读一次（收尾钩子和读队列并行跑）：Windows 的两次 CPU 采样用定时器隔开，其余照同步的读。
  * @returns {Promise<Reading>}
  */
 export function readCapacityAsync() {
   if (process.platform !== 'win32') return Promise.resolve(readCapacity());
+  const first = realSample();
   return new Promise((done) => {
-    execFile(
-      'powershell.exe',
-      CIM_ARGS,
-      { encoding: 'utf8', timeout: CIM_TIMEOUT_MS, windowsHide: true },
-      (err, stdout, stderr) => {
-        const code = err && typeof err.code === 'number' ? err.code : err ? null : 0;
-        const spawnErr = !err
-          ? undefined
-          : err.killed
-            ? new Error(`${CIM_TIMEOUT_MS} 毫秒没读完，杀掉了`)
-            : typeof err.code !== 'number'
-              ? err
-              : undefined;
-        done(
-          readCapacity({
-            runCim: () => ({ status: code, stdout: stdout ?? '', stderr: stderr ?? '', error: spawnErr }),
-          }),
-        );
-      },
-    );
+    setTimeout(() => done(readCapacity({ samples: () => [first, realSample()] })), CPU_SAMPLE_MS);
   });
 }
 
@@ -98,7 +106,7 @@ const why = (e) => (e instanceof Error ? e.message : String(e));
 export function readCapacity({
   platform = process.platform,
   cores = availableParallelism(),
-  runCim = realCim,
+  samples = () => sampleTwice(waitMs),
   readText = (p) => readFileSync(p, 'utf8'),
   runVmStat = realVmStat,
   loadavg: readLoadavg = loadavg,
@@ -106,25 +114,20 @@ export function readCapacity({
   try {
     if (!Number.isInteger(cores) || cores <= 0) return { ok: false, why: `核数认不出（${cores}）` };
     if (platform === 'win32') {
-      const r = runCim();
-      if (r.error) return { ok: false, why: `CIM 没读成（PowerShell 没跑起来：${r.error.message}）` };
-      if (r.status !== 0) {
-        return {
-          ok: false,
-          why: `CIM 没读成（PowerShell 退出码 ${r.status}：${r.stderr.trim().slice(0, 200)}）`,
-        };
-      }
-      const m = /^\s*(\d+)\s+(\d+(?:\.\d+)?)\s*$/.exec(r.stdout);
-      if (!m) return { ok: false, why: `CIM 的输出认不出：${r.stdout.trim().slice(0, 200) || '（空）'}` };
-      const busy = Number(m[2]) / 100;
+      const [a, b] = samples();
+      const busy = busyPercent(a.times, b.times) / 100;
+      if (!Number.isFinite(b.freeBytes) || b.freeBytes < 0)
+        return { ok: false, why: `空闲内存认不出（${b.freeBytes}）` };
+      if (!Number.isFinite(busy)) return { ok: false, why: `CPU 采样没读成（忙的比例 ${busy}）` };
       return {
         ok: true,
-        freeBytes: Number(m[1]) * 1024,
+        freeBytes: b.freeBytes,
         load1: busy * cores,
         cores,
-        how: `CIM：空闲物理内存、CPU 忙 ${Math.round(busy * 100)}%（折成负载）`,
+        how: `os.freemem、os.cpus 采样：CPU 忙 ${Math.round(busy * 100)}%（折成负载）`,
       };
     }
+
     if (platform === 'linux') {
       const mem = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(readText('/proc/meminfo'));
       if (!mem) return { ok: false, why: '/proc/meminfo 里没有 MemAvailable' };
@@ -165,7 +168,7 @@ export function readCapacity({
     }
     return {
       ok: false,
-      why: `这个平台（${platform}）不认，只会读 Windows 的 CIM、Linux 的 /proc 和 macOS 的 vm_stat`,
+      why: `这个平台（${platform}）不认，只会读 Windows 的 os.freemem 和 os.cpus、Linux 的 /proc 和 macOS 的 vm_stat`,
     };
   } catch (e) {
     return { ok: false, why: `读数自己出错了（${why(e)}）` };

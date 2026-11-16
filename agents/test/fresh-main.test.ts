@@ -65,6 +65,9 @@ const lib = {
   ...(await import(pathToFileURL(join(HOOKS, 'git-run.mjs')).href)),
   ...(await import(pathToFileURL(join(HOOKS, 'fresh-main.mjs')).href)),
 } as Lib;
+const { CPU_SAMPLE_MS } = (await import(pathToFileURL(join(HOOKS, 'capacity.mjs')).href)) as {
+  CPU_SAMPLE_MS: number;
+};
 
 const PROXY = { HTTPS_PROXY: 'http://127.0.0.1:59822', HTTP_PROXY: 'http://127.0.0.1:59822' };
 const refused = (): R => ({
@@ -209,9 +212,21 @@ describe('起子代理前取远端的时间预算', () => {
     expect(lib.SUBAGENT_FETCH_MS).toBeGreaterThan(lib.SUBAGENT_DIRECT_MS);
   });
 
-  it('总预算 < 10 秒钩子超时，且够环境代理拖满 6 秒后直连和备用各留得下（单 #3588）', () => {
+  it('总预算 < 10 秒钩子超时，且够环境代理拖满它那一份后备用代理还留得下（单 #3588）', () => {
     expect(lib.SUBAGENT_BUDGET_MS).toBeLessThan(10_000);
     expect(lib.SUBAGENT_BUDGET_MS).toBeGreaterThanOrEqual(lib.SUBAGENT_FETCH_MS + lib.SUBAGENT_FALLBACK_MS);
+  });
+  it('总预算给判容量和取失败后的 git log 留出余量', () => {
+    // targets.ts 里 PreToolUse 的 pretool.mjs 是 10 秒。容量在取远端之前（pretool.mjs 主流程），
+    // Windows 两次 CPU 采样隔 CPU_SAMPLE_MS；取不成还要再读一次本地 git log（fresh-main.mjs）。
+    // 本地 git 的余量取「钩子上限的十分之一、且不少于 1 秒」：本机起 git 要一两秒里短的那头。
+    const HOOK_MS = 10_000;
+    const sampleMs = CPU_SAMPLE_MS;
+    const localGitMs = Math.max(1_000, HOOK_MS / 10);
+    expect(lib.SUBAGENT_BUDGET_MS).toBeLessThanOrEqual(HOOK_MS - sampleMs - localGitMs);
+    expect(lib.SUBAGENT_FETCH_MS + lib.SUBAGENT_FALLBACK_MS).toBeLessThanOrEqual(lib.SUBAGENT_BUDGET_MS);
+    expect(lib.SUBAGENT_DIRECT_MS).toBe(3_000);
+    expect(lib.SUBAGENT_FALLBACK_MS).toBe(3_000);
   });
 
   it('不建工作树的派工（没写 isolation、remote）：一条 git 命令都不跑，直接放行；建工作树的照旧取', () => {
@@ -392,11 +407,14 @@ describe('取远端：环境代理、直连都没成，再经备用代理取一�
     expect(s.opts).toEqual([undefined, { direct: true }]);
   });
 
-  it('预算：环境代理被拒当场失败不占预算，直连和备用代理都拿满；环境代理拖满 6 秒，直连让位、备用代理还有 3 秒', () => {
-    const budget = { totalMs: 9_000, directMs: 3_000, fallbackMs: 3_000 };
+  it('预算：环境代理被拒当场失败不占预算，直连和备用代理都拿满；环境代理拖满它那一份，直连让位、备用代理还有它那一份', () => {
+    const budget = {
+      totalMs: lib.SUBAGENT_BUDGET_MS,
+      directMs: lib.SUBAGENT_DIRECT_MS,
+      fallbackMs: lib.SUBAGENT_FALLBACK_MS,
+    };
     let t = 0;
-    const slow = byRoute(refused(), timedOut(3000), good());
-    // 被拒：时钟不动
+    const slow = byRoute(refused(), timedOut(lib.SUBAGENT_DIRECT_MS), good());
     lib.fetchWithFallback(slow.git, '/r', ['fetch'], {
       ...h(PROXY),
       fallbackProxy: CLASH,
@@ -405,14 +423,13 @@ describe('取远端：环境代理、直连都没成，再经备用代理取一�
     });
     expect(slow.opts).toEqual([
       undefined,
-      { direct: true, timeoutMs: 3000 },
-      { proxy: CLASH, timeoutMs: 3000 },
+      { direct: true, timeoutMs: lib.SUBAGENT_DIRECT_MS },
+      { proxy: CLASH, timeoutMs: lib.SUBAGENT_FALLBACK_MS },
     ]);
-    // 拖满：第一次花掉 6 秒
     t = 0;
     const hung: Git = (_c, _a, o) => {
-      if (!o) t += 6_000;
-      return o?.proxy ? good() : timedOut(6000);
+      if (!o) t += lib.SUBAGENT_FETCH_MS;
+      return o?.proxy ? good() : timedOut(lib.SUBAGENT_FETCH_MS);
     };
     const seen: (Opts | undefined)[] = [];
     const rec: Git = (c, a, o) => {
@@ -426,7 +443,7 @@ describe('取远端：环境代理、直连都没成，再经备用代理取一�
       clock: () => t,
     });
     expect(r.via).toBe('fallback');
-    expect(seen).toEqual([undefined, { proxy: CLASH, timeoutMs: 3000 }]);
+    expect(seen).toEqual([undefined, { proxy: CLASH, timeoutMs: lib.SUBAGENT_FALLBACK_MS }]);
     expect(lib.SUBAGENT_BUDGET_MS).toBeLessThan(10_000);
     expect(lib.SUBAGENT_FALLBACK_MS).toBe(3_000);
   });

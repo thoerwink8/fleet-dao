@@ -289,7 +289,7 @@ describe('订阅目录（决定 0085）', () => {
       {
         type: 'command',
         command: 'node',
-        args: ['${CLAUDE_PROJECT_DIR}/agents/hooks/main-thread.mjs'],
+        args: [`\${CLAUDE_PROJECT_DIR}/agents/hooks/main-thread.mjs`],
         timeout: 10,
       },
     ];
@@ -578,7 +578,7 @@ it('真实退役inbox-watch精确清受管登记，混组第三方原样保留�
   const owned = [
     { type: 'command', command: lib.commandFor(HOOKS, name), timeout: 1 },
     { type: 'command', command: 'node "D:/current/agents/hooks/' + name + '"', timeout: 1 },
-    ...['$CLAUDE_PROJECT_DIR', '${CLAUDE_PROJECT_DIR}'].map((p) => ({
+    ...['$CLAUDE_PROJECT_DIR', `\${CLAUDE_PROJECT_DIR}`].map((p) => ({
       type: 'command',
       command: 'node "' + p + '/agents/hooks/' + name + '"',
       timeout: 1,

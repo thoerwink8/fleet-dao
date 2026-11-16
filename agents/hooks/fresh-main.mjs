@@ -15,10 +15,10 @@
 //   直连 GitHub 又在 3 秒内没回，而本机 Clash 口 127.0.0.1:7890 是通的（手动 git -c http.proxy=… fetch 立刻成功），
 //   钩子只会「环境代理 → 直连」，子代理一个都派不出去。所以每台机器可以在 ~/.fleet-dao/fallback-proxy（不进仓、不是密钥）
 //   第一行写一个 http:// 或 socks5:// 地址，前两条路都没成才经它取一次（via 为 'fallback'）。读法见 git-run.mjs 的 readFallbackProxy。
-//   三条路的预算见下面 SUBAGENT_* 的注释：环境 6 秒 / 直连 3 秒 / 备用 3 秒，靠总预算 9 秒压住，不会撑破钩子的 10 秒。
+//   三条路的预算见下面 SUBAGENT_* 的注释：环境 5.5 秒 / 直连 3 秒 / 备用 3 秒，靠总预算压住，不会撑破钩子的 10 秒。
 //   只有建工作树（isolation 是 worktree）的派工才取远端，其余一条 git 都不跑（单 #3588：124 次里大半白付了 p50 838 毫秒、最长近 10 秒）。
 // - 同一个仓三分钟内刚取成过就不再取（记在 ~/.fleet-dao/fetch-ok/）。开会话钩子取成功也会记一笔，
-//   接着起的子代理不再各付一次 6 秒。取失败不记：要建工作树的子代理仍给提示，下一轮还会再试。
+//   接着起的子代理不再各付一次环境代理那一路的超时。取失败不记：要建工作树的子代理仍给提示，下一轮还会再试。
 
 import { createHash } from 'node:crypto';
 import { mkdirSync, statSync, writeFileSync } from 'node:fs';
@@ -106,17 +106,21 @@ export function fetchWithFallback(git, cwd, args, h) {
 const MIN_TRY_MS = 1_000;
 
 /**
- * 起子代理前取远端的时间预算：调工具前钩子总共只有 10 秒（targets.ts），三条路加起来要留出余量，总预算 9 秒（只有建工作树的派工才取，次数已大降；预算太小环境代理一超时，直连和备用两条路都会被跳过）。
- * 首选路（环境里的代理，reclaude 的口）给 6 秒——同时起了十来个子代理，代理瞬时慢过 4 秒，三个带工作树的子代理被误拦；
- * 直连只是兜底给 3 秒（这台机器直连常常要 20 多秒才报超时）；
- * 备用代理（~/.fleet-dao/fallback-proxy，本机的 Clash 口）给 3 秒——第三条路，为什么有它见文件头「第三条路」那段。
- * 三个数加起来是 12 秒，所以靠总预算压：环境代理被拒当场失败的（0 毫秒）不占预算，直连和备用代理都拿得满；
- * 环境代理拖满 6 秒时，直连让位（只拿「9 − 6 − 3」，不足 1 秒就不试），留 3 秒给备用代理；没配备用代理时直连照旧拿满 3 秒。
+ * 起子代理前取远端的时间预算：调工具前钩子总共只有 10 秒（targets.ts 里 PreToolUse 的 pretool.mjs）。
+ * 容量在取远端之前读（pretool.mjs 主流程），Windows 两次 CPU 采样隔 CPU_SAMPLE_MS（250 毫秒）；
+ * 取不成还要再读一次本地 git log。这两段都不在三条取远端的预算里。
+ * 本地 git 留钩子上限的十分之一（1 秒）：本机起 git 要一两秒里短的那头。
+ * 于是三条路能用的是 10 秒 − 0.25 秒 − 1 秒 = 8.75 秒。
+ * 直连、备用各留 3 秒（直连常常要 20 多秒才报超时，3 秒只是兜底；备用是第三条路）。
+ * 环境代理拿剩下的 2.75 秒不够一次正经的取，所以它和备用加起来顶满 8.75 秒：环境 5.5 秒、备用 3 秒、总预算 8.5 秒
+ * （8.75 秒再留 0.25 秒给起进程）。gitRunner(SUBAGENT_FETCH_MS) 实际用的就是 5.5 秒。
+ * 三个上限加起来仍大于总预算，靠总预算压：环境代理被拒当场失败的（0 毫秒）不占预算，直连和备用代理都拿得满；
+ * 环境代理拖满 5.5 秒时，直连让位（只拿「8.5 − 5.5 − 3」，不足 1 秒就不试），备用代理拿剩下的 3 秒；没配备用代理时直连照旧拿满 3 秒。
  */
-export const SUBAGENT_FETCH_MS = 6_000;
+export const SUBAGENT_FETCH_MS = 5_500;
 export const SUBAGENT_DIRECT_MS = 3_000;
 export const SUBAGENT_FALLBACK_MS = 3_000;
-export const SUBAGENT_BUDGET_MS = 9_000;
+export const SUBAGENT_BUDGET_MS = 8_500;
 /** 这个仓刚取成 origin 的有效期。和开会话钩子的 QUIET_MS 一样是 3 分钟。 */
 export const FETCH_QUIET_MS = 3 * 60_000;
 
