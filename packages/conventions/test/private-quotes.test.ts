@@ -100,7 +100,7 @@ describe('私有原话先本机再上传', () => {
     const d = result.directive;
     const publicText = JSON.stringify({
       file: formatDirective({ ...d, id: '20261018180000', issue: 3109, log: [] }),
-      issue: directiveIssueDraft({ meaning: d.text, at: d.at, source: d.source }),
+      issue: directiveIssueDraft({ meaning: d.text, at: d.at, source: d.source, owner: d.owner }),
     });
     expect(publicText).toContain('按既定规则执行');
     expect(publicText).toContain('原话：私有处');
@@ -163,17 +163,24 @@ describe('真实progress入口', { timeout: 0 }, () => {
         ['https://fixture', 'synthetic-password@fixture.invalid/project'].join(':'),
       ]).status,
     ).toBe(0);
-    for (const args of [
-      ['directive', '--kind', 'ai'],
-      ['directive', '--kind', 'ai', '--from-inbox', '123'],
-    ]) {
-      const result = runChild(process.execPath, ['packages/conventions/src/bin/progress.ts', ...args], {
+    const missing = runChild(
+      process.execPath,
+      ['packages/conventions/src/bin/progress.ts', 'directive', '--kind', 'ai'],
+      {
         env: { ...process.env, INIT_CWD: h, USERPROFILE: h, HOME: h },
-      });
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('--meaning');
-      expect(result.stderr + result.stdout).not.toContain('synthetic-password');
-    }
+      },
+    );
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('--meaning');
+    expect(missing.stderr + missing.stdout).not.toContain('synthetic-password');
+    const inbox = runChild(
+      process.execPath,
+      ['packages/conventions/src/bin/progress.ts', 'directive', '--kind', 'ai', '--from-inbox', '123'],
+      { env: { ...process.env, INIT_CWD: h, USERPROFILE: h, HOME: h } },
+    );
+    expect(inbox.status).toBe(1);
+    expect(inbox.stderr).toContain('--from-inbox 已关掉');
+    expect(inbox.stderr + inbox.stdout).not.toContain('synthetic-password');
   });
   it('补传入口在没有node_modules的同步检出也能启动', () => {
     const h = home();
@@ -322,20 +329,19 @@ it('外仓成功上传后记进账本的链只传意思，不含原话', async (
     { meaning: saved.directive.text, category: 'ai' },
     {
       repo: 'fixture/fixture',
+      home: h,
       gh: async (args) => {
         publicCalls.push(args);
-        return { code: 0, stdout: 'OPEN', stderr: '' };
-      },
-      post: async (body) => {
-        publicCalls.push(body);
-        return { status: 200, text: JSON.stringify({ id: 7, created: true }) };
+        if (args[0] === 'issue' && args[1] === 'list') return { code: 0, stdout: '[]', stderr: '' };
+        if (args[0] === 'issue' && args[1] === 'view') return { code: 0, stdout: 'OPEN\n', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
       },
     },
     3109,
   );
   expect(made.issue).toBe(3109);
   const published = JSON.stringify(publicCalls);
-  expect(published).toContain('可公开意思');
+  expect(published).toContain('创始人引导');
   expect(published).not.toContain(quote.text);
   expect(published).not.toContain('synthetic-password');
 });

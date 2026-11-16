@@ -1455,6 +1455,18 @@ describe('fleet-dao 的创始人引导是带「创始人引导」标签的 GitHu
     expect(check(dir, fakeRun({ stdout: '[]' }).run)).toEqual([]);
   });
 
+  it('正文里有〔主：本会话〕的开着的单：列进归本会话，不当成无主', () => {
+    const dir = fleetRepo();
+    const body = ['## 场景', '', '意思：会话先读规矩再动手', '', '〔主：dir-a〕', ''].join('\n');
+    const f = fakeRun({
+      stdout: JSON.stringify([issue(4054, '创始人引导：会话先读规矩再动手', body, new Date().toISOString())]),
+    });
+    const lines = check(dir, f.run, { status: 'found', dir: 'dir-a', sessionIds: ['s'] }).join('\n');
+    expect(lines).toContain('#4054');
+    expect(lines).toContain('归本会话');
+    expect(lines).not.toContain('无主的创始人引导');
+  });
+
   it('【故意造出的失败】gh 退出非 0、超时、输出认不出：说一行没查成，不当成没有待办', () => {
     const dir = fleetRepo();
     expect(check(dir, fakeRun({ status: 2, stderr: 'error connecting to api.github.com\n' }).run)).toEqual([
