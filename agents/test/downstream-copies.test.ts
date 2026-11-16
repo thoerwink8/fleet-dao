@@ -186,7 +186,7 @@ describe('开会话钩子接上（fastSessionStart 的 downstreamCopies）', SLO
       home,
       git,
       env: {},
-      progress: () => ({ status: 0, stdout: '', stderr: '' }),
+      directives: () => ({ status: 0, stdout: '[]', stderr: '' }),
       spawnBackground: () => ({ ok: true }),
       downstreamCopies: (dir: string) => lib.copyLines({ cwd: dir, git, home, hookDir: HOOK_DIR }),
     });
