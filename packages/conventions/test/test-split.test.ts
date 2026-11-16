@@ -369,13 +369,16 @@ describe('环境类、能力标记', () => {
 
 describe('在真仓上装箱（全跑那一轮）', () => {
   const input = { all: FILES, timings: REAL_TIMINGS, read };
+  // 必过 test 台装的是 assignTests 排除 HEAVY_FILES 之后的文件。把 heavy job 那几个文件也装进来，
+  // 会给普通台多算约 208 秒，台数封顶后又不能补给较轻的 pg 台，跨类 2 倍就会误红。
+  const PACKED_FILES = (FILES as string[]).filter((f) => !isHeavy(f));
 
   it('全部测试文件都分到、正好一台一次；台数 8（687 秒合计 / 目标 50 秒，封顶 8）', () => {
     const r = packTests({
-      files: FILES,
+      files: PACKED_FILES,
       universe: FILES,
       timings: REAL_TIMINGS,
-      temporal: temporalOf(FILES),
+      temporal: temporalOf(PACKED_FILES),
     });
     if (typeof r === 'string') throw new Error(r);
     expect(r.boxes).toHaveLength(8);
@@ -385,8 +388,9 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     expect(r.boxes.slice(0, pgCount).every((b) => b.pg && b.label.endsWith('· pg'))).toBe(true);
     expect(r.boxes.map((b, i) => b.label.startsWith(`${i + 1}/8`))).toEqual(Array(8).fill(true));
     const all = r.boxes.flatMap((b) => b.files);
-    expect(all.length).toBe(FILES.length);
-    expect([...all].sort()).toEqual([...FILES].sort());
+    expect(all.length).toBe(PACKED_FILES.length);
+    expect([...all].sort()).toEqual([...PACKED_FILES].sort());
+    expect(all.filter(isHeavy)).toEqual([]);
     // 耗时表是上一轮量出来的，这一轮新加的文件不在上面（按所在包的均值估）——那正是「表过期只是不匀、不影响跑不跑」
     expect(
       r.notes.filter((n) => !n.includes('按所在包的均值') && !n.includes('都要 Temporal 命令行')),
@@ -395,27 +399,27 @@ describe('在真仓上装箱（全跑那一轮）', () => {
 
   it('每一台的估计耗时（对比现在的 --shard 分片：89/35/137 · 141 · 87/72/125 秒）', () => {
     const r = packTests({
-      files: FILES,
+      files: PACKED_FILES,
       universe: FILES,
       timings: REAL_TIMINGS,
-      temporal: temporalOf(FILES),
+      temporal: temporalOf(PACKED_FILES),
     });
     if (typeof r === 'string') throw new Error(r);
     const seconds = r.boxes.map((b) => Math.round(b.estMs / 1000));
-    // 8 台的合计 = 全部文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按所在包的均值估（guessMs），
+    // 8 台的合计 = 必过 test 台文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按所在包的均值估（guessMs），
     // 和装箱同一个估法。不拿整张表的合计比：表一过期（加了测试文件、删了旧的）两边就差几秒，这条就红（#700 写的
     // 那种比法，主线上新加了测试文件之后改到 conventions 的 PR 全跑时都红在这）。最重的台和最轻的差不过 2 倍（LPT 的效果）。
-    const expected = FILES.reduce((t, f) => t + (REAL_TIMINGS.files[f] ?? guessMs(f, REAL_TIMINGS)), 0);
+    const expected = PACKED_FILES.reduce((t, f) => t + (REAL_TIMINGS.files[f] ?? guessMs(f, REAL_TIMINGS)), 0);
     expect(r.boxes.reduce((t, b) => t + b.estMs, 0)).toBe(expected);
     expect(Math.max(...seconds)).toBeLessThanOrEqual(Math.min(...seconds) * 2);
   });
 
   it('pg 台只有 db 和执行资格真竞争文件；Temporal 装在有 github-reconcile.test.ts 的那一台', () => {
     const r = packTests({
-      files: FILES,
+      files: PACKED_FILES,
       universe: FILES,
       timings: REAL_TIMINGS,
-      temporal: temporalOf(FILES),
+      temporal: temporalOf(PACKED_FILES),
     });
     if (typeof r === 'string') throw new Error(r);
     for (const b of r.boxes.filter((x) => x.pg))
