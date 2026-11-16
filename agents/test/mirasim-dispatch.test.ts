@@ -94,7 +94,9 @@ describe('dispatch.mjs 拿不到会话号', () => {
         code: 0,
         stdout: JSON.stringify({
           frames: [
-            { sessions: [{ agent: 'pi', workdir: 'D:/other', sessionKey: 'pi:elsewhere', createdAt: 9 }] },
+            {
+              sessions: [{ agent: 'kimi', workdir: 'D:/other', sessionKey: 'kimi:elsewhere', createdAt: 9 }],
+            },
           ],
         }),
         stderr: '',
@@ -130,8 +132,8 @@ describe('dispatch.mjs 拿不到会话号', () => {
             frames: [
               {
                 sessions: [
-                  { agent: 'pi', workdir: 'D:/repo', sessionKey: 'pi:old', createdAt: 1 },
-                  { agent: 'pi', workdir: 'D:/repo', sessionKey: 'pi:new', createdAt: 5 },
+                  { agent: 'kimi', workdir: 'D:/repo', sessionKey: 'kimi:old', createdAt: 1 },
+                  { agent: 'kimi', workdir: 'D:/repo', sessionKey: 'kimi:new', createdAt: 5 },
                 ],
               },
             ],
@@ -150,13 +152,51 @@ describe('dispatch.mjs 拿不到会话号', () => {
     });
     expect(code).toBe(0);
     expect(atoms).toEqual(['prompt', 'renameSession']);
-    expect(payloads[1]).toEqual({ sessionKey: 'pi:new', title: '【pi】#4019 一句' });
-    expect(lines.join('\n')).toMatch(/pi:new/);
+    expect(payloads[1]).toEqual({ sessionKey: 'kimi:new', title: '【pi】#4019 一句' });
+    expect(lines.join('\n')).toMatch(/kimi:new/);
     expect((payloads[0] as { clientRef: string }).clientRef).toBe('d-7');
   });
 });
 
 describe('回报去向', () => {
+  it('干活的会话默认是 omp（agent kimi），不传 model 和 effort（ACP 不认 set_model）', () => {
+    const sent: Record<string, unknown>[] = [];
+    const exec = (_cmd: string, args: string[]) => {
+      sent.push(JSON.parse(args[args.indexOf('--args') + 1] ?? '{}'));
+      return {
+        code: 0,
+        stdout: JSON.stringify({ frames: [{ type: 'accepted', sessionKey: 'kimi:x' }] }),
+        stderr: '',
+      };
+    };
+    const code = mod.dispatchRun(
+      ['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p', '--report-to', 'claude:c'],
+      {
+        exec,
+        server: 'unused.cjs',
+        log: () => {},
+      },
+    );
+    expect(code).toBe(0);
+    expect(sent[0]).toMatchObject({ agent: 'kimi' });
+    expect(sent[0]).not.toHaveProperty('model');
+    expect(sent[0]).not.toHaveProperty('effort');
+  });
+
+  it('--agent pi：退出码 2，一次都不派', () => {
+    const calls: string[] = [];
+    const exec = () => {
+      calls.push('called');
+      return { code: 0, stdout: '{}', stderr: '' };
+    };
+    const code = mod.dispatchRun(
+      ['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p', '--agent', 'pi', '--report-to', 'claude:c'],
+      { exec, server: 'unused.cjs' },
+    );
+    expect(code).toBe(2);
+    expect(calls).toEqual([]);
+  });
+
   it('找不到指挥会话：退出码 2，一次都不派', () => {
     const calls: string[] = [];
     const exec = () => {

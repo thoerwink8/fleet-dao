@@ -247,7 +247,7 @@ export function reportFooter(reportTo, reportScript = REPORT_SCRIPT) {
  * @param {Record<string, unknown>} args
  * @param {NodeJS.ProcessEnv} env
  */
-function callAtom(exec, nodePath, server, port, atom, args, env) {
+export function callAtom(exec, nodePath, server, port, atom, args, env) {
   /** @type {string[]} */
   const argv = [server, 'ui-cli'];
   if (port) argv.push('--port', port);
@@ -284,7 +284,14 @@ export function dispatchRun(argv, io = {}) {
   const err = (line) => console.error(line);
   try {
     const opt = parseArgs(argv);
-    const agent = opt.agent || 'pi';
+    // 干活的会话一律是 omp：mirasim 里的 agent 名是 kimi（启动方式经 ACP 到 omp）。
+    // 原版 pi 的配置和技能目录不归我们的规范管，不用它干活。
+    const agent = opt.agent || 'kimi';
+    if (agent === 'pi') {
+      throw new Stop('参数', '干活的会话必须用 omp（--agent kimi，默认值），不用原版 pi', 2);
+    }
+    // omp 的模型由它自己的配置（~/.omp/agent/config.yml 的角色）定，不经 ACP 的 set_model：
+    // 给 kimi 传 model 会报 Unknown ACP ext method: session/set_model（2026-11-16 实测），所以不传。
     const reportTo = opt['report-to'] || findCommander(io.records ?? readCommanderRecords(env));
     if (!reportTo) {
       throw new Stop('派活', '找不到指挥会话，加 --report-to <会话key>；这次不派，免得做完没处回报', 2);

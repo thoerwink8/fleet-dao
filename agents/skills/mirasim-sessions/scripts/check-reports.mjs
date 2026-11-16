@@ -62,8 +62,10 @@ export function run(argv, log = console.log) {
     const i = argv.indexOf(k);
     return i >= 0 ? argv[i + 1] : undefined;
   };
-  const root = get('--root') ?? join(homedir(), '.mirasim', 'sessions', 'pi');
-  const rows = scanUnreported(root, { hours: Number(get('--hours') ?? 12) });
+  const roots = get('--root')
+    ? [get('--root')]
+    : ['kimi', 'pi'].map((a) => join(homedir(), '.mirasim', 'sessions', a));
+  const rows = roots.flatMap((root) => scanUnreported(root, { hours: Number(get('--hours') ?? 12) }));
   for (const r of rows) log(`ALERT ${r.id} ${r.state} 没发回报：${r.why}`);
   if (!rows.length) log('没有收轮却没回报的会话');
   return rows.length ? 1 : 0;

@@ -9,7 +9,7 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 
 ## 开会话之前先查老会话
 
-- 查已有会话：`listSessions`（`workdir` 填仓根，`limit` 给小）。它不列 pi 会话。查 pi 要看本机会话目录 `~/.mirasim/sessions/pi/<会话 id>/record.json`（里面有 `title`、`workdir`、`runState`），再对上 `getTurnFacts`（给 `taskId`）看这一轮。同一件活的后续（返工、补验证、修 CI、改约束）发回原会话：`prompt` 带它的 `sessionKey`。只有新的一件活才开新会话。
+- 查已有会话：`listSessions`（`workdir` 填仓根，`limit` 给小）。干活的会话是 omp（mirasim 里的 agent 名是 `kimi`，启动方式经 ACP 到 omp），要看本机会话目录 `~/.mirasim/sessions/kimi/<会话 id>/record.json`（里面有 `title`、`workdir`、`runState`、`nativeSessionId`，原生记录在 `~/.omp/agent/sessions/`），再对上 `getTurnFacts`（给 `taskId`）看这一轮。同一件活的后续（返工、补验证、修 CI、改约束）发回原会话：`prompt` 带它的 `sessionKey`。只有新的一件活才开新会话。
 - mirasim 的会话列表就是账，不另记清单。侧栏名在派的同时改好，见下。
 
 ## 开会话
@@ -18,8 +18,12 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 - 派活交代必须带回报去向。不给 `--report-to` 时，脚本在本机 claude 会话目录里找正在跑、工作目录以 fleet-dao 结尾、标题不是无人值守心跳的那一个（多个取最近更新），把「回报，必做」追加到交代末尾，指到同目录的 `scripts/report.mjs`。找不到指挥会话就退出码 2，一次都不派。
 
 ```
-node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓根> --prompt "<交代>" [--agent pi] [--model <模型>] [--effort <档>] [--route local] [--report-to <指挥会话key>]
+node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <仓根> --prompt "<交代>" [--report-to <指挥会话key>]
 ```
+
+- 给在跑或已收轮的会话发后续消息（返工、补验证、接着做），一律用 `scripts/send.mjs --to <会话key> --file <消息文件>`，不要裸调 `prompt`：它会把「回报，必做」和指挥会话号追加到每条消息末尾。只靠开场交代里的那一段，会话做完第二件事时会忘（11-16 #33 做完开了 PR 却没回报，我的后续消息里只写了「回报」两个字）。
+- **干活的会话一律是 omp，不用原版 pi**（2026-11-16 创始人定）。mirasim 里 omp 的 agent 名是 `kimi`（启动方式经 ACP 到 omp），脚本默认 `--agent kimi`，`--agent pi` 直接退出码 2。omp 用的模型由它自己的配置（`~/.omp/agent/config.yml` 的角色，指向 `gateway/group/smart`）定，不要给 kimi 传 `--model`：ACP 不认 `set_model`，会话开场就报错（11-16 实测）。原因：我们的 omp 定制（单轮输出上限、技能目录、结束前检查扩展，在配置仓里）只管 omp；原版 pi 读另一套配置，今天派的 pi 会话没吃到这些，还出现过工具调用名字为空导致整轮被停的事。
+- 标题写 `【omp】`，和实际一致。
 
 - `agent`、`model`、`effort` 照创始人指定的，`route` 用 `local`（走个人账号，不扣 Mirasim 额度）。没给 `--port` 时用环境变量 `MIRASIM_HOST_PORT`；会话里两个都没有就不带端口。版本读 `~/.mirasim/app/state.json` 里 `good` 的那一版，不写死。
 - 走个人账号要整机路由是「自有」（`setRelayMode {mode: "local"}`）。派之前先 `getCatalog {agent}` 确认要的模型在目录里；会话报「只有平台提供」（422）或目录里没有，先 `getCatalog {agent, refresh: true}` 刷新再发，不换成差一档的模型凑合。刷新本身也会探残（本机网络一抖：grok-4.7 标 `routeByModel: relay`、`ownOnlyModels` 里没有 fast）：看到残的就再刷，刷到正常再发，别据此判「这个模型只剩平台」，以本机 `grok models` 列出的为准。grok 一律 `grok-4.7` + `route: "local"`。
@@ -30,7 +34,7 @@ node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓�
   4. 回报去向由 `scripts/dispatch.mjs` 写进交代，不要再手写一套。做完或卡住时，把正文写进文件，运行交代里的 `scripts/report.mjs --to <指挥会话key> --title <活名> --file <正文>`，看到输出 ok 才算发出。正文写做到哪、PR 号、头提交、`git ls-remote` 和 `gh pr view` 的输出、验证命令和真实结果、没做的和原因。不许写「CI 绿了再回报」然后收轮。命令超过约 60 秒会被钩子自动转后台：让会话把测试按单个文件分开跑、每条命令尽量 60 秒内，同一条查看命令最多连发 2 次，连续 8 次相同调用系统会停掉整轮（11-16 #11 实测），停了就既不提交也不回报；不许丢到后台再收轮。会话自己回报覆盖不了它自己被停、崩溃、模型报错（11-16 还有一例开场 422），所以每轮巡检都跑 `node scripts/check-reports.mjs`，有 ALERT 行就读该会话最后一轮，插队让它接着做或重派。
 - 关键约束（授权边界、别碰哪些分支、验收标准）在开会话的第一条里写全。`steer` 只有部分 agent 吃，grok 不吃。给在跑的子会话发任何新消息（补充、返工、回报转发），都用 `prompt` 再 `stopAndRun {sessionKey, ref}`（`ref` 填那条 `prompt` 的 `clientRef`）才会送达（2026-11-16 创始人：每次都要插队才收得到）；代价是它正在跑的那条命令被打断，所以尽量攒成一条再发。它已经 done 的会话直接 `prompt` 即可，不用插队。
 - 交代里给时限。子会话易在测试上越绕越远（降并发、加跳过、逐条追断言，#3988 的第二棒真遇到）；到点用上面的 `stopAndRun` 让它收尾，只报现状。
-- 长时间没回报：`listSessions` 看它的 `runState`、`failed`（pi 不在这份列表里，改看会话目录的 `record.json` 加 `getTurnFacts`）。grok 进程会异常退出（`grok exited`），退了就不会回报，发回原会话重跑。
+- 长时间没回报：`listSessions` 看它的 `runState`、`failed`（omp 会话不一定在这份列表里，改看 `~/.mirasim/sessions/kimi/` 的 `record.json` 加 `getTurnFacts`）。grok 进程会异常退出（`grok exited`），退了就不会回报，发回原会话重跑。
 - 参考外部产品时写清授权边界：闭源软件和非开源许可（源码可见但限商用）的代码、样式一行都不进仓，只参考思路；MIT、Apache 类的库可以直接用。
 
 ## 指挥会话自己
@@ -38,7 +42,7 @@ node scripts/dispatch.mjs --title "【pi】#单号 一句中文" --workdir <仓�
 - 派完就收轮。回报是作为新消息排进指挥会话的队列的，指挥会话一轮不结束，回报就进不来。
 - 进无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 照样跑，mirasim 托管的会话它不拦收轮；同时开一个 30 分钟心跳定时任务（`mcp__mirasim__schedule_task`，`cron` 用 `*/30 * * * *`，`prompt` 写「无人值守心跳：打开 `mirasim-sessions` 技能的 `heartbeat.md`，把占位换成这一轮的仓和指挥会话，查子会话回报和队列，有活就接着派」，`once` 不设）。清单本身是本技能目录的 `heartbeat.md`，不含具体单号、内网地址和盘符路径。`on` 不排心跳，心跳没排上就收轮，这个会话没人叫醒。接续就靠子会话回报和这个心跳。收工（`unattended.mjs done`）后把心跳定时任务停掉。
 - 会话太长要换棒：照 `commander-handoff`。
-- 不轮询。要看状态用 `getTurnFacts`（给 `taskId`）或小 `limit` 的 `listSessions`（pi 会话不在 `listSessions` 里，见上面「先查老会话」）；mirasim 的返回常常很大，只抽要的字段。
+- 不轮询。要看状态用 `getTurnFacts`（给 `taskId`）或小 `limit` 的 `listSessions`（omp 会话以会话目录为准，见上面「先查老会话」）；mirasim 的返回常常很大，只抽要的字段。
 
 ## 换一台机器
 
