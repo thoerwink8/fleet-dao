@@ -1,4 +1,4 @@
-// 【2026-10-30 起新引导不再进仓，记进驾驶舱库（法国账本 directive 行），见 directive-ledger.ts，决定 0123、#3764。】
+// 【2026-10-30 起新引导不再进仓。#4054 起一条一张带「创始人引导」标签的 GitHub 单，见 directive-ledger.ts；原话在本机私有处。】
 // 这个文件现在只管 docs/directives/ 里已有的旧档案：解析、读 prompt-log 取原话和时间、挂的单现判、旧文件里还待办的列出来。
 //
 // 旧档案当时的做法：创始人引导记在仓里 docs/directives/<YYYY-MM>/<编号>.md，一条引导一个文件，随 PR 走（决定 0097 #2169；只收 AI 做法类，先判类见决定 0111）。
@@ -25,6 +25,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Gh, GhResult } from './issue-new.ts';
+import { ownerLine } from './progress.ts';
 
 export const DIRECTIVES_DIR = 'docs/directives';
 export const NO_OWNER = '无主';
@@ -456,8 +457,8 @@ export async function listPending(git: Git, gh: Gh, ref: string): Promise<Direct
 export const MAIN = 'origin/main';
 
 // —— 记 ——
-// 创始人引导不再进仓、不再开 PR（决定 0123，#3764）：pnpm progress directive 经 POST /api/nodes/notes 写账本（directive-ledger.ts），
-// 原话只在驾驶舱库里；上面的文件读写只为读 docs/directives/ 里的旧档案。
+// 创始人引导不再进仓、不再开 PR（#4054）：pnpm progress directive 开一张带「创始人引导」标签的单（directive-ledger.ts），
+// 原话只在本机私有处；上面的文件读写只为读 docs/directives/ 里的旧档案。
 
 /** 挂的单：开着的才能挂；关了、不存在、读不到都明确报 */
 export async function checkIssueOpen(gh: Gh, issue: number): Promise<void> {
@@ -472,10 +473,19 @@ export async function checkIssueOpen(gh: Gh, issue: number): Promise<void> {
 }
 
 /**
- * 没给 --issue 时顺手开的单：标题和正文只用意思（单在公开仓，原话只进驾驶舱库，决定 0123），四节照 issue-new 的要求写。
- * 「## 原话」一节 issue-new 要求非空：写明原话在哪。
+ * 没给 --issue 时顺手开的单：标题和正文只用意思（单在公开仓，原话只在本机私有处），四节照 issue-new 的要求写。
+ * 「## 原话」一节 issue-new 要求非空：写明原话在哪，不抄原文。主人标记独占一行，开会话钩子靠它认主。
  */
-export function directiveIssueDraft(r: { meaning: string; at: string; source: string }): {
+export function directiveIssueDraft(r: {
+  meaning: string;
+  at: string;
+  source: string;
+  owner: string;
+  /** 从旧账本迁过来时，原来挂的那张单 */
+  priorIssue?: number;
+  /** 同一句重放用的记号，不是原话 */
+  marker?: string;
+}): {
   title: string;
   body: string;
 } {
@@ -485,19 +495,22 @@ export function directiveIssueDraft(r: { meaning: string; at: string; source: st
   const body = [
     '## 场景',
     '',
-    `创始人 ${r.at} 的引导（来源：${r.source}），随 pnpm progress directive 记进驾驶舱库（法国账本），这张单就是它办没办完的凭据：单开着引导就算没办完，单关了就算办完。意思：${flat}`,
+    `创始人 ${r.at} 的引导（来源：${r.source}）。这张单就是它办没办完的凭据：单开着引导就算没办完，单关了就算办完。意思：${flat}`,
+    '',
+    ownerLine(r.owner),
     '',
     '## 原话',
     '',
-    '原话只在驾驶舱库里（账本 directive 行），不抄进公开仓和公开单（决定 0123）；上面的意思就是它的转述。',
+    '原话只在本机私有处（~/.fleet-dao/private/directive-quotes/），不抄进公开仓和公开单。上面的意思是转述。',
     '',
     '## 已知的模块',
     '',
-    '暂无',
+    r.priorIssue !== undefined ? `原单：#${r.priorIssue}` : '暂无',
     '',
     '## 怎么算做完',
     '',
     '- 这条引导要的事做成并合进主线，CI 全绿。',
+    ...(r.marker ? ['', `<!-- fleet:directive ${r.marker} -->`] : []),
     '',
   ].join('\n');
   return { title, body };

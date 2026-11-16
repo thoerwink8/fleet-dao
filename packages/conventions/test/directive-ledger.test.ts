@@ -1,14 +1,22 @@
-// 创始人引导记进账本（#3764，决定 0123）：只经 POST /api/nodes/notes，不调 git、不调 gh pr create、不写 docs/directives/。
-// 【故意造出的失败】：没给意思、挂的单已关、gh 读不到单、没法开单、账本写不成都明确拒绝或报没查成，写不成时不退回写文件。
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+// 创始人引导一条一张 GitHub 单（#4054）：贴「创始人引导」标签，正文只用意思，原话进本机私有目录。
+// 不调 git、不调 gh pr create、不写 docs/directives/、不 POST 账本。
+// 【故意造出的失败】：没给意思、意思里抄着原话、挂的单已关、gh 读不到、没法开单、标签没贴上都明确拒绝或报没查成。
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { ledgerPending, recordDirectiveToLedger } from '../src/directive-ledger.ts';
+import {
+  DIRECTIVE_LABEL,
+  type DirectiveLedgerDeps,
+  directiveIssueToDigest,
+  ledgerPending,
+  migrateOpenDirectives,
+  type OpenDirectiveIssue,
+  recordDirectiveToLedger,
+} from '../src/directive-ledger.ts';
 import { DirectiveRefused, DirectiveUnchecked } from '../src/directives.ts';
 import type { Gh, GhResult } from '../src/issue-new.ts';
-import type { LedgerNoteBody, LedgerNotePost } from '../src/ledger-note.ts';
-import { LEDGER_PAGE, type LedgerEventsGet } from '../src/ledger-read.ts';
+import { LEDGER_PAGE, type LedgerDirective, type LedgerEventsGet } from '../src/ledger-read.ts';
 import { ProgressUnchecked } from '../src/progress.ts';
 
 const QUOTE = '以后所有会话都先读规矩再动手，这是我的原话 xyz-secret-quote';
@@ -23,22 +31,23 @@ const meta = { meaning: '会话先读规矩再动手', category: 'ai' as const }
 const okR = (stdout = ''): GhResult => ({ code: 0, stdout, stderr: '' });
 
 function wiring(
-  over: { open?: number[]; ghFails?: string; post?: (b: LedgerNoteBody) => ReturnType<LedgerNotePost> } = {},
+  over: { open?: number[]; ghFails?: string; labelFails?: boolean; listed?: OpenDirectiveIssue[] } = {},
 ) {
+  const home = mkdtempSync(join(tmpdir(), 'directive-home-'));
   const ghCalls: string[][] = [];
-  const posts: LedgerNoteBody[] = [];
   const gh: Gh = async (args) => {
     ghCalls.push(args);
     if (over.ghFails) return { code: 1, stdout: '', stderr: over.ghFails };
-    if (args[0] === 'issue' && args[1] === 'view')
+    if (over.labelFails && args.includes('--add-label'))
+      return { code: 1, stdout: '', stderr: 'label refused' };
+    if (args[0] === 'issue' && args[1] === 'list') return okR(JSON.stringify(over.listed ?? []));
+    if (args[0] === 'issue' && args[1] === 'view' && args.includes('.state'))
       return okR((over.open ?? []).includes(Number(args[2])) ? 'OPEN\n' : 'CLOSED\n');
+    if (args[0] === 'issue' && args[1] === 'view') return okR('既有正文\n');
     return okR();
   };
-  const post: LedgerNotePost = async (b) => {
-    posts.push(b);
-    return over.post ? over.post(b) : { status: 200, text: JSON.stringify({ id: 41, created: true }) };
-  };
-  return { ghCalls, posts, deps: { gh, post, repo: 'o/r', ref: 'sess-1' } };
+  const deps: DirectiveLedgerDeps = { gh, repo: 'o/r', ref: 'sess-1', home };
+  return { ghCalls, home, deps };
 }
 
 /** 假法国账本：按 after/limit 切片，记下每次请求 */
@@ -66,7 +75,7 @@ const dirRow = (id: number, issue: number, meaning = `意思${id}`) => ({
   after: { text: `原话${id}`, meaning, category: 'ai', owner: 'dir-a', spokenAt: '2026-10-30 10:00 +0800' },
 });
 
-describe('ledgerPending（progress read --pending 的账本那一半）', () => {
+describe('ledgerPending（只给 directive-export 的账本读口）', () => {
   const dir = mkdtempSync(join(tmpdir(), 'directive-pending-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
   const openGh =
@@ -133,31 +142,36 @@ describe('ledgerPending（progress read --pending 的账本那一半）', () => 
 });
 
 describe('recordDirectiveToLedger', () => {
-  it('写一条 kind=directive：原话在 text，意思、类别、主人、说话时刻、挂的单各一个字段；不调 gh pr create', async () => {
-    const w = wiring({ open: [3764] });
+  const homes: string[] = [];
+  afterAll(() => {
+    for (const h of homes) rmSync(h, { recursive: true, force: true });
+  });
+  const keep = <T extends { home: string }>(w: T): T => {
+    homes.push(w.home);
+    return w;
+  };
+  const quoteFile = (home: string) => {
+    const dir = join(home, '.fleet-dao', 'private', 'directive-quotes');
+    const name = readdirSync(dir).find((n) => n.endsWith('.json') && n !== 'index.json');
+    if (!name) throw new Error('没有原话文件');
+    return join(dir, name);
+  };
+
+  it('贴上「创始人引导」标签：正文只有意思和主人，原话在本机文件里，不进 gh', async () => {
+    const w = keep(wiring({ open: [3764] }));
     const made = await recordDirectiveToLedger(rec, meta, w.deps, 3764);
-    expect(made).toEqual({ id: 41, issue: 3764, created: true });
-    expect(w.posts).toHaveLength(1);
-    expect(w.posts[0]).toMatchObject({
-      kind: 'directive',
-      repo: 'o/r',
-      issue: 3764,
-      text: QUOTE,
-      meaning: meta.meaning,
-      category: 'ai',
-      owner: 'dir-a',
-      spokenAt: '2026-10-30 10:00 +0800',
-      source: { kind: 'local-session', ref: 'sess-1' },
-    });
-    expect(w.posts[0]?.idempotencyKey).toMatch(/^directive:\d{12}-[0-9a-f]{16}$/);
-    // 只查了挂的单开着没有；没有任何 pr 命令，也没有 git 依赖可调（deps 里压根没有 git）
-    expect(w.ghCalls.map((a) => a.slice(0, 2).join(' '))).toEqual(['issue view']);
+    expect(made).toEqual({ id: 3764, issue: 3764, created: true });
+    expect(w.ghCalls.some((a) => a.includes('--add-label') && a.includes(DIRECTIVE_LABEL))).toBe(true);
     expect(w.ghCalls.some((a) => a[0] === 'pr')).toBe(false);
+    expect(JSON.stringify(w.ghCalls)).not.toContain('xyz-secret-quote');
     expect('git' in w.deps).toBe(false);
+    const saved = readFileSync(quoteFile(w.home), 'utf8');
+    expect(saved).toContain(QUOTE);
+    if (process.platform !== 'win32') expect(statSync(quoteFile(w.home)).mode & 0o777).toBe(0o600);
   });
 
-  it('没给 --issue：顺手开一张单，标题和正文只用意思、不含原话', async () => {
-    const w = wiring();
+  it('没给 --issue：顺手开一张单，标题和正文只用意思、含主人标记、不含原话', async () => {
+    const w = keep(wiring());
     const drafts: Array<{ title: string; body: string }> = [];
     const made = await recordDirectiveToLedger(rec, meta, {
       ...w.deps,
@@ -166,61 +180,212 @@ describe('recordDirectiveToLedger', () => {
         return 4242;
       },
     });
-    expect(made.issue).toBe(4242);
-    expect(w.posts[0]?.issue).toBe(4242);
+    expect(made).toEqual({ id: 4242, issue: 4242, created: true });
     expect(JSON.stringify(drafts)).not.toContain('xyz-secret-quote');
     expect(drafts[0]?.title).toBe('创始人引导：会话先读规矩再动手');
+    expect(drafts[0]?.body).toContain('〔主：dir-a〕');
+    expect(drafts[0]?.body).toContain('本机私有处');
     for (const h of ['## 场景', '## 原话', '## 已知的模块', '## 怎么算做完'])
       expect(drafts[0]?.body).toContain(h);
   });
 
-  it('同一句同一分钟重跑：幂等键相同，回包 created:false 照实带回', async () => {
-    const w = wiring({
-      open: [1],
-      post: async () => ({ status: 200, text: JSON.stringify({ id: 41, created: false }) }),
-    });
-    const a = await recordDirectiveToLedger(rec, meta, w.deps, 1);
-    const b = await recordDirectiveToLedger(rec, meta, w.deps, 1);
-    expect(a.created).toBe(false);
-    expect(w.posts[0]?.idempotencyKey).toBe(w.posts[1]?.idempotencyKey);
-    expect(b.id).toBe(41);
+  it('同一句同一分钟重跑：不再开第二张，created:false', async () => {
+    const w = keep(wiring());
+    let opened = 0;
+    const deps = {
+      ...w.deps,
+      newIssue: async () => {
+        opened += 1;
+        return 4242;
+      },
+    };
+    const a = await recordDirectiveToLedger(rec, meta, deps);
+    const b = await recordDirectiveToLedger(rec, meta, deps);
+    expect(a.created).toBe(true);
+    expect(b).toEqual({ id: 4242, issue: 4242, created: false });
+    expect(opened).toBe(1);
   });
 
-  it('【故意造出的失败】没给意思：拒绝，不查单、不写账本', async () => {
-    const w = wiring({ open: [1] });
+  it('【故意造出的失败】没给意思、意思里抄着原话：拒绝，不查单', async () => {
+    const w = keep(wiring({ open: [1] }));
     await expect(recordDirectiveToLedger(rec, { ...meta, meaning: '  ' }, w.deps, 1)).rejects.toThrow(
       DirectiveRefused,
     );
-    expect(w.ghCalls).toEqual([]);
-    expect(w.posts).toEqual([]);
-  });
-
-  it('【故意造出的失败】挂的单已关、gh 读不到、没法开单：都不写账本', async () => {
-    const closed = wiring({ open: [] });
-    await expect(recordDirectiveToLedger(rec, meta, closed.deps, 1)).rejects.toThrow(DirectiveRefused);
-    const down = wiring({ ghFails: 'HTTP 502' });
-    await expect(recordDirectiveToLedger(rec, meta, down.deps, 1)).rejects.toThrow(DirectiveUnchecked);
-    const none = wiring();
-    await expect(recordDirectiveToLedger(rec, meta, none.deps)).rejects.toThrow(/没法开单/);
-    for (const w of [closed, down, none]) expect(w.posts).toEqual([]);
-  });
-
-  it('【故意造出的失败】账本写不成（HTTP 503、断连、回包认不出）：抛没记成，不退回写文件；顺手开过单的说明单号', async () => {
-    for (const post of [
-      async () => ({ status: 503, text: 'down' }),
-      async () => {
-        throw new Error('ECONNREFUSED');
-      },
-      async () => ({ status: 200, text: 'not json' }),
-    ] as LedgerNotePost[]) {
-      const w = wiring({ open: [1], post });
-      await expect(recordDirectiveToLedger(rec, meta, w.deps, 1)).rejects.toThrow(
-        /往法国账本记引导没成.*引导没记/,
-      );
-    }
-    const w = wiring({ post: async () => ({ status: 503, text: 'down' }) });
     await expect(
-      recordDirectiveToLedger(rec, meta, { ...w.deps, newIssue: async () => 4242 }),
-    ).rejects.toThrow(/已顺手开了单 #4242，重跑时带 --issue 4242/);
+      recordDirectiveToLedger(rec, { ...meta, meaning: `转述 ${QUOTE}` }, w.deps, 1),
+    ).rejects.toThrow(/抄着原话/);
+    expect(w.ghCalls).toEqual([]);
+  });
+
+  it('【故意造出的失败】挂的单已关、gh 读不到、没法开单：都不把原话交出去', async () => {
+    const closed = keep(wiring({ open: [] }));
+    await expect(recordDirectiveToLedger(rec, meta, closed.deps, 1)).rejects.toThrow(DirectiveRefused);
+    const down = keep(wiring({ ghFails: 'HTTP 502' }));
+    await expect(recordDirectiveToLedger(rec, meta, down.deps, 1)).rejects.toThrow(DirectiveUnchecked);
+    const none = keep(wiring());
+    await expect(recordDirectiveToLedger(rec, meta, none.deps)).rejects.toThrow(/没法开单/);
+    for (const w of [closed, down, none]) expect(JSON.stringify(w.ghCalls)).not.toContain('xyz-secret-quote');
+  });
+
+  it('【故意造出的失败】标签没贴上：抛没记完，并写明已经开出的单号；重跑补标签、不再开一张', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'directive-home-'));
+    homes.push(home);
+    let labelFails = true;
+    let opened = 0;
+    const gh: Gh = async (args) => {
+      if (labelFails && args.includes('--add-label')) return { code: 1, stdout: '', stderr: 'label refused' };
+      if (args[1] === 'list') return okR('[]');
+      if (args.includes('.state')) return okR('OPEN\n');
+      return okR('');
+    };
+    const deps: DirectiveLedgerDeps = {
+      gh,
+      repo: 'o/r',
+      home,
+      newIssue: async () => {
+        opened += 1;
+        return 4242;
+      },
+    };
+    await expect(recordDirectiveToLedger(rec, meta, deps)).rejects.toThrow(/已顺手开了单 #4242/);
+    labelFails = false;
+    const again = await recordDirectiveToLedger(rec, meta, deps);
+    expect(again).toEqual({ id: 4242, issue: 4242, created: false });
+    expect(opened).toBe(1);
+  });
+
+  it('挂已有单时正文没补上：重跑补主人标记，不再开第二张', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'directive-home-'));
+    homes.push(home);
+    let editFails = true;
+    const calls: string[][] = [];
+    const gh: Gh = async (args) => {
+      calls.push(args);
+      if (editFails && args.includes('--body-file')) return { code: 1, stdout: '', stderr: 'edit refused' };
+      if (args[1] === 'list') return okR('[]');
+      if (args.includes('.state')) return okR('OPEN\n');
+      if (args.includes('--jq')) return okR('既有正文\n');
+      return okR('');
+    };
+    const deps: DirectiveLedgerDeps = { gh, repo: 'o/r', home };
+    await expect(recordDirectiveToLedger(rec, meta, deps, 7)).rejects.toThrow(/没补上主人标记/);
+    editFails = false;
+    calls.length = 0;
+    const again = await recordDirectiveToLedger(rec, meta, deps, 7);
+    expect(again).toEqual({ id: 7, issue: 7, created: false });
+    expect(calls.some((a) => a.includes('--body-file'))).toBe(true);
+    expect(JSON.stringify(calls)).not.toContain('xyz-secret-quote');
+  });
+});
+
+describe('migrateOpenDirectives', () => {
+  const row = (over: Partial<LedgerDirective> = {}): LedgerDirective => ({
+    id: 9,
+    at: '2026-10-30T02:00:00Z',
+    issue: 10,
+    text: QUOTE,
+    meaning: '会话先读规矩再动手',
+    category: 'ai',
+    owner: 'dir-a',
+    spokenAt: '2026-10-30 10:00 +0800',
+    ...over,
+  });
+
+  it('未办完的逐条开单，正文写原单号，不写原话；再跑不重复开', async () => {
+    const w = wiring();
+    const drafts: Array<{ title: string; body: string }> = [];
+    let opened = 0;
+    const deps = {
+      ...w.deps,
+      newIssue: async (d: { title: string; body: string }) => {
+        drafts.push(d);
+        opened += 1;
+        return 5000 + opened;
+      },
+    };
+    const first = await migrateOpenDirectives(
+      [row(), row({ id: 8, issue: 11, text: '另一句原话-secret' })],
+      deps,
+    );
+    expect(first.opened.map((o) => [o.ledgerId, o.from, o.issue])).toEqual([
+      [9, 10, 5001],
+      [8, 11, 5002],
+    ]);
+    expect(drafts[0]?.body).toContain('原单：#10');
+    expect(JSON.stringify(drafts)).not.toContain('xyz-secret-quote');
+    expect(JSON.stringify(drafts)).not.toContain('另一句原话-secret');
+    expect(JSON.stringify(w.ghCalls)).not.toContain('xyz-secret-quote');
+    const second = await migrateOpenDirectives([row()], deps);
+    expect(second.opened).toEqual([]);
+    expect(second.already).toEqual([10]);
+    expect(opened).toBe(2);
+  });
+
+  it('意思和原话是同一句：公开单用占位，原话只留本机', async () => {
+    const w = wiring();
+    const drafts: Array<{ body: string }> = [];
+    await migrateOpenDirectives([row({ meaning: QUOTE })], {
+      ...w.deps,
+      newIssue: async (d) => {
+        drafts.push(d);
+        return 60;
+      },
+    });
+    expect(drafts[0]?.body).toContain('没有可公开的意思');
+    expect(drafts[0]?.body).not.toContain('xyz-secret-quote');
+    expect(drafts[0]?.body).toContain('原单：#10');
+  });
+
+  it('开着的单上已经写了原单号：不再开', async () => {
+    const w = wiring({
+      listed: [
+        {
+          number: 70,
+          title: '创始人引导：已迁',
+          body: '原单：#10\n',
+          createdAt: '2026-10-30T02:00:00Z',
+        },
+      ],
+    });
+    let opened = 0;
+    const got = await migrateOpenDirectives([row()], {
+      ...w.deps,
+      newIssue: async () => {
+        opened += 1;
+        return 1;
+      },
+    });
+    expect(got).toEqual({ opened: [], already: [10] });
+    expect(opened).toBe(0);
+    const saved = readdirSync(join(w.home, '.fleet-dao', 'private', 'directive-quotes'))
+      .filter((n) => n.endsWith('.json') && n !== 'index.json')
+      .map((n) => readFileSync(join(w.home, '.fleet-dao', 'private', 'directive-quotes', n), 'utf8'))
+      .join('\n');
+    expect(saved).toContain(QUOTE);
+    expect(JSON.stringify(w.ghCalls)).not.toContain('xyz-secret-quote');
+  });
+});
+
+describe('directiveIssueToDigest', () => {
+  it('周汇总用正文里的说话时刻，不带原话', () => {
+    const body = [
+      '## 场景',
+      '',
+      '创始人 2026-10-30 10:00 +0800 的引导（来源：prompt-log）。意思：会话先读规矩再动手',
+      '',
+      '〔主：dir-a〕',
+      '',
+    ].join('\n');
+    const d = directiveIssueToDigest({
+      number: 41,
+      title: '创始人引导：会话先读规矩再动手',
+      body,
+      createdAt: '2026-11-17T00:00:00.000Z',
+    });
+    expect(d.spokenAt).toBe('2026-10-30 10:00 +0800');
+    expect(d.meaning).toBe('会话先读规矩再动手');
+    expect(d.text).toBe('');
+    expect(d.owner).toBe('dir-a');
+    expect(d.issue).toBe(41);
   });
 });
