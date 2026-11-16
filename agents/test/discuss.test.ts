@@ -223,7 +223,6 @@ function run(
   o: { home: string; path?: string; env?: Record<string, string> },
 ) {
   const env: Record<string, string> = {
-    DISCUSS_MAGPIE_BASE_URL: '',
     HOME: o.home,
     USERPROFILE: o.home,
     PATH: o.path ?? temp('empty'),
@@ -249,12 +248,6 @@ function topic(text: string): string {
   const file = join(temp('topic'), '题面.md');
   writeFileSync(file, text);
   return file;
-}
-
-/** 给子进程一个自己的临时目录（TMPDIR，Windows 上是 TEMP、TMP）：跑完看它留没留东西。 */
-function ownTmp(): { dir: string; env: Record<string, string> } {
-  const dir = temp('tmp');
-  return { dir, env: { TMPDIR: dir, TEMP: dir, TMP: dir } };
 }
 
 const SLOW = { timeout: 0 };
@@ -291,55 +284,20 @@ describe('ask.mjs：参数不对、题面不对，一家都不问', SLOW, () => 
   });
 });
 
-describe('ask.mjs：这台机器缺 cursor-agent', SLOW, () => {
-  it('没装：退出码 2，明说这台机器没装 cursor-agent，不去问', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-    });
-    expect(r.code).toBe(2);
-    expect(r.err).toContain('这台机器没装 cursor-agent');
-  });
-
-  it('装了没登录：退出码 2，明说没登录', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: { FAKE_LOGGED: '0', FAKE_ANSWER: '不该问到我' },
-    });
-    expect(r.code).toBe(2);
-    expect(r.err).toContain('cursor-agent 没登录');
-    expect(r.all).not.toContain('不该问到我');
-  });
-
-  it('装了登了：答案照登，记录落在家目录，不落进技能目录（同步会把技能目录整个换掉）；放题面的临时目录问完就删', () => {
+describe('ask.mjs：没配讨论网关就明说没讨论成', SLOW, () => {
+  it('要 --models，不认识的路由组，没配网关：退出码 2，不提 cursor-agent', () => {
     const home = temp('home');
-    const tmp = ownTmp();
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home,
-      path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '假答案：同意', ...tmp.env },
-    });
-    expect(r.code).toBe(0);
-    expect(r.out).toContain('## gpt');
-    expect(r.out).toContain('假答案：同意');
-    const runs = join(tools.dataDir(home), 'runs');
-    expect(readdirSync(runs).some((f) => f.startsWith('ask-'))).toBe(true);
-    expect(existsSync(join(SCRIPTS, 'runs'))).toBe(false);
-    expect(readdirSync(tmp.dir)).toEqual([]);
-  });
-
-  it('【故意造出的失败】问完了、记录却写不下（--out 落在一个文件下面）：退出码 2 说没问成，临时目录照样删掉', () => {
-    const tmp = ownTmp();
-    const blocker = join(temp('out'), 'not-a-dir');
-    writeFileSync(blocker, 'x');
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--out', join(blocker, 'runs')], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '假答案：同意', ...tmp.env },
-    });
+    let r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], { home });
     expect(r.code).toBe(2);
-    expect(r.err).toContain('没问成');
-    expect(readdirSync(tmp.dir)).toEqual([]);
+    expect(r.err).toContain('要 --models');
+    r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--models', 'gpt,kimi'], { home });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('不认识的模型');
+    r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--models', 'gpt-pool'], { home });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('没配讨论网关');
+    expect(r.err).toContain('没讨论成');
+    expect(r.all).not.toContain('cursor-agent');
   });
 
   it('【故意造出的失败】临时目录删不掉：照实说没删掉、是哪个目录，不当成删好了；删得掉就不出声', () => {
@@ -361,142 +319,15 @@ describe('ask.mjs：这台机器缺 cursor-agent', SLOW, () => {
       spy.mockRestore();
     }
   });
-
-  it('答了个空：记成没答上，一家都没答上退出码 2', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_RAW: '1', FAKE_ANSWER: '' },
-    });
-    expect(r.code).toBe(2);
-    expect(r.out).toContain('没答上：退出码 0 但没有输出');
-  });
 });
 
-describe('ask.mjs：按当前 Cursor 账号能力选择，family 之间不冒充', SLOW, () => {
-  it('默认 GPT 整族缺失时明确失败，不让 auto/composer 显示名或其他 family 冒充', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: {
-        FAKE_LOGGED: '1',
-        FAKE_ANSWER: '不该调用模型',
-        FAKE_MODELS: 'Available models\nauto - GPT\ncomposer-2.5 - GPT\nkimi-k3-low - Kimi\n',
-      },
-    });
-    expect(r.code).toBe(2);
-    expect(r.out).toContain('当前 Cursor 账号无可用 gpt 型号');
-    expect(r.out).not.toContain('不该调用模型');
-  });
-
-  it('偏好 id 缺失时选择真实同族项；显式 GPT 失败不妨碍 Kimi 独立回答', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--models', 'gpt,kimi'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: {
-        FAKE_LOGGED: '1',
-        FAKE_ANSWER: '合法同族答案',
-        FAKE_MODELS: 'Available models\nkimi-k9-low - Kimi\n',
-      },
-    });
-    expect(r.code).toBe(0);
-    expect(r.out).toContain('当前 Cursor 账号无可用 gpt 型号');
-    expect(r.out).toContain('## kimi（kimi-k9-low');
-    expect(r.out).toContain('合法同族答案');
-    expect(r.out).not.toContain('kimi-k3-low');
-  });
-
-  it.each([
-    {
-      FAKE_MODELS: 'Available models\ngpt-current-high - GPT\n',
-      FAKE_MODELS_EXIT: '9',
-    },
-    { FAKE_MODELS: '格式变了，不能认作空列表' },
-  ])('列表没读成时一家都不问，也不使用静态旧 id', (failure) => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '不该调用模型', ...failure },
-    });
-    expect(r.code).toBe(2);
-    expect(r.err).toMatch(/型号列表.*(?:读取失败|格式认不出)/);
-    expect(r.out).not.toContain('不该调用模型');
-  });
-
+describe('ask.mjs：--limit 硬顶', SLOW, () => {
   it.each(['301', 'NaN', '0'])('limit %s 不得绕过300秒硬顶', (limit) => {
     const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--limit', limit], {
       home: temp('home'),
     });
     expect(r.code).toBe(2);
     expect(r.err).toContain('不超过 300 秒');
-  });
-});
-
-// 断链修复（本机 2026-09-28 两次实测）：第一版让 askOne 起 cursor-agent 读工作目录里的题面文件，指望
-// cursorAgentEnv() 摘掉 Git Bash 留下的环境变量就够。实测不够：只要父进程链里有 Git Bash，Cursor 的钩子照样把
-// 读文件的工具调用拦掉（见 scripts/ask.mjs askOne 头上的论证），模型读不到题面时回一句「无法读取 xxx」——但
-// 退出码 0、有输出，原来的判断（退出码 0 且有输出就算答了）会把这句「读不到」当成结论。改法是压根不用文件：不给
-// 位置参数，题面从 stdin 喂给它；再加一层防蒙混——题面最前面塞一行随机核对码，要求原样抄进答案，输出里找不到
-// 核对码就一律判没答上，不管缘由是什么（钩子拦的、权限、压根没读 stdin）。
-describe('askOne：题面从 stdin 喂给 cursor-agent，核对码没读回来不当成答上', SLOW, () => {
-  it('假 cursor-agent 不管 stdin、直接回一句没有核对码的话（退出码 0）：判没答上，ask.mjs 退出码 2', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_RAW: '1', FAKE_ANSWER: '无法读取题面。' },
-    });
-    expect(r.code).toBe(2);
-    expect(r.out).toContain('没读到题面（答案里没有题面里的核对码）');
-    expect(r.out).toContain('无法读取题面');
-  });
-
-  it('假 cursor-agent 老实读了 stdin、原样带回核对码：判答上，记下的答案里没有核对码那一行', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '这才是真正的答案' },
-    });
-    expect(r.code).toBe(0);
-    const body = /## gpt[^\n]*\n\n([\s\S]*)/.exec(r.out)?.[1]?.trim();
-    expect(body).toBe('这才是真正的答案');
-  });
-
-  // 故意造出失败：askOne 的 spawn 要是又给带上了「读 xxx.md」那种位置参数、或者忘了把题面喂进 stdin，
-  // 这条就会看到 extraArgs 非空、或 stdinHasTopic 是 false，断言失败。
-  it('起 cursor-agent 时不带位置参数（不再叫它去读文件），题面真的从 stdin 送过去', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_ASSERT: '1' },
-    });
-    const dumped = JSON.parse(/\{[\s\S]*\}/.exec(r.out)?.[0] ?? '{}');
-    expect(dumped).toEqual({ extraArgs: [], stdinHasTopic: true });
-  });
-
-  // 故意造出失败：不给 ask.mjs 里 askOne 的 spawn 带 env: cursorAgentEnv()，这条就会看到 SHELL/MSYSTEM 原样传下去，
-  // 断言失败。只测 win32：cursorAgentEnv 在别的平台是恒等函数，摘不掉什么，纯函数那组测试已经覆盖了。
-  it.skipIf(!WIN)('win32：起 cursor-agent 时环境里没有 Git Bash 留下的 SHELL/MSYSTEM 等', () => {
-    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
-      home: temp('home'),
-      path: fakeCursor(),
-      env: {
-        FAKE_LOGGED: '1',
-        FAKE_DUMP_ENV: '1',
-        SHELL: '/bin/bash.exe',
-        MSYSTEM: 'MINGW64',
-        MSYSTEM_PREFIX: '/mingw64',
-        MSYSTEM_CHOST: 'x86_64-w64-mingw32',
-        TERM: 'xterm-256color',
-      },
-    });
-    const dumped = JSON.parse(/\{[\s\S]*\}/.exec(r.out)?.[0] ?? '{}');
-    expect(dumped).toEqual({
-      SHELL: null,
-      MSYSTEM: null,
-      MSYSTEM_PREFIX: null,
-      MSYSTEM_CHOST: null,
-      TERM: null,
-    });
   });
 });
 
@@ -513,7 +344,7 @@ describe('second-opinion.mjs（反方）：缺东西照实报', SLOW, () => {
     expect(r.all).toContain('【推演】');
   });
 
-  it('固定候选都不可用：几家都换过，退出码 2，逐家写明缺的是什么', () => {
+  it('没配讨论网关：退出码 2，明说没讨论成，记录仍落在家目录', () => {
     const home = temp('home');
     const r = run(
       'second-opinion.mjs',
@@ -521,14 +352,14 @@ describe('second-opinion.mjs（反方）：缺东西照实报', SLOW, () => {
       { home },
     );
     expect(r.code).toBe(2);
-    expect(r.err).toContain('这台机器没装 Mirasim');
-    expect(r.err).toContain('这台机器没装 reclaude');
-    expect(r.err).toContain('候选的几家全没成');
+    expect(r.err).toContain('没配讨论网关');
+    expect(r.err).toContain('没讨论成');
+    expect(r.err).not.toContain('reclaude');
     const runs = join(tools.dataDir(home), 'runs');
     expect(readdirSync(runs).some((f) => f.startsWith('critique-no-tools-'))).toBe(true);
   });
 
-  it('Mirasim 装了没开：写明没开', () => {
+  it('本机有没有 Mirasim 都不拿它冒充讨论', () => {
     const home = temp('home');
     mkdirSync(join(home, '.mirasim', 'run'), { recursive: true });
     const r = run(
@@ -537,7 +368,8 @@ describe('second-opinion.mjs（反方）：缺东西照实报', SLOW, () => {
       { home },
     );
     expect(r.code).toBe(2);
-    expect(r.err).toContain('本机 Mirasim 没开');
+    expect(r.err).toContain('没配讨论网关');
+    expect(r.err).not.toContain('本机 Mirasim 没开');
   });
 
   // 会话是一次性的（#654 F2 之外的另一件，创始人 2026-10-03 要求）：列会话、清旧会话是本机命令，
@@ -700,7 +532,7 @@ describe('cloud 能力和本次计费账本', () => {
     ...overrides,
   });
 
-  it('原生 Grok 请求 cloud 时在连接 Mirasim 前拒绝，不静默改用 local', async () => {
+  it('--agent 直接拒绝，不连 Mirasim、不发出模型调用', async () => {
     const home = temp('cloud-grok');
     const r = run(
       'second-opinion.mjs',
@@ -708,8 +540,7 @@ describe('cloud 能力和本次计费账本', () => {
       { home },
     );
     expect(r.code).toBe(2);
-    expect(r.err).toContain('grok 执行体不支持 cloud');
-    expect(r.err).toContain('未发出模型调用');
+    expect(r.err).toContain('不要 --agent');
     expect(r.err).not.toContain('没装 Mirasim');
     expect(existsSync(join(home, '.mirasim'))).toBe(false);
   });
@@ -897,6 +728,23 @@ describe('讨论：按作者模型族排除同族', () => {
   it('缺作者族或含未知族时明确失败，不猜环境变量', () => {
     expect(() => so.discussionProfiles({})).toThrow('要 --author-family');
     expect(() => so.discussionProfiles({ authorFamily: 'mystery' })).toThrow('不认识的作者模型族');
+  });
+
+  it('路由组名按厂商族排除，不带 -pool 的旧名仍认', () => {
+    expect(so.discussionProfiles({ authorFamily: 'gpt-pool' }).map((p) => p.family)).toEqual([
+      'grok',
+      'claude',
+      'deepseek',
+      'kimi',
+    ]);
+    expect(so.discussionProfiles({ authorFamily: 'glm-pool,cn-pool' }).map((p) => p.family)).toEqual([
+      'gpt',
+      'grok',
+      'claude',
+      'deepseek',
+      'kimi',
+    ]);
+    expect(() => so.discussionProfiles({ authorFamily: 'gpt-pool', agent: 'code' })).toThrow('同一模型族');
   });
 
   it('显式指定同作者族的执行体时拒绝，不能靠手点绕过同族排除', () => {
@@ -1143,53 +991,21 @@ describe('不出声就换下一家（创始人 2026-10-05：太慢了，优先 g
   });
 });
 
-describe('讨论：作者为 GPT 时候选全不可用', SLOW, () => {
-  it('候选端点都没装或没开时退出码 2，并列出全没成，不伪造 DeepSeek 已可用', () => {
+describe('讨论没配网关：不拿别的工具冒充', SLOW, () => {
+  it('反方退出码 2，明说没讨论成，不起 reclaude', () => {
     const r = run(
       'second-opinion.mjs',
-      ['--text', topic(LONG), '--name', 'all-unavailable', '--author-family', 'gpt'],
-      {
-        home: temp('home'),
-      },
+      ['--text', topic(LONG), '--name', 'no-gateway', '--author-family', 'gpt-pool'],
+      { home: temp('home'), path: fakeReclaude() },
     );
     expect(r.code).toBe(2);
-    expect(r.err).toContain('候选的几家全没成');
-    expect(r.err).toContain('reclaude');
-    expect(r.err).toContain('dsh');
-  });
-});
-
-describe('Claude 讨论端点：只经 reclaude 的无头 JSON', SLOW, () => {
-  it('作者是 GPT 时 Claude 先被选中，reclaude 参数和 JSON 正文都能核对', () => {
-    const r = run(
-      'second-opinion.mjs',
-      ['--text', topic(LONG), '--name', 'fake-claude', '--author-family', 'gpt'],
-      {
-        home: temp('home'),
-        path: fakeReclaude(),
-      },
-    );
-    expect(r.code).toBe(0);
-    expect(r.out).toContain('critique-fake-claude-');
-    expect(r.err).toContain('reclaude 起了');
+    expect(r.err).toContain('没配讨论网关');
+    expect(r.err).toContain('没讨论成');
+    expect(r.err).not.toContain('reclaude 起了');
   });
 
   it('reclaude JSON 形状认不出时明确失败', () => {
     expect(() => so.parseReclaudeOutput('{"unexpected":true}')).toThrow('reclaude JSON 输出格式认不出');
     expect(so.parseReclaudeOutput('{"result":"结论：同意"}')).toBe('结论：同意');
-  });
-
-  it('单家超时后不把预算带给下一家，整轮到时退出码 2', () => {
-    const r = run(
-      'second-opinion.mjs',
-      ['--text', topic(LONG), '--name', 'budget', '--author-family', 'gpt', '--budget-sec', '0.05'],
-      {
-        home: temp('home'),
-        path: fakeReclaude(),
-        env: { FAKE_RECLAUDE_SLEEP_MS: '100' },
-      },
-    );
-    expect(r.code).toBe(2);
-    expect(r.err).toContain('讨论总预算已用完');
   });
 });

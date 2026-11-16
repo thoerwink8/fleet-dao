@@ -1,21 +1,19 @@
 #!/usr/bin/env node
-// 讨论用的一问一答：magpie 可用时默认并行问 GPT、Grok、DeepSeek、SWE，Haiku 可选。
-// magpie 不可用时保持旧路：配置了 GPT 中转就走 chat/completions，否则走 Cursor。
-// 请求失败照实记没查成，不改道、不拿空答案冒充结论。
-// 超时、退出码非 0、没有输出都照实记成「没答上」，不当成答了。要走 Cursor 的那几家，这台没装、没登录，一家都不问，直接说清。
+// 讨论用的一问一答：只走本机讨论网关（OpenAI 兼容 chat/completions）的路由组。
+// --models 写 gpt-pool、grok-pool、deepseek-pool、kimi-pool、glm-pool、cn-pool，模型名就是路由组名。
+// 密钥在 ~/.fleet-dao/discuss.env（DISCUSS_MAGPIE_API_KEY 或 DISCUSS_GPT_API_KEY，进程环境变量优先）。
+// 没配、超时、非 2xx、空回答、不是 JSON、连不上都记「没答上」，不改走 cursor-agent 或别的工具。
 //
 // 超时：默认 DEFAULT_LIMIT_SEC、硬顶 MAX_LIMIT_SEC。决定 0006 里的 30 秒是创始人的「短讨论预算」，不是实测出来的
-// 上限（超时/空输出不算成功那一条保留）。2026-10-30 本机实测：cursor-agent 回一个字就要 26–29 秒（--version 7 秒、
-// status 3 秒，余下是模型调用；带不带 --model 没差别），30 秒上限下真实题面一家都答不完。所以只放宽单家上限；
-// 并发上限 MAX_PAR、超时杀整棵进程树、收尾等管道关闭、核对码这些防护都不动。最坏整轮耗时 = 轮数 × 单家上限
-// （ceil(家数 / MAX_PAR) 轮），硬顶下 4 家最多 2 × 300 秒。
+// 上限（超时/空输出不算成功那一条保留）。单家硬超时；并发上限 MAX_PAR。最坏整轮耗时 = 轮数 × 单家上限
+// （ceil(家数 / MAX_PAR) 轮）。
 //
-//   node ask.mjs --text 题面.md --round <0|1|2…> [--models gpt[,kimi,glm,grok]] [--gpt-model 型号] [--limit 180] [--out 目录]
+//   node ask.mjs --text 题面.md --round <0|1|2…> --models <路由组[,路由组…]> [--limit 180] [--out 目录]
 //   --round 0 是各自独立答；1 起是挑错，题面必须带【推演】段（walkthrough.mjs），缺了不发、退出码 2。
-//   --models 显式选族；magpie 可用时 DISCUSS_MODELS 可覆盖默认面板。记录落在 ~/.local/share/second-opinion/runs/。
+//   记录落在 ~/.local/share/second-opinion/runs/。
 //
-// 退出码：0 至少一家答上；2 一家都没答上、参数不对，或要走 Cursor 的那几家这台机器缺 cursor-agent。
-// 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；五家齐跑 + 工人把进程数顶满、宿主崩过）。
+// 退出码：0 至少一家答上；2 一家都没答上、参数不对，或没配讨论网关。
+// 并发上限：同一时刻最多 MAX_PAR 个请求。
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -23,27 +21,25 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MODELS, readCursorModels, resolveModel } from './cursor-models.mjs';
+import { MODELS } from './cursor-models.mjs';
 import { stopProcessTree } from './cursor-process.mjs';
 import {
   completeChat,
-  DEFAULT_GPT_MODEL,
-  discussEnvValue,
-  gptRelayConfig,
+  discussionGateway,
+  GATEWAY_MISSING,
   judgeCursorText,
+  POOL_FAMILY,
   relayFailureWhy,
 } from './gpt-relay.mjs';
-import { MAGPIE_DEFAULT_KEYS, magpieAsk, magpieConfig, magpiePanel } from './magpie.mjs';
-import { cursorAgentEnv, cursorAgentProblem, dataDir } from './tools.mjs';
+import { cursorAgentEnv, dataDir } from './tools.mjs';
 import { missingWalkthrough } from './walkthrough.mjs';
 
 export { MODELS };
@@ -242,129 +238,43 @@ async function main() {
     const why = missingWalkthrough(prompt);
     if (why) throw new Error(why);
   }
-  const magpie = await magpieConfig();
-  const configuredKeys = magpie ? discussEnvValue('DISCUSS_MODELS') : undefined;
-  const keys = (o.models ?? configuredKeys ?? (magpie ? MAGPIE_DEFAULT_KEYS.join(',') : 'gpt'))
+  if (o.gptModel !== undefined) throw new Error('路由组名就是模型，不要 --gpt-model');
+  if (o.sweModel !== undefined) throw new Error('路由组名就是模型，不要 --swe-model');
+  if (o.deepseekModel !== undefined) throw new Error('路由组名就是模型，不要 --deepseek-model');
+  if (o.grokModel !== undefined) throw new Error('路由组名就是模型，不要 --grok-model');
+  if (o.haikuModel !== undefined) throw new Error('路由组名就是模型，不要 --haiku-model');
+  const keys = String(o.models ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  const overrides = {
-    gpt: o.gptModel,
-    swe: o.sweModel,
-    deepseek: o.deepseekModel,
-    grok: o.grokModel,
-    haiku: o.haikuModel,
-  };
-  for (const [key, model] of Object.entries(overrides)) {
-    if (model === undefined) continue;
-    if (!model.trim() || model.startsWith('--')) throw new Error(`--${key}-model 要带型号`);
-    if (!keys.includes(key)) throw new Error(`--${key}-model 只对 ${key} 生效`);
-  }
-  if (magpie) {
-    const panel = magpiePanel(keys, overrides);
-    // 每项是独立任务；最多三个同时请求，第四家排在空出的槽位里。
-    const results = new Array(panel.length);
-    let next = 0;
-    await Promise.all(
-      Array.from({ length: Math.min(MAX_PAR, panel.length) }, async () => {
-        while (next < panel.length) {
-          const index = next++;
-          results[index] = await magpieAsk(panel[index], prompt, o.limit, magpie);
-        }
-      }),
-    );
-    return saveAnswers(results, o.out, true);
-  }
-  if (
-    o.sweModel !== undefined ||
-    o.deepseekModel !== undefined ||
-    o.grokModel !== undefined ||
-    o.haikuModel !== undefined
-  )
-    throw new Error('这些 --*-model 参数需要可用的 magpie');
+  if (!keys.length) throw new Error(`要 --models：${Object.keys(POOL_FAMILY).join(' / ')}`);
+  if (new Set(keys).size !== keys.length) throw new Error('讨论模型不能重复');
   for (const k of keys)
-    if (!Object.hasOwn(MODELS, k)) throw new Error(`不认识的模型 ${k}（${Object.keys(MODELS).join(' / ')}）`);
-  const relay = gptRelayConfig();
-  if (o.gptModel !== undefined && !relay)
-    throw new Error(
-      '配了 --gpt-model，但这台没配讨论用的 GPT 接口（~/.fleet-dao/discuss.env 的 DISCUSS_GPT_BASE_URL 和 DISCUSS_GPT_API_KEY）',
-    );
-  const relayGpt = Boolean(relay && keys.includes('gpt'));
-  const cursorKeys = relayGpt ? keys.filter((k) => k !== 'gpt') : keys;
-  let cursorProblem = cursorKeys.length ? cursorAgentProblem() : null;
-  if (cursorProblem && !relayGpt) throw new Error(cursorProblem);
-  /** @type {string[]} */
-  let available = [];
-  if (cursorKeys.length && !cursorProblem) {
-    try {
-      available = await readCursorModels();
-    } catch (e) {
-      if (!relayGpt) throw e;
-      cursorProblem = e instanceof Error ? e.message : String(e);
-    }
-  }
-  // 题面放进自己建的临时目录（也是 cursor-agent 的工作区）：问完、中途出错都删掉，不在 /tmp 里越攒越多
-  const dir = mkdtempSync(join(tmpdir(), 'ask-'));
-  let cleanupFailed = false;
-  try {
-    const results = [];
-    const queue = [...keys];
-    await Promise.all(
-      Array.from({ length: Math.min(MAX_PAR, queue.length) }, async () => {
-        while (queue.length) {
-          const k = queue.shift();
-          if (k === 'gpt' && relay) {
-            const result = await askRelay(
-              k,
-              String(o.gptModel ?? DEFAULT_GPT_MODEL).trim(),
-              prompt,
-              o.limit,
-              relay,
-            );
-            results.push(result);
-            continue;
-          }
-          if (cursorProblem) {
-            results.push({
-              key: k,
-              model: '无可用型号',
-              ok: false,
-              secs: 0,
-              why: cursorProblem,
-            });
-            continue;
-          }
-          const model = resolveModel(k, available);
-          if (!model) {
-            results.push({
-              key: k,
-              model: '无可用型号',
-              ok: false,
-              secs: 0,
-              why: `当前 Cursor 账号无可用 ${k} 型号，未调用其他厂商或 auto`,
-            });
-            continue;
-          }
-          const result = await askOne(k, model, prompt, o.limit, dir);
-          cleanupFailed ||= result.cleanupFailed;
-          results.push(result);
-        }
-      }),
-    );
-    results.sort((a, b) => keys.indexOf(a.key) - keys.indexOf(b.key));
-    saveAnswers(results, o.out);
-  } finally {
-    if (cleanupFailed) console.error(`执行体收尾没查成，保留临时工作区：${dir}`);
-    else removeDir(dir);
-  }
+    if (!Object.hasOwn(POOL_FAMILY, k))
+      throw new Error(`不认识的模型 ${k}（${Object.keys(POOL_FAMILY).join(' / ')}）`);
+  const gateway = discussionGateway();
+  if (!gateway) throw new Error(GATEWAY_MISSING);
+  const results = new Array(keys.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(MAX_PAR, keys.length) }, async () => {
+      while (next < keys.length) {
+        const index = next++;
+        const k = keys[index];
+        const result = await askRelay(k, k, prompt, o.limit, gateway);
+        results[index] = { ...result, family: POOL_FAMILY[k] };
+      }
+    }),
+  );
+  saveAnswers(results, o.out);
 }
 
-function saveAnswers(results, out, magpie = false) {
+function saveAnswers(results, out) {
   const md = results
-    .map(
-      (r) =>
-        `## ${r.key}（${r.model}，${r.secs.toFixed(1)} 秒）${magpie ? ` — 厂商族：${r.family}` : ''}\n\n${r.ok ? r.text : `${magpie ? '没查成' : '没答上'}：${r.why}`}\n`,
-    )
+    .map((r) => {
+      const family = r.family ? ` — 厂商族：${r.family}` : '';
+      return `## ${r.key}（${r.model}，${r.secs.toFixed(1)} 秒）${family}\n\n${r.ok ? r.text : `没答上：${r.why}`}\n`;
+    })
     .join('\n');
   const outDir = out ?? join(dataDir(), 'runs');
   mkdirSync(outDir, { recursive: true });
