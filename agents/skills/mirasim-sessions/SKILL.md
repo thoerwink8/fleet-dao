@@ -21,7 +21,7 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <仓根> --prompt "<交代>" [--report-to <指挥会话key>]
 ```
 
-- **干活的会话一律是 omp，不用原版 pi**（2026-11-16 创始人定）。mirasim 里 omp 的 agent 名是 `kimi`（启动方式经 ACP 到 omp），脚本默认 `--agent kimi`，`--agent pi` 直接退出码 2。omp 用的模型由它自己的配置（`~/.omp/agent/config.yml` 的角色，指向 `gateway/group/smart`）定，不要给 kimi 传 `--model`：ACP 不认 `set_model`，会话开场就报错（11-16 实测）。原因：我们的 omp 定制（单轮输出上限、技能目录、`finish-gate` 扩展，在 `fleet-setup` 里）只管 omp；原版 pi 读另一套配置，今天派的 pi 会话没吃到这些，还出现过工具调用名字为空导致整轮被停的事。
+- **干活的会话一律是 omp，不用原版 pi**（2026-11-16 创始人定）。mirasim 里 omp 的 agent 名是 `kimi`（启动方式经 ACP 到 omp），脚本默认 `--agent kimi`，`--agent pi` 直接退出码 2。omp 用的模型由它自己的配置（`~/.omp/agent/config.yml` 的角色，指向 `gateway/group/smart`）定，不要给 kimi 传 `--model`：ACP 不认 `set_model`，会话开场就报错（11-16 实测）。原因：我们的 omp 定制（单轮输出上限、技能目录、结束前检查扩展，在配置仓里）只管 omp；原版 pi 读另一套配置，今天派的 pi 会话没吃到这些，还出现过工具调用名字为空导致整轮被停的事。
 - 标题写 `【omp】`，和实际一致。
 
 - `agent`、`model`、`effort` 照创始人指定的，`route` 用 `local`（走个人账号，不扣 Mirasim 额度）。没给 `--port` 时用环境变量 `MIRASIM_HOST_PORT`；会话里两个都没有就不带端口。版本读 `~/.mirasim/app/state.json` 里 `good` 的那一版，不写死。
