@@ -542,8 +542,9 @@ export function idlePrRunner(timeoutMs = IDLE_PR_MS) {
 
 /** 参数：cwd、git、run、fetch（第 1 件取远端的结果）、mirror（同步专用检出里那份脚本）；返回要说的几行：没有、不是 fleet-dao 都不出声 */
 export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
-  const root = fleetRoot(cwd, git);
-  if (root === null) return [];
+  const found = fleetRoot(cwd, git);
+  if (found === null) return [];
+  const root = found.root;
   if (fetch && fetch.ok === false) return [`${IDLE_NOT_CHECKED}：取不到远端（${fetch.why}）。`];
   const script = [mirror, join(root, IDLE_SCRIPT)].find((s) => s && existsSync(s));
   if (!script) return [`${IDLE_NOT_CHECKED}：找不到 ${IDLE_SCRIPT.replaceAll('\\', '/')}。`];
@@ -564,24 +565,24 @@ export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
 }
 
 /**
- * fleet-dao 的创始人引导（只收 AI 做法类，pnpm progress directive --kind ai）记进驾驶舱库（法国账本 directive 行，#3764、决定 0123；
- * docs/directives/ 是旧档案，挂的单还开着的照读），挂的单还开着就是没办完；
- * 驾驶舱答案的收件箱读法国账本（#3741 片 2c，decision.handoff 行；#1055 只剩进度流水）：这里起
- * `progress.ts read --pending` 读没处理的几条（账本读不到它退出 2，这里就说没查成），硬超时 PROGRESS_MS。不是 fleet-dao 不出声（别的仓不记引导：
- * 通用段「我拍的板」那条）；查不成出一行「没查成」，不挡开会话。
- * 优先用同步专用检出里那份脚本，没有再用会话所在检出里的。
+ * 创始人引导一条一张 GitHub 单，带「创始人引导」标签（#4054，从法国账本迁过来；原话不进公开仓，正文只写意思）；
+ * 单开着就是没办完，办完＝把单关了（干活的 PR 写 Closes）。开会话时用 gh 列这个标签下开着的单：
+ * gh issue list --repo <仓> --label 创始人引导 --state open --json number,title,body,createdAt，硬超时 DIRECTIVE_MS。
+ * 主人标记〔主：…〕写在单正文里（新写口把它放进 body，认主的写法不变，见 NO_OWNER 上面）。
+ * 不是 fleet-dao 不出声（别的仓不记引导：通用段「我拍的板」那条）；gh 没查成出一行「没查成」，不挡开会话。
  */
-export const PROGRESS_MS = 8_000;
+export const DIRECTIVE_MS = 8_000;
 /** 引导挂了多久、本会话又接不了，就提醒指挥官自己接着办 */
 export const STALE_DIRECTIVE_MS = 24 * 60 * 60_000;
+export const DIRECTIVE_LABEL = '创始人引导';
 const PROGRESS_SCRIPT = join('packages', 'conventions', 'src', 'bin', 'progress.ts');
-const PROGRESS_NOT_CHECKED = '创始人引导（法国账本收件箱）没查成';
+const DIRECTIVES_NOT_CHECKED = '创始人引导（GitHub 单）没查成';
 
-/** 在仓根起 progress.ts read --pending：{ status, stdout, stderr, error, timeoutMs } */
-export function progressRunner(timeoutMs = PROGRESS_MS) {
-  return (script, repo) => {
-    const r = spawnSync(process.execPath, [script, 'read', '--pending'], {
-      cwd: repo,
+/** 起 gh 跑一条命令：{ status, stdout, stderr, error, timeoutMs }；spawn 测试换假的（真跑 gh 不拦网络） */
+export function ghRunner(timeoutMs = DIRECTIVE_MS, spawn = spawnSync) {
+  return (args, cwd) => {
+    const r = spawn('gh', args, {
+      cwd,
       encoding: 'utf8',
       timeout: timeoutMs,
       windowsHide: true,
@@ -591,72 +592,80 @@ export function progressRunner(timeoutMs = PROGRESS_MS) {
   };
 }
 
+/** gh issue list 的参数：这个标签下开着的单，最多 200 条 */
+const directiveListArgs = (repo) => [
+  'issue', 'list',
+  '--repo', repo,
+  '--label', DIRECTIVE_LABEL,
+  '--state', 'open',
+  '--json', 'number,title,body,createdAt',
+  '--limit', '200',
+];
+
 /**
- * 参数同 checkIdlePrs，加 lineage（本会话的血缘）；返回要说的几行：没有待处理的、不是 fleet-dao 都不出声。
- * 认主（见 NO_OWNER 上面）：progress.ts 的第 4 列是主人（旧版脚本没有这一列，就从正文里的〔主：…〕认，再没有算无主）。
- * 本血缘的列全文叫它办；有主、主不是本血缘的只说条数；无主的照列开头。办没办完看挂的单（#2727），没有认领这一步。
+ * 参数同 checkIdlePrs，去掉 mirror（不再起仓里的脚本），加 lineage（本会话的血缘）；返回要说的几行：
+ * 没有待处理的、不是 fleet-dao 都不出声。认主（见 NO_OWNER 上面）：主人标记写在单正文的〔主：…〕里，
+ * 没有标记算无主。本血缘的列出来叫它办；有主、主不是本血缘的只说条数；无主的照列开头。办没办完就是单开着没有，没有认领这一步。
  */
-export function checkProgressIssue({ cwd, git, run, mirror = null, lineage = null, opts = {} }) {
-  const root = fleetRoot(cwd, git);
-  if (root === null) return [];
-  const script = progressScript(root, mirror);
-  if (!script) return [progressMissing()];
-  return progressLines(run(script, root), lineage, opts);
+export function checkDirectives({ cwd, git, run, lineage = null, opts = {} }) {
+  const found = fleetRoot(cwd, git);
+  if (found === null) return [];
+  return directiveLines(run(directiveListArgs(found.repo), found.root), lineage, opts);
 }
 
-/** 会话所在的仓是 fleet-dao 的检出就返回仓根，不是（或不是 git 仓）返回 null */
+/** 会话所在的仓是 fleet-dao 的检出就返回 { root, repo }（repo 是 owner/name，给 gh --repo），不是（或不是 git 仓）返回 null */
 function fleetRoot(cwd, git) {
   const top = git(cwd, ['rev-parse', '--show-toplevel']);
   if (!ok(top) || !top.stdout.trim()) return null;
   const root = top.stdout.trim();
   const url = git(root, ['config', '--get', 'remote.origin.url']);
-  if (!ok(url) || !FLEET_ORIGIN.test(url.stdout.trim())) return null;
-  return root;
+  if (!ok(url)) return null;
+  const origin = url.stdout.trim();
+  if (!FLEET_ORIGIN.test(origin)) return null;
+  const m = /github\.com[:/]+([^/]+\/[^/]+?)(?:\.git)?\/?$/i.exec(origin);
+  if (!m) return null;
+  return { root, repo: m[1] };
 }
 
-const progressScript = (root, mirror) =>
-  [mirror, join(root, PROGRESS_SCRIPT)].find((s) => s && existsSync(s));
-const progressMissing = () => `${PROGRESS_NOT_CHECKED}：找不到 ${PROGRESS_SCRIPT.replaceAll('\\', '/')}。`;
-
 /**
- * progress.ts read --pending 跑出来的结果 → 要说的几行（开会话的同步那半拿后台存下的结果调它，认主要用本会话的血缘）。
+ * gh issue list（directiveListArgs 那行 JSON）跑出来的结果 → 要说的几行；同步那半拿结果调它，认主要用本会话的血缘。
  * @param {{ status: number | null, stdout: string, stderr: string, error?: { message?: string, code?: string } | null, timeoutMs?: number }} r
  */
-export function progressLines(r, lineage = null, { now = Date.now() } = {}) {
-  if (r.error || r.status !== 0) return [`${PROGRESS_NOT_CHECKED}：${why(r)}。`];
-  const rows = String(r.stdout)
-    .split(/\r?\n/)
-    .filter((l) => l.trim());
-  const items = rows.map((l) => l.split('\t'));
-  if (items.some((c) => c.length < 3 || !/^\d+$/.test(c[0])))
-    return [`${PROGRESS_NOT_CHECKED}：progress.ts 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`];
-  if (items.length === 0) return [];
+export function directiveLines(r, lineage = null, { now = Date.now() } = {}) {
+  if (r.error || r.status !== 0) return [`${DIRECTIVES_NOT_CHECKED}：${why(r)}。`];
+  let issues;
+  try {
+    issues = JSON.parse(String(r.stdout));
+  } catch {
+    return [`${DIRECTIVES_NOT_CHECKED}：gh 的输出不是 JSON（${String(r.stdout).trim().slice(0, 60)}）。`];
+  }
+  if (!Array.isArray(issues) || issues.some((i) => typeof i?.number !== 'number'))
+    return [`${DIRECTIVES_NOT_CHECKED}：gh 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`];
+  if (issues.length === 0) return [];
   const mine = lineageDir(lineage);
-  const all = items.map(([id, head, text, col, created, issue]) => {
-    const split = splitOwner(text);
-    const owner = col?.trim() || split.owner;
-    const at = Date.parse(created?.trim() ?? '');
+  const all = issues.map((i) => {
+    const split = splitOwner(String(i.body ?? ''));
+    const at = Date.parse(String(i.createdAt ?? ''));
     return {
-      id,
-      when: head.replace(/^【[^】]*】/, ''),
-      text: split.text.replace(/^原话：/, ''),
-      owner,
-      issue: /^#\d+$/.test(issue?.trim() ?? '') ? issue.trim() : null,
+      number: i.number,
+      when: Number.isFinite(at) ? beijingClock(at) : '',
+      text: String(i.title ?? '').trim(),
+      owner: split.owner,
       age: Number.isFinite(at) ? now - at : null,
     };
   });
   const lines = [];
-  // 每条只列编号、时间、前 DIRECTIVE_HEAD_CHARS 个字和怎么处理；一条只进一处（挂久了的不在无主那行再列一遍）
+  // 每条只列单号、时间、前 DIRECTIVE_HEAD_CHARS 个字和怎么处理；一条只进一处（挂久了的不在无主那行再列一遍）
   const ours = all.filter((d) => mine !== null && d.owner === mine);
   // 挂了超过 24 小时、本会话又接不了的（无主、主人还在或判不了）：指挥官自己接着办，不进「要你拍的」（决定 0097）
   const stale = all.filter((d) => d.owner !== mine && d.age !== null && d.age > STALE_DIRECTIVE_MS);
   const unowned = all.filter((d) => d.owner === NO_OWNER);
   const unownedFresh = unowned.filter((d) => !stale.includes(d));
   const others = all.filter((d) => !ours.includes(d) && d.owner !== NO_OWNER && !stale.includes(d)).length;
-  const full = '全文 pnpm progress read --pending';
-  // 办没办完看挂的单（#2727）：办完 = 把单关了（干活的 PR 写 Closes）；没有认领这一步
-  const ref = (d) => `${d.id}${d.issue ? `，单 ${d.issue}` : ''}`;
-  const done = '办完把挂的单关掉（PR 写 Closes #单号），不用另记';
+  const full = '全文 gh issue view <单号>';
+  // 办没办完就是单开着没有：办完 = 把单关了（干活的 PR 写 Closes）；没有认领这一步
+  const ref = (d) => `#${d.number}`;
+  const done = '办完把单关掉（PR 写 Closes #单号），不用另记';
   if (stale.length > 0)
     lines.push(
       `创始人引导 ${stale.length} 条挂了超过 24 小时、本会话还没接：${stale
@@ -664,7 +673,7 @@ export function progressLines(r, lineage = null, { now = Date.now() } = {}) {
         .map((d) => `${ref(d)}（${d.when}，主：${d.owner}）${head(d.text)}`)
         .join(
           '；',
-        )}${stale.length > 5 ? ' 等' : ''}。这是指挥官自己的活，不用问创始人：直接接着办（不用认领；主人会话还在办的话别重复），${done}；不用办了的就把挂的单关掉并写明原因；${full}。`,
+        )}${stale.length > 5 ? ' 等' : ''}。这是指挥官自己的活，不用问创始人：直接接着办（不用认领；主人会话还在办的话别重复），${done}；不用办了的就把单关掉并写明原因；${full}。`,
     );
   if (ours.length > 0)
     lines.push(
@@ -683,6 +692,13 @@ export function progressLines(r, lineage = null, { now = Date.now() } = {}) {
   if (others > 0) lines.push(`别的会话还有 ${others} 条创始人引导在办，不归你，别动。`);
   return lines;
 }
+
+/** ISO 时刻 → 北京时「YYYY-MM-DD HH:mm」；北京固定 +0800、没有夏令时，加 8 小时按 UTC 排就行 */
+const beijingClock = (ms) => new Date(ms + 8 * 3_600_000).toISOString().slice(0, 16).replace('T', ' ');
+
+const progressScript = (root, mirror) =>
+  [mirror, join(root, PROGRESS_SCRIPT)].find((s) => s && existsSync(s));
+
 
 /** 和 packages/shared 的 DEFAULT_POOL_HOLD_OWNER 同一个字。钩子装到机器上，不能 import 那个包。 */
 const DEFAULT_POOL_HOLD_OWNER = '指挥官';
@@ -730,7 +746,6 @@ const scrubHost = (text, host) =>
 
 /** 和 france-lib.mjs 的 LOGIN_KEY_NAMES 同一份：fleet_login，其次创始人的 id_ed25519、id_rsa。不含 grok_bot。 */
 const FRANCE_LOGIN_KEY_NAMES = ['fleet_login', 'id_ed25519', 'id_rsa'];
-
 function franceLoginIdentityArgs(home) {
   const found = [];
   for (const name of FRANCE_LOGIN_KEY_NAMES) {
@@ -917,7 +932,7 @@ export function sessionStart({
   agentId = null,
   unattendedDir = null,
   idlePr = idlePrRunner(),
-  progress = progressRunner(),
+  directives = ghRunner(),
   env = process.env,
   poolHolds = null,
   repoContract = null,
@@ -963,11 +978,10 @@ export function sessionStart({
     ...(downstreamCopies ? downstreamCopies(cwd) : []),
     ...(quiet
       ? []
-      : checkProgressIssue({
+      : checkDirectives({
           cwd,
           git: localGit,
-          run: progress,
-          mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
+          run: directives,
           lineage,
         })),
     ...recentPrompts({ home, now, sessionId, env, lineage }),
@@ -1192,7 +1206,7 @@ export function fastSessionStart({
   env = process.env,
   repoContract = null,
   downstreamCopies = null,
-  progress = progressRunner(),
+  directives = ghRunner(),
   spawnBackground = null,
 }) {
   const here = checkHere(cwd, localGit, { network: false });
@@ -1236,13 +1250,11 @@ export function fastSessionStart({
   lines.push(...(repoContract ? repoContract(cwd) : []));
   lines.push(...(downstreamCopies ? downstreamCopies(cwd) : []));
   // 引导段同步现查，不用后台缓存：缓存里的「没办完」可能已经办完了（#2726）；办没办完看挂的单，读 GitHub（#2727）
-  const syncDir = source ? source.syncDirIn(home) : null;
   lines.push(
-    ...checkProgressIssue({
+    ...checkDirectives({
       cwd,
       git: localGit,
-      run: progress,
-      mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
+      run: directives,
       lineage,
       opts: { now },
     }),

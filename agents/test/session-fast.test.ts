@@ -37,7 +37,7 @@ interface HookLib {
   bgCachePath(home: string, cwd: string, git: Git): string;
   fastSessionStart(
     o: Common & {
-      progress?: ScriptRun;
+      directives?: (args: string[], cwd: string) => Result;
       sessionId?: string | null;
       spawnBackground?: (o: { cwd: string; home: string }) => { ok: boolean; why?: string };
     },
@@ -208,9 +208,6 @@ describe('同步那半只读本地', SLOW, () => {
     const { git, seen } = countingGit();
     const fleetGit = withFleetIdentity(git);
     expect(g(w.work, 'config', '--get', 'remote.origin.url')).toBe(w.origin);
-    const script = join(w.work, 'packages', 'conventions', 'src', 'bin', 'progress.ts');
-    mkdirSync(join(script, '..'), { recursive: true });
-    writeFileSync(script, '// stub\n');
     // 后台缓存是 35 分钟前的：当时的引导还在，现在已经收掉了
     hook.runBackground({
       cwd: w.work,
@@ -228,18 +225,11 @@ describe('同步那半只读本地', SLOW, () => {
     cached.steps.progress = {
       ok: true,
       value: {
-        run: {
-          status: 0,
-          stdout:
-            '1\t【创始人引导·待处理】2026-10-14 16:00 +0800\t原话：旧缓存里的\t无主\t2026-10-14T08:00:00Z\n',
-          stderr: '',
-        },
-        script,
-        root: w.work,
+        run: { status: 0, stdout: '[{"number":1,"title":"旧缓存里的","createdAt":"2026-10-14T08:00:00Z"}]', stderr: '' },
       },
     };
     writeFileSync(cachePath, JSON.stringify(cached));
-    const calls: string[] = [];
+    const calls: string[][] = [];
     const lines = hook.fastSessionStart({
       cwd: w.work,
       home: w.home,
@@ -247,15 +237,15 @@ describe('同步那半只读本地', SLOW, () => {
       now: T0 + 35 * 60_000,
       env: {},
       spawnBackground: () => ({ ok: true }),
-      progress: (s) => {
-        calls.push(s);
-        return { status: 0, stdout: '', stderr: '' };
+      directives: (args) => {
+        calls.push(args);
+        return { status: 0, stdout: '[]', stderr: '' };
       },
     });
     const text = lines.join('\n');
     expect(seen.fetch).toBe(1); // 同步现查引导，不能再取远端。
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.replaceAll('\\', '/')).toMatch(/packages\/conventions\/src\/bin\/progress\.ts$/);
+    expect(calls[0]).toContain('创始人引导');
     expect(text).not.toContain('旧缓存里的');
     expect(text).not.toContain('要你拍');
     const hold = lines.find((l) => l.includes('claude-max')) ?? '';
@@ -264,9 +254,6 @@ describe('同步那半只读本地', SLOW, () => {
 
   it('【故意造出失败】引导查询本身失败：照实说没查成，不当成没有', () => {
     const w = world();
-    const script = join(w.work, 'packages', 'conventions', 'src', 'bin', 'progress.ts');
-    mkdirSync(join(script, '..'), { recursive: true });
-    writeFileSync(script, '// stub\n');
     const lines = hook.fastSessionStart({
       cwd: w.work,
       home: w.home,
@@ -274,9 +261,9 @@ describe('同步那半只读本地', SLOW, () => {
       now: T0,
       env: {},
       spawnBackground: () => ({ ok: true }),
-      progress: () => ({ status: 1, stdout: '', stderr: 'git 找待处理的引导报错：boom' }),
+      directives: () => ({ status: 1, stdout: '', stderr: 'gh 找待处理的引导报错：boom' }),
     });
-    expect(lines.join('\n')).toMatch(/创始人引导（法国账本收件箱）没查成/);
+    expect(lines.join('\n')).toMatch(/创始人引导（GitHub 单）没查成/);
   });
 
   it('不在 git 仓里也一样：同步、整池暂停照后台的结果说', () => {

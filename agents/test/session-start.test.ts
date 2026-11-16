@@ -4,6 +4,7 @@
 // 真 git（临时目录里的裸仓当 origin），同步换成假的（agents-sync 本身的测试在它的包里，
 // 装进去的钩子真跑一遍同步在 packages/agents-sync/test/session-hook.test.ts；专用检出本身在 sync-source.test.ts）。
 // 第 3 件「生效中的临时调整」表：真 git 仓里放 .md，到期、缺列、日期认不出、表坏了、git 坏了各一条。
+import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -71,14 +72,14 @@ interface HookLib {
   beijingToday(now?: number): string;
   render(lines: string[]): string;
   pickCwd(input: unknown): string;
-  PROGRESS_MS: number;
-  progressRunner(timeoutMs?: number): ScriptRun;
-  checkProgressIssue(o: {
+  DIRECTIVE_MS: number;
+  ghRunner(timeoutMs?: number, spawn?: HookSpawn): GhRun;
+  checkDirectives(o: {
     cwd: string;
     git: Git;
-    run: ScriptRun;
-    mirror?: string | null;
+    run: GhRun;
     lineage?: Lineage | null;
+    opts?: { now?: number };
   }): string[];
   IDLE_PR_MS: number;
   idlePrRunner(timeoutMs?: number): ScriptRun;
@@ -90,6 +91,8 @@ interface HookLib {
     mirror?: string | null;
   }): string[];
 }
+type HookSpawn = (cmd: string, args: string[], opts: unknown) => Result;
+type GhRun = (args: string[], cwd: string) => Result;
 type ScriptRun = (script: string, repo: string) => Result;
 type Lineage =
   | { status: 'found'; dir: string; sessionIds: string[] }
@@ -1382,83 +1385,95 @@ describe('绿了没挂自动合并的 PR：只在 fleet-dao 里提醒，没查�
   });
 });
 
-describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子读它）', SLOW, () => {
-  const SCRIPT = HOOK;
+// 第 5 件：fleet-dao 的创始人引导一条一张 GitHub 单、带「创始人引导」标签（#4054，从法国账本迁过来）。
+// 开会话钩子用 gh 列这个标签下开着的单（单开着＝没办完）；gh 没查成、超时、输出认不出都说一行没查成，
+// 不当成「没有」，也不挡开会话。
+describe('fleet-dao 的创始人引导是带「创始人引导」标签的 GitHub 单（开会话钩子用 gh 列）', SLOW, () => {
   function fleetRepo(): string {
     const dir = repo({});
     g(dir, 'remote', 'add', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
     return dir;
   }
   function fakeRun(result: Partial<Result>) {
-    const calls: [string, string][] = [];
-    const run: ScriptRun = (script, r) => {
-      calls.push([script, r]);
+    const calls: string[][] = [];
+    const run: GhRun = (args) => {
+      calls.push(args);
       return { status: 0, stdout: '', stderr: '', ...result };
     };
     return { run, calls };
   }
-  const row = (id: number, head: string, text: string) => `${id}\t${head}\t${text}\n`;
-  const check = (dir: string, run: ScriptRun, mirror: string | null = SCRIPT) =>
-    hook.checkProgressIssue({ cwd: dir, git, run, mirror });
+  const issue = (number: number, title: string, body = '', createdAt = new Date().toISOString()) =>
+    ({ number, title, body, createdAt });
+  const check = (dir: string, run: GhRun, lineage: Lineage | null = null) =>
+    hook.checkDirectives({ cwd: dir, git, run, lineage });
 
   it('不是 fleet-dao 的检出、不是 git 仓：不查、不出声', () => {
-    const f = fakeRun({ stdout: row(1, '【创始人引导·待处理】x', '原话：y') });
+    const f = fakeRun({ stdout: JSON.stringify([issue(1, 'x')]) });
     expect(check(world().work, f.run)).toEqual([]);
     expect(check(temp('plain-progress'), f.run)).toEqual([]);
     expect(f.calls).toEqual([]);
   });
 
-  it('有待处理的（旧的、没写主的算无主）：一行写条数、评论号、原话开头，叫直接办、办完关挂的单；没有不出声', () => {
+  it('起的是 gh issue list 查这个仓、这个标签下开着的单；有开着的列出单号、时间、意思开头，叫直接办、办完关单；没有不出声', () => {
     const dir = fleetRepo();
     const f = fakeRun({
-      stdout:
-        row(11, '【创始人引导·待处理】2026-10-05 17:50', '原话：太慢了，我建议优先gpt6luna，不行就grok') +
-        row(12, '【创始人引导·待处理】2026-10-05 17:05', '原话：都按照你推荐'),
+      stdout: JSON.stringify([
+        issue(11, '太慢了，我建议优先gpt6luna，不行就grok'),
+        issue(12, '都按照你推荐', '', new Date(Date.now() - 45 * 60_000).toISOString()),
+      ]),
     });
-    const lines = hook.checkProgressIssue({
+    const lines = hook.checkDirectives({
       cwd: dir,
       git,
       run: f.run,
-      mirror: SCRIPT,
       lineage: { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] },
     });
+    expect(f.calls).toEqual([
+      [
+        'issue', 'list',
+        '--repo', 'thoerwink8/fleet-dao',
+        '--label', '创始人引导',
+        '--state', 'open',
+        '--json', 'number,title,body,createdAt',
+        '--limit', '200',
+      ],
+    ]);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('无主的创始人引导 2 条（旧的');
-    expect(lines[0]).toContain('11（2026-10-05 17:50）太慢了');
+    expect(lines[0]).toContain('无主的创始人引导 2 条');
+    expect(lines[0]).toMatch(/#11（\d{4}-\d{2}-\d{2} \d{2}:\d{2}）太慢了/);
+    expect(lines[0]).toContain('把单关掉');
     expect(lines[0]).not.toContain('progress claim');
-    expect(lines[0]).toContain('把挂的单关掉');
-    expect(f.calls.map(([script]) => script)).toEqual([SCRIPT]);
-    expect(check(dir, fakeRun({ stdout: '' }).run)).toEqual([]);
+    expect(check(dir, fakeRun({ stdout: '[]' }).run)).toEqual([]);
   });
 
-  it('【故意造出的失败】脚本退出 2（gh 没成）、超时、输出认不出、找不到脚本：说一行没查成，不当成没有待办', () => {
+  it('【故意造出的失败】gh 退出非 0、超时、输出认不出：说一行没查成，不当成没有待办', () => {
     const dir = fleetRepo();
-    expect(check(dir, fakeRun({ status: 2, stderr: 'gh 读 #1055 的评论报错：network down\n' }).run)).toEqual([
-      '创始人引导（法国账本收件箱）没查成：gh 读 #1055 的评论报错：network down。',
-    ]);
-    const slow = fakeRun({
+    expect(
+      check(dir, fakeRun({ status: 2, stderr: 'error connecting to api.github.com\n' }).run),
+    ).toEqual(['创始人引导（GitHub 单）没查成：error connecting to api.github.com。']);
+    const timedOut = fakeRun({
       status: null,
-      error: Object.assign(new Error('spawnSync node ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      error: Object.assign(new Error('spawnSync gh ETIMEDOUT'), { code: 'ETIMEDOUT' }),
       timeoutMs: 8_000,
     });
-    expect(check(dir, slow.run)).toEqual(['创始人引导（法国账本收件箱）没查成：超过 8 秒没完。']);
-    expect(check(dir, fakeRun({ stdout: '乱七八糟\n' }).run)[0]).toMatch(/没查成：progress\.ts 的输出认不出/);
-    const f = fakeRun({ stdout: row(1, 'h', 't') });
-    expect(check(dir, f.run, join(dir, 'nope.ts'))).toEqual([
-      '创始人引导（法国账本收件箱）没查成：找不到 packages/conventions/src/bin/progress.ts。',
-    ]);
-    expect(f.calls).toEqual([]);
+    expect(check(dir, timedOut.run)).toEqual(['创始人引导（GitHub 单）没查成：超过 8 秒没完。']);
+    expect(check(dir, fakeRun({ stdout: '乱七八糟\n' }).run)[0]).toMatch(/没查成：gh 的输出不是 JSON/);
+    expect(check(dir, fakeRun({ stdout: '{"a":1}\n' }).run)[0]).toMatch(/没查成：gh 的输出认不出/);
   });
 
-  it('【故意造出的失败】真起脚本、硬超时：到点杀掉、说没查成，不拖着开会话', () => {
+  it('【故意造出的失败】真起子进程、硬超时：到点杀掉、说没查成，不拖着开会话', () => {
     const dir = fleetRepo();
-    const sleeper = join(temp('progress-sleeper'), 'sleep.mjs');
-    writeFileSync(sleeper, 'setTimeout(() => {}, 20_000);\n');
+    // 子进程是独立的进程时钟，vi 假时间管不到它，只能真睡死、真超时杀掉（run 的形状和生产一样）
+    const sleeper = (): Result =>
+      spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 20_000)'], {
+        encoding: 'utf8',
+        timeout: 1_000,
+      }) as Result;
     const started = Date.now();
-    const lines = check(dir, hook.progressRunner(1_000), sleeper);
-    expect(Date.now() - started).toBeLessThan(8_000);
-    expect(lines).toEqual(['创始人引导（法国账本收件箱）没查成：超过 1 秒没完。']);
-    expect(hook.PROGRESS_MS).toBe(8_000);
+    const lines = check(dir, hook.ghRunner(1_000, sleeper));
+    expect(Date.now() - started).toBeLessThan(30_000); // 到点就杀：杀掉慢是机器的事，别拿时钟卡线
+    expect(lines).toEqual(['创始人引导（GitHub 单）没查成：超过 1 秒没完。']);
+    expect(hook.DIRECTIVE_MS).toBe(8_000);
   });
 });
 
@@ -1765,7 +1780,7 @@ describe('开会话不串会话：他的话只给同一个 Mirasim 会话', () =
   });
 });
 
-describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个会话办', SLOW, () => {
+describe('引导认主：带「创始人引导」标签的单只叫主人那个会话办', SLOW, () => {
   const mine: Lineage = { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] };
   const theirs: Lineage = { status: 'found', dir: 'dir-b', sessionIds: ['dir-b'] };
   const none: Lineage = { status: 'none', why: '这台没装 Mirasim' };
@@ -1774,35 +1789,42 @@ describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个
     g(dir, 'remote', 'add', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
     return dir;
   }
+  const AT = new Date().toISOString(); // 刚开的单：固定旧时间会全进「挂超 24 小时」分支
+  const issue = (number: number, title: string, owner?: string) => ({
+    number,
+    title,
+    body: owner === undefined ? '' : `〔主：${owner}〕 意思写在正文`,
+    createdAt: AT,
+  });
   const run =
-    (stdout: string): ScriptRun =>
+    (stdout: string): GhRun =>
     () => ({ status: 0, stdout, stderr: '' });
-  const H = '【创始人引导·待处理】2026-10-11 18:15';
   const LONG = '子代理最佳实践排查：哪些活该派 Haiku、哪些该派 Sonnet，后台跑的怎么收口，全文要给到接手的人';
-  const rows =
-    `31\t${H}\t原话：字号太大、参考苹果\tdir-b\n` +
-    `32\t${H}\t原话：${LONG}\tdir-a\n` +
-    `33\t${H}\t原话：老的一条\t无主\n`;
-  const check = (lineage: Lineage, out = rows) =>
-    hook.checkProgressIssue({ cwd: fleetRepo(), git, run: run(out), mirror: HOOK, lineage });
+  const out = JSON.stringify([
+    issue(31, '字号太大、参考苹果', 'dir-b'),
+    issue(32, LONG, 'dir-a'),
+    issue(33, '老的一条'),
+  ]);
+  const check = (lineage: Lineage, o = out) =>
+    hook.checkDirectives({ cwd: fleetRepo(), git, run: run(o), lineage });
 
-  it('本血缘的列编号和前 40 字叫它办（全文指到 pnpm progress read --pending）；别的会话的只说条数、不列原文；无主的照列开头，写明先认领', () => {
+  it('本血缘的列单号和前 40 字叫它办（全文指到 gh issue view）；别的会话的只说条数、不列标题；无主的照列开头', () => {
     const lines = check(mine);
     expect(lines).toHaveLength(3);
     expect(lines[0]).toMatch(/^创始人引导有 1 条归本会话、没办完（本会话是 Mirasim 会话 dir-a）/);
-    expect(lines[0]).toContain(`32（2026-10-11 18:15）${Array.from(LONG).slice(0, 40).join('')}…`);
+    expect(lines[0]).toMatch(/#32（\d{4}-\d{2}-\d{2} \d{2}:\d{2}）/);
+    expect(lines[0]).toContain(`${Array.from(LONG).slice(0, 40).join('')}…`);
     expect(lines[0]).not.toContain(LONG);
-    expect(lines[0]).toContain('pnpm progress read --pending');
-    expect(lines[0]).not.toContain('progress done');
-    expect(lines[0]).toContain('把挂的单关掉');
+    expect(lines[0]).toContain('gh issue view');
+    expect(lines[0]).toContain('把单关掉');
     expect(lines[1]).toMatch(
-      /^无主的创始人引导 1 条.*33（2026-10-11 18:15）老的一条.*直接接着办，办完把挂的单关掉/,
+      /^无主的创始人引导 1 条.*#33（.*）老的一条.*直接接着办，办完把单关掉/,
     );
     expect(lines[2]).toBe('别的会话还有 1 条创始人引导在办，不归你，别动。');
     expect(lines.join('\n')).not.toContain('字号太大');
   });
 
-  it('【故意造出的失败】换成另一个会话开场：它只看得到自己那条，A 的全文一个字都不给它', () => {
+  it('【故意造出的失败】换成另一个会话开场：它只看得到自己那条，A 的标题一个字都不给它', () => {
     const lines = check(theirs).join('\n');
     expect(lines).toContain('字号太大');
     expect(lines).not.toContain('子代理最佳实践排查');
@@ -1816,13 +1838,17 @@ describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个
     expect(lines[1]).toBe('别的会话还有 2 条创始人引导在办，不归你，别动。');
   });
 
-  it('旧版脚本只给三列：从正文里的〔主：…〕认主，没有标记的算无主', () => {
-    const old = `32\t${H}\t〔主：dir-a〕 原话：${LONG}\n33\t${H}\t原话：老的一条\n`;
-    const lines = check(mine, old);
+  it('主人标记写在单正文〔主：…〕里：正文认主，标题里就算有 〔主： 也不认', () => {
+    const o = JSON.stringify([
+      issue(32, LONG, 'dir-a'),
+      { number: 33, title: '〔主：dir-a〕 标记在标题不算数', body: '', createdAt: AT },
+    ]);
+    const lines = check(mine, o);
     expect(lines[0]).toContain('归本会话');
     expect(lines[0]).toContain(Array.from(LONG).slice(0, 40).join(''));
     expect(lines[0]).not.toContain('〔主：');
     expect(lines[1]).toMatch(/^无主的创始人引导 1 条/);
+    expect(lines[1]).toContain('#33');
   });
 });
 

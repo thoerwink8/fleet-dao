@@ -20,14 +20,12 @@ interface Result {
   stderr: string;
 }
 const HOOKS = fileURLToPath(new URL('../../hooks/', import.meta.url));
-const SESSION_START = join(HOOKS, 'session-start.mjs');
-const hook = (await import(pathToFileURL(SESSION_START).href)) as {
+const hook = (await import(pathToFileURL(join(HOOKS, 'session-start.mjs')).href)) as {
   recentPrompts(o: { home: string; now: number; sessionId: string; lineage?: Lineage }): string[];
-  checkProgressIssue(o: {
+  checkDirectives(o: {
     cwd: string;
     git: (cwd: string, args: string[]) => Result;
-    run: (script: string, repo: string) => Result;
-    mirror: string;
+    run: (args: string[], cwd: string) => Result;
     lineage: Lineage;
   }): string[];
 };
@@ -93,17 +91,22 @@ describe('规矩：他的话只给同一个 Mirasim 会话（不串会话）', (
 });
 
 describe('规矩：待处理的引导只叫主人那个会话办', () => {
-  // 假 git：仓根 /r、origin 是 fleet-dao；progress.ts 的输出是三条引导（A 的、B 的、无主的）
+  // 假 git：仓根 /r、origin 是 fleet-dao；gh 列回三张单（A 的、B 的、无主的；主人标记在正文〔主：…〕里）
   const git = (_cwd: string, args: string[]): Result => ({
     status: 0,
     stdout: args[0] === 'rev-parse' ? '/r\n' : 'https://github.com/thoerwink8/fleet-dao.git\n',
     stderr: '',
   });
-  const H = '【创始人引导·待处理】2026-10-11 18:15';
-  const out = `1\t${H}\t原话：A 的引导\tdir-a\n2\t${H}\t原话：B 的引导\tdir-b\n3\t${H}\t原话：旧引导\t无主\n`;
+  const issue = (number: number, title: string, owner?: string) => ({
+    number,
+    title,
+    body: owner === undefined ? '' : `〔主：${owner}〕`,
+    createdAt: new Date().toISOString(),
+  });
+  const out = JSON.stringify([issue(1, 'A 的引导', 'dir-a'), issue(2, 'B 的引导', 'dir-b'), issue(3, '旧引导')]);
   const run = (): Result => ({ status: 0, stdout: out, stderr: '' });
   const check = (lineage: Lineage) =>
-    hook.checkProgressIssue({ cwd: '/r', git, run, mirror: SESSION_START, lineage }).join('\n');
+    hook.checkDirectives({ cwd: '/r', git, run, lineage }).join('\n');
   const A: Lineage = { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] };
 
   it('A 只被叫去办自己的；B 的只说条数、不给原文；无主的直接办、办完关挂的单（没有认领）', () => {
@@ -111,7 +114,7 @@ describe('规矩：待处理的引导只叫主人那个会话办', () => {
     expect(said).toContain('A 的引导');
     expect(said).not.toContain('B 的引导');
     expect(said).toContain('别的会话还有 1 条创始人引导在办');
-    expect(said).toMatch(/旧引导.*直接接着办，办完把挂的单关掉/);
+    expect(said).toMatch(/旧引导.*直接接着办，办完把单关掉/);
     expect(said).not.toContain('progress claim');
   });
 

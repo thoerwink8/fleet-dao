@@ -105,7 +105,7 @@ interface StartOptions {
   home: string;
   git: () => { status: number; stdout: string; stderr: string };
   sync: () => { status: number; stdout: string; stderr: string };
-  progress: () => { status: number; stdout: string; stderr: string };
+  directives: () => { status: number; stdout: string; stderr: string };
   poolHolds: () => { ok: boolean; skipped: boolean };
   spawnBackground: () => { ok: boolean };
   env: NodeJS.ProcessEnv;
@@ -129,7 +129,7 @@ describe('SessionStart 无人值守状态消费方', () => {
         home: dir,
         git: noop,
         sync: noop,
-        progress: noop,
+        directives: noop,
         poolHolds: () => ({ ok: true, skipped: true }),
         spawnBackground: () => ({ ok: true }),
         env,
