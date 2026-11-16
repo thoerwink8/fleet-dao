@@ -78,6 +78,20 @@ describe('dispatch.mjs 参数缺失', () => {
     expect(mod.dispatchRun(['--title', 't', '--prompt', 'p'], { server: 'unused.cjs' })).toBe(2);
   });
 
+  it('grok 快档 id 退出码 2，不调 prompt', () => {
+    const calls: string[] = [];
+    const exec = (cmd: string, args: string[]) => {
+      calls.push([cmd, ...args].join(' '));
+      return { code: 0, stdout: '{}', stderr: '' };
+    };
+    for (const model of ['grok-4.7-high-fast', 'cursor/grok-4.7-build-fast@500k', 'grok-4.7-low-fast']) {
+      const code = mod.dispatchRun([...base, '--model', model], { exec, server: 'unused.cjs' });
+      expect(code).toBe(2);
+    }
+    expect(mod.dispatchRun([...base, '--model', 'grok-4.7'], { exec, server: 'unused.cjs' })).toBe(1);
+    expect(calls).toHaveLength(1);
+  });
+
   it('state.json 用 good 的版本，不用 pending', () => {
     const { env, server } = homeWithServer('9.9.9');
     expect(mod.mirasimServer(env)).toBe(server);

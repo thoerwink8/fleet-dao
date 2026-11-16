@@ -26,7 +26,10 @@ node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <仓
 - 标题写 `【omp】`，和实际一致。
 
 - `agent`、`model`、`effort` 照创始人指定的，`route` 用 `local`（走个人账号，不扣 Mirasim 额度）。没给 `--port` 时用环境变量 `MIRASIM_HOST_PORT`；会话里两个都没有就不带端口。版本读 `~/.mirasim/app/state.json` 里 `good` 的那一版，不写死。
-- 走个人账号要整机路由是「自有」（`setRelayMode {mode: "local"}`）。派之前先 `getCatalog {agent}` 确认要的模型在目录里；会话报「只有平台提供」（422）或目录里没有，先 `getCatalog {agent, refresh: true}` 刷新再发，不换成差一档的模型凑合。刷新本身也会探残（本机网络一抖：grok-4.7 标 `routeByModel: relay`、`ownOnlyModels` 里没有 fast）：看到残的就再刷，刷到正常再发，别据此判「这个模型只剩平台」，以本机 `grok models` 列出的为准。grok 一律 `grok-4.7` + `route: "local"`。
+- 走个人账号要整机路由是「自有」（`setRelayMode {mode: "local"}`）。派之前先 `getCatalog {agent}` 确认要的模型在目录里；会话报「只有平台提供」（422）或目录里没有，先 `getCatalog {agent, refresh: true}` 刷新再发，不换成差一档的模型凑合。刷新本身也会探残（本机网络一抖：grok-4.7 标 `routeByModel: relay`、`ownOnlyModels` 里没有 fast）：看到残的就再刷，刷到正常再发，别据此判「这个模型只剩平台」，以本机 `grok models` 列出的为准。grok 一律 `grok-4.7` + `route: "local"`。不要写 `grok-4.7-low-fast`、`grok-4.7-high-fast`、`grok-4.7-build-fast`，也不要开 priority。`dispatch.mjs` 遇到 grok 的 `-fast` id（`grok-4.7-low-fast`、`grok-4.7-high-fast`、`grok-4.7-build-fast`，可带 `@500k`）退出码 2，不派。
+- 488 次是路由加上的快档，不是调用方点了另一个模型（11-16 往前 24 小时 `magpie usage`；法国这台 magpie `0.1.4263`）。cursor 渠道 `grok-4.7@500k` 1661 次里 488 次 `tier_sent=priority`，模型名仍是 `grok-4.7`。这一版网关的 `fast=`（以及某个 agent 的 fast pick）只在送出时加 `service_tier=priority`，不改模型 id；cursor 插件再按这个档去选快变体，用量里的模型名保持原样。模型自己的速度若开了快档，这 1661 次会全是 priority，所以不是那一条。讨论脚本原来的 `grok-4.7-low-fast` 会单独成一行模型 id，汇总里没有这一行，对不上这 488 次。
+- 30 次 `grok-4.7-high-fast`（约 30.06 美元）是调用方点名这个 id，不是 `fast=` 替选。`fast=` 加不出这个模型名：它留下的是 `grok-4.7@500k` 加 priority，就是上面那 488 次。本仓和已部署的 fleet-dao 生产代码都没有 `grok-4.7-high-fast`（讨论脚本旧偏好是 `grok-4.7-low-fast`）。`group/grok-pool` 的权重对得上的是 grok 渠道那两行（下面），不是 cursor 渠道这 30 次。
+- `grok-4.7-build-fast@500k`（grok 渠道）1097 次、0 错，中位 8.0 秒、首字 5.4 秒；同渠道 `grok-4.7` 是 1978 次、中位 6.0 秒、首字 3.7 秒。花费 148.5 美元对 149.4 美元，单次 148.5/1097 对 149.4/1978，约 1.8 倍。次数比约 1:1.8，就是池里 1 比 2 的两名成员，慢且贵的那名是 `grok-4.7-build-fast`。从 `group/grok-pool` 移出，不留权重当后备。Grok Build 周额度这次 usage 里没有。
 - 交代照 commander「派活」写全（单号、要改什么、怎么算做完、别碰什么、跑哪些测试），另加四条：
   1. 自己干，不派子代理。
   2. 一件活一棵工作树 `.claude/worktrees/<单号>-<短名>`、分支 `local/<单号>-<短名>`；不往别的会话的分支推，依赖别人的 PR 就基于那个分支开自己的，对方合了再 rebase。
