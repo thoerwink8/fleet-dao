@@ -21,6 +21,7 @@ import {
   MAX_BOXES,
   NEVER_HEAVY,
   needsPg,
+  packBalance,
   packTests,
   parseTimings,
   siblingsOf,
@@ -236,6 +237,70 @@ describe('耗时表：只影响分得匀不匀，绝不影响跑不跑', () => {
   });
 });
 
+describe('同一类里最重不超过最轻的 2 倍，每一台不超过全部台平均的 1.3 倍', () => {
+  // 合计 540 秒、目标 50 秒，台数封顶前会要 11 台；这里只有 3 件，所以实际 3 台：pg 一件、普通两件。
+  const files = ['packages/db/test/a.test.ts', 'packages/web/test/b.test.ts', 'packages/web/test/c.test.ts'];
+  const timings: Timings = {
+    source: 'test',
+    files: {
+      'packages/db/test/a.test.ts': 100_000,
+      'packages/web/test/b.test.ts': 220_000,
+      'packages/web/test/c.test.ts': 220_000,
+    },
+  };
+
+  it('pg 100 秒、普通每台 220 秒：新判法过，旧的跨类 2 倍仍然不过', () => {
+    const r = packTests({ files, universe: files, timings, temporal: new Set() });
+    if (typeof r === 'string') throw new Error(r);
+    const seconds = r.boxes.map((b) => Math.round(b.estMs / 1000));
+    const pg = r.boxes.filter((b) => b.pg).map((b) => Math.round(b.estMs / 1000));
+    const plain = r.boxes.filter((b) => !b.pg).map((b) => Math.round(b.estMs / 1000));
+    expect(pg).toEqual([100]);
+    expect(plain).toEqual([220, 220]);
+    expect(Math.max(...seconds)).toBeGreaterThan(Math.min(...seconds) * 2);
+    expect(packBalance(r.boxes)).toEqual({ ok: true });
+  });
+
+  it('【故意造出的失败】同一类里最重超过最轻的 2 倍：仍然不过，2 这个倍数不加大', () => {
+    // 两台都不可再分。平均 150.5 秒的 1.3 倍是 195.65 秒，201 仍先撞 1.3，测不到类内 2 倍。
+    // 再加一台 180 秒：平均 160.3 秒的 1.3 倍是 208.4 秒，201 不再撞 1.3，类内 201/100 仍超 2 倍。
+    const v = packBalance([
+      { pg: false, estMs: 100_000 },
+      { pg: false, estMs: 180_000 },
+      { pg: false, estMs: 201_000 },
+    ]);
+    expect(v.ok).toBe(false);
+    if (v.ok) return;
+    expect(v.why).toContain('同一类');
+    expect(v.why).toContain('2');
+    expect(v.why).not.toContain('1.3');
+  });
+
+  it('【故意造出的失败】某一台超过全部台平均的 1.3 倍：仍然不过', () => {
+    const heavy: Timings = {
+      source: 'test',
+      files: {
+        'packages/web/test/b.test.ts': 100_000,
+        'packages/web/test/c.test.ts': 100_000,
+        'packages/web/test/d.test.ts': 100_000,
+        'packages/web/test/e.test.ts': 400_000,
+      },
+    };
+    const heavyFiles = Object.keys(heavy.files);
+    const r = packTests({
+      files: heavyFiles,
+      universe: heavyFiles,
+      timings: heavy,
+      temporal: new Set(),
+    });
+    if (typeof r === 'string') throw new Error(r);
+    const v = packBalance(r.boxes);
+    expect(v.ok).toBe(false);
+    if (v.ok) return;
+    expect(v.why).toContain('1.3');
+  });
+});
+
 describe('耗时表缺文件超过 10% 就提醒刷表（只提醒、不挡，不改装箱结果）', () => {
   /** 要装 total 个文件，表里只记前 known 个。 */
   const packWith = (total: number, known: number) => {
@@ -404,10 +469,12 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     const seconds = r.boxes.map((b) => Math.round(b.estMs / 1000));
     // 8 台的合计 = 全部文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按所在包的均值估（guessMs），
     // 和装箱同一个估法。不拿整张表的合计比：表一过期（加了测试文件、删了旧的）两边就差几秒，这条就红（#700 写的
-    // 那种比法，主线上新加了测试文件之后改到 conventions 的 PR 全跑时都红在这）。最重的台和最轻的差不过 2 倍（LPT 的效果）。
+    // 那种比法，主线上新加了测试文件之后改到 conventions 的 PR 全跑时都红在这）。
+    // 同一类里最重不超过最轻的 2 倍；每一台不超过全部台平均的 1.3 倍。不拿跨类的「最重 ≤ 最轻的 2 倍」：
+    // 要真 Postgres 的和不要的不能进同一个 vitest 进程，多出来的台会都给更重的那一类，较轻的一类整台偏轻，不是某一台装歪（#4047）。
     const expected = FILES.reduce((t, f) => t + (REAL_TIMINGS.files[f] ?? guessMs(f, REAL_TIMINGS)), 0);
     expect(r.boxes.reduce((t, b) => t + b.estMs, 0)).toBe(expected);
-    expect(Math.max(...seconds)).toBeLessThanOrEqual(Math.min(...seconds) * 2);
+    expect(packBalance(r.boxes), seconds.join('/')).toEqual({ ok: true });
   });
 
   it('pg 台只有 db 和执行资格真竞争文件；Temporal 装在有 github-reconcile.test.ts 的那一台', () => {
