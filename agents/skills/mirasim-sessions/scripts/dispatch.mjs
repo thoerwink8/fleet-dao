@@ -79,7 +79,18 @@ export function parseArgs(argv) {
   if (got.route !== undefined && got.route !== 'local' && got.route !== 'cloud') {
     throw new Stop('参数', `--route 只认 local 或 cloud\n${USAGE}`, 2);
   }
+  if (got.model && grokFastModel(got.model)) {
+    throw new Stop('参数', `grok 不开快档，模型要用 grok-4.7，不要 ${got.model}\n${USAGE}`, 2);
+  }
   return got;
+}
+
+/** grok 的快档 id（low-fast、high-fast、build-fast，可带 @500k）。别的厂商不拦。 */
+export function grokFastModel(model) {
+  const id = String(model).trim();
+  if (!/grok/i.test(id)) return false;
+  const bare = id.split('/').pop() ?? id;
+  return /(?:^|-)fast(?:@|$)/i.test(bare);
 }
 
 /**
