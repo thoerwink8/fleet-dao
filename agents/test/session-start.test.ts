@@ -4,7 +4,6 @@
 // 真 git（临时目录里的裸仓当 origin），同步换成假的（agents-sync 本身的测试在它的包里，
 // 装进去的钩子真跑一遍同步在 packages/agents-sync/test/session-hook.test.ts；专用检出本身在 sync-source.test.ts）。
 // 第 3 件「生效中的临时调整」表：真 git 仓里放 .md，到期、缺列、日期认不出、表坏了、git 坏了各一条。
-import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -1471,17 +1470,24 @@ describe('fleet-dao 的创始人引导是带「创始人引导」标签的 GitHu
     expect(check(dir, fakeRun({ stdout: '{"a":1}\n' }).run)[0]).toMatch(/没查成：gh 的输出认不出/);
   });
 
-  it('【故意造出的失败】真起子进程、硬超时：到点杀掉、说没查成，不拖着开会话', () => {
+  it('【故意造出的失败】gh 硬超时：限时传给 gh、到点说没查成，不拖着开会话', () => {
     const dir = fleetRepo();
-    // 子进程是独立的进程时钟，vi 假时间管不到它，只能真睡死、真超时杀掉（run 的形状和生产一样）
-    const sleeper = (): Result =>
-      spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 20_000)'], {
-        encoding: 'utf8',
-        timeout: 1_000,
-      }) as Result;
-    const started = Date.now();
-    const lines = check(dir, hook.ghRunner(1_000, sleeper));
-    expect(Date.now() - started).toBeLessThan(30_000); // 到点就杀：杀掉慢是机器的事，别拿时钟卡线
+    // 不起真子进程：假的 spawn 记下 ghRunner 传下去的限时，回一条超时的结果（形状和生产一样）
+    const seen: { cmd: string; args: string[]; opts: { timeout?: number } }[] = [];
+    const timedOut: HookSpawn = (cmd, args, opts) => {
+      seen.push({ cmd, args, opts: opts as { timeout?: number } });
+      return {
+        status: null,
+        stdout: '',
+        stderr: '',
+        error: Object.assign(new Error('spawnSync gh ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      };
+    };
+    const lines = check(dir, hook.ghRunner(1_000, timedOut));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.cmd).toBe('gh');
+    expect(seen[0]?.args).toContain('--label');
+    expect(seen[0]?.opts.timeout).toBe(1_000);
     expect(lines).toEqual(['创始人引导（GitHub 单）没查成：超过 1 秒没完。']);
     expect(hook.DIRECTIVE_MS).toBe(8_000);
   });
