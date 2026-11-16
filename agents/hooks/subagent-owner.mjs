@@ -11,7 +11,8 @@ import { isMainModule } from './is-main.mjs';
 /** @typedef {{ agentId: string, sessionId: string, pid: number, worktree: string, at: string }} Owner */
 
 /** @param {unknown} e */
-const errCode = (e) => (typeof e === 'object' && e !== null && 'code' in e ? Reflect.get(e, 'code') : undefined);
+const errCode = (e) =>
+  typeof e === 'object' && e !== null && 'code' in e ? Reflect.get(e, 'code') : undefined;
 /** @param {unknown} e */
 const why = (e) => (e instanceof Error ? e.message : String(e));
 
@@ -180,7 +181,10 @@ export function sessionAlive(row) {
 export function deliverStop(home, row, now) {
   const file = stopPath(home, row.sessionId);
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify({ agentId: row.agentId, sessionId: row.sessionId, at: now().toISOString() })}\n`);
+  writeFileSync(
+    file,
+    `${JSON.stringify({ agentId: row.agentId, sessionId: row.sessionId, at: now().toISOString() })}\n`,
+  );
 }
 
 /**

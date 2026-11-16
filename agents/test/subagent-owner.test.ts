@@ -90,13 +90,21 @@ describe('归属写入与读取', () => {
     const now = () => new Date(at);
     expect(
       lib.recordDispatch(
-        { session_id: 's', cwd: '/w', tool_name: 'Agent', agent_id: 'child', tool_response: { agentId: 'x' } },
+        {
+          session_id: 's',
+          cwd: '/w',
+          tool_name: 'Agent',
+          agent_id: 'child',
+          tool_response: { agentId: 'x' },
+        },
         { home, pid: 1, now },
       ).recorded,
     ).toBe(false);
     expect(
-      lib.recordDispatch({ session_id: 's', cwd: '/w', tool_name: 'Bash', tool_response: { agentId: 'x' } }, { home, pid: 1, now })
-        .recorded,
+      lib.recordDispatch(
+        { session_id: 's', cwd: '/w', tool_name: 'Bash', tool_response: { agentId: 'x' } },
+        { home, pid: 1, now },
+      ).recorded,
     ).toBe(false);
     expect(lib.readOwners(home)).toEqual([]);
   });
