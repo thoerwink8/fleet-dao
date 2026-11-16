@@ -44,6 +44,7 @@ const CHECKED = [
   'hooks/capacity.mjs',
   'hooks/queue-stop.mjs',
   'hooks/subagent-ledger.mjs',
+  'hooks/subagent-ownership.mjs',
   'hooks/shell-edit.mjs',
   'hooks/work-watch.mjs',
   'local-sessions/lib.mjs',

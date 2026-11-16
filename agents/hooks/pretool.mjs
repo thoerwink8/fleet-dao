@@ -22,6 +22,7 @@ import { hookTimer } from './hook-timing.mjs';
 import { isMainModule } from './is-main.mjs';
 import { shellEditVerdict } from './shell-edit.mjs';
 import { haikuVerdict, recordHaikuDispatch } from './subagent-ledger.mjs';
+import { recordDispatch, takeStopNote } from './subagent-ownership.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -3007,6 +3008,15 @@ if (isMainModule(import.meta)) {
   if (!ledgerRow.recorded && ledgerRow.issue !== undefined) {
     process.stderr.write(`fleet-guard：Haiku 派工没记进账本：${ledgerRow.why}\n`);
   }
+  // 派子代理落一行归属（单 #3911）。写不进才出声；缺字段、不是派工都不拦。停止字条等放行再读，拦下不删。
+  const ownershipRow = recordDispatch(raw);
+  if (
+    !ownershipRow.recorded &&
+    typeof ownershipRow.why === 'string' &&
+    ownershipRow.why.startsWith('归属写不进去')
+  ) {
+    process.stderr.write(`fleet-guard：子代理归属没记上：${ownershipRow.why}\n`);
+  }
   let backgroundOnly = false;
   try {
     /** @type {unknown} */
@@ -3023,17 +3033,19 @@ if (isMainModule(import.meta)) {
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }
-  // 起子代理前取不到远端：不拦，提示给模型（additionalContext）也给创始人看（systemMessage）
+  // 起子代理前取不到远端：给模型，也给人看。这条放行（后台工具）才把停止字条读走。
   const fresh = subagentFreshness(raw);
-  if (fresh) {
-    process.stdout.write(
-      `${JSON.stringify({
-        systemMessage: fresh.message,
-        hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: fresh.message },
-      })}\n`,
-    );
-  }
   if (backgroundOnly) {
+    const stopNote = takeStopNote(raw);
+    const message = [fresh?.message, stopNote].filter((s) => typeof s === 'string' && s !== '').join('\n');
+    if (message) {
+      process.stdout.write(
+        `${JSON.stringify({
+          systemMessage: message,
+          hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: message },
+        })}\n`,
+      );
+    }
     timer.mark('decide');
     finish(0);
   }
@@ -3044,6 +3056,8 @@ if (isMainModule(import.meta)) {
     process.stderr.write(`${verdict.message}\n`);
     finish(verdict.code);
   }
+  const stopNote = takeStopNote(raw);
+  const note = [verdict.context, stopNote].filter((s) => typeof s === 'string' && s !== '').join('\n');
   if (verdict.updatedInput) {
     // 文档（code.claude.com/docs/en/hooks「PreToolUse decision control」）：updatedInput 整份替换 tool_input。
     // approve（redactor 改写）配 allow 放行；别的（改成后台跑）不带决定，改写后的输入照常走权限确认
@@ -3055,16 +3069,16 @@ if (isMainModule(import.meta)) {
             ? { permissionDecision: 'allow', permissionDecisionReason: verdict.context ?? '' }
             : {}),
           updatedInput: verdict.updatedInput,
-          ...(verdict.context ? { additionalContext: verdict.context } : {}),
+          ...(note ? { additionalContext: note } : {}),
         },
       })}\n`,
     );
-  } else if (verdict.context) {
-    // 只有一句提示（比如切号前没查成有没有会话在跑）：给模型看，也给人看
+  } else if (note) {
+    // 只有一句提示（比如切号前没查成有没有会话在跑，或要停子代理）：给模型看，也给人看
     process.stdout.write(
       `${JSON.stringify({
-        systemMessage: verdict.context,
-        hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: verdict.context },
+        systemMessage: note,
+        hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: note },
       })}\n`,
     );
   }

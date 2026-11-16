@@ -47,6 +47,7 @@
     "hooks/queue-stop.mjs",
     "hooks/background-launch.mjs",
     "hooks/subagent-ledger.mjs",
+    "hooks/subagent-ownership.mjs",
     "hooks/shell-edit.mjs",
     "hooks/work-watch.mjs",
     "hooks/carpool-clock.mjs",
