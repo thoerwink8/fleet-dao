@@ -339,6 +339,41 @@ export interface Packed {
   timingsGap?: { missing: number; total: number };
 }
 
+/** 同一类里最重不超过最轻的这个倍数。跨类不比：两类不能进同一个 vitest 进程，多出来的台会都给更重的那一类。 */
+export const PACK_CLASS_RATIO = 2;
+/** 每一台不超过全部台平均的这个倍数。全量合计远大于台数封顶时，不拿目标 50 秒比。 */
+export const PACK_MEAN_RATIO = 1.3;
+
+export type PackBalance = { ok: true } | { ok: false; why: string };
+
+/**
+ * 装得匀不匀。同一类（要真 Postgres 的、不要的）里最重不超过最轻的 PACK_CLASS_RATIO 倍；
+ * 每一台不超过全部台平均的 PACK_MEAN_RATIO 倍。一类只有一台时，类内没有第二台可比。空清单算匀。
+ * 不比跨类：较轻的一类整台偏轻，不是某一台装歪。
+ */
+export function packBalance(boxes: readonly Pick<TestBox, 'pg' | 'estMs'>[]): PackBalance {
+  if (boxes.length === 0) return { ok: true };
+  const avg = boxes.reduce((s, b) => s + b.estMs, 0) / boxes.length;
+  const overMean = boxes.find((b) => b.estMs > avg * PACK_MEAN_RATIO);
+  if (overMean)
+    return {
+      ok: false,
+      why: `${overMean.estMs} 毫秒超过全部 ${boxes.length} 台平均 ${Math.round(avg)} 毫秒的 ${PACK_MEAN_RATIO} 倍`,
+    };
+  for (const pg of [true, false]) {
+    const loads = boxes.filter((b) => b.pg === pg).map((b) => b.estMs);
+    if (loads.length < 2) continue;
+    const heavy = Math.max(...loads);
+    const light = Math.min(...loads);
+    if (heavy > light * PACK_CLASS_RATIO)
+      return {
+        ok: false,
+        why: `${pg ? '要真 Postgres 的' : '不要真 Postgres 的'}同一类里最重 ${heavy} 毫秒超过最轻 ${light} 毫秒的 ${PACK_CLASS_RATIO} 倍`,
+      };
+  }
+  return { ok: true };
+}
+
 /** 要装的文件里表里缺的占比超过这个就提醒刷表（只提醒、不挡）。 */
 export const TIMINGS_MISSING_WARN_RATIO = 0.1;
 
