@@ -76,6 +76,14 @@ describe('用法', () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain('agents-sync --check');
   });
+
+  it('--tier 写错、--retire-old 带 --tier：退出 64', () => {
+    const home = tempDir('home');
+    expect(run(['--check', '--tier', 'office', '--home', home]).err).toContain('只认 home、company、france');
+    expect(run(['--retire-old', '--old-repo', home, '--tier', 'home', '--home', home]).err).toContain(
+      '--tier 只给 --check、--apply 用',
+    );
+  });
 });
 
 describe('退出码', () => {
@@ -99,6 +107,36 @@ describe('退出码', () => {
     expect(again.out).not.toContain('↻');
     expect(again.out).toContain('结论：改动 0');
     expect(run(['--check', '--home', home, '--repo', repo]).code).toBe(0);
+  });
+
+  it('公司档：omp 和 Claude 都装上 discuss，不装 commander；读回一致；再跑不写', { timeout: 15_000 }, () => {
+    const home = tempDir('home');
+    const repo = makeRepo({
+      commander: { 'SKILL.md': '---\nname: commander\n---\n派给法国引擎。\n' },
+      discuss: { 'SKILL.md': '---\nname: discuss\n---\n挑错。\n' },
+    });
+    put(home, '.fleet-dao/machine-tier', 'company\n');
+    const bin = tempDir('bin');
+    fakeBin(bin, 'claude');
+    fakeBin(bin, 'omp');
+    const env = { PATH: bin, PATHEXT: '.CMD' };
+    const applied = run(['--apply', '--home', home, '--repo', repo], { env });
+    expect(applied.code, applied.out + applied.err).toBe(0);
+    expect(applied.out).not.toContain('写完读回不对');
+    expect(existsSync(join(home, '.agents/skills/commander'))).toBe(false);
+    expect(existsSync(join(home, '.claude/skills/commander'))).toBe(false);
+    expect(existsSync(join(home, '.omp', 'agent', 'skills'))).toBe(false);
+    expect(get(home, '.omp/agent/AGENTS.md')).toContain(BEGIN);
+    expect(get(home, '.agents/skills/discuss/SKILL.md')).toBe(get(home, '.claude/skills/discuss/SKILL.md'));
+    const again = run(['--apply', '--home', home, '--repo', repo], { env });
+    expect(again.code, again.out + again.err).toBe(0);
+    expect(again.out).not.toContain('↻');
+    const bad = run(['--check', '--home', home, '--repo', repo], { env });
+    put(home, '.fleet-dao/machine-tier', 'nope\n');
+    const unread = run(['--check', '--home', home, '--repo', repo], { env });
+    expect(unread.code).toBe(2);
+    expect(unread.err).toContain('machine-tier');
+    expect(bad.code).toBe(0);
   });
 
   // 决定 0092：真实操作系统（deps.os）要一路传到权限那一步，Mac 在 platform 里也归 linux，只看 platform 判不出桌面机

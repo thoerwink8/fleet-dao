@@ -1,7 +1,7 @@
 // 命令行：解析参数、（要的话）换成目标用户的身份、跑一种模式、打印结论、给退出码。
 // 和系统打交道的几样（身份、查用户、PATH、git）都从 deps 进来，测试换成假的。
-import { statSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import { Backups } from './backup.ts';
 import { installedAgents } from './detect.ts';
 import { applyGitExcludes, checkGitExcludes } from './git-excludes.ts';
@@ -27,7 +27,7 @@ import {
   type Sources,
   verify,
 } from './sync.ts';
-import type { Platform } from './targets.ts';
+import { isMachineTier, MACHINE_TIER_FILE, type MachineTier, type Platform, placeOn } from './targets.ts';
 import { applyToolConfig, checkToolConfig } from './tool-config.ts';
 
 export const USAGE = `agents-sync —— 把 fleet-dao 仓里 agents/shared-rules.md 的通用段、agents/skills/（自研）、agents/skills-vendor/（第三方，照锁文件核过才发）、agents/hooks/、agents/subagents/ 分发到这台机器上各家 AI 的全局入口
@@ -74,6 +74,10 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 agents/shared-rule
   --no-skills        这个家不装 skill，以前本脚本装的撤掉（清单里没记的不碰）：给引擎一次性会话的用户（法国的会话用户）。
                      那里的会话照单子干活，家目录里的通用 skill（commander、discuss 这些）和单子无关，
                      各家 CLI 一启动就扫到、会去读（决定 0093）
+  --tier <档>        机器档 home、company、france。公司档不装指挥官和法国引擎派活的 skill
+                     （commander、commander-handoff），装过的撤掉。不写这个时看环境变量
+                     FLEET_MACHINE_TIER，再看家目录里的 .fleet-dao/machine-tier；都没有按 home。
+                     omp 和 Codex、pi 一样读 ~/.agents/skills，装了 omp 就会往那里装
 
 每项一行：✓ 一致、↻ 这次改了、✗ 漂移 / 缺失 / 没做成、… 没查成、· 没装（跳过）。
 退出码：0 都对（没装的不算）；1 有漂移、缺失或没做成；2 没有 ✗ 但有没查成的（含另一个同步正在写）；64 用法不对。
@@ -117,6 +121,7 @@ interface Args {
   oldRepo?: string;
   noSkills?: boolean;
   noMaintenance?: boolean;
+  tier?: string;
 }
 
 class UsageError extends Error {}
@@ -139,11 +144,12 @@ function parse(argv: readonly string[]): Args | 'help' {
       opts.noMaintenance = true;
       continue;
     }
-    const takes: Record<string, 'home' | 'user' | 'repo' | 'oldRepo'> = {
+    const takes: Record<string, 'home' | 'user' | 'repo' | 'oldRepo' | 'tier'> = {
       '--home': 'home',
       '--user': 'user',
       '--repo': 'repo',
       '--old-repo': 'oldRepo',
+      '--tier': 'tier',
     };
     const field = a === undefined ? undefined : takes[a];
     if (field === undefined) throw new UsageError(`认不出的参数：${a}`);
@@ -162,7 +168,38 @@ function parse(argv: readonly string[]): Args | 'help' {
   if (mode === '--retire-old' && opts.noSkills) throw new UsageError('--no-skills 只给 --check、--apply 用');
   if (mode === '--retire-old' && opts.noMaintenance)
     throw new UsageError('--no-maintenance 只给 --check、--apply 用');
+  if (mode === '--retire-old' && opts.tier !== undefined)
+    throw new UsageError('--tier 只给 --check、--apply 用');
+  if (opts.tier !== undefined && !isMachineTier(opts.tier))
+    throw new UsageError(`机器档只认 home、company、france，收到「${opts.tier}」`);
   return { mode, ...opts };
+}
+
+/** --tier 优先，其次 FLEET_MACHINE_TIER，其次家目录里的 machine-tier 文件；都没有是 home。读不了、写错了就抛 */
+function resolveTier(args: Args, env: Deps['env'], home: string, platform: Platform): MachineTier {
+  if (args.tier !== undefined) {
+    if (!isMachineTier(args.tier))
+      throw new UsageError(`机器档只认 home、company、france，收到「${args.tier}」`);
+    return args.tier;
+  }
+  const fromEnv = env.FLEET_MACHINE_TIER?.trim();
+  if (fromEnv !== undefined && fromEnv !== '') {
+    if (!isMachineTier(fromEnv))
+      throw new UsageError(`FLEET_MACHINE_TIER 只认 home、company、france，收到「${fromEnv}」`);
+    return fromEnv;
+  }
+  const file = join(home, placeOn(MACHINE_TIER_FILE, platform));
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'home';
+    throw new Error(`读不了 ${file}（${(err as NodeJS.ErrnoException).code ?? err}）`);
+  }
+  const word = text.trim();
+  if (!isMachineTier(word))
+    throw new Error(`${file} 只认一行 home、company 或 france，收到「${word.slice(0, 40)}」`);
+  return word;
 }
 
 interface Identity {
@@ -331,10 +368,22 @@ export function runCli(argv: readonly string[], deps: Deps): number {
     } else {
       const src = sources as Sources;
       const positionOff = [line('skip', '同步位置', POSITION_OFF_FOR_USER)];
+      let tier: MachineTier;
+      try {
+        tier = resolveTier(args, deps.env, home, deps.platform);
+      } catch (err) {
+        if (err instanceof UsageError) {
+          deps.stderr(`${err.message}\n`);
+          return 64;
+        }
+        deps.stderr(`没查成：${(err as Error).message}\n`);
+        return 2;
+      }
       const ctx: Ctx = {
         home,
         platform: deps.platform,
         installed: installedAgents({ env: deps.env, platform: deps.platform, home }),
+        tier,
         ...(deps.os === undefined ? {} : { os: deps.os }),
       };
       const permsOff = args.user === undefined ? undefined : PERMISSIONS_OFF_FOR_USER;

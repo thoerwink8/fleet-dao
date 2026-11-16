@@ -54,6 +54,8 @@ export const HEADLESS: Record<
   kimi: null,
   agy: null,
   gemini: null,
+  // omp -p 能单轮，但没在无头自检里核过它会不会把 ~/.omp/agent/AGENTS.md 抄出来，先记没核过
+  omp: null,
 };
 
 /** Claude 按通用段经 reclaude 起；其余用找到的那个可执行文件 */
