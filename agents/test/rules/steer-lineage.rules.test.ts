@@ -103,10 +103,13 @@ describe('规矩：待处理的引导只叫主人那个会话办', () => {
     body: owner === undefined ? '' : `〔主：${owner}〕`,
     createdAt: new Date().toISOString(),
   });
-  const out = JSON.stringify([issue(1, 'A 的引导', 'dir-a'), issue(2, 'B 的引导', 'dir-b'), issue(3, '旧引导')]);
+  const out = JSON.stringify([
+    issue(1, 'A 的引导', 'dir-a'),
+    issue(2, 'B 的引导', 'dir-b'),
+    issue(3, '旧引导'),
+  ]);
   const run = (): Result => ({ status: 0, stdout: out, stderr: '' });
-  const check = (lineage: Lineage) =>
-    hook.checkDirectives({ cwd: '/r', git, run, lineage }).join('\n');
+  const check = (lineage: Lineage) => hook.checkDirectives({ cwd: '/r', git, run, lineage }).join('\n');
   const A: Lineage = { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] };
 
   it('A 只被叫去办自己的；B 的只说条数、不给原文；无主的直接办、办完关挂的单（没有认领）', () => {

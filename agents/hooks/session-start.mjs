@@ -594,12 +594,18 @@ export function ghRunner(timeoutMs = DIRECTIVE_MS, spawn = spawnSync) {
 
 /** gh issue list 的参数：这个标签下开着的单，最多 200 条 */
 const directiveListArgs = (repo) => [
-  'issue', 'list',
-  '--repo', repo,
-  '--label', DIRECTIVE_LABEL,
-  '--state', 'open',
-  '--json', 'number,title,body,createdAt',
-  '--limit', '200',
+  'issue',
+  'list',
+  '--repo',
+  repo,
+  '--label',
+  DIRECTIVE_LABEL,
+  '--state',
+  'open',
+  '--json',
+  'number,title,body,createdAt',
+  '--limit',
+  '200',
 ];
 
 /**
@@ -698,7 +704,6 @@ const beijingClock = (ms) => new Date(ms + 8 * 3_600_000).toISOString().slice(0,
 
 const progressScript = (root, mirror) =>
   [mirror, join(root, PROGRESS_SCRIPT)].find((s) => s && existsSync(s));
-
 
 /** 和 packages/shared 的 DEFAULT_POOL_HOLD_OWNER 同一个字。钩子装到机器上，不能 import 那个包。 */
 const DEFAULT_POOL_HOLD_OWNER = '指挥官';

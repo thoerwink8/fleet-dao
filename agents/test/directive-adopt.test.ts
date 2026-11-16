@@ -55,11 +55,7 @@ describe('挂久了的引导交给指挥官自己办', () => {
 
   it('开场注入不重复：挂久了的无主引导不在无主那行再列；每条只带前 40 字，全文指到 gh issue view', () => {
     const long = `${'长'.repeat(40)}后面的全文不该注入`;
-    const lines = hook.directiveLines(
-      run([issue(1, long, 30), issue(2, '新的无主', 1)]),
-      A,
-      { now: NOW },
-    );
+    const lines = hook.directiveLines(run([issue(1, long, 30), issue(2, '新的无主', 1)]), A, { now: NOW });
     const text = lines.join('\n');
     expect(text.split('长'.repeat(40)).length - 1).toBe(1);
     expect(text).not.toContain('后面的全文不该注入');
@@ -74,11 +70,9 @@ describe('挂久了的引导交给指挥官自己办', () => {
 describe('单号就是引导本身（#4054）', () => {
   it('每条带 #单号；办完＝把单关掉（PR 写 Closes），没有另记', () => {
     const lines = hook
-      .directiveLines(
-        run([issue(2727, '有单的', 2, 'dir-a'), issue(2728, '另一条', 2, 'dir-a')]),
-        A,
-        { now: NOW },
-      )
+      .directiveLines(run([issue(2727, '有单的', 2, 'dir-a'), issue(2728, '另一条', 2, 'dir-a')]), A, {
+        now: NOW,
+      })
       .join('\n');
     expect(lines).toContain('#2727');
     expect(lines).toContain('#2728');

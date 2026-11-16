@@ -1402,8 +1402,12 @@ describe('fleet-dao 的创始人引导是带「创始人引导」标签的 GitHu
     };
     return { run, calls };
   }
-  const issue = (number: number, title: string, body = '', createdAt = new Date().toISOString()) =>
-    ({ number, title, body, createdAt });
+  const issue = (number: number, title: string, body = '', createdAt = new Date().toISOString()) => ({
+    number,
+    title,
+    body,
+    createdAt,
+  });
   const check = (dir: string, run: GhRun, lineage: Lineage | null = null) =>
     hook.checkDirectives({ cwd: dir, git, run, lineage });
 
@@ -1430,12 +1434,18 @@ describe('fleet-dao 的创始人引导是带「创始人引导」标签的 GitHu
     });
     expect(f.calls).toEqual([
       [
-        'issue', 'list',
-        '--repo', 'thoerwink8/fleet-dao',
-        '--label', '创始人引导',
-        '--state', 'open',
-        '--json', 'number,title,body,createdAt',
-        '--limit', '200',
+        'issue',
+        'list',
+        '--repo',
+        'thoerwink8/fleet-dao',
+        '--label',
+        '创始人引导',
+        '--state',
+        'open',
+        '--json',
+        'number,title,body,createdAt',
+        '--limit',
+        '200',
       ],
     ]);
     expect(lines).toHaveLength(1);
@@ -1448,9 +1458,9 @@ describe('fleet-dao 的创始人引导是带「创始人引导」标签的 GitHu
 
   it('【故意造出的失败】gh 退出非 0、超时、输出认不出：说一行没查成，不当成没有待办', () => {
     const dir = fleetRepo();
-    expect(
-      check(dir, fakeRun({ status: 2, stderr: 'error connecting to api.github.com\n' }).run),
-    ).toEqual(['创始人引导（GitHub 单）没查成：error connecting to api.github.com。']);
+    expect(check(dir, fakeRun({ status: 2, stderr: 'error connecting to api.github.com\n' }).run)).toEqual([
+      '创始人引导（GitHub 单）没查成：error connecting to api.github.com。',
+    ]);
     const timedOut = fakeRun({
       status: null,
       error: Object.assign(new Error('spawnSync gh ETIMEDOUT'), { code: 'ETIMEDOUT' }),
@@ -1817,9 +1827,7 @@ describe('引导认主：带「创始人引导」标签的单只叫主人那个�
     expect(lines[0]).not.toContain(LONG);
     expect(lines[0]).toContain('gh issue view');
     expect(lines[0]).toContain('把单关掉');
-    expect(lines[1]).toMatch(
-      /^无主的创始人引导 1 条.*#33（.*）老的一条.*直接接着办，办完把单关掉/,
-    );
+    expect(lines[1]).toMatch(/^无主的创始人引导 1 条.*#33（.*）老的一条.*直接接着办，办完把单关掉/);
     expect(lines[2]).toBe('别的会话还有 1 条创始人引导在办，不归你，别动。');
     expect(lines.join('\n')).not.toContain('字号太大');
   });

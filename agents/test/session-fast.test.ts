@@ -225,7 +225,11 @@ describe('同步那半只读本地', SLOW, () => {
     cached.steps.progress = {
       ok: true,
       value: {
-        run: { status: 0, stdout: '[{"number":1,"title":"旧缓存里的","createdAt":"2026-10-14T08:00:00Z"}]', stderr: '' },
+        run: {
+          status: 0,
+          stdout: '[{"number":1,"title":"旧缓存里的","createdAt":"2026-10-14T08:00:00Z"}]',
+          stderr: '',
+        },
       },
     };
     writeFileSync(cachePath, JSON.stringify(cached));
