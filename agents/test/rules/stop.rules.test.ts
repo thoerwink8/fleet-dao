@@ -518,7 +518,7 @@ describe('规矩：收轮前对账——有可接的活、容量够、没有子�
   const enough: Reading = { ok: true, freeBytes: 16 * GB, load1: 2, cores: 16, how: '假的' };
   const lowMem: Reading = { ok: true, freeBytes: 3 * GB, load1: 2, cores: 16, how: '假的' };
   const busy: Reading = { ok: true, freeBytes: 16 * GB, load1: 13, cores: 16, how: '假的' };
-  const unknown: Reading = { ok: false, why: 'CIM 没读成（PowerShell 退出码 1）' };
+  const unknown: Reading = { ok: false, why: 'CPU 采样没读成（退出码 1）' };
   const items: QueueItemLite[] = [
     { issue: 11, title: '一', takeable: true },
     { issue: 12, title: '在做', takeable: false },
@@ -651,7 +651,7 @@ describe('规矩：收轮前对账——有可接的活、容量够、没有子�
   it('【故意造出的失败】容量没查成：不当成够，不挡，明说没查成和原因', async () => {
     const r = await decide({ cap: unknown }).p;
     expect(r.block).toBe(false);
-    expect(r.block ? '' : r.notice).toContain('没查成：CIM 没读成');
+    expect(r.block ? '' : r.notice).toContain('没查成：CPU 采样没读成');
   });
 
   it('【故意造出的失败】队列没查成：不当成没活、也不挡，明说没查成', async () => {

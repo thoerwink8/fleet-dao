@@ -27,6 +27,13 @@ interface PretoolLib {
   SHELL_TOOLS: Record<string, string>;
   GITIGNORE_NOT_BLOCKED: Record<string, string>;
 }
+interface CpuTimes {
+  user: number;
+  nice: number;
+  sys: number;
+  idle: number;
+  irq: number;
+}
 interface CapReading {
   ok: boolean;
   freeBytes?: number;
@@ -39,7 +46,7 @@ interface CapacityLib {
   readCapacity(deps?: {
     platform?: string;
     cores?: number;
-    runCim?: () => { status: number | null; stdout: string; stderr: string; error?: Error };
+    samples?: () => [{ times: CpuTimes[]; freeBytes: number }, { times: CpuTimes[]; freeBytes: number }];
     readText?: (path: string) => string;
     runVmStat?: () => { status: number | null; stdout: string; stderr: string; error?: Error };
     loadavg?: () => number[];
@@ -480,10 +487,10 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
 
   it('【故意造出的失败】读不到：拦下，明说没查成和原因，不当成够', () => {
     const v = lib.capacityVerdict(agent({ subagent_type: 'general-purpose' }), {
-      read: () => ({ ok: false, why: 'CIM 没读成（PowerShell 退出码 1）' }),
+      read: () => ({ ok: false, why: 'CPU 采样没读成（退出码 1）' }),
     });
     expect(v?.code).toBe(2);
-    expect(v?.message).toContain('没查成：CIM 没读成');
+    expect(v?.message).toContain('没查成：CPU 采样没读成');
   });
 
   it('容量够：放行；没写 subagent_type（默认就是写码的工人）也判', () => {
@@ -548,14 +555,18 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
     }
   });
 
-  it('读数：Windows 读 CIM（空闲内存 KB、CPU 忙的百分比折成负载），Linux 读 /proc，macOS 读 vm_stat；读不到、认不出、别的平台都是没查成', () => {
+  it('读数：Windows 用 os.freemem 和两次 os.cpus 折成负载，Linux 读 /proc，macOS 读 vm_stat；读不到、认不出、别的平台都是没查成', () => {
+    const tick = (user: number, idle: number): CpuTimes => ({ user, nice: 0, sys: 0, idle, irq: 0 });
     const win = capacity.readCapacity({
       platform: 'win32',
       cores: 16,
-      runCim: () => ({ status: 0, stdout: '8388608 50\r\n', stderr: '' }),
+      samples: () => [
+        { times: [tick(0, 100)], freeBytes: 0 },
+        { times: [tick(50, 100)], freeBytes: 8 * GB },
+      ],
     });
-    expect(win).toMatchObject({ ok: true, freeBytes: 8 * GB, load1: 8, cores: 16 });
-    expect(capacity.judgeCapacity(win).enough).toBe(true);
+    expect(win).toMatchObject({ ok: true, freeBytes: 8 * GB, load1: 16, cores: 16 });
+    expect(capacity.judgeCapacity(win).enough).toBe(false);
     const linux = capacity.readCapacity({
       platform: 'linux',
       cores: 4,
@@ -584,17 +595,17 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
       capacity.readCapacity({
         platform: 'win32',
         cores: 16,
-        runCim: () => ({ status: 1, stdout: '', stderr: '拒绝访问' }),
+        samples: () => [
+          { times: [tick(0, 100)], freeBytes: 8 * GB },
+          { times: [tick(50, 100)], freeBytes: Number.NaN },
+        ],
       }),
       capacity.readCapacity({
         platform: 'win32',
         cores: 16,
-        runCim: () => ({ status: 0, stdout: '乱码', stderr: '' }),
-      }),
-      capacity.readCapacity({
-        platform: 'win32',
-        cores: 16,
-        runCim: () => ({ status: null, stdout: '', stderr: '', error: new Error('ENOENT') }),
+        samples: () => {
+          throw new Error('EACCES');
+        },
       }),
       capacity.readCapacity({
         platform: 'linux',
@@ -622,6 +633,33 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
       expect(capacity.judgeCapacity(r).text).toContain('没查成');
     }
   });
+  it('真读 Windows 容量不起子进程：os.freemem 和 os.cpus 两次采样，读数仍是空闲字节和折成核数的负载', async () => {
+    if (process.platform !== 'win32') return;
+    const script = [
+      "import { readCapacity, readCapacityAsync } from './capacity.mjs';",
+      'const sync = readCapacity();',
+      'const asyncReading = await readCapacityAsync();',
+      'process.stdout.write(JSON.stringify({ sync, asyncReading }));',
+    ].join('\n');
+    const r = runChild(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: HOOKS,
+      limitMs: 8_000,
+      env: { ...process.env, NODE_DEBUG: 'child_process' },
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toMatch(/CHILD_PROCESS/);
+    const got = JSON.parse(r.stdout) as { sync: CapReading; asyncReading: CapReading };
+    expect(got.sync.ok).toBe(true);
+    expect(got.asyncReading.ok).toBe(true);
+    expect(got.sync.freeBytes ?? 0).toBeGreaterThan(0);
+    expect(got.asyncReading.freeBytes ?? 0).toBeGreaterThan(0);
+    expect(got.sync.load1 ?? -1).toBeGreaterThanOrEqual(0);
+    expect(got.sync.how ?? '').not.toMatch(/CIM|PowerShell/);
+    expect(got.asyncReading.how ?? '').not.toMatch(/CIM|PowerShell/);
+    expect(`${got.sync.why ?? ''}${got.asyncReading.why ?? ''}`).not.toMatch(/PowerShell/);
+  });
+
+
 });
 
 // —— 密钥文件：值不进对话 ——
