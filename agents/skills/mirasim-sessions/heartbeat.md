@@ -7,6 +7,7 @@
 ## 每轮
 
 1. 交接笔记只当线索，一切以远端现状为准。连远端用这台机器当时能通的方式，不把代理地址写进本模板。
+1b. 跑 `node <技能目录>/scripts/check-reports.mjs`：有 ALERT 行就是会话收了轮却没发回报（被系统停、崩溃、模型报错），读它最后一轮，插队让它接着做，或重派。
 2. 列开着的 PR：`gh pr list --repo <owner/repo> --state open --json number,title,headRefName,headRefOid,mergeStateStatus`。
 3. 每个 PR 看 `gh pr checks <号> --repo <owner/repo>`，分四类：
    - 绿且可合：对着单上「怎么算做完」核。核过、并且没有打开自动合并，再 `gh pr merge <号> --squash --delete-branch`，然后收尾。核不过：用 `prompt` 加 `stopAndRun` 把没过的那一条发回原会话。
