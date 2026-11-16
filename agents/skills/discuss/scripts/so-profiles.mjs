@@ -125,7 +125,7 @@ export function splitFamilies(raw, label = '--author-family') {
       `要 ${label} <${[...Object.keys(POOL_FAMILY), 'claude'].join('|')}>：讨论不能确认作者模型族（可逗号分隔，也认不带 -pool 的族名），不会从环境变量猜`,
     );
   const families = values.map((name) => (Object.hasOwn(POOL_FAMILY, name) ? POOL_FAMILY[name] : name));
-  const known = new Set([...FAMILY_ORDER, 'swe', 'glm', 'cn']);
+  const known = new Set([...FAMILY_ORDER, 'swe', 'glm', 'cn', 'gemini']);
   const unknown = families.filter((family) => !known.has(family));
   if (unknown.length)
     throw new NotChecked(

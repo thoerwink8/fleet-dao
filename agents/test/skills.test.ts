@@ -25,6 +25,8 @@ const NOT_SKILLS = new Set([
   'claude-sonnet-5-5',
   'claude-opus-5-5',
   'gpt-6-luna',
+  'cn-pool',
+  'gemini-pool',
 ]);
 
 /** 紧挨着这些字的不算一个词的开头（只看 ASCII：中文和英文之间常不留空格）。 */

@@ -639,6 +639,65 @@ describe('讨论路由组：并行、单家失败、同族不问', SLOW, () => {
     expect(relay.hits()).toHaveLength(1);
   });
 
+  it('ask.mjs 点名 gemini-pool 通过校验并按 gemini 族请求', async () => {
+    const relay = await fakeRelay('ok', '看图结论');
+    const asked = run('ask.mjs', ['--text', topic('分析图像'), '--round', '0', '--models', 'gemini-pool'], {
+      home: temp('home'),
+      env: magpieEnv(relay.baseUrl),
+    });
+    expect(asked.code).toBe(0);
+    expect(relay.hits().map((h) => h.model)).toEqual(['gemini-pool']);
+    expect(asked.out).toContain('厂商族：gemini');
+    expect(asked.out).toContain('看图结论');
+  });
+
+  it('gemini-pool 点名才问：参数校验通过，不进默认那五家，同族不问', async () => {
+    const relay = await fakeRelay('magpie', CRITIQUE);
+    const env = magpieEnv(relay.baseUrl);
+    const home = temp('home');
+    const asked = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--author-family', 'claude', '--models', 'gemini-pool', '--budget-sec', '5'],
+      { home, env },
+    );
+    expect(asked.code).toBe(0);
+    expect(asked.err).not.toContain('不认识的模型');
+    expect(relay.hits()[0]?.model).toBe('gemini-pool');
+    expect(critiqueBody(asked)).toContain('厂商族：gemini');
+
+    const bare = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--author-family', 'gemini', '--models', 'gpt-pool', '--budget-sec', '5'],
+      { home, env },
+    );
+    expect(bare.code).toBe(0);
+    expect(bare.err).not.toContain('不认识的作者模型族');
+    expect(relay.hits().map((h) => h.model)).toEqual(['gemini-pool', 'gpt-pool']);
+
+    const same = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--author-family', 'gemini-pool', '--models', 'gemini-pool'],
+      { home, env },
+    );
+    expect(same.code).toBe(2);
+    expect(same.err).toContain('同一族');
+    expect(relay.hits().map((h) => h.model)).toEqual(['gemini-pool', 'gpt-pool']);
+
+    const beforeDefault = relay.hits().length;
+    const defaults = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--author-family', 'claude', '--budget-sec', '5'],
+      { home, env },
+    );
+    expect(defaults.code).toBe(0);
+    expect(defaults.err).not.toContain('不认识的模型');
+    const askedByDefault = relay
+      .hits()
+      .slice(beforeDefault)
+      .map((h) => h.model);
+    expect(askedByDefault).toEqual(['gpt-pool', 'grok-pool', 'deepseek-pool', 'kimi-pool', 'glm-pool']);
+  });
+
   it('网关探测有两秒预算、坏名单不能用，配置空值明确停用', async () => {
     const env = magpieEnv('http://127.0.0.1:1234/v1');
     const aborting: typeof fetch = async (_url, init) => {
