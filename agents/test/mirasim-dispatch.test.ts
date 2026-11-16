@@ -21,6 +21,7 @@ interface DispatchMod {
       log?: (line: string) => void;
       server?: string;
       now?: number;
+      records?: unknown[];
     },
   ): number;
   parseArgs(argv: string[]): Record<string, string>;
@@ -49,7 +50,16 @@ function homeWithServer(version = '9.9.9'): { env: NodeJS.ProcessEnv; server: st
   return { env: { USERPROFILE: root, HOME: root }, server };
 }
 
-const base = ['--title', '【pi】#4019 一句', '--workdir', 'D:/repo', '--prompt', '照做'];
+const base = [
+  '--title',
+  '【pi】#4019 一句',
+  '--workdir',
+  'D:/repo',
+  '--prompt',
+  '照做',
+  '--report-to',
+  'claude:cmd',
+];
 
 describe('dispatch.mjs 参数缺失', () => {
   it('缺 --prompt：退出码 2，一次都不调 mirasim', () => {
@@ -146,7 +156,86 @@ describe('dispatch.mjs 拿不到会话号', () => {
   });
 });
 
+describe('回报去向', () => {
+  it('找不到指挥会话：退出码 2，一次都不派', () => {
+    const calls: string[] = [];
+    const exec = () => {
+      calls.push('called');
+      return { code: 0, stdout: '{}', stderr: '' };
+    };
+    const code = mod.dispatchRun(['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p'], {
+      exec,
+      server: 'unused.cjs',
+      records: [],
+    });
+    expect(code).toBe(2);
+    expect(calls).toEqual([]);
+  });
+
+  it('从会话记录里挑正在跑、目录以 fleet-dao 结尾、最近更新的，并写进交代', () => {
+    const payloads: { prompt?: string }[] = [];
+    const exec = (_cmd: string, args: string[]) => {
+      const atom = args[args.indexOf('call') + 1] ?? '';
+      payloads.push(JSON.parse(args[args.indexOf('--args') + 1] ?? '{}'));
+      if (atom === 'prompt') {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            frames: [{ type: 'accepted', sessionKey: 'pi:accepted' }],
+          }),
+          stderr: '',
+        };
+      }
+      return { code: 0, stdout: '{}', stderr: '' };
+    };
+    const code = mod.dispatchRun(['--title', '【pi】一句', '--workdir', 'D:/repo', '--prompt', '照做'], {
+      exec,
+      server: 'unused.cjs',
+      now: 3,
+      records: [
+        {
+          runState: 'running',
+          title: '无人值守心跳',
+          workdir: 'D:/fleet-dao',
+          sessionId: 'heart',
+          updatedAt: '9',
+        },
+        { runState: 'completed', title: '旧的', workdir: 'D:/fleet-dao', sessionId: 'old', updatedAt: '8' },
+        {
+          runState: 'running',
+          title: '指挥',
+          workdir: 'D:\\repo\\fleet-dao\\',
+          sessionId: 'early',
+          updatedAt: '1',
+        },
+        { runState: 'running', title: '指挥', workdir: 'D:/other', sessionId: 'nope', updatedAt: '9' },
+        { runState: 'running', title: '指挥', workdir: 'D:/fleet-dao', sessionId: 'late', updatedAt: '2' },
+      ],
+    });
+    expect(code).toBe(0);
+    expect(payloads[0]?.prompt).toContain('【回报，必做】');
+    expect(payloads[0]?.prompt).toContain('--to claude:late');
+    expect(payloads[0]?.prompt).toContain('report.mjs');
+    expect(payloads[0]?.prompt).not.toContain('_tmp');
+    expect(payloads[1]).toEqual({ sessionKey: 'pi:accepted', title: '【pi】一句' });
+  });
+});
+
 describe('pickSessionKey', () => {
+  it('接受帧的会话号优先于列表里更新的那一个', () => {
+    expect(
+      mod.pickSessionKey(
+        {
+          frames: [
+            { type: 'accepted', sessionKey: 'pi:accepted' },
+            { sessions: [{ agent: 'pi', workdir: 'D:/repo', sessionKey: 'pi:newer', createdAt: 9 }] },
+          ],
+        },
+        { agent: 'pi', workdir: 'D:/repo' },
+      ),
+    ).toBe('pi:accepted');
+  });
+
   it('没有 sessionKey 的项不算', () => {
     expect(
       mod.pickSessionKey(
