@@ -3,11 +3,12 @@ import { stopProcessTree } from './cursor-process.mjs';
 import { cursorAgentEnv } from './tools.mjs';
 
 // 这些只是偏好；每次执行必须先与当前账号的真实列表求交。
+// grok 一律 grok-4.7，不开 fast（创始人 11-15：额度不够）。
 export const MODELS = {
   gpt: 'gpt-5.6-luna-high',
   kimi: 'kimi-k3-low',
   glm: 'glm-5.2-high',
-  grok: 'grok-4.7-low-fast',
+  grok: 'grok-4.7',
 };
 const FAMILIES = {
   gpt: /^(?:cursor-)?gpt-/,
@@ -25,10 +26,17 @@ export function parseModels(text) {
   return [...new Set(ids)];
 }
 
+/** grok 的快档：low-fast、high-fast、build-fast。偏好不在名单里时不退到这些。 */
+function grokFastId(id) {
+  return /(?:^|-)fast(?:@|$)/i.test(id);
+}
+
 export function resolveModel(family, available) {
   if (!Object.hasOwn(FAMILIES, family)) throw new Error(`不认识的模型 ${family}`);
   const candidates = available.filter((id) => FAMILIES[family].test(id));
-  return candidates.includes(MODELS[family]) ? MODELS[family] : (candidates[0] ?? null);
+  const usable = family === 'grok' ? candidates.filter((id) => !grokFastId(id)) : candidates;
+  const prefer = MODELS[family];
+  return usable.includes(prefer) ? prefer : (usable[0] ?? null);
 }
 
 /** 现读当前 Cursor 账号；不缓存，不跨渠道拼名单。查询超时也必须收完整个子树。 */

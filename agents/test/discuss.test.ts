@@ -152,7 +152,7 @@ function fakeCursor(): string {
       "if (process.argv.includes('status')) {",
       "  process.stdout.write(JSON.stringify({ status: 'x', isAuthenticated: process.env.FAKE_LOGGED === '1' }));",
       "} else if (process.argv.includes('models')) {",
-      "  process.stdout.write(process.env.FAKE_MODELS ?? 'Available models\\ngpt-5.6-luna-high - GPT\\nkimi-k3-low - Kimi\\nglm-5.2-high - GLM\\ngrok-4.7-low-fast - Grok\\n');",
+      "  process.stdout.write(process.env.FAKE_MODELS ?? 'Available models\\ngpt-5.6-luna-high - GPT\\nkimi-k3-low - Kimi\\nglm-5.2-high - GLM\\ngrok-4.7 - Grok\\n');",
       '  process.exitCode = Number(process.env.FAKE_MODELS_EXIT ?? 0);',
       '} else {',
       "  let stdinData = '';",

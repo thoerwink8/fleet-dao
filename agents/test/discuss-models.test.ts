@@ -20,6 +20,12 @@ it('只读机器 id，兼容 CRLF/ANSI/重复项，显示标签不能改变厂�
   expect(models.resolveModel('grok', ids)).toBe('grok-current-low');
 });
 
+it('grok 只偏好 grok-4.7；有快档也不选，只剩快档就不派', () => {
+  expect(models.resolveModel('grok', ['grok-4.7-low-fast', 'grok-4.7', 'grok-4.7-high-fast'])).toBe('grok-4.7');
+  expect(models.resolveModel('grok', ['grok-4.7-build-fast', 'grok-4.7-high-fast', 'grok-4.7-low-fast'])).toBeNull();
+  expect(models.resolveModel('grok', ['cursor-grok-4.7', 'grok-4.7-low-fast'])).toBe('cursor-grok-4.7');
+});
+
 it('偏好必须在真实列表中；缺失时只选同族，未知族与auto不可作为family', () => {
   expect(models.resolveModel('gpt', ['gpt-current-high', 'gpt-5.6-luna-high'])).toBe('gpt-5.6-luna-high');
   expect(models.resolveModel('gpt', ['grok-current-high', 'gpt-current-high'])).toBe('gpt-current-high');
