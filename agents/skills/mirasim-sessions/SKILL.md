@@ -87,7 +87,7 @@ node <仓根>/agents/skills/mirasim-sessions/scripts/dispatch.mjs
 5. 报回处理完就关会话：`pnpm pr:merge` 会自动按工作树找到会话删掉；明确不合的用 `close.mjs --repo <主检出> --branch <分支> --session <agent>:<会话id>`（工作树和分支已不在时也会删会话）。要返工的会话留着。
 ## 合并和清理
 
-工人的 PR 一律走 `pnpm pr:merge <号>`，这是唯一入口，禁止裸 `gh pr merge` / `gh pr merge --auto`（它只合远端，工作树、分支和会话全留成残；fleet-setup #14、#15 和 fleet-ade #42、#43 都是这么漏的）。脚本自己解出分支、主检出、工作树和这棵树上派活的会话，整条交给 `close.mjs`。
+工人的 PR 一律走 `pnpm pr:merge <号>`，这是唯一入口，禁止裸 `gh pr merge` / `gh pr merge --auto`（它只合远端，工作树、分支和会话全留成残；私有仓 #14、#15 和公开仓 #42、#43 都是这么漏的）。脚本自己解出分支、主检出、工作树和这棵树上派活的会话，整条交给 `close.mjs`。
 
 没走 PR 的收尾（GitLab MR、已合完的补删、只删会话），用本技能目录里的 `scripts/close.mjs` 一条做完，不要分步手工删：
 ```
