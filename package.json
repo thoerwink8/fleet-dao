@@ -46,6 +46,8 @@
     "discuss:new": "node agents/skills/discussion-draft/scripts/draft.mjs new",
     "discuss:check": "node agents/skills/discussion-draft/scripts/draft.mjs check",
     "pr:open": "node packages/conventions/src/bin/pr-open.ts",
+    "pr:merge": "node agents/skills/mirasim-sessions/scripts/pr-merge.mjs",
+    "leftovers": "node agents/skills/mirasim-sessions/scripts/leftovers.mjs",
     "subagent:stats": "node packages/conventions/src/bin/subagent-stats.ts",
     "project": "node packages/conventions/src/bin/project.ts",
     "project:add": "node packages/conventions/src/bin/project.ts add",

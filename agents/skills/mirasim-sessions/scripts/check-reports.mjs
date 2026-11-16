@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const SENT_MARK = 'ok 已发给';
+export const SENT_MARK = 'ok 已发给';
 
 /**
  * @param {string} root 某个 agent 的会话目录，例如 ~/.mirasim/sessions/pi
