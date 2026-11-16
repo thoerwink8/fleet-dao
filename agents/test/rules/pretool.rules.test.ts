@@ -658,8 +658,6 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
     expect(got.asyncReading.how ?? '').not.toMatch(/CIM|PowerShell/);
     expect(`${got.sync.why ?? ''}${got.asyncReading.why ?? ''}`).not.toMatch(/PowerShell/);
   });
-
-
 });
 
 // —— 密钥文件：值不进对话 ——
