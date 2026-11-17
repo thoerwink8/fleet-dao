@@ -444,6 +444,87 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(w.inserted.filter((i) => i.dedupeKey === key).map((i) => i.created)).toEqual([true, false]);
   });
 
+  it('#4014 人合且缺队列回执：报 historical_unproven，不撤；号和 fleet/4003 分支都不豁免', async () => {
+    const key = prAlertKey('thoerwink8', 'fleet-dao', 4014);
+    const proven = openAlert(prAlertKey('thoerwink8', 'fleet-dao', 10));
+    const hand = {
+      headRef: 'fleet/4003-t01a1db95',
+      openedByEngine: false,
+      mergedByEngine: false,
+    };
+    const w = world({
+      open: [proven],
+      repos: [{ owner: 'thoerwink8', name: 'fleet-dao' }],
+      audit: async () =>
+        audit(
+          [
+            {
+              number: 4014,
+              kind: 'not_merged_by_engine',
+              text: '#4014 不是「引擎」机器人合的（合并人 thoerwink8）',
+              ...hand,
+            },
+            {
+              number: 4014,
+              kind: 'no_merge_record',
+              text: '#4014 合并了，但账上没有合并队列的合并记录',
+              ...hand,
+            },
+          ],
+          { cleanPrs: [4014, 10] },
+        ),
+    });
+    await checkMergedPrs(w.deps);
+    const alert = w.inserted.find((i) => i.dedupeKey === key);
+    expect(alert?.created).toBe(true);
+    expect(alert?.title).toBe('机器人开的 PR 没经合并队列合：thoerwink8/fleet-dao#4014');
+    expect(alert?.link).toBe('https://github.com/thoerwink8/fleet-dao/pull/4014');
+    expect(alert?.body).toContain('historical_unproven');
+    expect(alert?.body).toContain('fleet-api historical-audit');
+    expect(alert?.body).toContain('合并人 thoerwink8');
+    expect(alert?.body).toContain('没有合并队列的合并记录');
+    expect(alert?.body).toContain('不是条件已消失');
+    expect(alert?.body).not.toContain('条件不再成立');
+    expect(w.resolved).toEqual([{ dedupeKey: proven.dedupeKey, why: MERGE_RECORD_LANDED_WHY }]);
+    expect(w.resolved.some((r) => r.dedupeKey === key)).toBe(false);
+    await checkMergedPrs(w.deps);
+    expect(w.resolved.map((r) => r.dedupeKey)).toEqual([proven.dedupeKey]);
+    expect(w.inserted.filter((i) => i.dedupeKey === key).map((i) => i.created)).toEqual([true, false]);
+  });
+
+  it('列提醒失败：#4014 缺证据仍不撤，记没查成', async () => {
+    const key = prAlertKey('thoerwink8', 'fleet-dao', 4014);
+    const w = world({
+      repos: [{ owner: 'thoerwink8', name: 'fleet-dao' }],
+      listOpen: async () => {
+        throw new Error('库连不上');
+      },
+      audit: async () =>
+        audit(
+          [
+            {
+              number: 4014,
+              kind: 'no_merge_record',
+              text: '#4014 合并了，但账上没有合并队列的合并记录',
+              headRef: 'fleet/4003-t01a1db95',
+              openedByEngine: false,
+              mergedByEngine: false,
+            },
+          ],
+          { cleanPrs: [4014] },
+        ),
+    });
+    const part = await checkMergedPrs(w.deps);
+    expect(part.unchecked).toEqual([
+      '列没处理的提醒没成，合并记录后来记上了的 reconcile:pr 这一轮不撤：库连不上',
+    ]);
+    expect(w.resolved).toEqual([]);
+    expect(w.inserted.map((i) => i.dedupeKey)).toEqual([key]);
+    expect(w.inserted[0]?.body).toContain('historical_unproven');
+    expect(w.inserted[0]?.body).toContain('不是条件已消失');
+    expect(w.inserted[0]?.body).not.toContain('条件不再成立');
+  });
+
   it('列提醒失败：缺证据的 reconcile:pr 不撤，记没查成', async () => {
     const key = prAlertKey('thoerwink8', 'fleet-dao', 4044);
     const w = world({

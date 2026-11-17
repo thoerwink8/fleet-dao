@@ -56,8 +56,9 @@ beforeEach(() => resetTestDb(t));
 
 for (const backend of ['memory', 'pg'] as const)
   describe(`真实 CLI 分派与 ${backend} Store`, () => {
-    async function setup(body: unknown = input) {
+    async function setup(body: unknown = input, prepare?: (data: ReturnType<typeof fixture>) => void) {
       const data = fixture();
+      prepare?.(data);
       if (backend === 'pg') await seedPg(t.db, data);
       const store =
         backend === 'pg'
@@ -187,6 +188,126 @@ for (const backend of ['memory', 'pg'] as const)
       expect(s.out.join()).toContain('历史合并队列仍未证明');
       expect(s.out.join()).not.toContain('条件已消失');
       expect((await s.notification())?.body).toBe(originalBody);
+      if (backend === 'pg') expect(await t.db.select().from(idempotencyKeys)).toEqual([]);
+    });
+
+    it('#4014 人合且缺队列回执：审计记下真实仓、PR、head 和合并人，结论仍是 historical_unproven', async () => {
+      const head = 'e1278741d644c729189e6b83e421aea3957a94a8';
+      const mergeCommit = '93e874d0bc54381e69247f30435644e35a3ac702';
+      const realRepo = 'thoerwink8/fleet-dao';
+      const realKey = `reconcile:pr:${realRepo}#4014`;
+      const realUrl = `https://github.com/${realRepo}/pull/4014`;
+      const evidenceIssue = `https://github.com/${realRepo}/issues/4094`;
+      const body = {
+        notificationId: input.notificationId,
+        dedupeKey: realKey,
+        repo: realRepo,
+        pr: 4014,
+        head,
+        evidenceIssue,
+        conclusion: 'historical_unproven' as const,
+        evidence:
+          'GitHub 现读 #4014：fleet-dao-agent 开、thoerwink8 合，head 与 squash 合并提交已核对，不是引擎机器人',
+        gaps: '没有 github.merge_pr 的目标与完整回执；补账不能证明经过合并队列，合前三道核对没有证据',
+        responsibility: '后续仍由 ops 保留这条缺口；点处理只表示看过',
+      };
+      const humanPull = {
+        number: 4014,
+        state: 'closed' as const,
+        merged: true as const,
+        html_url: realUrl,
+        head: { sha: head },
+        base: { repo: { full_name: realRepo } },
+        merge_commit_sha: mergeCommit,
+        merged_at: '2026-11-16T12:07:40Z',
+        merged_by: { id: 211872110, login: 'thoerwink8' },
+      };
+      const evidence = {
+        number: 4094,
+        html_url: evidenceIssue,
+        body: `提醒 reconcile:pr:thoerwink8/fleet-dao#4014 指向 ${realUrl}，缺队列回执。`,
+      };
+      const s = await setup(body, (data) => {
+        const row = data.repos?.[0];
+        const note = data.notifications?.find((n) => n.id === input.notificationId);
+        if (!row || !note) throw new Error('missing fixture');
+        row.owner = 'thoerwink8';
+        row.name = 'fleet-dao';
+        Object.assign(note, { dedupeKey: realKey, link: realUrl, body: originalBody });
+      });
+      s.read.mockImplementation(async (_repo: string, path: string) =>
+        path.startsWith('pulls/') ? structuredClone(humanPull) : structuredClone(evidence),
+      );
+      expect(await s.run(), s.err.join()).toBe(0);
+      const audits = await s.store.listAudit({
+        target: `notification:${input.notificationId}`,
+        limit: 100,
+      });
+      expect(audits.items).toHaveLength(1);
+      expect(audits.items[0]).toMatchObject({
+        action: 'notification.historical_audit',
+        after: {
+          conclusion: 'historical_unproven',
+          repo: realRepo,
+          pr: 4014,
+          head,
+          evidence: body.evidence,
+          gaps: body.gaps,
+          responsibility: body.responsibility,
+          github: { head, mergeCommit, mergedBy: humanPull.merged_by },
+        },
+      });
+      const recorded = JSON.stringify(audits.items[0]?.after);
+      expect(recorded).not.toContain('条件已消失');
+      expect(recorded).not.toContain('条件不再成立');
+      expect(recorded).not.toContain('github.merge_pr"');
+      expect(recorded).not.toContain('批准');
+      expect(s.out.join()).toContain('历史合并队列仍未证明');
+      expect(s.out.join()).not.toContain('条件已消失');
+      expect((await s.notification())?.body).toBe(originalBody);
+      expect((await s.notification())?.dedupeKey).toBe(realKey);
+      if (backend === 'pg') expect(await t.db.select().from(idempotencyKeys)).toEqual([]);
+    });
+
+    it('#4014 现读失败：不处置、不记成功审计、不清通知', async () => {
+      const realRepo = 'thoerwink8/fleet-dao';
+      const realKey = `reconcile:pr:${realRepo}#4014`;
+      const s = await setup(
+        {
+          ...input,
+          dedupeKey: realKey,
+          repo: realRepo,
+          pr: 4014,
+          head: 'e1278741d644c729189e6b83e421aea3957a94a8',
+          evidenceIssue: `https://github.com/${realRepo}/issues/4094`,
+          evidence: '还没读到 GitHub',
+          gaps: '合并人与队列回执都未核实',
+          responsibility: '读失败保持未知，不清这条通知',
+        },
+        (data) => {
+          const row = data.repos?.[0];
+          const note = data.notifications?.find((n) => n.id === input.notificationId);
+          if (!row || !note) throw new Error('missing fixture');
+          row.owner = 'thoerwink8';
+          row.name = 'fleet-dao';
+          Object.assign(note, {
+            dedupeKey: realKey,
+            link: `https://github.com/${realRepo}/pull/4014`,
+            body: originalBody,
+          });
+        },
+      );
+      s.read.mockImplementation(async () => {
+        throw new Error('GitHub unavailable');
+      });
+      expect(await s.run()).toBe(1);
+      expect((await s.notification())?.resolvedAt).toBeUndefined();
+      expect(
+        (await s.store.listAudit({ target: `notification:${input.notificationId}`, limit: 100 })).items,
+      ).toEqual([]);
+      expect(s.out).toEqual([]);
+      expect(s.err.join()).not.toContain('条件已消失');
+      expect(s.err.join()).not.toContain('条件不再成立');
       if (backend === 'pg') expect(await t.db.select().from(idempotencyKeys)).toEqual([]);
     });
 

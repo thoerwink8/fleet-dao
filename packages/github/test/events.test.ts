@@ -793,6 +793,103 @@ describe('对账与补漏', () => {
     expect(await ledger.idempotency.peek(mergeKey(repo, byHand.number, head))).toEqual(backfill);
   });
 
+  it('#4014：人合的 fleet/4003 不进 cleanPrs，backfill 不晋升，读失败留未知', async () => {
+    const { gh, fake, ledger } = setup();
+    const head = 'e1278741d644c729189e6b83e421aea3957a94a8';
+    const mergeCommit = '93e874d0bc54381e69247f30435644e35a3ac702';
+    const byHand = fake.addPull({
+      user: fake.bots.agent,
+      head: { ref: 'fleet/4003-t01a1db95', sha: head },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-11-16T12:07:40Z',
+      updated_at: '2026-11-16T12:07:40Z',
+      merge_commit_sha: mergeCommit,
+      merged_by: { login: 'thoerwink8', id: 211872110, type: 'User' },
+    });
+    fake.pulls.delete(byHand.number);
+    byHand.number = 4014;
+    fake.pulls.set(4014, byHand);
+    const proven = fake.addPull({
+      user: fake.bots.agent,
+      head: { ref: 'fleet/1-proven', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.bots.engine,
+    });
+    const provenKey = mergeKey(repo, proven.number, A);
+    await ledger.idempotency.claim(
+      { key: provenKey, action: 'github.merge_pr', target: `acme/widgets#${proven.number}` },
+      new Date(),
+    );
+    await ledger.idempotency.complete(
+      provenKey,
+      { number: proven.number, head: A, mergeCommit: sha('c'), mergedBy: fake.bots.engine.login },
+      new Date(),
+    );
+    const { intake } = fakeIntake(() => true);
+    const rec = gh.reconciler({ intake, pollDeliveryId });
+    const since = new Date('2026-09-25T00:00:00Z');
+    const report = await rec.auditMergedPrs('acme/widgets', since);
+    const handKinds = report.findings.filter((f) => f.number === 4014).map((f) => f.kind);
+    expect(byHand.number).toBe(4014);
+    expect(report.cleanPrs).toEqual([proven.number]);
+    expect(report.cleanPrs).not.toContain(4014);
+    expect(handKinds.sort()).toEqual(
+      ['backfill_merge_record', 'mirror_fixed', 'no_merge_record', 'not_merged_by_engine'].sort(),
+    );
+    expect(report.engineCiTimingsPrs ?? []).not.toContain(4014);
+    expect(report.engineChangelogPrs ?? []).not.toContain(4014);
+    const handRows = report.findings.filter(
+      (f) => f.number === 4014 && (f.kind === 'not_merged_by_engine' || f.kind === 'no_merge_record'),
+    );
+    expect(handRows.map((f) => f.headRef)).toEqual(['fleet/4003-t01a1db95', 'fleet/4003-t01a1db95']);
+    expect(handRows.every((f) => f.openedByEngine === false && f.mergedByEngine === false)).toBe(true);
+    const handText = handRows.map((f) => f.text).join('\n');
+    expect(handText).toContain('合并人 thoerwink8');
+    expect(handText).not.toContain('条件已消失');
+    expect(handText).not.toContain('条件不再成立');
+    const backfill = await ledger.idempotency.peek(mergeKey(repo, 4014, head));
+    expect(backfill).toMatchObject({
+      action: 'github.merge_pr_backfill',
+      target: 'acme/widgets#4014',
+      result: { number: 4014, head, mergeCommit, mergedBy: 'thoerwink8' },
+    });
+    expect(backfill?.action).not.toBe('github.merge_pr');
+    const again = await rec.auditMergedPrs('acme/widgets', since);
+    expect(again.cleanPrs).toEqual([proven.number]);
+    expect(again.findings.some((f) => f.number === 4014 && f.kind === 'backfill_merge_record')).toBe(false);
+    expect(again.findings.some((f) => f.number === 4014 && f.kind === 'no_merge_record')).toBe(true);
+    expect(again.findings.some((f) => f.number === 4014 && f.kind === 'not_merged_by_engine')).toBe(true);
+    expect(await ledger.idempotency.peek(mergeKey(repo, 4014, head))).toEqual(backfill);
+
+    let claims = 0;
+    const peek = ledger.idempotency.peek.bind(ledger.idempotency);
+    const claim = ledger.idempotency.claim.bind(ledger.idempotency);
+    ledger.idempotency.peek = async () => {
+      throw new Error('幂等账读失败');
+    };
+    ledger.idempotency.claim = async () => {
+      claims += 1;
+      return { status: 'claimed' };
+    };
+    const failed = await rec.auditMergedPrs('acme/widgets', since);
+    ledger.idempotency.peek = peek;
+    ledger.idempotency.claim = claim;
+    expect(failed).toMatchObject({ outcome: 'partial', cleanPrs: [] });
+    expect(failed.findings).toContainEqual(
+      expect.objectContaining({
+        number: 4014,
+        kind: 'unchecked',
+        text: expect.stringContaining('幂等账读失败'),
+      }),
+    );
+    expect(claims).toBe(0);
+    expect(await ledger.idempotency.peek(mergeKey(repo, 4014, head))).toEqual(backfill);
+  });
+
   it('真实队列占用的同 head 回执晚到：先报风险，完成后才进入 cleanPrs', async () => {
     const { gh, fake, ledger } = setup();
     const pr = fake.addPull({
