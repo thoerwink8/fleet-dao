@@ -33,7 +33,7 @@
   ],
   "pools": [
     {
-      "_说明": "Claude 订阅 · 独享组织。法国只有一个会话用户 fleet-agent-carpool（名字是历史沿用；reclaude 一个账户最多挂 4 台设备，法国只占 1 台，design 第十节），两个 Claude 池都跑在它下面，它同一时刻只挂一个组织：平时挂拼车，拼车用满才切到独享（#59），所以这个池只在切过去以后才派（引擎按 orgKind 认，没挂着的挡掉）。并发 4：两个池不同时跑。每个会话的内存上限按「同一时刻最多 3 个会话在跑测试」算（packages/engine/src/limits.ts，硬上限约 3.5G，2026-09-26 实测后定）：4 个会话同时跑重的测试时整机可能不够，现在没有东西拦（#164 方案「还没做的」）。",
+      "_说明": "Claude 订阅 · 独享组织。法国只有一个会话用户 fleet-agent-carpool（名字是历史沿用；reclaude 一个账户最多挂 4 台设备，法国只占 1 台，design 第十节），两个 Claude 池都跑在它下面，它同一时刻只挂一个组织：平时挂拼车，拼车用满才切到独享（#59），所以这个池只在切过去以后才派（引擎按 orgKind 认，没挂着的挡掉）。并发 4 是这个池的空位上限（maxConcurrency），两个池不同时跑。内存不再按「总量 ÷ 同时 3 个会话」掐单会话（#164 那套约 3.5G 已作废）。#423 把总量闸放在父节点 fleet-agents.slice（MemoryHigh=10152M、MemoryMax=10664M，deploy/france/fleet-agents.slice），单会话硬上限 6144M、软上限 5888M（packages/engine/src/limits.ts）。#219 在派活前按父节点 memory.current 做准入（packages/engine/src/real/memory-admission.ts）：余量放不下一份 2048M 预留就等，读不到不派，没有这层 cgroup 的机器跳过。",
       "id": "claude-solo",
       "channelId": "claude-sub",
       "maxConcurrency": 4,
@@ -41,7 +41,7 @@
       "orgKind": "solo"
     },
     {
-      "_说明": "Claude 订阅 · 拼车组织：会话用户平时挂着它，引擎的全部会话先用它（窗口小，design 第十节实测约为独享号的八分之一；用满切独享见 #59）。并发 4，理由同独享池。没量过。",
+      "_说明": "Claude 订阅 · 拼车组织：会话用户平时挂着它，引擎的全部会话先用它（窗口小，design 第十节实测约为独享号的八分之一；用满切独享见 #59）。并发 4，和独享池一样是池的空位上限，不是按内存算出的会话个数。没量过。",
       "id": "claude-carpool",
       "channelId": "claude-sub",
       "maxConcurrency": 4,
