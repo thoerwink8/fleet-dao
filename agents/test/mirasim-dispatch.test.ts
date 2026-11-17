@@ -26,6 +26,7 @@ interface DispatchMod {
   ): number;
   parseArgs(argv: string[]): Record<string, string>;
   pickSessionKey(parsed: unknown, want: { agent: string; workdir: string }): string | null;
+  findCommander(records: unknown[]): string | null;
   mirasimServer(env: NodeJS.ProcessEnv): string;
   hostPort(env: NodeJS.ProcessEnv, explicit?: string, listDir?: (dir: string) => string[]): string;
   explicitReportTo(explicit: string | undefined, env: NodeJS.ProcessEnv): string;
@@ -495,6 +496,50 @@ describe('回报去向', () => {
     expect(calls).toEqual([]);
     expect(errs.join('\n')).toContain('--report-to');
     expect(errs.join('\n')).toContain('MIRASIM_SESSION_KEY');
+  });
+});
+
+describe('findCommander', () => {
+  it('fleet-dao 工作树里正在跑的算指挥会话；非 running、无人值守心跳、别的仓的工作树不算；多个取 updatedAt 最新', () => {
+    expect(
+      mod.findCommander([
+        {
+          runState: 'completed',
+          title: '指挥',
+          workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\x',
+          sessionId: 'stopped',
+          updatedAt: '9',
+        },
+        {
+          runState: 'running',
+          title: '无人值守心跳',
+          workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\x',
+          sessionId: 'heart',
+          updatedAt: '8',
+        },
+        {
+          runState: 'running',
+          title: '指挥',
+          workdir: 'D:\\frank\\fleet-ade\\.claude\\worktrees\\x',
+          sessionId: 'ade',
+          updatedAt: '7',
+        },
+        {
+          runState: 'running',
+          title: '旧的',
+          workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\y',
+          sessionId: 'older',
+          updatedAt: '1',
+        },
+        {
+          runState: 'running',
+          title: '指挥',
+          workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\x',
+          sessionId: 'wt',
+          updatedAt: '3',
+        },
+      ]),
+    ).toBe('claude:wt');
   });
 });
 
