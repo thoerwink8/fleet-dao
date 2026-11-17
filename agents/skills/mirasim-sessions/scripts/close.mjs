@@ -18,6 +18,7 @@ import {
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { hostPort } from './dispatch.mjs';
 
 export const USAGE = `用法：node close.mjs --repo <主检出> --branch <分支> [--mr <号>|--pr <号>] [--session <sessionKey>]
 按序：合并（GitHub 用 gh，GitLab 用仓远端上的地址和令牌）→ 主检出快进到默认分支并推其余远端 →
@@ -406,9 +407,23 @@ async function deleteSessionReal(env, exec, sessionKey) {
   if (!version) throw new Stop('删会话', `${statePath} 里没有 good 版本`);
   const server = join(home, '.mirasim', 'app', version, 'server.cjs');
   if (!existsSync(server)) throw new Stop('删会话', `没有 ${server}`);
-  const args = [server, 'ui-cli'];
-  if (env.MIRASIM_HOST_PORT) args.push('--port', String(env.MIRASIM_HOST_PORT));
-  args.push('call', 'deleteSession', '--args', JSON.stringify({ sessionKey }));
+  // 不带端口的 ui-cli 会起一次性私服、删不到正在跑的宿主里的会话（#4075），端口一律经 hostPort 取。
+  let port;
+  try {
+    port = hostPort(env);
+  } catch (e) {
+    throw new Stop('删会话', e instanceof Error ? e.message : String(e));
+  }
+  const args = [
+    server,
+    'ui-cli',
+    '--port',
+    port,
+    'call',
+    'deleteSession',
+    '--args',
+    JSON.stringify({ sessionKey }),
+  ];
   const r = exec(process.execPath, args, { env });
   const out = `${r.stdout}\n${r.stderr}`;
   if (r.code !== 0) {

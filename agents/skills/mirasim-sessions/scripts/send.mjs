@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import {
   callAtom,
   findCommander,
+  hostPort,
   mirasimServer,
   readCommanderRecords,
   realExec,
@@ -35,7 +36,7 @@ export function sendRun(argv, io = {}) {
     if (!reportTo) throw new Stop('发送', '找不到指挥会话，加 --report-to <会话key>；这次不发', 2);
     const body = (io.readFile ?? ((p) => readFileSync(p, 'utf8')))(a.file);
     const server = io.server ?? mirasimServer(env);
-    const port = a.port || (env.MIRASIM_HOST_PORT ? String(env.MIRASIM_HOST_PORT) : '');
+    const port = hostPort(env, a.port);
     const res = callAtom(
       io.exec ?? realExec,
       process.execPath,

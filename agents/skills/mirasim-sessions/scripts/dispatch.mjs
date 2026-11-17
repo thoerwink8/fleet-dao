@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const USAGE = `用法：node dispatch.mjs --title <侧栏名> --workdir <目录> --prompt <交代> [--agent <名>] [--model <名>] [--effort <档>] [--route local|cloud] [--port <端口>] [--report-to <会话key>]
 派活并立刻改名，只调一次 prompt。交代末尾自动加上回报去向。找不到指挥会话退出码 2、一次都不派；拿不到会话号退出码 1、不重派；参数不对退出码 2。
-没给 --port 时用环境变量 MIRASIM_HOST_PORT；两个都没有就不带端口（会话里 mirasim 自己认宿主）。
+宿主端口：--port → 环境变量 MIRASIM_HOST_PORT → ~/.mirasim/run/local-<端口>.token（有 4970 优先）；都没有就退出码 2、不调 ui-cli（不带端口的 ui-cli 会起一次性私服，子会话随命令退出一起死）。
 没给 --report-to 时，在本机 claude 会话目录里找正在跑、工作目录以 fleet-dao 结尾、标题不是无人值守心跳的会话，用最近更新的那一个。`;
 
 /** 和本脚本放在一起的回报脚本，换机器不写死盘符。 */
@@ -249,20 +249,60 @@ export function reportFooter(reportTo, reportScript = REPORT_SCRIPT) {
   );
 }
 
+/** 装好的桌面版 mirasim 默认监听的端口；run 目录里有它就用它（旧宿主留下的 token 不一定还在监听）。 */
+export const DEFAULT_HOST_PORT = '4970';
+
+/**
+ * 正在跑的 mirasim 宿主端口：显式 → MIRASIM_HOST_PORT → ~/.mirasim/run/local-<端口>.token。
+ * 不带端口调 ui-cli 不会连到正在跑的宿主，而是起一个只为这条命令服务的一次性私服：子会话挂在它下面，
+ * 命令一退出就跟着死（记录停在 owner process exited / kimi exited），启动日志还会打在 JSON 前面（#4075）。
+ * 所以找不到就停，不让调用方退回「不带端口」。
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} [explicit]
+ * @param {(dir: string) => string[]} [listDir]
+ * @returns {string}
+ */
+export function hostPort(env, explicit, listDir = (dir) => readdirSync(dir)) {
+  if (explicit) return String(explicit);
+  if (env.MIRASIM_HOST_PORT) return String(env.MIRASIM_HOST_PORT);
+  const home = env.USERPROFILE || env.HOME || homedir();
+  const dir = join(home, '.mirasim', 'run');
+  /** @type {string[]} */
+  let names = [];
+  try {
+    names = listDir(dir);
+  } catch {
+    names = [];
+  }
+  const ports = names
+    .map((name) => /^local-(\d+)\.token$/.exec(String(name))?.[1])
+    .filter((p) => typeof p === 'string');
+  if (ports.includes(DEFAULT_HOST_PORT)) return DEFAULT_HOST_PORT;
+  if (ports.length === 1) return /** @type {string} */ (ports[0]);
+  if (ports.length > 1) {
+    throw new Stop('找宿主', `${dir} 里有多个宿主（${ports.join('、')}），用 --port 指定一个`, 2);
+  }
+  throw new Stop(
+    '找宿主',
+    `找不到在跑的 mirasim：没给 --port，没有 MIRASIM_HOST_PORT，${dir} 里也没有 local-<端口>.token。` +
+      '不带端口调 ui-cli 会起一次性私服、子会话随命令退出一起死，这次不调',
+    2,
+  );
+}
+
 /**
  * @param {Exec} exec
  * @param {string} nodePath
  * @param {string} server
- * @param {string | undefined} port
+ * @param {string} port 宿主端口，用 hostPort() 取；不许空
  * @param {string} atom
  * @param {Record<string, unknown>} args
  * @param {NodeJS.ProcessEnv} env
  */
 export function callAtom(exec, nodePath, server, port, atom, args, env) {
+  if (!port) throw new Stop('找宿主', '调 ui-cli 必须带宿主端口（用 hostPort() 取）', 2);
   /** @type {string[]} */
-  const argv = [server, 'ui-cli'];
-  if (port) argv.push('--port', port);
-  argv.push('call', atom, '--args', JSON.stringify(args));
+  const argv = [server, 'ui-cli', '--port', port, 'call', atom, '--args', JSON.stringify(args)];
   const result = exec(nodePath, argv, { env, timeout: 120_000 });
   if (result.code !== 0) {
     const detail = (result.stderr || result.stdout || '没有输出').trim().slice(0, 400);
@@ -309,7 +349,7 @@ export function dispatchRun(argv, io = {}) {
     }
     const server = io.server ?? mirasimServer(env);
     const nodePath = io.nodePath ?? process.execPath;
-    const port = opt.port || (env.MIRASIM_HOST_PORT ? String(env.MIRASIM_HOST_PORT) : '');
+    const port = hostPort(env, opt.port);
     /** @type {Record<string, unknown>} */
     const promptArgs = {
       clientRef: `d-${io.now ?? Date.now()}`,
