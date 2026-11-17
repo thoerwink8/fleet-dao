@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const USAGE = `用法：node dispatch.mjs --title <侧栏名> --workdir <目录> --prompt <交代> [--agent <名>] [--model <名>] [--effort <档>] [--route local|cloud] [--port <端口>] [--report-to <会话key>]
 派活并立刻改名，只调一次 prompt。交代末尾自动加上回报去向。找不到指挥会话退出码 2、一次都不派；拿不到会话号退出码 1、不重派；参数不对退出码 2。
 宿主端口：--port → 环境变量 MIRASIM_HOST_PORT → ~/.mirasim/run/local-<端口>.token（有 4970 优先）；都没有就退出码 2、不调 ui-cli（不带端口的 ui-cli 会起一次性私服，子会话随命令退出一起死）。
-没给 --report-to 时，在本机 claude 会话目录里找正在跑、工作目录以 fleet-dao 结尾、标题不是无人值守心跳的会话，用最近更新的那一个。`;
+没给 --report-to 时，在本机 claude 会话目录里找正在跑、工作目录是 fleet-dao 仓或它的 .claude/worktrees/<名>、标题不是无人值守心跳的会话，用最近更新的那一个。`;
 
 /** 和本脚本放在一起的回报脚本，换机器不写死盘符。 */
 export const REPORT_SCRIPT = fileURLToPath(new URL('./report.mjs', import.meta.url));
@@ -186,7 +186,18 @@ function isRecord(value) {
 }
 
 /**
- * 指挥会话：正在跑、工作目录以 fleet-dao 结尾、标题不是无人值守心跳。多个时取 updatedAt 最大的。
+ * fleet-dao 仓本身（路径末段是 fleet-dao），或路径里有 fleet-dao/.claude/worktrees/ 的工作树。
+ * @param {string} workdir 已去掉末尾斜杠
+ */
+function isFleetDaoTree(workdir) {
+  const norm = workdir.replace(/\\/g, '/');
+  const last = norm.split('/').pop() ?? '';
+  if (last.toLowerCase() === 'fleet-dao') return true;
+  return /(?:^|\/)fleet-dao\/\.claude\/worktrees\//i.test(norm);
+}
+
+/**
+ * 指挥会话：正在跑、工作目录是 fleet-dao 仓或它的 .claude/worktrees/<名>、标题不是无人值守心跳。多个时取 updatedAt 最大的。
  * @param {unknown[]} records
  * @returns {string | null}
  */
@@ -197,7 +208,7 @@ export function findCommander(records) {
     return (
       item.runState === 'running' &&
       !title.startsWith('无人值守心跳') &&
-      /fleet-dao$/i.test(workdir) &&
+      isFleetDaoTree(workdir) &&
       typeof item.sessionId === 'string' &&
       item.sessionId.length > 0
     );
