@@ -26,6 +26,7 @@ interface DispatchMod {
   ): number;
   parseArgs(argv: string[]): Record<string, string>;
   pickSessionKey(parsed: unknown, want: { agent: string; workdir: string }): string | null;
+  findCommander(records: unknown[]): string | null;
   mirasimServer(env: NodeJS.ProcessEnv): string;
   hostPort(env: NodeJS.ProcessEnv, explicit?: string, listDir?: (dir: string) => string[]): string;
   Stop: new (step: string, next: string, code?: number) => Error;
@@ -288,6 +289,34 @@ describe('回报去向', () => {
     expect(payloads[0]?.prompt).toContain('report.mjs');
     expect(payloads[0]?.prompt).not.toContain('_tmp');
     expect(payloads[1]).toEqual({ sessionKey: 'pi:accepted', title: '【pi】一句' });
+  });
+});
+
+describe('findCommander', () => {
+  it('fleet-dao 工作树里正在跑的选中；非 running、心跳、别的仓不选；多个取 updatedAt 最新', () => {
+    const running = (
+      sessionId: string,
+      workdir: string,
+      updatedAt: string,
+      extra: Record<string, string> = {},
+    ) => ({
+      runState: 'running',
+      title: '指挥',
+      sessionId,
+      workdir,
+      updatedAt,
+      ...extra,
+    });
+    expect(
+      mod.findCommander([
+        running('root', 'D:\\frank\\fleet-dao', '3'),
+        running('wt', 'D:\\frank\\fleet-dao\\.claude\\worktrees\\x', '5'),
+        running('stopped', 'D:\\frank\\fleet-dao\\.claude\\worktrees\\x', '9', { runState: 'completed' }),
+        running('heart', 'D:\\frank\\fleet-dao\\.claude\\worktrees\\x', '9', { title: '无人值守心跳' }),
+        running('ade', 'D:\\frank\\fleet-ade\\.claude\\worktrees\\x', '9'),
+        running('newer', 'D:/frank/fleet-dao/.claude/worktrees/y', '7'),
+      ]),
+    ).toBe('claude:newer');
   });
 });
 
