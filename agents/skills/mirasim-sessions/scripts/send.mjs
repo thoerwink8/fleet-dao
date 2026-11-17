@@ -4,17 +4,19 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import {
   callAtom,
-  findCommander,
   hostPort,
   mirasimServer,
+  REPORT_TO_HOWTO,
   readCommanderRecords,
   realExec,
   reportFooter,
+  resolveReportTo,
   Stop,
 } from './dispatch.mjs';
 
 export const USAGE = `用法：node send.mjs --to <会话key> --file <消息文件> [--report-to <指挥会话key>] [--port <端口>]
-把消息文件的内容连同「回报，必做」一起发给一个在跑或已收轮的执行会话。`;
+把消息文件的内容连同「回报，必做」一起发给一个在跑或已收轮的执行会话。
+回报去向：--report-to，否则环境变量 MIRASIM_SESSION_KEY，再否则和 dispatch.mjs 一样猜指挥会话。`;
 
 /**
  * @param {string[]} argv
@@ -32,8 +34,8 @@ export function sendRun(argv, io = {}) {
       if (k?.startsWith('--')) a[k.slice(2)] = argv[++i] ?? '';
     }
     if (!a.to || !a.file) throw new Stop('参数', USAGE, 2);
-    const reportTo = a['report-to'] || findCommander(io.records ?? readCommanderRecords(env));
-    if (!reportTo) throw new Stop('发送', '找不到指挥会话，加 --report-to <会话key>；这次不发', 2);
+    const reportTo = resolveReportTo(a['report-to'], env, () => io.records ?? readCommanderRecords(env));
+    if (!reportTo) throw new Stop('发送', `找不到指挥会话。${REPORT_TO_HOWTO}；这次不发`, 2);
     const body = (io.readFile ?? ((p) => readFileSync(p, 'utf8')))(a.file);
     const server = io.server ?? mirasimServer(env);
     const port = hostPort(env, a.port);
