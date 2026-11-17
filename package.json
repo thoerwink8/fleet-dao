@@ -20,6 +20,7 @@
     "test": "vitest run",
     "agents:sync": "node packages/agents-sync/bin/agents-sync-now",
     "agents:probe": "node packages/agents-sync/src/probe-main.ts",
+    "agents:stop": "node agents/hooks/subagent-owner.mjs",
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
     "test:linux": "node packages/conventions/src/bin/test-linux.ts",
     "test:isolated": "node packages/conventions/src/bin/test-isolated.ts",
