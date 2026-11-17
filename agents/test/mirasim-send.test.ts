@@ -24,30 +24,65 @@ const mod = (await import(
 /** 固定宿主端口，不读本机真实的 ~/.mirasim/run（CI 上没有）。 */
 const ENV: NodeJS.ProcessEnv = { MIRASIM_HOST_PORT: '4970' };
 
+const accepted = (taskId = '') =>
+  JSON.stringify({
+    ok: true,
+    frames: [{ type: 'accepted', sessionKey: 'kimi:abc', clientRef: 'atom-server-ref', taskId }],
+  });
+
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('send.mjs', () => {
-  it('消息后面追加「回报，必做」和指挥会话号，发给指定会话', () => {
+  it.each(['', 'new-task'])('发送一次并返回宿主接受编号，taskId=%s', (taskId) => {
     const sent: { sessionKey?: string; prompt?: string }[] = [];
+    const logs: string[] = [];
     const exec = (_c: string, args: string[]) => {
       sent.push(JSON.parse(args[args.indexOf('--args') + 1] ?? '{}'));
-      return { code: 0, stdout: '{"ok":true}', stderr: '' };
+      return { code: 0, stdout: accepted(taskId), stderr: '' };
     };
     const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md', '--report-to', 'claude:cmd'], {
       exec,
       server: 'unused.cjs',
       env: ENV,
       readFile: () => '接着做 #33',
-      log: () => {},
+      log: (line) => logs.push(line),
     });
     expect(code).toBe(0);
     expect(sent[0]?.sessionKey).toBe('kimi:abc');
     expect(sent[0]?.prompt).toContain('接着做 #33');
     expect(sent[0]?.prompt).toContain('回报，必做');
     expect(sent[0]?.prompt).toContain('claude:cmd');
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(logs.at(-1) ?? '')).toEqual({
+      sessionKey: 'kimi:abc',
+      clientRef: 'atom-server-ref',
+      taskId,
+    });
+  });
+
+  it.each([
+    { ok: true },
+    { ok: true, frames: [{ type: 'accepted', sessionKey: 'kimi:other', clientRef: 'atom-other' }] },
+    { ok: true, frames: [{ type: 'accepted', sessionKey: 'kimi:abc', clientRef: '' }] },
+  ])('接受回执缺失或不符时报告未知且不重发：%j', (response) => {
+    let calls = 0;
+    const logs: string[] = [];
+    const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md', '--report-to', 'claude:cmd'], {
+      exec: () => {
+        calls++;
+        return { code: 0, stdout: JSON.stringify(response), stderr: '' };
+      },
+      server: 'unused.cjs',
+      env: ENV,
+      readFile: () => '接着做',
+      log: (line) => logs.push(line),
+    });
+    expect(code).not.toBe(0);
+    expect(calls).toBe(1);
+    expect(logs).toEqual([]);
   });
 
   it('找不到指挥会话：退出码 2，一次都不发', () => {
@@ -71,7 +106,7 @@ describe('send.mjs', () => {
     const sent: { prompt?: string }[] = [];
     const exec = (_c: string, args: string[]) => {
       sent.push(JSON.parse(args[args.indexOf('--args') + 1] ?? '{}'));
-      return { code: 0, stdout: '{"ok":true}', stderr: '' };
+      return { code: 0, stdout: accepted(), stderr: '' };
     };
     const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md'], {
       exec,
@@ -89,7 +124,7 @@ describe('send.mjs', () => {
     const sent: { prompt?: string }[] = [];
     const exec = (_c: string, args: string[]) => {
       sent.push(JSON.parse(args[args.indexOf('--args') + 1] ?? '{}'));
-      return { code: 0, stdout: '{"ok":true}', stderr: '' };
+      return { code: 0, stdout: accepted(), stderr: '' };
     };
     const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md', '--report-to', 'claude:from-cli'], {
       exec,
@@ -112,7 +147,7 @@ describe('send.mjs', () => {
     const calls: string[] = [];
     const exec = () => {
       calls.push('called');
-      return { code: 0, stdout: '{"ok":true}', stderr: '' };
+      return { code: 0, stdout: accepted(), stderr: '' };
     };
     const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md', '--report-to', 'claude:from-cli'], {
       exec,
