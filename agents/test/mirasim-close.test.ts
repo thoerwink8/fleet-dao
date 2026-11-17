@@ -52,6 +52,7 @@ interface CloseMod {
   performMerge(o: MergeOpts): Promise<{ skipped: boolean; detail: string }>;
   remoteHost(url: string): { host: string; project: string } | null;
   directoryLinks(root: string): string[];
+  conventionalWorktreePath(main: string, branch: string): string | null;
 }
 
 const mod = (await import(pathToFileURL(SCRIPT).href)) as CloseMod;
@@ -464,27 +465,28 @@ describe('git 登记消失不能当成目录已删', () => {
     expect(dropped).toBe(false);
   });
 
-  it('登记没了、分支已在默认分支、目录对得上：拆联接后删掉，主检出还在', async () => {
+  it('登记没了、目录里还有文件：停住不删，主检出还在', async () => {
     const { main, wt, branch } = conventionalRepo(true);
     linkModules(main, wt, process.platform === 'win32' ? 'junction' : 'dir');
     dropAdmin(wt);
     expect(git(main, ['worktree', 'list'])).not.toContain(wt);
-    const dropped: string[] = [];
+    let dropped = false;
     const lines: string[] = [];
     const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:on-main'], {
       log: (line) => lines.push(line),
-      deleteSession: async (key) => {
-        dropped.push(key);
-        return { skipped: false, detail: `已删会话 ${key}` };
+      deleteSession: async () => {
+        dropped = true;
+        return { skipped: false, detail: '不该删' };
       },
     });
     const out = lines.join('\n');
-    expect(code, out).toBe(0);
-    expect(existsSync(wt)).toBe(false);
+    expect(code, out).not.toBe(0);
+    expect(out).toMatch(/没有删/);
+    expect(existsSync(wt)).toBe(true);
+    expect(existsSync(join(wt, 'change.txt'))).toBe(true);
     expect(readFileSync(join(main, 'node_modules', 'keep.txt'), 'utf8')).toBe('keep\n');
     expect(readFileSync(join(main, 'readme.txt'), 'utf8')).toBe('ok\n');
-    expect(git(main, ['branch', '--list', branch]).trim()).toBe('');
-    expect(dropped).toEqual(['kimi:on-main']);
+    expect(dropped).toBe(false);
   });
 
   it('登记没了但仍有未提交文件：不删', async () => {
@@ -493,7 +495,7 @@ describe('git 登记消失不能当成目录已删', () => {
     dropAdmin(wt);
     const { code, out } = await runClose(main, branch);
     expect(code, out).not.toBe(0);
-    expect(out).toMatch(/未提交/);
+    expect(out).toMatch(/没有删/);
     expect(existsSync(join(wt, 'dirty.txt'))).toBe(true);
     expect(existsSync(join(main, 'readme.txt'))).toBe(true);
   });
@@ -503,7 +505,7 @@ describe('git 登记消失不能当成目录已删', () => {
     dropAdmin(wt);
     const { code, out } = await runClose(main, branch);
     expect(code, out).not.toBe(0);
-    expect(out).toMatch(/停在：合并/);
+    expect(out).toMatch(/没有删/);
     expect(existsSync(join(wt, 'change.txt'))).toBe(true);
   });
 
@@ -538,5 +540,32 @@ describe('git 登记消失不能当成目录已删', () => {
     expect(existsSync(join(main, 'readme.txt')), out).toBe(true);
     expect(existsSync(link), out).toBe(true);
     expect(out).not.toContain('已删');
+  });
+
+  it('父目录是指到主检出外的联接：不认、不删外面的目录', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'close-4099-parent-'));
+    roots.push(base);
+    const main = join(base, 'main');
+    const outside = join(base, 'outside');
+    mkdirSync(main);
+    git(main, ['init', '-b', 'main']);
+    writeFileSync(join(main, 'readme.txt'), 'ok\n');
+    git(main, ['add', 'readme.txt']);
+    git(main, ['commit', '-m', 'init']);
+    mkdirSync(join(main, '.claude'));
+    mkdirSync(outside);
+    mkdirSync(join(outside, 'case'));
+    writeFileSync(join(outside, 'case', 'keep.txt'), 'keep\n');
+    symlinkSync(
+      outside,
+      join(main, '.claude', 'worktrees'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    expect(mod.conventionalWorktreePath(main, 'local/case')).toBeNull();
+    const { code, out } = await runClose(main, 'local/case');
+    expect(readFileSync(join(outside, 'case', 'keep.txt'), 'utf8'), out).toBe('keep\n');
+    expect(existsSync(join(main, '.claude', 'worktrees')), out).toBe(true);
+    expect(readFileSync(join(main, 'readme.txt'), 'utf8'), out).toBe('ok\n');
+    expect(code, out).toBe(0);
   });
 });

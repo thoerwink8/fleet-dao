@@ -6,8 +6,8 @@
 // fleet-ade 的 upstream 推送地址故意是 DISABLED，推它会让后面的删除全停（2026-11-16 #155）。不加开关。
 // 快进因历史无共同祖先失败时，报告「主检出没快进：历史无共同祖先」并继续删联接、工作树、分支、会话（这几步不依赖快进）。
 // 其余步骤失败就停、退出码非 0，并写明下一步怎么手工接。已经做成的步骤再跑会跳过（看仓库现状，不另记进度文件）。
-// git worktree remove 退出码是 0，或登记里已经没有这棵树，都不能当成目录已删。删完要核目标绝对路径不在。
-// 登记没了时只认主检出 .claude/worktrees/<分支去掉 local/ 的那一段> 这一个真实目录，不猜别的路径，不另记台账。
+// git worktree remove 退出码是 0，或登记里已经没有这棵树，都不能当成目录已删。登记还在的，删完要核目标绝对路径不在。
+// 登记没了时，只在物理路径确实落在主检出 .claude/worktrees/<分支去掉 local/ 的那一段> 下才收空目录。目录里还有东西就停，留给人，不按分支名猜归属，不另记台账。
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -260,7 +260,9 @@ function reportDepCounts(say, before) {
 }
 
 /**
- * git 已经不登记这棵树时，只认这一个绝对路径。多段、..、联接、不存在、或就是主检出，都回 null。
+ * git 已经不登记这棵树时，只认这一个绝对路径。
+ * 字符串上的 resolve/relative 不够：父目录是联接、指到主检出外面时，末级仍可能是普通目录。
+ * 父目录和这一级的真实路径都必须在主检出里面。多段、..、末级联接、不存在、或就是主检出，都回 null。
  * @param {string} main
  * @param {string} branch
  * @returns {string | null}
@@ -269,10 +271,11 @@ export function conventionalWorktreePath(main, branch) {
   if (!branch.startsWith('local/')) return null;
   const name = branch.slice('local/'.length);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return null;
-  const root = resolve(main, '.claude', 'worktrees');
+  const mainAbs = resolve(main);
+  const root = resolve(mainAbs, '.claude', 'worktrees');
   const candidate = resolve(root, name);
   if (relative(root, candidate) !== name) return null;
-  if (samePath(candidate, resolve(main))) return null;
+  if (samePath(candidate, mainAbs)) return null;
   let st;
   try {
     st = lstatSync(candidate);
@@ -280,139 +283,50 @@ export function conventionalWorktreePath(main, branch) {
     return null;
   }
   if (st.isSymbolicLink() || !st.isDirectory()) return null;
+  let mainReal;
+  let rootReal;
+  let candidateReal;
+  try {
+    mainReal = realpathSync(mainAbs);
+    rootReal = realpathSync(root);
+    candidateReal = realpathSync(candidate);
+  } catch {
+    return null;
+  }
+  const rootRel = relative(mainReal, rootReal);
+  if (rootRel === '' || rootRel.startsWith('..') || isAbsolute(rootRel)) return null;
+  if (relative(rootReal, candidateReal) !== name) return null;
   return candidate;
 }
 
 /**
- * 登记没了之后，对照分支的树看这个目录还有没有未提交内容。
- * 不用主仓索引：分支还没合进默认分支时，索引里没有这些文件，会把已提交内容误判成未跟踪。
- * 联接不跟进去。只读主仓，不修元数据。
- * @param {Exec} exec
- * @param {string} main
- * @param {string} worktree
- * @param {string} branch
- * @returns {{ ok: true, dirty: boolean } | { ok: false, detail: ExecResult }}
- */
-function leftoverDirty(exec, main, worktree, branch) {
-  const fail = (detail) => ({ ok: false, detail });
-  const listed = git(exec, main, ['ls-tree', '-r', '--name-only', branch]);
-  if (listed.code !== 0) return fail(listed);
-  const tree = new Set(
-    listed.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean),
-  );
-  const ignored = (rel) => {
-    const r = git(exec, main, ['check-ignore', '-q', '--', rel]);
-    if (r.code === 0) return true;
-    if (r.code === 1) return false;
-    return r;
-  };
-  /** @type {string[]} */
-  const files = [];
-  const walk = (dir) => {
-    /** @type {import('node:fs').Dirent[]} */
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch (err) {
-      return fail({ code: 1, stdout: '', stderr: err instanceof Error ? err.message : String(err) });
-    }
-    for (const ent of entries) {
-      if (ent.name === '.git') continue;
-      const p = join(dir, ent.name);
-      let st;
-      try {
-        st = lstatSync(p);
-      } catch (err) {
-        return fail({ code: 1, stdout: '', stderr: err instanceof Error ? err.message : String(err) });
-      }
-      const rel = relative(worktree, p).split('\\').join('/');
-      if (st.isSymbolicLink()) {
-        const skip = ignored(rel);
-        if (typeof skip !== 'boolean') return fail(skip);
-        if (!skip) return { ok: true, dirty: true };
-        continue;
-      }
-      if (st.isDirectory()) {
-        const sub = walk(p);
-        if (sub) return sub;
-        continue;
-      }
-      files.push(rel);
-    }
-    return null;
-  };
-  const walked = walk(worktree);
-  if (walked) return walked;
-  const seen = new Set();
-  for (const rel of files) {
-    const skip = ignored(rel);
-    if (typeof skip !== 'boolean') return fail(skip);
-    if (skip) continue;
-    seen.add(rel);
-    if (!tree.has(rel)) return { ok: true, dirty: true };
-    const hashed = git(exec, main, ['hash-object', `--path=${rel}`, '--', join(worktree, rel)]);
-    const blob = git(exec, main, ['rev-parse', '--verify', `${branch}:${rel}`]);
-    if (hashed.code !== 0 || blob.code !== 0) return fail(hashed.code !== 0 ? hashed : blob);
-    if (hashed.stdout.trim() !== blob.stdout.trim()) return { ok: true, dirty: true };
-  }
-  for (const rel of tree) {
-    if (!seen.has(rel)) return { ok: true, dirty: true };
-  }
-  return { ok: true, dirty: false };
-}
-
-/**
- * 删掉已经不在 git 登记里、且路径就是 conventionalWorktreePath 的那一个目录。
- * 先拆目录联接，再按 lstat 删，不进联接，也不删主检出。
+ * 删掉已经不在 git 登记里、物理路径核对通过、且里面没有条目的那一个目录。
+ * 有内容就停。不递归删，也不按分支名推断目录归属。
  * @param {string} main
  * @param {string} branch
  * @param {string} target
- * @returns {string[]} 拆掉的目录联接
+ * @returns {string[]}
  */
 export function removeUnregisteredWorktree(main, branch, target) {
   const expected = conventionalWorktreePath(main, branch);
   const abs = resolve(target);
   if (!expected || !samePath(abs, expected)) {
-    throw new Stop('删工作树', `只删 .claude/worktrees 下对得上分支的那一个目录，不会删 ${abs}`);
+    throw new Stop('删工作树', `只删 .claude/worktrees 下物理路径在主检出里的空目录，不会删 ${abs}`);
   }
   if (samePath(abs, resolve(main))) throw new Stop('删工作树', `目标是主检出 ${main}，不删`);
-  const unlinked = unlinkDirectoryLinks(abs);
-  if (unlinked.left.length > 0) {
-    throw new Stop('拆联接', `拆完还有目录联接，没有删目录：${unlinked.left.join('、')}`);
+  let names;
+  try {
+    names = readdirSync(abs);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Stop('删工作树', `读不了 ${abs}：${message}`);
   }
-  const removeDir = (dir) => {
-    /** @type {import('node:fs').Dirent[]} */
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new Stop('删工作树', `读不了 ${dir}：${message}`);
-    }
-    for (const ent of entries) {
-      const p = join(dir, ent.name);
-      let st;
-      try {
-        st = lstatSync(p);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Stop('删工作树', `看不了 ${p}：${message}`);
-      }
-      if (st.isSymbolicLink()) {
-        unlinkSync(p);
-        continue;
-      }
-      if (st.isDirectory()) removeDir(p);
-      else unlinkSync(p);
-    }
-    rmdirSync(dir);
-  };
-  removeDir(abs);
+  if (names.length > 0) {
+    throw new Stop('删工作树', `目录还有内容，没有删，留给人处理：${abs}`);
+  }
+  rmdirSync(abs);
   if (existsSync(abs)) throw new Stop('删工作树', `目录还在：${abs}`);
-  return unlinked.removed;
+  return [];
 }
 
 /**
@@ -718,18 +632,8 @@ export async function closeRun(argv, io = {}) {
       }
       if (names.length === 0) {
         say(`[核对] 空目录残留，里面没有文件：${worktree}`);
-      } else if (!branchExists) {
-        throw new Stop('核对', `目录还在：${worktree}。本地分支已经不在，对不上提交，没有删。`);
       } else {
-        const judged = leftoverDirty(exec, main, worktree, opt.branch);
-        if (!judged.ok) failExec('核对', judged.detail, '看残留目录有没有未提交改动');
-        if (judged.dirty) {
-          throw new Stop(
-            '核对',
-            `工作树有未提交改动，没有合并也没有删。先在 ${worktree} 提交或丢掉这些改动，再重跑：${again()}`,
-          );
-        }
-        say(`[核对] 工作树没有未提交改动：${worktree}`);
+        throw new Stop('核对', `目录还有内容，没有删，留给人处理：${worktree}`);
       }
     } else say('[核对] 没有这棵工作树，跳过未提交检查');
 
