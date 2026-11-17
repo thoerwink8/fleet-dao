@@ -27,10 +27,14 @@ interface DispatchMod {
   parseArgs(argv: string[]): Record<string, string>;
   pickSessionKey(parsed: unknown, want: { agent: string; workdir: string }): string | null;
   mirasimServer(env: NodeJS.ProcessEnv): string;
+  hostPort(env: NodeJS.ProcessEnv, explicit?: string, listDir?: (dir: string) => string[]): string;
   Stop: new (step: string, next: string, code?: number) => Error;
 }
 
 const mod = (await import(pathToFileURL(SCRIPT).href)) as DispatchMod;
+
+/** 固定宿主端口，不读本机真实的 ~/.mirasim/run（CI 上没有）。 */
+const ENV: NodeJS.ProcessEnv = { MIRASIM_HOST_PORT: '4970' };
 
 const roots: string[] = [];
 afterEach(() => {
@@ -68,14 +72,20 @@ describe('dispatch.mjs 参数缺失', () => {
       calls.push([cmd, ...args].join(' '));
       return { code: 0, stdout: '{}', stderr: '' };
     };
-    const code = mod.dispatchRun(['--title', 't', '--workdir', 'D:/repo'], { exec, server: 'unused.cjs' });
+    const code = mod.dispatchRun(['--title', 't', '--workdir', 'D:/repo'], {
+      exec,
+      server: 'unused.cjs',
+      env: ENV,
+    });
     expect(code).toBe(2);
     expect(calls).toEqual([]);
   });
 
   it('缺 --title、缺 --workdir 各自退出码 2', () => {
-    expect(mod.dispatchRun(['--workdir', 'D:/repo', '--prompt', 'p'], { server: 'unused.cjs' })).toBe(2);
-    expect(mod.dispatchRun(['--title', 't', '--prompt', 'p'], { server: 'unused.cjs' })).toBe(2);
+    expect(
+      mod.dispatchRun(['--workdir', 'D:/repo', '--prompt', 'p'], { server: 'unused.cjs', env: ENV }),
+    ).toBe(2);
+    expect(mod.dispatchRun(['--title', 't', '--prompt', 'p'], { server: 'unused.cjs', env: ENV })).toBe(2);
   });
 
   it('grok 快档 id 退出码 2，不调 prompt', () => {
@@ -85,10 +95,12 @@ describe('dispatch.mjs 参数缺失', () => {
       return { code: 0, stdout: '{}', stderr: '' };
     };
     for (const model of ['grok-4.7-high-fast', 'cursor/grok-4.7-build-fast@500k', 'grok-4.7-low-fast']) {
-      const code = mod.dispatchRun([...base, '--model', model], { exec, server: 'unused.cjs' });
+      const code = mod.dispatchRun([...base, '--model', model], { exec, server: 'unused.cjs', env: ENV });
       expect(code).toBe(2);
     }
-    expect(mod.dispatchRun([...base, '--model', 'grok-4.7'], { exec, server: 'unused.cjs' })).toBe(1);
+    expect(mod.dispatchRun([...base, '--model', 'grok-4.7'], { exec, server: 'unused.cjs', env: ENV })).toBe(
+      1,
+    );
     expect(calls).toHaveLength(1);
   });
 
@@ -116,7 +128,7 @@ describe('dispatch.mjs 拿不到会话号', () => {
         stderr: '',
       };
     };
-    const code = mod.dispatchRun(base, { exec, server: 'unused.cjs', now: 1 });
+    const code = mod.dispatchRun(base, { exec, server: 'unused.cjs', env: ENV, now: 1 });
     expect(code).toBe(1);
     expect(atoms).toEqual(['prompt']);
   });
@@ -127,7 +139,7 @@ describe('dispatch.mjs 拿不到会话号', () => {
       atoms.push(args[args.indexOf('call') + 1] ?? '');
       return { code: 0, stdout: '不是 json', stderr: '' };
     };
-    expect(mod.dispatchRun(base, { exec, server: 'unused.cjs', now: 1 })).toBe(1);
+    expect(mod.dispatchRun(base, { exec, server: 'unused.cjs', env: ENV, now: 1 })).toBe(1);
     expect(atoms).toEqual(['prompt']);
   });
 
@@ -161,6 +173,7 @@ describe('dispatch.mjs 拿不到会话号', () => {
     const code = mod.dispatchRun(base, {
       exec,
       server: 'unused.cjs',
+      env: ENV,
       now: 7,
       log: (line) => lines.push(line),
     });
@@ -188,6 +201,7 @@ describe('回报去向', () => {
       {
         exec,
         server: 'unused.cjs',
+        env: ENV,
         log: () => {},
       },
     );
@@ -205,7 +219,7 @@ describe('回报去向', () => {
     };
     const code = mod.dispatchRun(
       ['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p', '--agent', 'pi', '--report-to', 'claude:c'],
-      { exec, server: 'unused.cjs' },
+      { exec, server: 'unused.cjs', env: ENV },
     );
     expect(code).toBe(2);
     expect(calls).toEqual([]);
@@ -220,6 +234,7 @@ describe('回报去向', () => {
     const code = mod.dispatchRun(['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p'], {
       exec,
       server: 'unused.cjs',
+      env: ENV,
       records: [],
     });
     expect(code).toBe(2);
@@ -245,6 +260,7 @@ describe('回报去向', () => {
     const code = mod.dispatchRun(['--title', '【pi】一句', '--workdir', 'D:/repo', '--prompt', '照做'], {
       exec,
       server: 'unused.cjs',
+      env: ENV,
       now: 3,
       records: [
         {
@@ -297,5 +313,78 @@ describe('pickSessionKey', () => {
         { agent: 'pi', workdir: 'D:/repo' },
       ),
     ).toBeNull();
+  });
+});
+
+// #4075：不带端口的 ui-cli 会起一次性私服，子会话随命令退出一起死。端口必须找到，找不到就停、不调。
+describe('hostPort 宿主端口', () => {
+  const none = () => [] as string[];
+
+  it('显式 --port 优先于环境变量和 run 目录', () => {
+    expect(mod.hostPort({ MIRASIM_HOST_PORT: '5000' }, '6000', () => ['local-4970.token'])).toBe('6000');
+  });
+
+  it('没给 --port 用 MIRASIM_HOST_PORT', () => {
+    expect(mod.hostPort({ MIRASIM_HOST_PORT: '5000' }, undefined, () => ['local-4970.token'])).toBe('5000');
+  });
+
+  it('都没有时读 ~/.mirasim/run：有 4970 用 4970，不认别的文件', () => {
+    const dirs: string[] = [];
+    const list = (dir: string) => {
+      dirs.push(dir);
+      return ['local-14939.token', 'space-api.env', 'local-4970.token'];
+    };
+    expect(mod.hostPort({ USERPROFILE: 'C:/u', HOME: 'C:/u' }, undefined, list)).toBe('4970');
+    expect(dirs[0]?.replaceAll('\\', '/')).toBe('C:/u/.mirasim/run');
+  });
+
+  it('run 目录只有一个宿主：用它', () => {
+    expect(mod.hostPort({ HOME: '/h' }, undefined, () => ['local-4950.token'])).toBe('4950');
+  });
+
+  it('run 目录有多个宿主又没有 4970：退出码 2，要 --port', () => {
+    expect(() =>
+      mod.hostPort({ HOME: '/h' }, undefined, () => ['local-4950.token', 'local-4939.token']),
+    ).toThrow(/多个宿主/);
+  });
+
+  it('都找不到：抛退出码 2 的 Stop；读不了目录当成空', () => {
+    let caught: unknown;
+    try {
+      mod.hostPort({ HOME: '/h' }, undefined, () => {
+        throw new Error('ENOENT');
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.Stop);
+    expect((caught as { code: number }).code).toBe(2);
+    expect(() => mod.hostPort({ HOME: '/h' }, undefined, none)).toThrow(/找不到在跑的 mirasim/);
+  });
+
+  it('dispatch：找不到宿主就退出码 2，一次都不调 ui-cli', () => {
+    const { env } = homeWithServer();
+    const calls: string[] = [];
+    const exec = () => {
+      calls.push('called');
+      return { code: 0, stdout: '{}', stderr: '' };
+    };
+    expect(mod.dispatchRun(base, { exec, server: 'unused.cjs', env })).toBe(2);
+    expect(calls).toEqual([]);
+  });
+
+  it('dispatch：每次调 ui-cli 都带 --port', () => {
+    const argvs: string[][] = [];
+    const exec = (_cmd: string, args: string[]) => {
+      argvs.push(args);
+      return {
+        code: 0,
+        stdout: JSON.stringify({ frames: [{ type: 'accepted', sessionKey: 'kimi:x' }] }),
+        stderr: '',
+      };
+    };
+    expect(mod.dispatchRun(base, { exec, server: 'unused.cjs', env: ENV, log: () => {} })).toBe(0);
+    expect(argvs).toHaveLength(2);
+    for (const args of argvs) expect(args.slice(1, 4)).toEqual(['ui-cli', '--port', '4970']);
   });
 });

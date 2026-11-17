@@ -13,6 +13,7 @@ interface ReportMod {
     argv: string[],
     io?: {
       exec?: (cmd: string, args: string[]) => ExecResult;
+      env?: NodeJS.ProcessEnv;
       server?: string;
       now?: number;
       readFile?: (path: string) => string;
@@ -23,6 +24,8 @@ interface ReportMod {
 
 const mod = (await import(SCRIPT)) as ReportMod;
 const base = ['--to', 'claude:cmd', '--title', '#1', '--file', 'body.md'];
+/** 固定宿主端口，不读本机真实的 ~/.mirasim/run（CI 上没有）。 */
+const ENV: NodeJS.ProcessEnv = { MIRASIM_HOST_PORT: '4970' };
 
 describe('report.mjs', () => {
   it('缺 --file：退出码 2，一次都不发', () => {
@@ -33,6 +36,7 @@ describe('report.mjs', () => {
         return { code: 0, stdout: '{}', stderr: '' };
       },
       server: 'unused.cjs',
+      env: ENV,
     });
     expect(code).toBe(2);
     expect(calls).toEqual([]);
@@ -48,6 +52,7 @@ describe('report.mjs', () => {
     const code = mod.reportRun(base, {
       exec,
       server: 'unused.cjs',
+      env: ENV,
       now: 4,
       readFile: () => '做到哪',
       log: (line) => lines.push(line),
@@ -59,6 +64,6 @@ describe('report.mjs', () => {
 
   it('宿主回 ok 不是 true：退出码 1', () => {
     const exec = () => ({ code: 0, stdout: JSON.stringify({ ok: false }), stderr: '' });
-    expect(mod.reportRun(base, { exec, server: 'unused.cjs', readFile: () => 'x' })).toBe(1);
+    expect(mod.reportRun(base, { exec, server: 'unused.cjs', env: ENV, readFile: () => 'x' })).toBe(1);
   });
 });

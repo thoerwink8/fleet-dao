@@ -2,7 +2,7 @@
 // 正文放文件里，避免命令行引号被吞。发完打印 ok；失败退出码 1；参数不对退出码 2。
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { mirasimServer, realExec, Stop } from './dispatch.mjs';
+import { hostPort, mirasimServer, realExec, Stop } from './dispatch.mjs';
 
 export const USAGE = `用法：node report.mjs --to <会话key> --title <活名> --file <正文文件> [--port <端口>]
 把正文发给指挥会话。看到 ok 才算发出；失败退出码 1，参数不对退出码 2。`;
@@ -54,11 +54,10 @@ export function reportRun(argv, io = {}) {
     const opt = parseReportArgs(argv);
     const server = io.server ?? mirasimServer(env);
     const nodePath = io.nodePath ?? process.execPath;
-    const port = opt.port || (env.MIRASIM_HOST_PORT ? String(env.MIRASIM_HOST_PORT) : '');
+    const port = hostPort(env, opt.port);
     const body = read(opt.file);
     /** @type {string[]} */
-    const args = [server, 'ui-cli'];
-    if (port) args.push('--port', port);
+    const args = [server, 'ui-cli', '--port', port];
     args.push(
       'call',
       'prompt',
