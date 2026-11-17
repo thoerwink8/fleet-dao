@@ -65,10 +65,10 @@ export const MAX_TOTAL_BLOCKS = 200;
 /**
  * 指挥会话里已经成功做完的实质命令。调用方已排除失败、中断和后台壳。
  * 收结果：wait.mjs 的 pr / pr-head / main-ci / issue。
- * 合并：gh pr merge、git merge（不含 --abort / --quit，也不含 merge-base）、close.mjs。
+ * 合并：gh pr merge、git merge（不含 --abort / --quit，也不含 merge-base）、close.mjs、带 --apply 的 sweep.mjs。
  * 派工：pnpm work run、pnpm work rework、pnpm issue:new、dispatch.mjs、send.mjs。
  * 记进展：pnpm progress note。
- * 纯查询（pr view/checks/list/diff、progress read、work queue/runs、check-reports）、sleep 都不算。
+ * 纯查询（pr view/checks/list/diff、progress read、work queue/runs、check-reports、不带 --apply 的 sweep.mjs）、sleep 都不算。
  * @param {string} command
  */
 function substantiveCommand(command) {
@@ -78,6 +78,7 @@ function substantiveCommand(command) {
   if (/\bgit\s+merge(?:\s|$)/.test(command) && !/\bgit\s+merge\s+--(?:abort|quit)\b/.test(command))
     return true;
   if (/\bclose\.mjs\b/.test(command)) return true;
+  if (/\bsweep\.mjs\b/.test(command) && /\s--apply\b/.test(command)) return true;
   if (/\bpnpm\s+work\s+run\b/.test(command)) return true;
   if (/\bpnpm\s+work\s+rework\b/.test(command)) return true;
   if (/\bpnpm\s+issue:new\b/.test(command)) return true;

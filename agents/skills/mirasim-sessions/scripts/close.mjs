@@ -4,7 +4,8 @@
 // 地址和令牌只从这次要收的仓读（远端 URL、环境变量、仓本地 git config），脚本里不写任何主机名。
 // 推其余远端时，推送地址是 DISABLED（只读）或 git remote get-url --push 失败的远端跳过，输出写明跳过了哪个。
 // fleet-ade 的 upstream 推送地址故意是 DISABLED，推它会让后面的删除全停（2026-11-16 #155）。不加开关。
-// 每一步失败就停、退出码非 0，并写明下一步怎么手工接。已经做成的步骤再跑会跳过（看仓库现状，不另记进度文件）。
+// 快进因历史无共同祖先失败时，报告「主检出没快进：历史无共同祖先」并继续删联接、工作树、分支、会话（这几步不依赖快进）。
+// 其余步骤失败就停、退出码非 0，并写明下一步怎么手工接。已经做成的步骤再跑会跳过（看仓库现状，不另记进度文件）。
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -295,7 +296,7 @@ export function remoteHost(url) {
  * @param {string} repo
  * @param {NodeJS.ProcessEnv} env
  */
-function gitlabToken(exec, repo, env) {
+export function gitlabToken(exec, repo, env) {
   for (const key of ['GITLAB_TOKEN', 'GL_TOKEN', 'GITLAB_PRIVATE_TOKEN']) {
     const value = env[key];
     if (typeof value === 'string' && value.trim()) return value.trim();
@@ -309,7 +310,7 @@ function gitlabToken(exec, repo, env) {
  * @param {NodeJS.ProcessEnv} env
  * @param {string} host 从仓的远端读到的主机名
  */
-function gitlabApi(env, host) {
+export function gitlabApi(env, host) {
   const fromEnv = env.GITLAB_API_URL;
   if (typeof fromEnv === 'string' && fromEnv.trim()) return fromEnv.trim().replace(/\/$/, '');
   return `https://${host}/api/v4`;
@@ -342,11 +343,12 @@ export async function performMerge(o) {
     } catch {
       throw new Stop('合并', `gh pr view ${o.pr} 的输出不是 JSON`);
     }
-    if (state === 'MERGED') return { skipped: true, detail: `PR #${o.pr} 已经合并` };
+    if (state === 'MERGED') return { skipped: true, merged: true, detail: `PR #${o.pr} 已经合并` };
+    if (state === 'CLOSED') return { skipped: true, merged: false, detail: `PR #${o.pr} 已关闭，不合并` };
     if (state !== 'OPEN') throw new Stop('合并', `PR #${o.pr} 状态是 ${state || '认不出'}，没有合并`);
     const merged = o.exec('gh', ['pr', 'merge', o.pr, '--repo', o.slug, '--squash']);
     if (merged.code !== 0) failExec('合并', merged, `gh pr merge ${o.pr}`);
-    return { skipped: false, detail: `已 squash 合并 PR #${o.pr}` };
+    return { skipped: false, merged: true, detail: `已 squash 合并 PR #${o.pr}` };
   }
   if (!o.mr || !o.host || !o.project)
     throw new Stop('合并', '给了 --mr，但 GitLab 远端的主机或项目路径没读出来');
@@ -375,7 +377,8 @@ export async function performMerge(o) {
     }
   };
   const state = await read();
-  if (state === 'merged') return { skipped: true, detail: `MR !${o.mr} 已经合并` };
+  if (state === 'merged') return { skipped: true, merged: true, detail: `MR !${o.mr} 已经合并` };
+  if (state === 'closed') return { skipped: true, merged: false, detail: `MR !${o.mr} 已关闭，不合并` };
   if (state !== 'opened') throw new Stop('合并', `MR !${o.mr} 状态是 ${state || '认不出'}，没有合并`);
   const res = await o.fetch(`${base}/merge`, {
     method: 'POST',
@@ -390,10 +393,10 @@ export async function performMerge(o) {
     } catch {
       again = '';
     }
-    if (again === 'merged') return { skipped: false, detail: `MR !${o.mr} 已经合并` };
+    if (again === 'merged') return { skipped: false, merged: true, detail: `MR !${o.mr} 已经合并` };
     throw new Stop('合并', `合并 MR !${o.mr} 失败：HTTP ${res.status} ${text.trim().slice(0, 200)}`);
   }
-  return { skipped: false, detail: `已 squash 合并 MR !${o.mr}` };
+  return { skipped: false, merged: true, detail: `已 squash 合并 MR !${o.mr}` };
 }
 
 /**
@@ -401,7 +404,7 @@ export async function performMerge(o) {
  * @param {Exec} exec
  * @param {string} sessionKey
  */
-async function deleteSessionReal(env, exec, sessionKey) {
+export async function deleteSession(env, exec, sessionKey) {
   const home = env.USERPROFILE || env.HOME || homedir();
   const statePath = join(home, '.mirasim', 'app', 'state.json');
   let version = '';
@@ -570,6 +573,8 @@ export async function closeRun(argv, io = {}) {
       failExec('合并', contained, '看分支是否已在默认分支里');
     // 有合并证据才许删远端分支：分支已在默认分支里，或这次确认 PR/MR 已合并。
     let mergeProven = branchExists && contained.code === 0;
+    // PR/MR 已关闭且没合并：工作树和会话可以收，分支留下。不另加开关。
+    let closedUnmerged = false;
     if (mergeProven) say(`[合并] 跳过：${opt.branch} 已在默认分支 ${defaultBranch} 里`);
     else if (!branchExists && !opt.pr && !opt.mr) say('[合并] 跳过：本地分支已经不在，也没有 --pr/--mr');
     else if (!opt.pr && !opt.mr) {
@@ -590,11 +595,15 @@ export async function closeRun(argv, io = {}) {
         project: source?.host?.project,
       });
       say(`[合并] ${result.detail}`);
-      if (source) {
-        const againFetch = git(exec, main, ['fetch', source.name, defaultBranch]);
-        if (againFetch.code !== 0) failExec('合并', againFetch, `合并后 git fetch ${source.name}`);
+      if (result.merged === false) {
+        closedUnmerged = true;
+      } else {
+        if (source) {
+          const againFetch = git(exec, main, ['fetch', source.name, defaultBranch]);
+          if (againFetch.code !== 0) failExec('合并', againFetch, `合并后 git fetch ${source.name}`);
+        }
+        mergeProven = true;
       }
-      mergeProven = true;
     }
 
     if (!source) {
@@ -604,55 +613,72 @@ export async function closeRun(argv, io = {}) {
       const remoteTip = git(exec, main, ['rev-parse', upstream]);
       if (localTip.code !== 0) failExec('快进', localTip, `读本地 ${defaultBranch}`);
       if (remoteTip.code !== 0) failExec('快进', remoteTip, `读 ${upstream}`);
-      if (localTip.stdout.trim() !== remoteTip.stdout.trim()) {
-        const on = git(exec, main, ['rev-parse', '--abbrev-ref', 'HEAD']);
-        if (on.code !== 0) failExec('快进', on, '看主检出当前分支');
-        const mainDirty = git(exec, main, ['status', '--porcelain']);
-        if (mainDirty.code !== 0) failExec('快进', mainDirty, '看主检出有没有未提交改动');
-        if (mainDirty.stdout.trim()) {
-          throw new Stop(
-            '快进',
-            `主检出有未提交改动，没法快进到 ${defaultBranch}。提交或丢掉之后重跑：${again()}`,
-          );
+      let advanceOthers = localTip.stdout.trim() === remoteTip.stdout.trim();
+      if (!advanceOthers) {
+        const base = git(exec, main, ['merge-base', `refs/heads/${defaultBranch}`, upstream]);
+        const unrelated = base.code === 1 && !(base.stdout || '').trim() && !(base.stderr || '').trim();
+        if (unrelated) {
+          // 删联接、删工作树、删分支、删会话都不读主检出有没有快进。
+          say('主检出没快进：历史无共同祖先');
+        } else {
+          if (base.code !== 0) failExec('快进', base, '看主检出和远端有没有共同祖先');
+          const on = git(exec, main, ['rev-parse', '--abbrev-ref', 'HEAD']);
+          if (on.code !== 0) failExec('快进', on, '看主检出当前分支');
+          const mainDirty = git(exec, main, ['status', '--porcelain']);
+          if (mainDirty.code !== 0) failExec('快进', mainDirty, '看主检出有没有未提交改动');
+          if (mainDirty.stdout.trim()) {
+            throw new Stop(
+              '快进',
+              `主检出有未提交改动，没法快进到 ${defaultBranch}。提交或丢掉之后重跑：${again()}`,
+            );
+          }
+          if (on.stdout.trim() !== defaultBranch) {
+            const switched = git(exec, main, ['checkout', defaultBranch]);
+            if (switched.code !== 0) failExec('快进', switched, `切到 ${defaultBranch}`);
+          }
+          const ff = git(exec, main, ['merge', '--ff-only', upstream]);
+          if (ff.code !== 0) {
+            if (/unrelated histories/i.test(`${ff.stderr}\n${ff.stdout}`)) {
+              say('主检出没快进：历史无共同祖先');
+            } else failExec('快进', ff, `快进 ${defaultBranch}`);
+          } else {
+            const now = git(exec, main, ['rev-parse', '--short', 'HEAD']);
+            say(`[快进] 主检出已快进到 ${now.stdout.trim() || remoteTip.stdout.trim()}`);
+            advanceOthers = true;
+          }
         }
-        if (on.stdout.trim() !== defaultBranch) {
-          const switched = git(exec, main, ['checkout', defaultBranch]);
-          if (switched.code !== 0) failExec('快进', switched, `切到 ${defaultBranch}`);
-        }
-        const ff = git(exec, main, ['merge', '--ff-only', upstream]);
-        if (ff.code !== 0) failExec('快进', ff, `快进 ${defaultBranch}`);
-        const now = git(exec, main, ['rev-parse', '--short', 'HEAD']);
-        say(`[快进] 主检出已快进到 ${now.stdout.trim() || remoteTip.stdout.trim()}`);
       } else say(`[快进] 主检出的 ${defaultBranch} 已是 ${source.name} 上合并后的提交`);
 
-      const others = remotes.filter((r) => r.name !== source.name);
-      if (others.length === 0) say('[快进] 没有其余远端');
-      for (const other of others) {
-        // 推送地址故意设成 DISABLED（只读）或根本读不出来的远端推不出去。
-        // fleet-ade 的 upstream 就是这样：推它会 fatal: 'DISABLED' does not appear to be a git repository，
-        // 后面的删工作树、删分支、删会话全停（2026-11-16 #155）。跳过，不加开关。
-        const pushUrl = git(exec, main, ['remote', 'get-url', '--push', other.name]);
-        const pushTarget = pushUrl.stdout.trim();
-        if (pushUrl.code !== 0 || pushTarget === 'DISABLED') {
-          const why =
-            pushUrl.code !== 0
-              ? `读推送地址没成：${(pushUrl.stderr || pushUrl.stdout).trim().slice(0, 200)}`
-              : '推送地址是 DISABLED';
-          say(`[快进] 跳过 ${other.name}：${why}`);
-          continue;
+      if (advanceOthers) {
+        const others = remotes.filter((r) => r.name !== source.name);
+        if (others.length === 0) say('[快进] 没有其余远端');
+        for (const other of others) {
+          // 推送地址故意设成 DISABLED（只读）或根本读不出来的远端推不出去。
+          // fleet-ade 的 upstream 就是这样：推它会 fatal: 'DISABLED' does not appear to be a git repository，
+          // 后面的删工作树、删分支、删会话全停（2026-11-16 #155）。跳过，不加开关。
+          const pushUrl = git(exec, main, ['remote', 'get-url', '--push', other.name]);
+          const pushTarget = pushUrl.stdout.trim();
+          if (pushUrl.code !== 0 || pushTarget === 'DISABLED') {
+            const why =
+              pushUrl.code !== 0
+                ? `读推送地址没成：${(pushUrl.stderr || pushUrl.stdout).trim().slice(0, 200)}`
+                : '推送地址是 DISABLED';
+            say(`[快进] 跳过 ${other.name}：${why}`);
+            continue;
+          }
+          const pushed = git(exec, main, [
+            'push',
+            other.name,
+            `refs/heads/${defaultBranch}:refs/heads/${defaultBranch}`,
+          ]);
+          if (pushed.code !== 0) {
+            throw new Stop(
+              '快进',
+              `推 ${other.name} ${defaultBranch} 没成。其余步骤还没做。修好这个远端后重跑（已合并、已快进的会跳过）：${again()}\n${(pushed.stderr || pushed.stdout).trim().slice(0, 400)}`,
+            );
+          }
+          say(`[快进] 已推 ${other.name} ${defaultBranch}`);
         }
-        const pushed = git(exec, main, [
-          'push',
-          other.name,
-          `refs/heads/${defaultBranch}:refs/heads/${defaultBranch}`,
-        ]);
-        if (pushed.code !== 0) {
-          throw new Stop(
-            '快进',
-            `推 ${other.name} ${defaultBranch} 没成。其余步骤还没做。修好这个远端后重跑（已合并、已快进的会跳过）：${again()}\n${(pushed.stderr || pushed.stdout).trim().slice(0, 400)}`,
-          );
-        }
-        say(`[快进] 已推 ${other.name} ${defaultBranch}`);
       }
     }
 
@@ -702,14 +728,18 @@ export async function closeRun(argv, io = {}) {
 
     const localStill = git(exec, main, ['show-ref', '--verify', '--quiet', wantRef]).code === 0;
     if (localStill) {
-      if (!mergeProven)
-        throw new Stop('删工作树', `没有合并证据，不删本地分支 ${opt.branch}。重跑：${again()}`);
-      const stillIn = git(exec, main, ['merge-base', '--is-ancestor', opt.branch, upstream]);
-      if (stillIn.code !== 0 && stillIn.code !== 1) failExec('删工作树', stillIn, '删分支前再确认是否已合入');
-      const flag = stillIn.code === 0 ? '-d' : '-D';
-      const dropped = git(exec, main, ['branch', flag, opt.branch]);
-      if (dropped.code !== 0) failExec('删工作树', dropped, `删本地分支 ${opt.branch}`);
-      say(`[删工作树] 已删本地分支 ${opt.branch}`);
+      if (!mergeProven) {
+        if (closedUnmerged) say(`[删工作树] 本地分支 ${opt.branch} 没合并，留下`);
+        else throw new Stop('删工作树', `没有合并证据，不删本地分支 ${opt.branch}。重跑：${again()}`);
+      } else {
+        const stillIn = git(exec, main, ['merge-base', '--is-ancestor', opt.branch, upstream]);
+        if (stillIn.code !== 0 && stillIn.code !== 1)
+          failExec('删工作树', stillIn, '删分支前再确认是否已合入');
+        const flag = stillIn.code === 0 ? '-d' : '-D';
+        const dropped = git(exec, main, ['branch', flag, opt.branch]);
+        if (dropped.code !== 0) failExec('删工作树', dropped, `删本地分支 ${opt.branch}`);
+        say(`[删工作树] 已删本地分支 ${opt.branch}`);
+      }
     } else say(`[删工作树] 本地分支 ${opt.branch} 已经不在`);
 
     for (const remote of remotes) {
@@ -725,6 +755,10 @@ export async function closeRun(argv, io = {}) {
         continue;
       }
       if (!mergeProven) {
+        if (closedUnmerged) {
+          say(`[删工作树] ${remote.name} 上的 ${opt.branch} 没合并，留下`);
+          continue;
+        }
         throw new Stop(
           '删工作树',
           `${remote.name} 上还有 ${opt.branch}，但没有合并证据（不在默认分支里，也没有已合并的 --pr/--mr），没有删它。带上号再重跑：${again()}`,
@@ -743,7 +777,7 @@ export async function closeRun(argv, io = {}) {
     if (!opt.session) {
       say('[删会话] 不适用');
     } else {
-      const drop = io.deleteSession ?? ((key) => deleteSessionReal(env, exec, key));
+      const drop = io.deleteSession ?? ((key) => deleteSession(env, exec, key));
       const result = await drop(opt.session);
       say(`[删会话] ${result.detail}`);
     }
