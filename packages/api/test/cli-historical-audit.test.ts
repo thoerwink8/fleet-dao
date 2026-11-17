@@ -143,6 +143,72 @@ for (const backend of ['memory', 'pg'] as const)
       }
     });
 
+    it('人合、缺队列回执：审计记 historical_unproven 和精确身份，不写合并账，不写成条件已消失', async () => {
+      const head = 'badaddeb46c86839951977fc1597111c6b8eff02';
+      const mergeCommit = '0d428e78b47b79de6cf95225b4f2bbee25df31e0';
+      const humanPull = {
+        ...pull,
+        head: { sha: head },
+        merge_commit_sha: mergeCommit,
+        merged_by: { id: 211872110, login: 'thoerwink8' },
+      };
+      const body = {
+        ...input,
+        head,
+        evidence: 'GitHub 现读合并人是 thoerwink8，不是引擎机器人',
+        gaps: '没有正常队列合并记录的目标与完整回执，补账不能证明经过队列',
+        responsibility: '后续仍由 ops 保留这条缺口，点处理只表示看过',
+      };
+      const s = await setup(body);
+      s.read.mockImplementation(async (_repo: string, path: string) =>
+        path.startsWith('pulls/') ? structuredClone(humanPull) : structuredClone(issue),
+      );
+      expect(await s.run(), s.err.join()).toBe(0);
+      const target = `notification:${input.notificationId}`;
+      const audits = await s.store.listAudit({ target, limit: 100 });
+      expect(audits.items).toHaveLength(1);
+      expect(audits.items[0]).toMatchObject({
+        action: 'notification.historical_audit',
+        after: {
+          conclusion: 'historical_unproven',
+          evidence: body.evidence,
+          gaps: body.gaps,
+          responsibility: body.responsibility,
+          head,
+          pr: input.pr,
+          repo,
+          github: { head, mergeCommit, mergedBy: humanPull.merged_by },
+        },
+      });
+      const recorded = JSON.stringify(audits.items[0]?.after);
+      expect(recorded).not.toContain('条件已消失');
+      expect(recorded).not.toContain('条件不再成立');
+      expect(audits.items[0]?.action).toBe('notification.historical_audit');
+      expect(s.out.join()).toContain('历史合并队列仍未证明');
+      expect(s.out.join()).not.toContain('条件已消失');
+      expect((await s.notification())?.body).toBe(originalBody);
+      if (backend === 'pg') expect(await t.db.select().from(idempotencyKeys)).toEqual([]);
+    });
+
+    it('人合这次现读失败：不处置、不记成功审计', async () => {
+      const s = await setup({
+        ...input,
+        head: 'badaddeb46c86839951977fc1597111c6b8eff02',
+        evidence: '还没读到 GitHub',
+        gaps: '合并人与队列回执都未核实',
+        responsibility: '读失败保持未知，不清这条通知',
+      });
+      s.read.mockImplementation(async () => {
+        throw new Error('GitHub unavailable');
+      });
+      expect(await s.run()).toBe(1);
+      expect((await s.notification())?.resolvedAt).toBeUndefined();
+      expect(
+        (await s.store.listAudit({ target: `notification:${input.notificationId}`, limit: 100 })).items,
+      ).toEqual([]);
+      expect(s.out).toEqual([]);
+    });
+
     it.each(['head', 'repo', 'number', 'read_failed', 'issue_pr', 'issue_wrong', 'issue_unrelated'] as const)(
       '%s 未核实不处置、不记成功审计',
       async (mode) => {

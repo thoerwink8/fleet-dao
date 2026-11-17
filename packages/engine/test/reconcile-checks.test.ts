@@ -400,6 +400,80 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(part.unchecked).toEqual([]);
   });
 
+  it('人合且缺队列回执：报 historical_unproven，不撤；号和 fleet/ 分支都不豁免。完整回执仍按原规则撤', async () => {
+    const key = prAlertKey('thoerwink8', 'fleet-dao', 4044);
+    const proven = openAlert(prAlertKey('thoerwink8', 'fleet-dao', 10));
+    const hand = {
+      headRef: 'fleet/4042-t01a1e34a',
+      openedByEngine: false,
+      mergedByEngine: false,
+    };
+    const w = world({
+      open: [proven],
+      repos: [{ owner: 'thoerwink8', name: 'fleet-dao' }],
+      audit: async () =>
+        audit(
+          [
+            {
+              number: 4044,
+              kind: 'not_merged_by_engine',
+              text: '#4044 不是「引擎」机器人合的（合并人 thoerwink8）',
+              ...hand,
+            },
+            {
+              number: 4044,
+              kind: 'no_merge_record',
+              text: '#4044 合并了，但账上没有合并队列的合并记录',
+              ...hand,
+            },
+          ],
+          { cleanPrs: [4044, 10] },
+        ),
+    });
+    await checkMergedPrs(w.deps);
+    const alert = w.inserted.find((i) => i.dedupeKey === key);
+    expect(alert?.created).toBe(true);
+    expect(alert?.body).toContain('historical_unproven');
+    expect(alert?.body).toContain('fleet-api historical-audit');
+    expect(alert?.body).toContain('合并人 thoerwink8');
+    expect(alert?.body).toContain('不是条件已消失');
+    expect(alert?.body).not.toContain('条件不再成立');
+    expect(w.resolved).toEqual([{ dedupeKey: proven.dedupeKey, why: MERGE_RECORD_LANDED_WHY }]);
+    await checkMergedPrs(w.deps);
+    expect(w.resolved.map((r) => r.dedupeKey)).toEqual([proven.dedupeKey]);
+    expect(w.inserted.filter((i) => i.dedupeKey === key).map((i) => i.created)).toEqual([true, false]);
+  });
+
+  it('列提醒失败：缺证据的 reconcile:pr 不撤，记没查成', async () => {
+    const key = prAlertKey('thoerwink8', 'fleet-dao', 4044);
+    const w = world({
+      repos: [{ owner: 'thoerwink8', name: 'fleet-dao' }],
+      listOpen: async () => {
+        throw new Error('库连不上');
+      },
+      audit: async () =>
+        audit(
+          [
+            {
+              number: 4044,
+              kind: 'no_merge_record',
+              text: '#4044 合并了，但账上没有合并队列的合并记录',
+              headRef: 'fleet/4042-t01a1e34a',
+            },
+          ],
+          { cleanPrs: [4044] },
+        ),
+    });
+    const part = await checkMergedPrs(w.deps);
+    expect(part.unchecked).toEqual([
+      '列没处理的提醒没成，合并记录后来记上了的 reconcile:pr 这一轮不撤：库连不上',
+    ]);
+    expect(w.resolved).toEqual([]);
+    expect(w.inserted.map((i) => i.dedupeKey)).toEqual([key]);
+    expect(w.inserted[0]?.body).toContain('historical_unproven');
+    expect(w.inserted[0]?.body).toContain('不是条件已消失');
+  });
+
   it('开着的 reconcile:pr 开了超过 7 天：回看最多往回 7 天（再老的由历史事实那一处收）', async () => {
     const old = openAlert('reconcile:pr:acme/widgets#3', {
       createdAt: new Date(NOW.getTime() - 10 * 24 * 60 * 60_000),

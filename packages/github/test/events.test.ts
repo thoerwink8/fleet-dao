@@ -704,6 +704,95 @@ describe('对账与补漏', () => {
     expect(await ledger.idempotency.peek(mergeKey(repo, missing.number, C))).toEqual(backfill);
   });
 
+  it('人合的 fleet/ 机器人 PR：完整队列回执才进 cleanPrs；backfill 不晋升，读失败留未知', async () => {
+    const { gh, fake, ledger } = setup();
+    const head = sha('4');
+    const mergeCommit = sha('0');
+    const byHand = fake.addPull({
+      user: fake.bots.agent,
+      head: { ref: 'fleet/4042-t01a1e34a', sha: head },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:10:00Z',
+      merge_commit_sha: mergeCommit,
+      merged_by: { login: 'thoerwink8', id: 211872110, type: 'User' },
+    });
+    const proven = fake.addPull({
+      user: fake.bots.agent,
+      head: { ref: 'fleet/1-proven', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.bots.engine,
+    });
+    const provenKey = mergeKey(repo, proven.number, A);
+    await ledger.idempotency.claim(
+      { key: provenKey, action: 'github.merge_pr', target: `acme/widgets#${proven.number}` },
+      new Date(),
+    );
+    await ledger.idempotency.complete(
+      provenKey,
+      { number: proven.number, head: A, mergeCommit: sha('c'), mergedBy: fake.bots.engine.login },
+      new Date(),
+    );
+    const { intake } = fakeIntake(() => true);
+    const rec = gh.reconciler({ intake, pollDeliveryId });
+    const since = new Date('2026-09-25T00:00:00Z');
+    const report = await rec.auditMergedPrs('acme/widgets', since);
+    const handKinds = report.findings.filter((f) => f.number === byHand.number).map((f) => f.kind);
+    expect(report.cleanPrs).toEqual([proven.number]);
+    expect(handKinds.sort()).toEqual(
+      ['backfill_merge_record', 'mirror_fixed', 'no_merge_record', 'not_merged_by_engine'].sort(),
+    );
+    expect(report.engineCiTimingsPrs ?? []).not.toContain(byHand.number);
+    expect(report.engineChangelogPrs ?? []).not.toContain(byHand.number);
+    const handText = report.findings
+      .filter((f) => f.number === byHand.number)
+      .map((f) => f.text)
+      .join('\n');
+    expect(handText).toContain('合并人 thoerwink8');
+    expect(handText).not.toContain('条件已消失');
+    expect(handText).not.toContain('条件不再成立');
+    const backfill = await ledger.idempotency.peek(mergeKey(repo, byHand.number, head));
+    expect(backfill).toMatchObject({
+      action: 'github.merge_pr_backfill',
+      target: `acme/widgets#${byHand.number}`,
+      result: { number: byHand.number, head, mergeCommit, mergedBy: 'thoerwink8' },
+    });
+    const again = await rec.auditMergedPrs('acme/widgets', since);
+    expect(again.cleanPrs).toEqual([proven.number]);
+    expect(again.findings.some((f) => f.number === byHand.number && f.kind === 'backfill_merge_record')).toBe(
+      false,
+    );
+    expect(again.findings.some((f) => f.number === byHand.number && f.kind === 'no_merge_record')).toBe(true);
+    expect(await ledger.idempotency.peek(mergeKey(repo, byHand.number, head))).toEqual(backfill);
+
+    let claims = 0;
+    const peek = ledger.idempotency.peek.bind(ledger.idempotency);
+    const claim = ledger.idempotency.claim.bind(ledger.idempotency);
+    ledger.idempotency.peek = async () => {
+      throw new Error('幂等账读失败');
+    };
+    ledger.idempotency.claim = async () => {
+      claims += 1;
+      return { status: 'claimed' };
+    };
+    const failed = await rec.auditMergedPrs('acme/widgets', since);
+    ledger.idempotency.peek = peek;
+    ledger.idempotency.claim = claim;
+    expect(failed).toMatchObject({ outcome: 'partial', cleanPrs: [] });
+    expect(failed.findings).toContainEqual(
+      expect.objectContaining({
+        number: byHand.number,
+        kind: 'unchecked',
+        text: expect.stringContaining('幂等账读失败'),
+      }),
+    );
+    expect(claims).toBe(0);
+    expect(await ledger.idempotency.peek(mergeKey(repo, byHand.number, head))).toEqual(backfill);
+  });
+
   it('真实队列占用的同 head 回执晚到：先报风险，完成后才进入 cleanPrs', async () => {
     const { gh, fake, ledger } = setup();
     const pr = fake.addPull({
