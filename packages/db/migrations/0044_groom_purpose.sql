@@ -1,1 +1,0 @@
-ALTER TYPE "public"."stage_kind" ADD VALUE 'groom';

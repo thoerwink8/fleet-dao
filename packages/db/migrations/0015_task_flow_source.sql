@@ -1,2 +1,0 @@
-ALTER TABLE "tasks" ADD COLUMN "flow_source" text;--> statement-breakpoint
-ALTER TABLE "tasks" ADD CONSTRAINT "tasks_flow_source_known" CHECK ("tasks"."flow_source" is null or "tasks"."flow_source" in ('project', 'org_default'));

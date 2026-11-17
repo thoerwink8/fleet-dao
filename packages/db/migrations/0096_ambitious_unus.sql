@@ -1,1 +1,0 @@
-ALTER TABLE "task_execution_controls" ADD CONSTRAINT "task_execution_controls_task_epoch_unique" UNIQUE("task_id","coverage_epoch");

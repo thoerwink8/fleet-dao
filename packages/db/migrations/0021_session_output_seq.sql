@@ -1,1 +1,0 @@
-ALTER TABLE "session_runs" ADD COLUMN "output_seq" integer;

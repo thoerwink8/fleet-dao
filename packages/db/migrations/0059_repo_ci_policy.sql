@@ -1,2 +1,0 @@
-ALTER TABLE "repos" ADD COLUMN "ci_policy" text DEFAULT 'force' NOT NULL;--> statement-breakpoint
-ALTER TABLE "repos" ADD CONSTRAINT "repos_ci_policy_known" CHECK ("repos"."ci_policy" in ('force', 'off'));

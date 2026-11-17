@@ -1,1 +1,0 @@
-CREATE INDEX "audit_log_issue_events_idx" ON "audit_log" USING btree ("id") WHERE "audit_log"."target" like 'issue:%';

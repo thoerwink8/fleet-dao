@@ -1,1 +1,0 @@
-ALTER TABLE "runs" ADD COLUMN "route_why" text;
