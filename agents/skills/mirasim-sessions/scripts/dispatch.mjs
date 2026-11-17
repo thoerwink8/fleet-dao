@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const USAGE = `用法：node dispatch.mjs --title <侧栏名> --workdir <目录> --prompt <交代> [--agent <名>] [--model <名>] [--effort <档>] [--route local|cloud] [--port <端口>] [--report-to <会话key>]
 派活并立刻改名，只调一次 prompt。交代末尾自动加上回报去向。找不到指挥会话退出码 2、一次都不派；拿不到会话号退出码 1、不重派；参数不对退出码 2。
 宿主端口：--port → 环境变量 MIRASIM_HOST_PORT → ~/.mirasim/run/local-<端口>.token（有 4970 优先）；都没有就退出码 2、不调 ui-cli（不带端口的 ui-cli 会起一次性私服，子会话随命令退出一起死）。
-没给 --report-to 时，在本机 claude 会话目录里找正在跑、工作目录是 fleet-dao 仓或它的 .claude/worktrees/<名>、标题不是无人值守心跳的会话，用最近更新的那一个。`;
+没给 --report-to、环境变量 MIRASIM_SESSION_KEY 也不是会话 key 时，才在本机 claude 会话目录里猜：正在跑、工作目录是 fleet-dao 仓根或其 .claude/worktrees/<名>、标题不是无人值守心跳，多个取最近更新。猜不到就退出码 2，并写明要补 --report-to。`;
 
 /** 和本脚本放在一起的回报脚本，换机器不写死盘符。 */
 export const REPORT_SCRIPT = fileURLToPath(new URL('./report.mjs', import.meta.url));
@@ -185,30 +185,48 @@ function isRecord(value) {
   return Boolean(value) && typeof value === 'object';
 }
 
+/** mirasim 起会话时写上的本会话 key，形如 claude:<会话号>。 */
+const SESSION_KEY = /^[a-z0-9]+:[\w-]{4,128}$/;
+
 /**
- * fleet-dao 仓本身（路径末段是 fleet-dao），或路径里有 fleet-dao/.claude/worktrees/ 的工作树。
- * @param {string} workdir 已去掉末尾斜杠
+ * 命令行或环境变量里已经写明的回报去向。都没有才返回空串，交给猜。
+ * --report-to 优先于 MIRASIM_SESSION_KEY。两个都是原来就有的入口，不是新开关。
+ * @param {string | undefined} explicit
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
  */
-function isFleetDaoTree(workdir) {
-  const norm = workdir.replace(/\\/g, '/');
-  const last = norm.split('/').pop() ?? '';
-  if (last.toLowerCase() === 'fleet-dao') return true;
+export function explicitReportTo(explicit, env) {
+  const cli = typeof explicit === 'string' ? explicit.trim() : '';
+  if (cli) return cli;
+  const key = typeof env.MIRASIM_SESSION_KEY === 'string' ? env.MIRASIM_SESSION_KEY.trim() : '';
+  return SESSION_KEY.test(key) ? key : '';
+}
+
+/**
+ * 指挥会话的工作目录：末段是 fleet-dao，或路径里有 fleet-dao/.claude/worktrees/。别的仓不算。
+ * @param {string} workdir
+ * @returns {boolean}
+ */
+export function isCommanderWorkdir(workdir) {
+  const norm = workdir.replace(/[\\/]+$/, '').replace(/\\/g, '/');
+  if (/(?:^|\/)fleet-dao$/i.test(norm)) return true;
   return /(?:^|\/)fleet-dao\/\.claude\/worktrees\//i.test(norm);
 }
 
 /**
- * 指挥会话：正在跑、工作目录是 fleet-dao 仓或它的 .claude/worktrees/<名>、标题不是无人值守心跳。多个时取 updatedAt 最大的。
+ * 没给显式回报去向时才猜。正在跑、工作目录是 fleet-dao 仓或其工作树、标题不是无人值守心跳。
+ * 多个时取 updatedAt 最大的。
  * @param {unknown[]} records
  * @returns {string | null}
  */
 export function findCommander(records) {
   const matched = records.filter(isRecord).filter((item) => {
     const title = typeof item.title === 'string' ? item.title : '';
-    const workdir = typeof item.workdir === 'string' ? item.workdir.replace(/[\\/]+$/, '') : '';
+    const workdir = typeof item.workdir === 'string' ? item.workdir : '';
     return (
       item.runState === 'running' &&
       !title.startsWith('无人值守心跳') &&
-      isFleetDaoTree(workdir) &&
+      isCommanderWorkdir(workdir) &&
       typeof item.sessionId === 'string' &&
       item.sessionId.length > 0
     );
@@ -217,6 +235,20 @@ export function findCommander(records) {
   const id = matched[0]?.sessionId;
   return typeof id === 'string' ? `claude:${id}` : null;
 }
+
+/**
+ * 显式去向优先。loadRecords 只有没给去向时才调用，避免给了 --report-to 仍去扫会话目录。
+ * @param {string | undefined} explicit
+ * @param {NodeJS.ProcessEnv} env
+ * @param {() => unknown[]} loadRecords
+ * @returns {string | null}
+ */
+export function resolveReportTo(explicit, env, loadRecords) {
+  return explicitReportTo(explicit, env) || findCommander(loadRecords());
+}
+
+export const REPORT_TO_HOWTO =
+  '补 --report-to <会话key>（mirasim 托管的会话会带环境变量 MIRASIM_SESSION_KEY，脚本会读）';
 
 /**
  * 读本机 claude 会话目录。目录不在就当没有。
@@ -354,9 +386,9 @@ export function dispatchRun(argv, io = {}) {
     }
     // omp 的模型由它自己的配置（~/.omp/agent/config.yml 的角色）定，不经 ACP 的 set_model：
     // 给 kimi 传 model 会报 Unknown ACP ext method: session/set_model（2026-11-16 实测），所以不传。
-    const reportTo = opt['report-to'] || findCommander(io.records ?? readCommanderRecords(env));
+    const reportTo = resolveReportTo(opt['report-to'], env, () => io.records ?? readCommanderRecords(env));
     if (!reportTo) {
-      throw new Stop('派活', '找不到指挥会话，加 --report-to <会话key>；这次不派，免得做完没处回报', 2);
+      throw new Stop('派活', `找不到指挥会话。${REPORT_TO_HOWTO}；这次不派，免得做完没处回报`, 2);
     }
     const server = io.server ?? mirasimServer(env);
     const nodePath = io.nodePath ?? process.execPath;

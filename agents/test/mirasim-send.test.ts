@@ -1,5 +1,8 @@
 // send.mjs：给在跑的会话发后续消息，必须带回报去向；找不到指挥会话就不发。
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 
 interface Mod {
   sendRun(
@@ -20,6 +23,11 @@ const mod = (await import(
 
 /** 固定宿主端口，不读本机真实的 ~/.mirasim/run（CI 上没有）。 */
 const ENV: NodeJS.ProcessEnv = { MIRASIM_HOST_PORT: '4970' };
+
+const roots: string[] = [];
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe('send.mjs', () => {
   it('消息后面追加「回报，必做」和指挥会话号，发给指定会话', () => {
@@ -57,6 +65,64 @@ describe('send.mjs', () => {
     });
     expect(code).toBe(2);
     expect(calls).toEqual([]);
+  });
+
+  it('没给 --report-to 时用 MIRASIM_SESSION_KEY', () => {
+    const sent: { prompt?: string }[] = [];
+    const exec = (_c: string, args: string[]) => {
+      sent.push(JSON.parse(args[args.indexOf('--args') + 1] ?? '{}'));
+      return { code: 0, stdout: '{"ok":true}', stderr: '' };
+    };
+    const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md'], {
+      exec,
+      server: 'unused.cjs',
+      env: { ...ENV, MIRASIM_SESSION_KEY: 'claude:from-env' },
+      records: [],
+      readFile: () => '接着做',
+      log: () => {},
+    });
+    expect(code).toBe(0);
+    expect(sent[0]?.prompt).toContain('claude:from-env');
+  });
+
+  it('--report-to 盖过环境变量', () => {
+    const sent: { prompt?: string }[] = [];
+    const exec = (_c: string, args: string[]) => {
+      sent.push(JSON.parse(args[args.indexOf('--args') + 1] ?? '{}'));
+      return { code: 0, stdout: '{"ok":true}', stderr: '' };
+    };
+    const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md', '--report-to', 'claude:from-cli'], {
+      exec,
+      server: 'unused.cjs',
+      env: { ...ENV, MIRASIM_SESSION_KEY: 'claude:from-env' },
+      records: [],
+      readFile: () => '接着做',
+      log: () => {},
+    });
+    expect(code).toBe(0);
+    expect(sent[0]?.prompt).toContain('claude:from-cli');
+    expect(sent[0]?.prompt).not.toContain('claude:from-env');
+  });
+
+  it('给了 --report-to，会话目录读不了也照发', () => {
+    const root = mkdtempSync(join(tmpdir(), 'send-4087-'));
+    roots.push(root);
+    mkdirSync(join(root, '.mirasim', 'sessions'), { recursive: true });
+    writeFileSync(join(root, '.mirasim', 'sessions', 'claude'), 'not-a-dir');
+    const calls: string[] = [];
+    const exec = () => {
+      calls.push('called');
+      return { code: 0, stdout: '{"ok":true}', stderr: '' };
+    };
+    const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md', '--report-to', 'claude:from-cli'], {
+      exec,
+      server: 'unused.cjs',
+      env: { MIRASIM_HOST_PORT: '4970', USERPROFILE: root, HOME: root },
+      readFile: () => '接着做',
+      log: () => {},
+    });
+    expect(code).toBe(0);
+    expect(calls).toEqual(['called']);
   });
 
   it('缺 --file：退出码 2', () => {

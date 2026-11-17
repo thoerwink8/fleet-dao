@@ -15,7 +15,7 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 ## 开会话
 
 - 派活一律用本技能目录里的 `scripts/dispatch.mjs`，不要自己先 `prompt` 再 `renameSession`：漏改名侧栏看不懂，多调一次 `prompt` 会再开一个会话（2026-11-15 两次漏改名、一次重派）。一条命令只调一次 `prompt`，拿到会话号立刻改名。改名用 prompt 接受帧上的会话号；没有接受帧才在同 agent、同目录里取最新的。拿不到会话号就退出码 1、不重派。
-- 派活交代必须带回报去向。不给 `--report-to` 时，脚本在本机 claude 会话目录里找正在跑、工作目录以 fleet-dao 结尾、标题不是无人值守心跳的那一个（多个取最近更新），把「回报，必做」追加到交代末尾，指到同目录的 `scripts/report.mjs`。找不到指挥会话就退出码 2，一次都不派。
+- 派活交代必须带回报去向。`--report-to` 优先；没给时读本进程的 `MIRASIM_SESSION_KEY`（mirasim 起会话就写上，形如 `claude:<会话号>`）。两个都没有才猜：本机 claude 会话里正在跑、工作目录是 fleet-dao 仓根或其 `.claude/worktrees/<名>`、标题不是无人值守心跳的那一个（多个取最近更新）。猜不到就退出码 2，一次都不派，并写明要补 `--report-to`。心跳会话自己的 key 不是指挥会话，心跳里派活要显式 `--report-to` 指向指挥会话。
 
 ```
 node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <仓根> --prompt "<交代>" [--report-to <指挥会话key>]
@@ -34,7 +34,7 @@ node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <仓
   1. 自己干，不派子代理。
   2. 一件活一棵工作树 `.claude/worktrees/<单号>-<短名>`、分支 `local/<单号>-<短名>`；不往别的会话的分支推，依赖别人的 PR 就基于那个分支开自己的，对方合了再 rebase。
   3. PR 开好、本机检查过了就停，不开自动合并、不自己合，也不等 CI；`pr:open` 顺手开了自动合并就 `gh pr merge <PR> --disable-auto` 摘掉。合并归验收的人，不然没验收的改动会先进主线（#3950 就是先合了、返工只能另开 #3951，还带红了主线 #3953）。
-  4. 回报去向由 `scripts/dispatch.mjs` 写进交代，不要再手写一套。做完或卡住时，把正文写进文件，运行交代里的 `scripts/report.mjs --to <指挥会话key> --title <活名> --file <正文>`，看到输出 ok 才算发出。正文写做到哪、PR 号、头提交、`git ls-remote` 和 `gh pr view` 的输出、验证命令和真实结果、没做的和原因。不许写「CI 绿了再回报」然后收轮。命令超过约 60 秒会被钩子自动转后台：让会话把测试按单个文件分开跑、每条命令尽量 60 秒内，同一条查看命令最多连发 2 次，连续 8 次相同调用系统会停掉整轮（11-16 #11 实测），停了就既不提交也不回报；不许丢到后台再收轮。会话自己回报覆盖不了它自己被停、崩溃、模型报错（11-16 还有一例开场 422），所以每轮巡检先跑 `node scripts/sweep.mjs`（只列可收、要人看、孤儿，不加 `--apply`），再跑 `node scripts/check-reports.mjs`，有 ALERT 行就读该会话最后一轮，插队让它接着做或重派。
+  4. 回报去向由 `scripts/dispatch.mjs` 写进交代，不要再手写一套。做完或卡住时，把正文写进文件，运行交代里的 `scripts/report.mjs --to <指挥会话key> --title <活名> --file <正文>`，看到输出 ok 才算发出。正文写做到哪、PR 号、头提交、`git ls-remote` 和 `gh pr view` 的输出、验证命令和真实结果、没做的和原因。不许写「CI 绿了再回报」然后收轮。命令超过约 60 秒会被钩子自动转后台：让会话把测试按单个文件分开跑、每条命令尽量 60 秒内，同一条查看命令最多连发 2 次，连续 8 次相同调用系统会停掉整轮（11-16 #11 实测），停了就既不提交也不回报；不许丢到后台再收轮。会话自己回报覆盖不了它自己被停、崩溃、模型报错（11-16 还有一例开场 422），所以每轮巡检先跑 `node scripts/sweep.mjs --repo <主检出>`（只列可收、要人看、孤儿，以及这个仓里没人认的工作树，不加 `--apply`），再跑 `node scripts/check-reports.mjs`，有 ALERT 行就读该会话最后一轮，插队让它接着做或重派。
 - 关键约束（授权边界、别碰哪些分支、验收标准）在开会话的第一条里写全。`steer` 只有部分 agent 吃，grok 不吃。给在跑的子会话发任何新消息（补充、返工、回报转发），都用 `prompt` 再 `stopAndRun {sessionKey, ref}`（`ref` 填那条 `prompt` 的 `clientRef`）才会送达（2026-11-16 创始人：每次都要插队才收得到）；代价是它正在跑的那条命令被打断，所以尽量攒成一条再发。它已经 done 的会话直接 `prompt` 即可，不用插队。
 - 交代里给时限。子会话易在测试上越绕越远（降并发、加跳过、逐条追断言，#3988 的第二棒真遇到）；到点用上面的 `stopAndRun` 让它收尾，只报现状。
 - 长时间没回报：`listSessions` 看它的 `runState`、`failed`（omp 会话不一定在这份列表里，改看 `~/.mirasim/sessions/kimi/` 的 `record.json` 加 `getTurnFacts`）。grok 进程会异常退出（`grok exited`），退了就不会回报，发回原会话重跑。
@@ -63,7 +63,7 @@ agy 1.5.9 在 Windows 上跑 `run_command` 走 `pwsh`（也认 `powershell.exe`�
 
 - 派活：`scripts/dispatch.mjs`（测试在 `agents/test/mirasim-dispatch.test.ts`：缺参数不调 prompt，找不到指挥会话不派，接受帧的会话号用来改名）
 - 回报：`scripts/report.mjs`（测试在 `agents/test/mirasim-report.test.ts`）
-- 扫尾：`scripts/sweep.mjs`（默认只列；`--apply` 收可收和孤儿，收的动作是 `close.mjs`，不另写一套。测试在 `agents/test/mirasim-sweep.test.ts`）
+- 扫尾：`scripts/sweep.mjs`（默认只列；`--repo` 默认当前目录所在仓，另列没有会话认领的工作树，判类和会话同一套。`--apply` 收可收和孤儿，收的动作是 `close.mjs`，没人认的工作树不带会话。不另写一条盘点命令。测试在 `agents/test/mirasim-sweep.test.ts`）
 - 收尾：`scripts/close.mjs`（单分支也能直接跑；扫尾 `--apply` 走它）
 - 心跳：`heartbeat.md`
 
@@ -88,13 +88,13 @@ node <仓根>/agents/skills/mirasim-sessions/scripts/dispatch.mjs
 
 ## 合并后清理
 
-每轮先列可收，不靠人记得哪一棵工作树还在：
+每轮先列可收，不靠人记得哪一棵工作树还在。会话从 `~/.mirasim/sessions` 来；没有会话认领的工作树用 `--repo` 指到主检出（人就在这个仓里可以不写，默认当前目录）：
 
 ```
-node scripts/sweep.mjs
+node scripts/sweep.mjs --repo <主检出>
 ```
 
-默认只列、不动。可收（PR 或 MR 已合并、或已关闭）和孤儿会话要收时加 `--apply`。收的动作就是 `close.mjs`，不另写删法，也不要直接 `git worktree remove`。
+默认只列、不动。可收（PR 或 MR 已合并、或已关闭，工作树干净且已推）和孤儿会话要收时，同一条加上 `--apply`，`--repo` 跟上面同一个主检出。没人认的可收工作树同样交给 `close.mjs`，不带会话。有未提交、有未推、没有 PR、读不了、认不出分支的算要人看，留着。不另写删法，也不要直接 `git worktree remove`。
 
 单分支仍可直接：
 

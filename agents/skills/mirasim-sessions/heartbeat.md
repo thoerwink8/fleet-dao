@@ -8,7 +8,7 @@
 
 1. 交接笔记只当线索，一切以远端现状为准。连远端用这台机器当时能通的方式，不把代理地址写进本模板。
 1b. 跑 `node <技能目录>/scripts/check-reports.mjs`：有 ALERT 行就是会话收了轮却没发回报（被系统停、崩溃、模型报错），读它最后一轮，插队让它接着做，或重派。
-1c. 跑 `node <技能目录>/scripts/sweep.mjs`（不要加 `--apply`）：先列出可收。要人看的留着，不收。
+1c. 跑 `node <技能目录>/scripts/sweep.mjs --repo <主检出>`（不要加 `--apply`）：先列出可收的会话，以及没有会话认领的工作树。要人看的留着，不收。
 2. 列开着的 PR：`gh pr list --repo <owner/repo> --state open --json number,title,headRefName,headRefOid,mergeStateStatus`。
 3. 每个 PR 看 `gh pr checks <号> --repo <owner/repo>`，分四类：
    - 绿且可合：对着单上「怎么算做完」核。核过、并且没有打开自动合并，再 `gh pr merge <号> --squash --delete-branch`，然后收尾。核不过：用 `prompt` 加 `stopAndRun` 把没过的那一条发回原会话。
@@ -16,7 +16,7 @@
    - 跑着或排队：不动。排队超过 60 分钟记一行原因。
    - 落后或冲突：发回原会话 rebase。
 4. 没有会话在做的 PR：看 `~/.mirasim/sessions/<agent>/<id>/record.json` 的 `runState`，再 `getTurnFacts`。停住的用 `prompt` 加 `stopAndRun` 叫它接着做。
-5. 这一轮验收并合并过之后，跑 `node <技能目录>/scripts/sweep.mjs --apply` 收可收和孤儿。不要手工 `git worktree remove`，也不要自己调 `deleteSession`（扫尾走 `scripts/close.mjs`）。母单的下一张要派时，同时在跑的会话不超过容量：空闲内存低于 4GB，或 1 分钟负载高于核数的 0.8，就等到下一轮。
+5. 这一轮验收并合并过之后，跑 `node <技能目录>/scripts/sweep.mjs --repo <主检出> --apply` 收可收的会话、没人认的可收工作树，以及孤儿。`--repo` 和上面列的时候用同一个主检出，人的当前目录不是这个仓也收得到。不要手工 `git worktree remove`，也不要自己调 `deleteSession`（扫尾走 `scripts/close.mjs`，没人认的工作树不带会话）。母单的下一张要派时，同时在跑的会话不超过容量：空闲内存低于 4GB，或 1 分钟负载高于核数的 0.8，就等到下一轮。
 6. 头提交和 PR 号用 `gh pr view` 和 `git ls-remote` 核对再采信。
 7. 当轮记一行：时间、开着几个、合了哪些、红了哪些、卡着的、派了什么。记在当轮交接笔记，不把笔记路径写死在模板里。
 

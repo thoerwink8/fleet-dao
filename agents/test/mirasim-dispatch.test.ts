@@ -29,6 +29,14 @@ interface DispatchMod {
   findCommander(records: unknown[]): string | null;
   mirasimServer(env: NodeJS.ProcessEnv): string;
   hostPort(env: NodeJS.ProcessEnv, explicit?: string, listDir?: (dir: string) => string[]): string;
+  explicitReportTo(explicit: string | undefined, env: NodeJS.ProcessEnv): string;
+  isCommanderWorkdir(workdir: string): boolean;
+  findCommander(records: unknown[]): string | null;
+  resolveReportTo(
+    explicit: string | undefined,
+    env: NodeJS.ProcessEnv,
+    loadRecords: () => unknown[],
+  ): string | null;
   Stop: new (step: string, next: string, code?: number) => Error;
 }
 
@@ -289,6 +297,205 @@ describe('回报去向', () => {
     expect(payloads[0]?.prompt).toContain('report.mjs');
     expect(payloads[0]?.prompt).not.toContain('_tmp');
     expect(payloads[1]).toEqual({ sessionKey: 'pi:accepted', title: '【pi】一句' });
+  });
+
+  it('命令行优先于环境变量；不像会话 key 的环境变量不当回报去向', () => {
+    expect(mod.explicitReportTo(' claude:from-cli ', { MIRASIM_SESSION_KEY: 'claude:from-env' })).toBe(
+      'claude:from-cli',
+    );
+    expect(mod.explicitReportTo(undefined, { MIRASIM_SESSION_KEY: ' claude:from-env ' })).toBe(
+      'claude:from-env',
+    );
+    expect(mod.explicitReportTo('', { MIRASIM_SESSION_KEY: 'not-a-key' })).toBe('');
+    expect(mod.explicitReportTo(undefined, {})).toBe('');
+  });
+
+  it('给了显式去向就不读会话记录', () => {
+    let reads = 0;
+    const load = () => {
+      reads += 1;
+      return [];
+    };
+    expect(mod.resolveReportTo('claude:from-cli', { MIRASIM_SESSION_KEY: 'claude:from-env' }, load)).toBe(
+      'claude:from-cli',
+    );
+    expect(mod.resolveReportTo(undefined, { MIRASIM_SESSION_KEY: 'claude:from-env' }, load)).toBe(
+      'claude:from-env',
+    );
+    expect(reads).toBe(0);
+    expect(mod.resolveReportTo(undefined, {}, load)).toBeNull();
+    expect(reads).toBe(1);
+  });
+
+  it('给了 --report-to，会话目录读不了也照派', () => {
+    const { env } = homeWithServer();
+    mkdirSync(join(env.USERPROFILE ?? '', '.mirasim', 'sessions'), { recursive: true });
+    writeFileSync(join(env.USERPROFILE ?? '', '.mirasim', 'sessions', 'claude'), 'not-a-dir');
+    const calls: string[] = [];
+    const exec = () => {
+      calls.push('called');
+      return {
+        code: 0,
+        stdout: JSON.stringify({ frames: [{ type: 'accepted', sessionKey: 'kimi:x' }] }),
+        stderr: '',
+      };
+    };
+    const code = mod.dispatchRun(
+      ['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p', '--report-to', 'claude:from-cli'],
+      {
+        exec,
+        server: 'unused.cjs',
+        env: { ...env, MIRASIM_HOST_PORT: '4970' },
+        log: () => {},
+      },
+    );
+    expect(code).toBe(0);
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it('只有 MIRASIM_SESSION_KEY、会话目录读不了也照派', () => {
+    const { env } = homeWithServer();
+    mkdirSync(join(env.USERPROFILE ?? '', '.mirasim', 'sessions'), { recursive: true });
+    writeFileSync(join(env.USERPROFILE ?? '', '.mirasim', 'sessions', 'claude'), 'not-a-dir');
+    const calls: string[] = [];
+    const exec = (_cmd: string, args: string[]) => {
+      calls.push(args[args.indexOf('call') + 1] ?? '');
+      return {
+        code: 0,
+        stdout: JSON.stringify({ frames: [{ type: 'accepted', sessionKey: 'kimi:x' }] }),
+        stderr: '',
+      };
+    };
+    const code = mod.dispatchRun(['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p'], {
+      exec,
+      server: 'unused.cjs',
+      env: { ...env, MIRASIM_HOST_PORT: '4970', MIRASIM_SESSION_KEY: 'claude:from-env' },
+      log: () => {},
+    });
+    expect(code).toBe(0);
+    expect(calls[0]).toBe('prompt');
+  });
+
+  it('工作目录在 fleet-dao 工作树里算指挥会话，别的仓不算', () => {
+    expect(mod.isCommanderWorkdir('D:\\frank\\fleet-dao\\')).toBe(true);
+    expect(mod.isCommanderWorkdir('D:/frank/fleet-dao/.claude/worktrees/x')).toBe(true);
+    expect(mod.isCommanderWorkdir('D:\\frank\\fleet-ade\\.claude\\worktrees\\x')).toBe(false);
+    expect(mod.isCommanderWorkdir('D:/frank/my-fleet-dao')).toBe(false);
+  });
+
+  it('猜：工作树里正在跑的最新一条；心跳、已结束、别的仓都不算', () => {
+    expect(
+      mod.findCommander([
+        {
+          runState: 'running',
+          title: '无人值守心跳',
+          workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\h',
+          sessionId: 'heart',
+          updatedAt: '9',
+        },
+        {
+          runState: 'completed',
+          title: '指挥',
+          workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\old',
+          sessionId: 'done',
+          updatedAt: '8',
+        },
+        {
+          runState: 'running',
+          title: '别的',
+          workdir: 'D:\\frank\\fleet-ade\\.claude\\worktrees\\x',
+          sessionId: 'ade',
+          updatedAt: '7',
+        },
+        {
+          runState: 'running',
+          title: '指挥',
+          workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\early',
+          sessionId: 'early',
+          updatedAt: '1',
+        },
+        {
+          runState: 'running',
+          title: '指挥',
+          workdir: 'D:/fleet-dao',
+          sessionId: 'root',
+          updatedAt: '2',
+        },
+        {
+          runState: 'running',
+          title: '指挥',
+          workdir: 'D:\\frank\\fleet-dao\\.claude\\worktrees\\late',
+          sessionId: 'late',
+          updatedAt: '3',
+        },
+      ]),
+    ).toBe('claude:late');
+  });
+
+  it('有 MIRASIM_SESSION_KEY 就写进交代，不再按目录猜', () => {
+    const payloads: { prompt?: string }[] = [];
+    const exec = (_cmd: string, args: string[]) => {
+      payloads.push(JSON.parse(args[args.indexOf('--args') + 1] ?? '{}'));
+      return {
+        code: 0,
+        stdout: JSON.stringify({ frames: [{ type: 'accepted', sessionKey: 'kimi:x' }] }),
+        stderr: '',
+      };
+    };
+    const code = mod.dispatchRun(['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p'], {
+      exec,
+      server: 'unused.cjs',
+      env: { ...ENV, MIRASIM_SESSION_KEY: 'claude:from-env' },
+      records: [
+        {
+          runState: 'running',
+          title: '指挥',
+          workdir: 'D:/fleet-dao',
+          sessionId: 'guessed',
+          updatedAt: '9',
+        },
+      ],
+      log: () => {},
+    });
+    expect(code).toBe(0);
+    expect(payloads[0]?.prompt).toContain('--to claude:from-env');
+    expect(payloads[0]?.prompt).not.toContain('claude:guessed');
+  });
+
+  it('猜不到：退出码 2，一次都不派，并写明怎么补', () => {
+    const calls: string[] = [];
+    const errs: string[] = [];
+    const orig = console.error;
+    console.error = (line?: unknown) => {
+      errs.push(String(line));
+    };
+    const exec = () => {
+      calls.push('called');
+      return { code: 0, stdout: '{}', stderr: '' };
+    };
+    let code = 0;
+    try {
+      code = mod.dispatchRun(['--title', 't', '--workdir', 'D:/repo', '--prompt', 'p'], {
+        exec,
+        server: 'unused.cjs',
+        env: { ...ENV, MIRASIM_SESSION_KEY: 'nope' },
+        records: [
+          {
+            runState: 'running',
+            title: '别的仓',
+            workdir: 'D:/frank/fleet-ade/.claude/worktrees/x',
+            sessionId: 'ade',
+            updatedAt: '9',
+          },
+        ],
+      });
+    } finally {
+      console.error = orig;
+    }
+    expect(code).toBe(2);
+    expect(calls).toEqual([]);
+    expect(errs.join('\n')).toContain('--report-to');
+    expect(errs.join('\n')).toContain('MIRASIM_SESSION_KEY');
   });
 });
 
