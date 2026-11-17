@@ -894,7 +894,10 @@ export async function closeRun(argv, io = {}) {
         } catch (err) {
           if (err instanceof Stop) throw err;
           const message = err instanceof Error ? err.message : String(err);
-          throw new Stop('删会话', `释放会话 ${opt.session} 没成：${message}。工作树和分支还没删，修好后重跑：${again()}`);
+          throw new Stop(
+            '删会话',
+            `释放会话 ${opt.session} 没成：${message}。工作树和分支还没删，修好后重跑：${again()}`,
+          );
         }
         say(`[删会话] ${result.detail}；已释放会话资源，继续删工作树`);
       }
