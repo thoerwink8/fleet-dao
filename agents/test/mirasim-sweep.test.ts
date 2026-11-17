@@ -14,6 +14,7 @@ interface SweepMod {
     argv: string[],
     io?: {
       log?: (line: string) => void;
+      exec?: (cmd: string, args: string[]) => { code: number; stdout: string; stderr: string };
       listPrs?: (ctx: { workdir: string; branch: string }) => Promise<Pr[] | null>;
       closeRun?: (argv: string[]) => Promise<number>;
       deleteSession?: (key: string) => Promise<{ skipped: boolean; detail: string }>;
@@ -298,5 +299,47 @@ describe('sweep.mjs 五种判类', () => {
     const code = await mod.sweepRun(['--repo'], { log: (line) => lines.push(line) });
     expect(code).toBe(2);
     expect(lines.join('\n')).toContain('--repo 缺值');
+  });
+
+
+  it('工作目录不是 git 仓库时不列成要人看，别的仓的链接工作树仍列', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'sweep-home-'));
+    roots.push(home);
+    writeFileSync(join(home, 'note.txt'), 'not a repo\n');
+    const linked = linkedRepo(false);
+    const sessions = mkdtempSync(join(tmpdir(), 'sweep-notgit-'));
+    roots.push(sessions);
+    const homeId = 'aaaaaaaa-9999-4999-8999-999999999999';
+    const linkedId = 'bbbbbbbb-8888-4888-8888-888888888888';
+    session(sessions, homeId, home, 'completed');
+    session(sessions, linkedId, linked.wt, 'completed');
+    const lines: string[] = [];
+    const code = await mod.sweepRun(['--root', sessions, '--repo', emptyRepo()], {
+      log: (line) => lines.push(line),
+      listPrs: async () => [],
+    });
+    const out = lines.join('\n');
+    expect(code, out).toBe(0);
+    expect(out).not.toContain(homeId.slice(0, 8));
+    expect(out).not.toContain('不是 git 工作树');
+    expect(out).toContain(`要人看 kimi:${linkedId.slice(0, 8)} ${linked.branch} 没有 PR`);
+  });
+
+  it('git 因权限失败仍要人看', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sweep-perm-'));
+    roots.push(dir);
+    const sessions = mkdtempSync(join(tmpdir(), 'sweep-perm-sessions-'));
+    roots.push(sessions);
+    const id = 'cccccccc-7777-4777-8777-777777777777';
+    session(sessions, id, dir, 'completed');
+    const lines: string[] = [];
+    const code = await mod.sweepRun(['--root', sessions, '--repo', emptyRepo()], {
+      log: (line) => lines.push(line),
+      exec: () => ({ code: 1, stdout: '', stderr: 'permission denied' }),
+    });
+    const out = lines.join('\n');
+    expect(code, out).toBe(0);
+    expect(out).toContain(`要人看 kimi:${id.slice(0, 8)}`);
+    expect(out).toContain('工作目录不是 git 工作树');
   });
 });

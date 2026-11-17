@@ -96,6 +96,38 @@ export function grokFastModel(model) {
   const bare = id.split('/').pop() ?? id;
   return /(?:^|-)fast(?:@|$)/i.test(bare);
 }
+/**
+ * 交代里有 git worktree add，且工作目录是主检出（不是链接工作树）时才拦。
+ * 只读会话不提这条命令，仍可以从主检出派。不是 git 仓库的目录不拦，不为它建树。
+ * @param {string} prompt
+ */
+export function promptCreatesWorktree(prompt) {
+  return /\bgit\s+worktree\s+add\b/.test(prompt);
+}
+
+/**
+ * @param {string} a
+ * @param {string} b
+ */
+function sameGitPath(a, b) {
+  const norm = (p) => p.replace(/[\\/]+$/, '').replace(/\\/g, '/');
+  const na = norm(a);
+  const nb = norm(b);
+  return process.platform === 'win32' ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+}
+
+/**
+ * @param {Exec} exec
+ * @param {string} workdir
+ * @param {string} prompt
+ */
+export function mainCheckoutBlocksCreate(exec, workdir, prompt) {
+  if (!promptCreatesWorktree(prompt)) return false;
+  const gitDir = exec('git', ['-C', workdir, 'rev-parse', '--path-format=absolute', '--git-dir']);
+  const common = exec('git', ['-C', workdir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (gitDir.code !== 0 || common.code !== 0) return false;
+  return sameGitPath(gitDir.stdout.trim(), common.stdout.trim());
+}
 
 /**
  * @param {NodeJS.ProcessEnv} env
@@ -387,6 +419,13 @@ export function dispatchRun(argv, io = {}) {
     // omp 的模型由它自己的配置（~/.omp/agent/config.yml 的角色）定，不经 ACP 的 set_model：
     // 给 kimi 传 model 会报 Unknown ACP ext method: session/set_model（2026-11-16 实测），所以不传。
     const reportTo = resolveReportTo(opt['report-to'], env, () => io.records ?? readCommanderRecords(env));
+    if (mainCheckoutBlocksCreate(exec, opt.workdir, opt.prompt)) {
+      throw new Stop(
+        '派活',
+        `工作目录 ${opt.workdir} 是主检出，交代里却有 git worktree add。先建好工作树，把 --workdir 指到那棵链接工作树再派。只读、不建树的会话仍可以用主检出。这次不派。`,
+        2,
+      );
+    }
     if (!reportTo) {
       throw new Stop('派活', `找不到指挥会话。${REPORT_TO_HOWTO}；这次不派，免得做完没处回报`, 2);
     }

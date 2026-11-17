@@ -1,4 +1,5 @@
 // dispatch.mjs：参数缺了不调 prompt；prompt 回来拿不到会话号就停，不再调一次 prompt。
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -638,5 +639,96 @@ describe('hostPort 宿主端口', () => {
     expect(mod.dispatchRun(base, { exec, server: 'unused.cjs', env: ENV, log: () => {} })).toBe(0);
     expect(argvs).toHaveLength(2);
     for (const args of argvs) expect(args.slice(1, 4)).toEqual(['ui-cli', '--port', '4970']);
+  });
+});
+
+describe('派发不从主检出发令另建树', () => {
+  function gitMain(): string {
+    const root = mkdtempSync(join(tmpdir(), 'dispatch-4099-'));
+    roots.push(root);
+    const main = join(root, 'main');
+    mkdirSync(main);
+    const run = (args: string[], cwd = main) => {
+      const r = spawnSync('git', ['-c', 'user.name=d', '-c', 'user.email=d@e', ...args], {
+        cwd,
+        encoding: 'utf8',
+      });
+      if (r.status !== 0) throw new Error(r.stderr || r.stdout);
+    };
+    run(['init', '-b', 'main']);
+    writeFileSync(join(main, 'a.txt'), 'a\n');
+    run(['add', 'a.txt']);
+    run(['commit', '-m', 'init']);
+    return main;
+  }
+
+  function execOf(atoms: string[]) {
+    return (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'git') {
+        const r = spawnSync('git', args, { encoding: 'utf8' });
+        return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+      }
+      atoms.push(args[args.indexOf('call') + 1] ?? '');
+      return {
+        code: 0,
+        stdout: JSON.stringify({ frames: [{ type: 'accepted', sessionKey: 'kimi:new' }] }),
+        stderr: '',
+      };
+    };
+  }
+
+  it('主检出上交代 git worktree add：退出码 2，不调 prompt', () => {
+    const main = gitMain();
+    const atoms: string[] = [];
+    const code = mod.dispatchRun(
+      [
+        '--title',
+        't',
+        '--workdir',
+        main,
+        '--prompt',
+        '先 git worktree add -b local/x .claude/worktrees/x',
+        '--report-to',
+        'claude:c',
+      ],
+      { exec: execOf(atoms), server: 'unused.cjs', env: ENV, log: () => {} },
+    );
+    expect(code).toBe(2);
+    expect(atoms).toEqual([]);
+  });
+
+  it('主检出但交代不建树：照常派', () => {
+    const main = gitMain();
+    const atoms: string[] = [];
+    const code = mod.dispatchRun(
+      ['--title', 't', '--workdir', main, '--prompt', '只读看日志', '--report-to', 'claude:c'],
+      { exec: execOf(atoms), server: 'unused.cjs', env: ENV, log: () => {} },
+    );
+    expect(code).toBe(0);
+    expect(atoms[0]).toBe('prompt');
+  });
+
+  it('已经是链接工作树：交代里有 git worktree add 也派', () => {
+    const main = gitMain();
+    const wt = join(main, '.claude', 'worktrees', 'x');
+    mkdirSync(join(main, '.claude', 'worktrees'), { recursive: true });
+    const add = spawnSync('git', ['-C', main, 'worktree', 'add', '-b', 'local/x', wt], { encoding: 'utf8' });
+    expect(add.status, add.stderr).toBe(0);
+    const atoms: string[] = [];
+    const code = mod.dispatchRun(
+      [
+        '--title',
+        't',
+        '--workdir',
+        wt,
+        '--prompt',
+        '在这棵树里干活，不要再 git worktree add',
+        '--report-to',
+        'claude:c',
+      ],
+      { exec: execOf(atoms), server: 'unused.cjs', env: ENV, log: () => {} },
+    );
+    expect(code).toBe(0);
+    expect(atoms[0]).toBe('prompt');
   });
 });
