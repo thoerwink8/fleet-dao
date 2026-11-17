@@ -53,7 +53,23 @@ export function sendRun(argv, io = {}) {
       env,
     );
     if (res && res.ok === false) throw new Stop('发送', `prompt 没成：${JSON.stringify(res).slice(0, 300)}`);
-    log(`已发给 ${a.to}，并带上回报去向`);
+    const accepted = res?.frames?.filter((frame) => frame.type === 'accepted');
+    if (
+      accepted?.length !== 1 ||
+      accepted[0].sessionKey !== a.to ||
+      typeof accepted[0].clientRef !== 'string' ||
+      !accepted[0].clientRef.trim()
+    ) {
+      throw new Stop('发送结果', '宿主接受回执缺失或不符；消息可能已发送，不要重发，先查目标会话和队列', 2);
+    }
+    const receipt = accepted[0];
+    log(
+      JSON.stringify({
+        sessionKey: receipt.sessionKey,
+        clientRef: receipt.clientRef,
+        taskId: receipt.taskId ?? null,
+      }),
+    );
     return 0;
   } catch (e) {
     if (e instanceof Stop) {
