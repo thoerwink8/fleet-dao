@@ -1,18 +1,28 @@
 // 扫尾：非 running 的会话按工作树和 PR 判类。默认只列。
+// 同时列 --repo（默认当前目录所在仓）里没有会话认领的工作树，判类同一套，不另写一条命令。
 // --apply 才收「可收」和「孤儿」。收的动作是 close.mjs（closeRun / deleteSession），这里不另写删工作树。
 // 会话工作目录是 record.json 的 workdir。会话目录里的 workspace 只是会话自己的文件夹，不算工作树还在。
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { closeRun, deleteSession, gitlabApi, gitlabToken, realExec, remoteHost } from './close.mjs';
+import {
+  closeRun,
+  deleteSession,
+  gitlabApi,
+  gitlabToken,
+  parseWorktrees,
+  realExec,
+  remoteHost,
+} from './close.mjs';
 
-export const USAGE = `用法：node sweep.mjs [--root <会话根目录>] [--apply]
-列出 ~/.mirasim/sessions 下各 agent 里 runState 不是 running 的会话。
+export const USAGE = `用法：node sweep.mjs [--root <会话根目录>] [--repo <主检出>] [--apply]
+列出 ~/.mirasim/sessions 下各 agent 里 runState 不是 running 的会话，
+再列 --repo（默认当前目录所在仓）里没有会话认领的工作树。
 可收：链接工作树干净、提交已推、PR/MR 已合并或已关闭。
-要人看：没有 PR/MR、有未推提交，或有真实未提交改动（写明是哪一种）。
+要人看：没有 PR/MR、有未推提交、有真实未提交改动、读不了，或认不出分支（写明是哪一种）。
 孤儿：workdir 指向的工作树和会话工作目录都已不在。
-默认只列。--apply 才收可收和孤儿：可收走 close.mjs，孤儿只走它的删会话。`;
+默认只列。--apply 才收可收和孤儿：可收走 close.mjs（没人认的工作树不带会话），孤儿只走它的删会话。`;
 
 /**
  * @param {string} state
@@ -34,6 +44,24 @@ function samePath(a, b) {
 }
 
 /**
+ * 工作树路径和会话 workdir 可能一个是盘符一个是真实路径。对不上就会把同一棵树列两次。
+ * @param {string} a
+ * @param {string} b
+ */
+function sameRealPath(a, b) {
+  const norm = (p) => {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  const ra = norm(a);
+  const rb = norm(b);
+  return process.platform === 'win32' ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
+}
+
+/**
  * @param {import('./close.mjs').Exec} exec
  * @param {string} repo
  * @param {string[]} args
@@ -46,8 +74,8 @@ function git(exec, repo, args) {
  * @param {string[]} argv
  */
 export function parseArgs(argv) {
-  /** @type {{ root: string, apply: boolean }} */
-  const opt = { root: '', apply: false };
+  /** @type {{ root: string, repo: string, apply: boolean }} */
+  const opt = { root: '', repo: '', apply: false };
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (token === '--apply') {
@@ -55,11 +83,12 @@ export function parseArgs(argv) {
       opt.apply = true;
       continue;
     }
-    if (token === '--root') {
+    if (token === '--root' || token === '--repo') {
       const value = argv[i + 1];
-      if (value === undefined || value.startsWith('--')) throw new Error(`--root 缺值\n${USAGE}`);
-      if (opt.root) throw new Error(`--root 写了两次\n${USAGE}`);
-      opt.root = value;
+      if (value === undefined || value.startsWith('--')) throw new Error(`${token} 缺值\n${USAGE}`);
+      if (token === '--root' ? opt.root : opt.repo) throw new Error(`${token} 写了两次\n${USAGE}`);
+      if (token === '--root') opt.root = value;
+      else opt.repo = value;
       i += 1;
       continue;
     }
@@ -257,18 +286,29 @@ async function inspectSession(agentDir, dirName, rec, exec, env, fetchImpl, list
     return row;
   }
   row.branch = branch;
+  const judged = await judgeTree(workdir, branch, runState, exec, env, fetchImpl, listPrs);
+  row.kind = judged.kind;
+  row.reason = judged.reason;
+  row.pr = judged.pr;
+  row.request = judged.request;
+  return row;
+}
+
+/**
+ * @param {string} workdir
+ * @param {string} branch
+ * @param {string} runState
+ * @param {import('./close.mjs').Exec} exec
+ * @param {NodeJS.ProcessEnv} env
+ * @param {typeof fetch} fetchImpl
+ * @param {((ctx: { workdir: string, branch: string }) => Promise<{ number: string, state: string }[] | null>) | undefined} listPrs
+ * @returns {Promise<{ kind: string, reason: string, pr: string | null, request: 'pr' | 'mr' }>}
+ */
+async function judgeTree(workdir, branch, runState, exec, env, fetchImpl, listPrs) {
   const dirty = git(exec, workdir, ['status', '--porcelain', '--untracked-files=all']);
-  if (dirty.code !== 0) {
-    row.kind = '要人看';
-    row.reason = '读不了工作树';
-    return row;
-  }
+  if (dirty.code !== 0) return { kind: '要人看', reason: '读不了工作树', pr: null, request: 'pr' };
   const unpushed = git(exec, workdir, ['rev-list', '--count', 'HEAD', '--not', '--remotes']);
-  if (unpushed.code !== 0) {
-    row.kind = '要人看';
-    row.reason = '有未推提交';
-    return row;
-  }
+  if (unpushed.code !== 0) return { kind: '要人看', reason: '有未推提交', pr: null, request: 'pr' };
   /** @type {{ number: string, state: string }[] | null} */
   let prs = null;
   /** @type {'pr' | 'mr'} */
@@ -289,15 +329,69 @@ async function inspectSession(agentDir, dirName, rec, exec, env, fetchImpl, list
     unpushed: Number(unpushed.stdout.trim()) > 0,
     prs,
   });
-  row.kind = judged.kind;
-  row.reason = judged.reason;
-  row.pr = judged.pr;
-  row.request = request;
-  return row;
+  return { kind: judged.kind, reason: judged.reason, pr: judged.pr, request };
 }
 
-/** @param {{ kind: string, agent: string, sessionId: string, branch: string, reason: string, pr: string | null }} row */
+/**
+ * 没有会话认领的链接工作树。主检出本身不算残留。判类走 classify，不另写结论。
+ * @param {string} repo
+ * @param {{ workdir: string }[]} owned
+ * @param {import('./close.mjs').Exec} exec
+ * @param {NodeJS.ProcessEnv} env
+ * @param {typeof fetch} fetchImpl
+ * @param {((ctx: { workdir: string, branch: string }) => Promise<{ number: string, state: string }[] | null>) | undefined} listPrs
+ */
+async function scanUnownedWorktrees(repo, owned, exec, env, fetchImpl, listPrs) {
+  const listed = git(exec, repo, ['worktree', 'list', '--porcelain']);
+  if (listed.code !== 0) {
+    return {
+      error: (listed.stderr || listed.stdout).trim().slice(0, 200) || 'git worktree list 失败',
+      rows: [],
+    };
+  }
+  const main = mainCheckout(repo, exec);
+  if (!main) return { error: '认不出主检出', rows: [] };
+  /** @type {Awaited<ReturnType<typeof inspectSession>>[]} */
+  const rows = [];
+  for (const tree of parseWorktrees(listed.stdout)) {
+    if (sameRealPath(tree.path, main)) continue;
+    if (owned.some((row) => row.workdir && sameRealPath(row.workdir, tree.path))) continue;
+    const branch = tree.branch ? tree.branch.replace(/^refs\/heads\//, '') : '';
+    /** @type {Awaited<ReturnType<typeof inspectSession>>} */
+    const row = {
+      agent: '',
+      sessionId: '',
+      runState: '',
+      workdir: tree.path,
+      branch,
+      kind: '要人看',
+      reason: '认不出分支',
+      pr: null,
+      request: 'pr',
+    };
+    if (!branch) {
+      rows.push(row);
+      continue;
+    }
+    const judged = await judgeTree(tree.path, branch, 'completed', exec, env, fetchImpl, listPrs);
+    row.kind = judged.kind;
+    row.reason = judged.reason;
+    row.pr = judged.pr;
+    row.request = judged.request;
+    rows.push(row);
+  }
+  return { error: '', rows };
+}
+
+/** @param {{ kind: string, agent: string, sessionId: string, branch: string, reason: string, pr: string | null, workdir?: string }} row */
 export function formatRow(row) {
+  if (!row.sessionId) {
+    const where = row.workdir ?? '';
+    if (row.kind === '可收') return `可收 工作树 ${row.branch} PR #${row.pr} ${row.reason} ${where}`;
+    if (row.kind === '要人看') return `要人看 工作树 ${row.branch || '(游离)'} ${row.reason} ${where}`;
+    if (row.kind === '还开着') return `还开着 工作树 ${row.branch} PR #${row.pr} ${where}`;
+    return '';
+  }
   const id = `${row.agent}:${row.sessionId.slice(0, 8)}`;
   if (row.kind === '可收') return `可收 ${id} ${row.branch} PR #${row.pr} ${row.reason}`;
   if (row.kind === '要人看') return `要人看 ${id} ${row.branch} ${row.reason}`;
@@ -345,23 +439,28 @@ export async function sweepRun(argv, io = {}) {
   const exec = io.exec ?? realExec;
   const env = io.env ?? process.env;
   const root = opt.root ? resolve(opt.root) : resolve(homedir(), '.mirasim', 'sessions');
+  const repo = opt.repo ? resolve(opt.repo) : resolve('.');
   const rows = await scanSessions(root, { exec, env, fetch: io.fetch, listPrs: io.listPrs });
-  const listed = rows
+  const extra = await scanUnownedWorktrees(repo, rows, exec, env, io.fetch ?? fetch, io.listPrs);
+  if (extra.error) log(`列工作树没成：${extra.error}`);
+  const listed = [...rows, ...extra.rows]
     .filter((row) => ORDER.includes(row.kind))
     .sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
   for (const row of listed) log(formatRow(row));
-  if (!listed.length) log('没有可收、要人看或孤儿会话');
+  if (!listed.length) log('没有可收、要人看、孤儿，也没有没人认的工作树');
   if (!opt.apply) return 0;
   let failed = 0;
   for (const row of listed) {
     if (row.kind === '可收') {
       const main = mainCheckout(row.workdir, exec);
+      const label = row.sessionId ? `${row.agent}:${row.sessionId.slice(0, 8)}` : row.branch || row.workdir;
       if (!main || !row.branch) {
-        log(`停在：收 ${row.agent}:${row.sessionId.slice(0, 8)} 认不出主检出`);
+        log(`停在：收 ${label} 认不出主检出`);
         failed += 1;
         continue;
       }
-      const args = ['--repo', main, '--branch', row.branch, '--session', `${row.agent}:${row.sessionId}`];
+      const args = ['--repo', main, '--branch', row.branch];
+      if (row.sessionId) args.push('--session', `${row.agent}:${row.sessionId}`);
       if (row.pr) args.push(row.request === 'mr' ? '--mr' : '--pr', row.pr);
       const run = io.closeRun ?? closeRun;
       const code = await run(args, { exec, env, log, fetch: io.fetch, deleteSession: io.deleteSession });

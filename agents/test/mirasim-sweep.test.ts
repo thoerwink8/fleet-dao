@@ -80,6 +80,16 @@ function linkedRepo(ahead: boolean): { wt: string; branch: string } {
   return { wt, branch };
 }
 
+/** 只有主检出、没有链接工作树。现有用例用它挡住对当前仓的盘点。 */
+function emptyRepo(): string {
+  const root = mkdtempSync(join(tmpdir(), 'sweep-empty-'));
+  roots.push(root);
+  const main = join(root, 'main');
+  mkdirSync(main);
+  git(main, ['init', '-b', 'main']);
+  return main;
+}
+
 function session(root: string, id: string, workdir: string, runState: string): void {
   const dir = join(root, 'kimi', id);
   mkdirSync(dir, { recursive: true });
@@ -112,7 +122,7 @@ describe('sweep.mjs 五种判类', () => {
     session(sessions, ids.orphan, join(sessions, 'gone-workdir'), 'completed');
     session(sessions, ids.running, join(sessions, 'also-gone'), 'running');
     const lines: string[] = [];
-    const code = await mod.sweepRun(['--root', sessions], {
+    const code = await mod.sweepRun(['--root', sessions, '--repo', emptyRepo()], {
       log: (line) => lines.push(line),
       listPrs: async ({ workdir }) => {
         if (workdir === merged.wt) return [{ number: '11', state: 'MERGED' }];
@@ -145,8 +155,9 @@ describe('sweep.mjs 五种判类', () => {
     session(sessions, orphanId, join(sessions, 'missing'), 'completed');
     const listPrs = async ({ workdir }: { workdir: string }) =>
       workdir === closable.wt ? [{ number: '21', state: 'MERGED' }] : [];
+    const quiet = emptyRepo();
     const idle: string[] = [];
-    const listed = await mod.sweepRun(['--root', sessions], {
+    const listed = await mod.sweepRun(['--root', sessions, '--repo', quiet], {
       log: () => {},
       listPrs,
       closeRun: async (argv) => {
@@ -164,7 +175,7 @@ describe('sweep.mjs 五种判类', () => {
     const closed: string[] = [];
     const dropped: string[] = [];
     const lines: string[] = [];
-    const code = await mod.sweepRun(['--root', sessions, '--apply'], {
+    const code = await mod.sweepRun(['--root', sessions, '--repo', quiet, '--apply'], {
       log: (line) => lines.push(line),
       listPrs,
       closeRun: async (argv) => {
@@ -185,5 +196,107 @@ describe('sweep.mjs 五种判类', () => {
     expect(closed[0]).not.toContain(keepId);
     expect(dropped).toEqual([`kimi:${orphanId}`]);
     expect(out).toContain(`[删会话] 已删会话 kimi:${orphanId}`);
+  });
+
+  it('没有会话认领的工作树按同一套判类列出，--apply 不带会话', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sweep-unowned-'));
+    roots.push(root);
+    const main = join(root, 'main');
+    const bare = join(root, 'origin.git');
+    mkdirSync(main);
+    git(main, ['init', '-b', 'main']);
+    git(main, ['config', 'core.autocrlf', 'false']);
+    writeFileSync(join(main, 'readme.txt'), 'ok\n');
+    git(main, ['add', 'readme.txt']);
+    git(main, ['commit', '-m', 'init']);
+    git(main, ['init', '--bare', bare]);
+    git(main, ['remote', 'add', 'origin', bare]);
+    git(main, ['push', '-u', 'origin', 'main']);
+    const trees = { merged: '', dirty: '', open: '', none: '', owned: '' };
+    for (const name of ['merged', 'dirty', 'open', 'none', 'owned'] as const) {
+      const wt = join(root, name);
+      git(main, ['worktree', 'add', '-b', `local/${name}`, wt]);
+      git(wt, ['config', 'core.autocrlf', 'false']);
+      writeFileSync(join(wt, 'change.txt'), `${name}\n`);
+      git(wt, ['add', 'change.txt']);
+      git(wt, ['commit', '-m', name]);
+      git(wt, ['push', '-u', 'origin', `local/${name}`]);
+      trees[name] = wt;
+    }
+    writeFileSync(join(trees.dirty, 'dirty.txt'), 'dirty\n');
+    git(main, ['worktree', 'add', '--detach', join(root, 'detached'), 'HEAD']);
+    const sessions = mkdtempSync(join(tmpdir(), 'sweep-unowned-sessions-'));
+    roots.push(sessions);
+    const ownedId = 'aaaaaaaa-7777-4777-8777-777777777777';
+    session(sessions, ownedId, trees.owned, 'completed');
+    const listPrs = async ({ branch }: { branch: string }) => {
+      if (branch === 'local/merged') return [{ number: '31', state: 'MERGED' }];
+      if (branch === 'local/open') return [{ number: '32', state: 'OPEN' }];
+      if (branch === 'local/owned') return [{ number: '33', state: 'MERGED' }];
+      return [];
+    };
+    const lines: string[] = [];
+    const listed = await mod.sweepRun(['--root', sessions, '--repo', main], {
+      log: (line) => lines.push(line),
+      listPrs,
+    });
+    const out = lines.join('\n');
+    expect(listed, out).toBe(0);
+    expect(out).toContain('可收 工作树 local/merged PR #31 已合并');
+    expect(out).toContain('要人看 工作树 local/dirty 有真实未提交改动');
+    expect(out).toContain('还开着 工作树 local/open PR #32');
+    expect(out).toContain('要人看 工作树 local/none 没有 PR');
+    expect(out).toContain('要人看 工作树 (游离) 认不出分支');
+    expect(out).toContain(`可收 kimi:${ownedId.slice(0, 8)} local/owned PR #33 已合并`);
+    expect(out).not.toContain('工作树 local/owned');
+    expect(out).not.toContain('工作树 main');
+    expect(out.split('\n').filter((line) => line.startsWith('可收'))).toHaveLength(2);
+
+    const closed: string[] = [];
+    const code = await mod.sweepRun(['--root', sessions, '--repo', main, '--apply'], {
+      log: () => {},
+      listPrs,
+      closeRun: async (argv) => {
+        closed.push(argv.join(' '));
+        return 0;
+      },
+      deleteSession: async () => {
+        throw new Error('没人认的工作树不该删会话');
+      },
+    });
+    expect(code, closed.join('\n')).toBe(0);
+    const sessionClose = closed.find((line) => line.includes('--session'));
+    const treeClose = closed.find((line) => !line.includes('--session'));
+    expect(closed).toHaveLength(2);
+    expect(sessionClose).toContain('--pr 33');
+    expect(sessionClose).toContain(`--session kimi:${ownedId}`);
+    expect(treeClose).toContain('--branch local/merged');
+    expect(treeClose).toContain('--pr 31');
+    expect(treeClose).not.toContain('--session');
+    expect(closed.join('\n')).not.toContain('local/dirty');
+    expect(closed.join('\n')).not.toContain('local/open');
+    expect(closed.join('\n')).not.toContain('local/none');
+  });
+
+  it('列工作树失败仍列出会话', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'sweep-norepo-'));
+    roots.push(sessions);
+    const id = '99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    session(sessions, id, join(sessions, 'missing'), 'completed');
+    const lines: string[] = [];
+    const code = await mod.sweepRun(['--root', sessions, '--repo', sessions], {
+      log: (line) => lines.push(line),
+    });
+    const out = lines.join('\n');
+    expect(code, out).toBe(0);
+    expect(out).toContain('列工作树没成');
+    expect(out).toContain('孤儿 kimi:99999999');
+  });
+
+  it('--repo 缺值就停', async () => {
+    const lines: string[] = [];
+    const code = await mod.sweepRun(['--repo'], { log: (line) => lines.push(line) });
+    expect(code).toBe(2);
+    expect(lines.join('\n')).toContain('--repo 缺值');
   });
 });
