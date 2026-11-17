@@ -22,7 +22,7 @@
 | 为什么 | `docs/design.md` |
 | 运维 | `docs/ops.md` |
 | 决定 | `docs/decisions/README.md` |
-| 创始人引导（记进驾驶舱库，仓里只有周汇总和旧档案） | `docs/directives/README.md` |
+| 创始人引导（一条一张 GitHub 单、标签「创始人引导」，原话在本机；仓里只有周汇总和旧档案） | `docs/directives/README.md` |
 | 封号清痕迹 | `docs/reclaude.md` |
 | 全部命令 | `README.md` |
 

@@ -284,11 +284,14 @@ describe('仓里读写', () => {
       meaning: '以后都这样办',
       at: '2026-10-16 16:29 +0800',
       source: 'prompt-log',
+      owner: 'dir-a',
     });
     expect(d.title).toBe('创始人引导：以后都这样办');
     expect(d.body).toContain('以后都这样办');
+    expect(d.body).toContain('〔主：dir-a〕');
     for (const h of ['## 场景', '## 原话', '## 已知的模块', '## 怎么算做完']) expect(d.body).toContain(h);
-    expect(d.body).toContain('原话只在驾驶舱库里');
+    expect(d.body).toContain('本机私有处');
+    expect(d.body).not.toContain('驾驶舱库');
   });
 });
 

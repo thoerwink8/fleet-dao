@@ -6,6 +6,7 @@ interface Mod {
     argv: string[],
     io?: {
       exec?: (cmd: string, args: string[]) => { code: number; stdout: string; stderr: string };
+      env?: NodeJS.ProcessEnv;
       server?: string;
       records?: unknown[];
       readFile?: (p: string) => string;
@@ -17,6 +18,9 @@ const mod = (await import(
   new URL('../skills/mirasim-sessions/scripts/send.mjs', import.meta.url).href
 )) as Mod;
 
+/** 固定宿主端口，不读本机真实的 ~/.mirasim/run（CI 上没有）。 */
+const ENV: NodeJS.ProcessEnv = { MIRASIM_HOST_PORT: '4970' };
+
 describe('send.mjs', () => {
   it('消息后面追加「回报，必做」和指挥会话号，发给指定会话', () => {
     const sent: { sessionKey?: string; prompt?: string }[] = [];
@@ -27,6 +31,7 @@ describe('send.mjs', () => {
     const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md', '--report-to', 'claude:cmd'], {
       exec,
       server: 'unused.cjs',
+      env: ENV,
       readFile: () => '接着做 #33',
       log: () => {},
     });
@@ -46,6 +51,7 @@ describe('send.mjs', () => {
     const code = mod.sendRun(['--to', 'kimi:abc', '--file', 'm.md'], {
       exec,
       server: 'unused.cjs',
+      env: ENV,
       records: [],
       readFile: () => 'x',
     });

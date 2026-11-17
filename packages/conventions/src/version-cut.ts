@@ -9,6 +9,7 @@
 //
 // 改这里之前必须知道：
 // - 哪一步没成都不往下走：挪单没挪全就不关旧版，退出码非 0；下一次跑从断的地方接着走（旧版过期、新版已开的这一对认得出），不开第二个新版。
+// - 按里程碑列单会晚一会儿才去掉刚挪走的单。关旧版只信改挂里程碑的回包；列表里这轮还没挪过的，同一轮挪完再关。
 // - 同一天重跑不出重复：留言按标记认、先后按单号去重、收口段按标记整段换掉。
 // - 读不到、认不出就停：不拿「没读到」当成「没有要挪的单」。
 // - 每条规则在 test/version-cut.test.ts 里有例子。
@@ -123,6 +124,47 @@ export function rollOrder(
     description = added.description;
   }
   return { ok: true, description, order: wanted };
+}
+
+/** 收口末尾才看见的单，补进新版先后末尾。已经在里面的不动。没写成回 false，调用方不关旧版。 */
+async function appendToVersionOrder(
+  gh: VersionCutGitHub,
+  to: Version,
+  numbers: readonly number[],
+  r: CutResult,
+): Promise<boolean> {
+  const toTitle = to.milestone.title;
+  let description = to.milestone.description;
+  let changed = false;
+  for (const n of numbers) {
+    const added = addToOrder(description, n);
+    if (!added.ok) {
+      r.failed.push(`「${toTitle}」的先后没接上（${added.problem}），旧版不关`);
+      return false;
+    }
+    if (added.description !== description) changed = true;
+    description = added.description;
+  }
+  if (!changed) return true;
+  try {
+    const back = await gh.setMilestoneDescription(to.milestone.number, description);
+    const check = parseOrder(back.description);
+    const got = check.ok ? check.order : [];
+    const wanted = parseOrder(description);
+    const want = wanted.ok ? wanted.order : [];
+    if (got.join() !== want.join()) {
+      r.failed.push(
+        `「${toTitle}」的先后改完回读对不上（要 ${want.join('、')}，读回来 ${got.join('、')}），旧版不关`,
+      );
+      return false;
+    }
+    to.milestone = back;
+    r.lines.push(`「${toTitle}」的先后补上了：${numbers.map((n) => `#${n}`).join('、')}。`);
+    return true;
+  } catch (e) {
+    r.failed.push(`「${toTitle}」的先后没接上（${message(e)}），旧版不关`);
+    return false;
+  }
 }
 
 /** 收口段里记的滚过去的单号（重跑时并上，上一次已经挪走的也算）。 */
@@ -295,7 +337,7 @@ async function rollOver(
     return;
   }
   const moving = issues.filter((i) => i.state === 'open').map((i) => i.number);
-  const rolled = [...new Set([...rolledFrom(from.milestone.description), ...moving])];
+  let rolled = [...new Set([...rolledFrom(from.milestone.description), ...moving])];
 
   // 先把要滚的单记进旧版说明（收口中）：挪到一半断了，下一次跑还知道哪些滚过
   let fromDescription = from.milestone.description;
@@ -350,12 +392,21 @@ async function rollOver(
   // 收口段写定、关旧版、回读
   try {
     const finalIssues = await gh.milestoneIssues(from.milestone.number);
-    const left = finalIssues.filter((i) => i.state === 'open');
-    if (left.length) {
-      r.failed.push(
-        `「${fromTitle}」里又冒出开着的单 ${left.map((i) => `#${i.number}`).join('、')}，旧版不关；下一轮接着挪`,
-      );
-      return;
+    const left = finalIssues.filter((i) => i.state === 'open').map((i) => i.number);
+    // 按里程碑列单是最终一致的：刚挪走的还会在旧版列表里停一会儿（2026-11-16 v8，#1960、#2088
+    // 的改挂回包已经是 v9，列表仍报在 v8，这一轮因此没关）。回包对过的（moved）不再当成没挪走。
+    // 列表里这轮还没挪过的，当场再挪，挪完才关。
+    const unseen = left.filter((n) => !moved.includes(n));
+    if (unseen.length) {
+      const again = await moveAll(gh, unseen, fromTitle, to, why, r);
+      if (again.length !== unseen.length) {
+        r.failed.push(
+          `「${fromTitle}」还有 ${unseen.length - again.length} 张单没挪过去，旧版不关；下一轮接着挪`,
+        );
+        return;
+      }
+      rolled = [...new Set([...rolled, ...again])];
+      if (!(await appendToVersionOrder(gh, to, again, r))) return;
     }
     const section = cutSection({
       version: from.version,

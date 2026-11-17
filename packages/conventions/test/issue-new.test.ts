@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   checkIssueBody,
+  chooseCurrentMilestone,
   defectImpactProblem,
   describeOrder,
   type GhResult,
@@ -17,6 +18,7 @@ import {
 import { readManifest, withManifest } from '../src/mother-manifest.ts';
 import { parentField } from '../src/parent-field.ts';
 import { parseOrder } from '../src/plan-view.ts';
+import { addDays, beijingDate } from '../src/version-cut.ts';
 import { order } from './fake-github.ts';
 
 const MILESTONES = JSON.stringify([{ title: 'P0 地基' }, { title: 'P1 核心闭环' }, { title: 'P4 飞书 v2' }]);
@@ -34,6 +36,7 @@ interface FakeMilestone {
   number: number;
   title: string;
   description: string | null;
+  due_on?: string | null;
 }
 /** 接口回的一个开放里程碑（gh api 读回来的样子）。 */
 const msJson = (m: FakeMilestone) => ({ ...m, state: 'open', closed_at: null });
@@ -1107,6 +1110,59 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
       '--milestone 当前：开着的 v<N> 版本该恰好一个，现在是 2 个（v1 Fusion 接活、v2 下一版），单没开。',
     );
     expect(created(calls)).toBe(false);
+  });
+
+  it('--milestone 当前只开着 v9：解析成「v9 11-16～11-22」', async () => {
+    const title = 'v9 11-16～11-22';
+    const api = milestoneApi([{ number: 16, title, description: V1_DESC, due_on: '2026-11-22T00:00:00Z' }]);
+    const { calls, run } = setup({ route: api.route });
+    const r = await run(...base.slice(0, 3), '当前', ...base.slice(4));
+    expect(r).toMatchObject({ milestone: title });
+    const create = calls.find((c) => c[1] === 'create') ?? [];
+    expect(create[create.indexOf('--milestone') + 1]).toBe(title);
+  });
+
+  it('到期未收口：旧版过了到期日还开着、下一版已开，当前选下一版', async () => {
+    const today = beijingDate(new Date());
+    const oldDue = addDays(today, -2);
+    const newStart = addDays(oldDue, 1);
+    const newEnd = addDays(oldDue, 7);
+    const oldTitle = `v8 ${addDays(oldDue, -6).slice(5)}～${oldDue.slice(5)}`;
+    const newTitle = `v9 ${newStart.slice(5)}～${newEnd.slice(5)}`;
+    const api = milestoneApi([
+      { number: 15, title: oldTitle, description: V1_DESC, due_on: `${oldDue}T00:00:00Z` },
+      { number: 16, title: newTitle, description: V1_DESC, due_on: `${newEnd}T00:00:00Z` },
+    ]);
+    const { calls, run } = setup({ route: api.route });
+    const r = await run(...base.slice(0, 3), '当前', ...base.slice(4));
+    expect(r).toMatchObject({ milestone: newTitle });
+    expect(created(calls)).toBe(true);
+  });
+
+  it('到期未收口时当前如何选：过期的 v8 还开着就选 v9；没过期、号不挨着、只开着 v9 各按规矩', () => {
+    const overdue = new Date('2026-11-17T02:00:00Z');
+    const open = [
+      { title: 'v8 11-09～11-15', dueOn: '2026-11-15T00:00:00Z' },
+      { title: 'v9 11-16～11-22', dueOn: '2026-11-22T00:00:00Z' },
+    ];
+    expect(chooseCurrentMilestone(open, overdue)).toEqual({ ok: true, title: 'v9 11-16～11-22' });
+    expect(chooseCurrentMilestone([...open].reverse(), overdue)).toEqual({
+      ok: true,
+      title: 'v9 11-16～11-22',
+    });
+    expect(chooseCurrentMilestone(open, new Date('2026-11-15T01:00:00Z'))).toMatchObject({ ok: false });
+    expect(
+      chooseCurrentMilestone(
+        [
+          { title: 'v7 更早', dueOn: '2026-11-08T00:00:00Z' },
+          { title: 'v9 11-16～11-22', dueOn: '2026-11-22T00:00:00Z' },
+        ],
+        overdue,
+      ),
+    ).toMatchObject({ ok: false });
+    const onlyV9 = open[1];
+    if (onlyV9 === undefined) throw new Error('测试数据缺 v9');
+    expect(chooseCurrentMilestone([onlyV9], overdue)).toEqual({ ok: true, title: 'v9 11-16～11-22' });
   });
 
   it('【故意造出的失败】写了已关（不在开着的里）的 v<N>：报错并提示用「当前」', async () => {

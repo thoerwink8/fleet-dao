@@ -1,5 +1,5 @@
 // 版本收口（#2683）：用内存里的假 GitHub 跑 cutVersions。过期收口、挪单失败不关旧版、同一天重跑不出重复、没过期什么都不做、
-// 手工关了还挂着开着单的版本兜底挪走，各有一条。
+// 列表还留着刚挪走的单仍关旧版、关之前才看见的单同一轮挪走、手工关了还挂着开着单的版本兜底挪走，各有一条。
 import { describe, expect, it } from 'vitest';
 import type { MilestoneDetail, PlanIssue } from '../src/github-api.ts';
 import { parseOrder } from '../src/plan-view.ts';
@@ -26,8 +26,13 @@ interface World {
 }
 
 /** 假 GitHub：读写都落在 world 上；failMove 里的单挪不动（故意造出的失败）。 */
-function fake(w: World, opts: { failMove?: number[] } = {}) {
+function fake(
+  w: World,
+  opts: { failMove?: number[]; staleOldAfterMove?: boolean; hideFromFirstOldRead?: number[] } = {},
+) {
   const writes: string[] = [];
+  const movedFrom = new Map<number, string>();
+  let oldReads = 0;
   const byNumber = (n: number) => {
     const m = w.milestones.find((x) => x.number === n);
     if (!m) throw new Error(`假数据里没有里程碑 ${n}`);
@@ -39,7 +44,22 @@ function fake(w: World, opts: { failMove?: number[] } = {}) {
     },
     async milestoneIssues(n) {
       const title = byNumber(n).title;
-      return w.issues.filter((i) => i.milestone === title).map((i) => ({ ...i }));
+      let rows = w.issues.filter((i) => i.milestone === title);
+      if (title === V4) {
+        oldReads += 1;
+        if (oldReads === 1 && opts.hideFromFirstOldRead?.length) {
+          const hide = new Set(opts.hideFromFirstOldRead);
+          rows = rows.filter((i) => !hide.has(i.number));
+        }
+        if (opts.staleOldAfterMove === true) {
+          const ghosts = w.issues.filter(
+            (i) => movedFrom.get(i.number) === title && i.milestone !== title && i.state === 'open',
+          );
+          const seen = new Set(rows.map((i) => i.number));
+          rows = [...rows, ...ghosts.filter((i) => !seen.has(i.number))];
+        }
+      }
+      return rows.map((i) => ({ ...i }));
     },
     async comments(n) {
       return [...(w.comments[n] ?? [])];
@@ -76,7 +96,9 @@ function fake(w: World, opts: { failMove?: number[] } = {}) {
       writes.push(`move #${n} → ${ms}`);
       const i = w.issues.find((x) => x.number === n);
       if (!i) throw new Error(`假数据里没有 #${n}`);
+      const prev = i.milestone;
       i.milestone = byNumber(ms).title;
+      if (typeof prev === 'string' && prev !== i.milestone) movedFrom.set(n, prev);
     },
   };
   return { gh, writes };
@@ -214,6 +236,46 @@ describe('到期收口', () => {
     const r = await cutVersions(gh, DAY_AFTER);
     expect(writes).toEqual([]);
     expect(r.problems.join()).toContain('只该开一个');
+  });
+
+  it('列表还留着刚挪走的单：改挂回包已经是新版，这一轮仍关旧版', async () => {
+    const w = world();
+    const { gh, writes } = fake(w, { staleOldAfterMove: true });
+    const r = await cutVersions(gh, DAY_AFTER);
+    expect(r.failed).toEqual([]);
+    expect(w.milestones.find((m) => m.number === 11)?.state).toBe('closed');
+    expect(w.milestones.find((m) => m.number === 11)?.description).not.toContain('收口中');
+    expect(w.milestones.filter((m) => m.state === 'open').map((m) => m.title)).toEqual(['v5 10-19～10-25']);
+    expect(writes.filter((line) => line.startsWith('move '))).toEqual([
+      'move #10 → 12',
+      'move #20 → 12',
+      'move #30 → 12',
+    ]);
+  });
+
+  it('关旧版前才看见一张没挪过的：同一轮挪过去、补进先后，再关', async () => {
+    const w = world();
+    const { gh } = fake(w, { hideFromFirstOldRead: [30] });
+    const r = await cutVersions(gh, DAY_AFTER);
+    expect(r.failed).toEqual([]);
+    expect(w.issues.find((i) => i.number === 30)?.milestone).toBe('v5 10-19～10-25');
+    expect(w.milestones.find((m) => m.number === 11)?.state).toBe('closed');
+    const v5 = w.milestones.find((m) => m.title.startsWith('v5 '));
+    expect(parseOrder(v5?.description ?? '')).toMatchObject({ ok: true, order: [20, 10, 30] });
+  });
+
+  it('到期未收口、单已经在下一版：下一轮只关旧版，不开第三个', async () => {
+    const w = world();
+    await cutVersions(fake(w).gh, DAY_AFTER);
+    const v4 = w.milestones.find((m) => m.number === 11);
+    if (!v4) throw new Error('假数据里没有 v4');
+    v4.state = 'open';
+    v4.closedAt = null;
+    const r = await cutVersions(fake(w).gh, DAY_AFTER);
+    expect(r.failed).toEqual([]);
+    expect(v4.state).toBe('closed');
+    expect(w.milestones.filter((m) => m.title.startsWith('v5 '))).toHaveLength(1);
+    expect(w.milestones.filter((m) => m.title.startsWith('v6 '))).toHaveLength(0);
   });
 });
 

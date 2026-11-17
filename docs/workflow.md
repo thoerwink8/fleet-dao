@@ -18,7 +18,8 @@
 ## PR
 
 - `pnpm pr:open` 开 PR，当场挂自动合并（改标准见下）；只看 CI，红了才回来修。谁开谁负责到合并。开的时候必带和开单同一套 `--domain`、`--nature`，贴上才能按域、按性质筛。
-- CI 一律全套（决定 0101）：每个 PR 都跑全部单元测试、web 打包、e2e 全套（两种屏宽）、deploy 全套，和主线推送一样；合并闸等全套绿。同一 PR 重推时输入没变的测试台复用上一轮的结果，合并后主线同一棵树复用 PR 的结果。不用自己判这个 PR 要不要跑 e2e。
+- CI 一律全套（决定 0101）：每个 PR 都跑全部单元测试、web 打包、e2e 全套（两种屏宽）、deploy 全套，和主线推送一样；合并闸等汇总 job `check` 绿。同一 PR 重推时输入没变的测试台复用上一轮的结果，合并后主线同一棵树复用 PR 的结果。不用自己判这个 PR 要不要跑 e2e。
+- ci.yml 每台 job 的身份（和 `.github/workflows/ci.yml`、`packages/conventions/src/ci-plan.ts` 的 `NON_BLOCKING_JOBS` 一致，#4064）。必过、挡合并的只有汇总 job `check` 这一个名字：它 needs `changes`、`lint`、`test`、`web`、`e2e`、`deploy`，少 needs 一台就不拦那台。`changes`、`lint` 每轮都跑且必须绿；`test`、`web`、`e2e`、`deploy` 是全套，主线同树复用时必须是跳过。`lint` 里的卫生检查只报不挡，不把 `lint` 判红。`heavy`、`windows`、`linux`、`desktop` 不在 needs 里，红了只让自己这台红，不挡合并，不是必过。`heavy` 挡发版：发版车预检（`agents/skills/commander/scripts/release-train-lib.mjs` 的 `preflightCi`）要被发提交上的 `check` 和 `heavy` 都是绿的，`heavy` 红了、没跑、还在跑、读不到都不发。`windows`（Windows 上编跑 jobrun）、`linux`（Linux 上编跑 hostd）、`desktop`（Windows 上编桌面外壳、出安装包、真开窗口）不进这份预检。这四台都没有 continue-on-error，主线上任何一台红了，整轮 ci.yml 的结论是 failure；自动发版（`deploy/france/auto-release/lib.mjs` 的 `ciVerdict`）只认整轮 success，所以这一次也不发。把 `windows`、`linux`、`desktop` 改成必过要同时改名单和 `check` 的 needs，这里不改。
 - 关单分执行者：本机最后一个 PR 的「需求」栏下另起一行写 `Closes #号`，由 GitHub 在合并时关闭。引擎 PR 正文和实际 squash 消息都去掉自动关单词，保留需求关联，工作流在合并收尾时关单。冷验收判出「不归我验」的条时写 `Refs #号` 并留单（贴「本机做」），有人贴上证据再关。验收核对需求关联，不要求引擎正文有自动关单词。任务工作流将验过的头传给自动合并口，先核头没变、再绑定该头并显式提交安全 squash 标题和非空正文，核 GitHub 回执一致后才算挂好；REST 直接合并和回退同样显式传消息。GitHub merge queue 会忽略自定义消息，不能沿这条消息确认机制宣称安全；回执缺失或不一致先撤挂并核撤挂回执，再保留原失败；撤挂也读不清则明确结果未知。没有 PR 的用 `pnpm issue:close`；完整约定见 design 第七节「关单要有证据」。合并不等于验完（决定 0113）：要 diff 外证据的验收条在开单、拉单时就挡下，这类单留给本机或指挥官做，单子开着直到有人贴上证据再关；冷验收仍判出「不归我验」的漏网条，代码照合，引擎收尾不关单、PR「需求」栏在合并前改 `Refs`（分片）。#3591 起不再往 `acceptance_duties` 写新行；#3630 删了结清、拍板卡、管理 CLI 和关单闸对它的检查，还开着的旧行由 `fleet-api acceptance-handback-once` 一次性交回原单（见决定 0113 补充段）。
 - 推之前本机做的见根 AGENTS.md 表，其余交给 CI。后端 Node 22 直接跑 TypeScript，相对导入带 `.ts`。
 - 改了哪个包的入口、命令、坑，顺手改那个包的 `AGENTS.md`。全部 pnpm 命令见 `README.md`。
@@ -30,6 +31,6 @@
 
 ## 发版和底线
 
-- 主线绿了法国自动发版。先改仓库、合进主线，再落到法国，不在机器上手改。本机只做断链急修、要本机资源的、指挥官本职，其余给法国。
+- 主线这次推送的 ci.yml 整轮 success 了，法国才自动发版（必过的 `check` 绿不够：`heavy` 或 `windows`、`linux`、`desktop` 红了整轮就不是 success）。先改仓库、合进主线，再落到法国，不在机器上手改。本机只做断链急修、要本机资源的、指挥官本职，其余给法国。
 - 已上线的真问题先回退再修；主线必过检查红了立刻修，修复 PR 写清是哪次合并弄坏的。CI 里的检查必须确定、只看检出来的文件，看外部状态的放定时任务、只留言不挡 PR。
 - 公开仓：卫生检查只拦真密钥（pre-push 挡）。
