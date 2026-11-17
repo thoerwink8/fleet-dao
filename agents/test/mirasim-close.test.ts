@@ -24,6 +24,13 @@ interface ExecResult {
   stdout: string;
   stderr: string;
 }
+interface SessionRow {
+  sessionKey: string;
+  runState: string;
+  workdir: string;
+  title?: string;
+  source?: 'managed' | 'native';
+}
 interface MergeOpts {
   exec: (cmd: string, args: string[]) => ExecResult;
   fetch: (
@@ -47,7 +54,8 @@ interface CloseMod {
     io?: {
       log?: (line: string) => void;
       exec?: (cmd: string, args: string[]) => ExecResult;
-      deleteSession?: (key: string) => Promise<{ skipped: boolean; detail: string }>;
+      sessionRow?: (key: string) => Promise<SessionRow | null>;
+      deleteSession?: (key: string, row?: SessionRow) => Promise<{ skipped: boolean; detail: string }>;
     },
   ): Promise<number>;
   performMerge(o: MergeOpts): Promise<{ skipped: boolean; detail: string }>;
@@ -101,6 +109,9 @@ function mergedRepo(): { main: string; wt: string; branch: string } {
   writeFileSync(join(main, 'node_modules', 'keep.txt'), 'keep\n');
   writeFileSync(join(main, 'node_modules', 'also.txt'), 'also\n');
   return { main, wt, branch };
+}
+function sessionRow(sessionKey: string, workdir: string, runState = 'completed'): SessionRow {
+  return { sessionKey, workdir, runState, source: 'managed', title: 'test' };
 }
 
 function linkModules(main: string, wt: string, kind: 'junction' | 'dir') {
@@ -384,6 +395,7 @@ describe('历史无共同祖先时快进失败仍继续收', () => {
       ['--repo', main, '--branch', branch, '--pr', '7', '--session', 'kimi:abc'],
       {
         log: (line) => lines.push(line),
+        sessionRow: async () => sessionRow('kimi:abc', wt),
         deleteSession: async (key) => {
           dropped.push(key);
           return { skipped: false, detail: `已删会话 ${key}` };
@@ -407,6 +419,44 @@ describe('历史无共同祖先时快进失败仍继续收', () => {
     expect(git(main, ['rev-parse', 'HEAD'])).toBe(head);
     expect(dropped).toEqual(['kimi:abc']);
     expect(out).toContain('已删会话 kimi:abc');
+  });
+});
+describe('会话释放先于工作树删除', () => {
+  it('running 会话拒绝删除工作树、分支和会话', async () => {
+    const { main, wt, branch } = mergedRepo();
+    let dropped = false;
+    const lines: string[] = [];
+    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:running'], {
+      log: (line) => lines.push(line),
+      sessionRow: async () => sessionRow('kimi:running', wt, 'running'),
+      deleteSession: async () => {
+        dropped = true;
+        return { skipped: false, detail: '不该删' };
+      },
+    });
+    const out = lines.join('\n');
+    expect(code, out).not.toBe(0);
+    expect(out).toMatch(/目标会话 kimi:running 还在运行/);
+    expect(existsSync(wt)).toBe(true);
+    expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
+    expect(dropped).toBe(false);
+  });
+
+  it('释放失败时不删除工作树和分支', async () => {
+    const { main, wt, branch } = mergedRepo();
+    const lines: string[] = [];
+    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:failed'], {
+      log: (line) => lines.push(line),
+      sessionRow: async () => sessionRow('kimi:failed', wt),
+      deleteSession: async () => {
+        throw new Error('session release failed');
+      },
+    });
+    const out = lines.join('\n');
+    expect(code, out).not.toBe(0);
+    expect(out).toContain('释放会话 kimi:failed 没成');
+    expect(existsSync(wt)).toBe(true);
+    expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
   });
 });
 
@@ -439,15 +489,16 @@ describe('git 登记消失不能当成目录已删', () => {
     rmSync(gitdir, { recursive: true, force: true });
   }
 
-  it('git worktree remove 退出码 0 但目录还在：失败，不删分支、不删会话', async () => {
+  it('git worktree remove 退出码 0 但目录还在：会话先释放，失败后可重跑', async () => {
     const { main, wt, branch } = mergedRepo();
     let dropped = false;
     const lines: string[] = [];
     const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:abc'], {
       log: (line) => lines.push(line),
+      sessionRow: async () => sessionRow('kimi:abc', wt),
       deleteSession: async () => {
         dropped = true;
-        return { skipped: false, detail: '不该删' };
+        return { skipped: false, detail: '已删会话 kimi:abc' };
       },
       exec: (cmd, args) => {
         if (cmd === 'git' && args.includes('worktree') && args.includes('remove')) {
@@ -459,12 +510,11 @@ describe('git 登记消失不能当成目录已删', () => {
     const out = lines.join('\n');
     expect(code, out).not.toBe(0);
     expect(out).toMatch(/停在：删工作树/);
-    // mkdtemp 给 8.3 短名，close 日志走 git rev-parse 的全名，先对齐再断言
-    expect(out).toContain(realpathSync.native(wt));
+    expect(out).toContain('已删会话 kimi:abc');
+    expect(out).toContain('没有把登记消失当成目录已删');
+    expect(dropped).toBe(true);
     expect(existsSync(wt)).toBe(true);
-    expect(existsSync(join(main, 'readme.txt'))).toBe(true);
     expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
-    expect(dropped).toBe(false);
   });
 
   it('登记没了、目录里还有文件：停住不删，主检出还在', async () => {
@@ -476,6 +526,7 @@ describe('git 登记消失不能当成目录已删', () => {
     const lines: string[] = [];
     const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:on-main'], {
       log: (line) => lines.push(line),
+      sessionRow: async () => null,
       deleteSession: async () => {
         dropped = true;
         return { skipped: false, detail: '不该删' };
