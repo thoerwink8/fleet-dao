@@ -1,6 +1,7 @@
 // mirasim-sessions 派活：只调一次 prompt，拿到会话号就立刻改名。
 // 拿不到会话号就退出码 1、不再调 prompt（重调会再派一个会话）。参数不对是退出码 2。
 // 版本读 ~/.mirasim/app/state.json 里 good 的那一版，不写死版本号；用户目录用 USERPROFILE / HOME / os.homedir()。
+// 不看交代正文。编码任务的工作树由调用方在派之前建好，--workdir 传那棵树；只读可以传主检出。脚本没有读写标记，拦不住交代里让工人另建树。
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -9,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const USAGE = `用法：node dispatch.mjs --title <侧栏名> --workdir <目录> --prompt <交代> [--agent <名>] [--model <名>] [--effort <档>] [--route local|cloud] [--port <端口>] [--report-to <会话key>]
 派活并立刻改名，只调一次 prompt。交代末尾自动加上回报去向。找不到指挥会话退出码 2、一次都不派；拿不到会话号退出码 1、不重派；参数不对退出码 2。
+--workdir 是会话的启动目录，原样传给 prompt。编码任务要先建好链接工作树，再把 --workdir 指到那棵树，不要指主检出。只读、不改代码可以把 --workdir 指主检出。脚本没有读写标记，也不看交代正文，拦不住交代里让工人另建树。
 宿主端口：--port → 环境变量 MIRASIM_HOST_PORT → ~/.mirasim/run/local-<端口>.token（有 4970 优先）；都没有就退出码 2、不调 ui-cli（不带端口的 ui-cli 会起一次性私服，子会话随命令退出一起死）。
 没给 --report-to、环境变量 MIRASIM_SESSION_KEY 也不是会话 key 时，才在本机 claude 会话目录里猜：正在跑、工作目录是 fleet-dao 仓根或其 .claude/worktrees/<名>、标题不是无人值守心跳，多个取最近更新。猜不到就退出码 2，并写明要补 --report-to。`;
 

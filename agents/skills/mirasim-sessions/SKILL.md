@@ -16,9 +16,10 @@ description: 创始人指定「用 mirasim 开会话干活、做完回报」时�
 
 - 派活一律用本技能目录里的 `scripts/dispatch.mjs`，不要自己先 `prompt` 再 `renameSession`：漏改名侧栏看不懂，多调一次 `prompt` 会再开一个会话（2026-11-15 两次漏改名、一次重派）。一条命令只调一次 `prompt`，拿到会话号立刻改名。改名用 prompt 接受帧上的会话号；没有接受帧才在同 agent、同目录里取最新的。拿不到会话号就退出码 1、不重派。
 - 派活交代必须带回报去向。`--report-to` 优先；没给时读本进程的 `MIRASIM_SESSION_KEY`（mirasim 起会话就写上，形如 `claude:<会话号>`）。两个都没有才猜：本机 claude 会话里正在跑、工作目录是 fleet-dao 仓根或其 `.claude/worktrees/<名>`、标题不是无人值守心跳的那一个（多个取最近更新）。猜不到就退出码 2，一次都不派，并写明要补 `--report-to`。心跳会话自己的 key 不是指挥会话，心跳里派活要显式 `--report-to` 指向指挥会话。
+- 编码任务在派之前建好工作树，`--workdir` 指这棵已经在的树，不要指仓根，也不要在交代里叫工人自己 `git worktree add`。只读、不改代码的会话可以把 `--workdir` 指主检出。`dispatch.mjs` 没有读写标记，不看交代正文，拦不住「另建树」；调用方自己把编码任务的 `--workdir` 指到真树。
 
 ```
-node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <仓根> --prompt "<交代>" [--report-to <指挥会话key>]
+node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <主检出>/.claude/worktrees/<单号>-<短名> --prompt "<交代>" [--report-to <指挥会话key>]
 ```
 
 - 给在跑或已收轮的会话发后续消息（返工、补验证、接着做），一律用 `scripts/send.mjs --to <会话key> --file <消息文件>`，不要裸调 `prompt`：它会把「回报，必做」和指挥会话号追加到每条消息末尾。只靠开场交代里的那一段，会话做完第二件事时会忘（11-16 #33 做完开了 PR 却没回报，我的后续消息里只写了「回报」两个字）。
@@ -32,7 +33,7 @@ node scripts/dispatch.mjs --title "【omp】#单号 一句中文" --workdir <仓
 - `grok-4.7-build-fast@500k`（grok 渠道）1097 次、0 错，中位 8.0 秒、首字 5.4 秒；同渠道 `grok-4.7` 是 1978 次、中位 6.0 秒、首字 3.7 秒。花费 148.5 美元对 149.4 美元，单次 148.5/1097 对 149.4/1978，约 1.8 倍。次数比约 1:1.8，就是池里 1 比 2 的两名成员，慢且贵的那名是 `grok-4.7-build-fast`。从 `group/grok-pool` 移出，不留权重当后备。Grok Build 周额度这次 usage 里没有。
 - 交代照 commander「派活」写全（单号、要改什么、怎么算做完、别碰什么、跑哪些测试），另加四条：
   1. 自己干，不派子代理。
-  2. 一件活一棵工作树 `.claude/worktrees/<单号>-<短名>`、分支 `local/<单号>-<短名>`；不往别的会话的分支推，依赖别人的 PR 就基于那个分支开自己的，对方合了再 rebase。
+  2. 工作目录已经是 `.claude/worktrees/<单号>-<短名>`、分支 `local/<单号>-<短名>`。不要再 `git worktree add`，也不要改主检出。不往别的会话的分支推，依赖别人的 PR 就基于那个分支开自己的，对方合了再 rebase。
   3. PR 开好、本机检查过了就停，不开自动合并、不自己合，也不等 CI；`pr:open` 顺手开了自动合并就 `gh pr merge <PR> --disable-auto` 摘掉。合并归验收的人，不然没验收的改动会先进主线（#3950 就是先合了、返工只能另开 #3951，还带红了主线 #3953）。
   4. 回报去向由 `scripts/dispatch.mjs` 写进交代，不要再手写一套。做完或卡住时，把正文写进文件，运行交代里的 `scripts/report.mjs --to <指挥会话key> --title <活名> --file <正文>`，看到输出 ok 才算发出。正文写做到哪、PR 号、头提交、`git ls-remote` 和 `gh pr view` 的输出、验证命令和真实结果、没做的和原因。不许写「CI 绿了再回报」然后收轮。命令超过约 60 秒会被钩子自动转后台：让会话把测试按单个文件分开跑、每条命令尽量 60 秒内，同一条查看命令最多连发 2 次，连续 8 次相同调用系统会停掉整轮（11-16 #11 实测），停了就既不提交也不回报；不许丢到后台再收轮。会话自己回报覆盖不了它自己被停、崩溃、模型报错（11-16 还有一例开场 422），所以每轮巡检先跑 `node scripts/sweep.mjs --repo <主检出>`（只列可收、要人看、孤儿，以及这个仓里没人认的工作树，不加 `--apply`），再跑 `node scripts/check-reports.mjs`，有 ALERT 行就读该会话最后一轮，插队让它接着做或重派。
 - 关键约束（授权边界、别碰哪些分支、验收标准）在开会话的第一条里写全。`steer` 只有部分 agent 吃，grok 不吃。给在跑的子会话发任何新消息（补充、返工、回报转发），都用 `scripts/send.mjs` 再 `stopAndRun {sessionKey, ref}`；`ref` 必须取脚本输出 JSON 的 `clientRef`，这是宿主 `accepted` 回执里的编号，不能用调用方生成的编号（#4097：宿主会改写，旧编号插队不生效）。回执缺失或会话不符时脚本报结果未知，先查目标会话和队列，不重发。插队会打断正在跑的命令，尽量攒成一条再发；之后用 `getTurnFacts` 确认新要求实际进入回合，不能仅凭 `ok` 判送达。已经 done 的会话直接用 `scripts/send.mjs` 即可，不用插队。

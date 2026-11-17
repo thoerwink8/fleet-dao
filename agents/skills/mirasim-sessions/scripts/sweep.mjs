@@ -2,6 +2,8 @@
 // 同时列 --repo（默认当前目录所在仓）里没有会话认领的工作树，判类同一套，不另写一条命令。
 // --apply 才收「可收」和「孤儿」。收的动作是 close.mjs（closeRun / deleteSession），这里不另写删工作树。
 // 会话工作目录是 record.json 的 workdir。会话目录里的 workspace 只是会话自己的文件夹，不算工作树还在。
+// 工作目录存在、但 git 说不是仓库（家目录、Documents、工具自己的运行目录）不是工作树残留，close 也收不了，跳过。
+// 不按 --repo 把别的仓的链接工作树滤掉。git 因权限等原因失败仍是要人看。
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -268,6 +270,12 @@ async function inspectSession(agentDir, dirName, rec, exec, env, fetchImpl, list
   const gitDir = git(exec, workdir, ['rev-parse', '--path-format=absolute', '--git-dir']);
   const common = git(exec, workdir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   if (gitDir.code !== 0 || common.code !== 0) {
+    const detail = `${gitDir.stderr}\n${gitDir.stdout}\n${common.stderr}\n${common.stdout}`;
+    if (/not a git repository/i.test(detail)) {
+      row.kind = '跳过';
+      row.reason = '不是 git 工作树';
+      return row;
+    }
     row.kind = '要人看';
     row.reason = '工作目录不是 git 工作树';
     return row;

@@ -6,6 +6,8 @@
 // fleet-ade 的 upstream 推送地址故意是 DISABLED，推它会让后面的删除全停（2026-11-16 #155）。不加开关。
 // 快进因历史无共同祖先失败时，报告「主检出没快进：历史无共同祖先」并继续删联接、工作树、分支、会话（这几步不依赖快进）。
 // 其余步骤失败就停、退出码非 0，并写明下一步怎么手工接。已经做成的步骤再跑会跳过（看仓库现状，不另记进度文件）。
+// git worktree remove 退出码是 0，或登记里已经没有这棵树，都不能当成目录已删。登记还在的，删完要核目标绝对路径不在。
+// 登记没了时，只在物理路径确实落在主检出 .claude/worktrees/<分支去掉 local/ 的那一段> 下才收空目录。目录里还有东西就停，留给人，不按分支名猜归属，不另记台账。
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -13,6 +15,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   statSync,
   unlinkSync,
 } from 'node:fs';
@@ -230,6 +233,100 @@ function entryCount(dir) {
   } catch {
     return null;
   }
+}
+/**
+ * @param {Map<string, number>} before
+ */
+function assertDepCounts(before) {
+  for (const [dir, n] of before) {
+    const after = entryCount(dir);
+    if (after !== n) {
+      throw new Stop(
+        '删工作树',
+        `主检出依赖目录项数变了：${dir} 删除前 ${n}，删除后 ${after ?? '目录没了'}。不要继续删别的。先把依赖恢复再重跑。`,
+      );
+    }
+  }
+}
+
+/**
+ * @param {(line: string) => void} say
+ * @param {Map<string, number>} before
+ */
+function reportDepCounts(say, before) {
+  assertDepCounts(before);
+  if (before.size === 0) say('[删工作树] 主检出没有依赖目录可核');
+  else say(`[删工作树] 主检出依赖目录项数未变（${[...before.values()].join('、')}）`);
+}
+
+/**
+ * git 已经不登记这棵树时，只认这一个绝对路径。
+ * 字符串上的 resolve/relative 不够：父目录是联接、指到主检出外面时，末级仍可能是普通目录。
+ * 父目录和这一级的真实路径都必须在主检出里面。多段、..、末级联接、不存在、或就是主检出，都回 null。
+ * @param {string} main
+ * @param {string} branch
+ * @returns {string | null}
+ */
+export function conventionalWorktreePath(main, branch) {
+  if (!branch.startsWith('local/')) return null;
+  const name = branch.slice('local/'.length);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return null;
+  const mainAbs = resolve(main);
+  const root = resolve(mainAbs, '.claude', 'worktrees');
+  const candidate = resolve(root, name);
+  if (relative(root, candidate) !== name) return null;
+  if (samePath(candidate, mainAbs)) return null;
+  let st;
+  try {
+    st = lstatSync(candidate);
+  } catch {
+    return null;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return null;
+  let mainReal;
+  let rootReal;
+  let candidateReal;
+  try {
+    mainReal = realpathSync(mainAbs);
+    rootReal = realpathSync(root);
+    candidateReal = realpathSync(candidate);
+  } catch {
+    return null;
+  }
+  const rootRel = relative(mainReal, rootReal);
+  if (rootRel === '' || rootRel.startsWith('..') || isAbsolute(rootRel)) return null;
+  if (relative(rootReal, candidateReal) !== name) return null;
+  return candidate;
+}
+
+/**
+ * 删掉已经不在 git 登记里、物理路径核对通过、且里面没有条目的那一个目录。
+ * 有内容就停。不递归删，也不按分支名推断目录归属。
+ * @param {string} main
+ * @param {string} branch
+ * @param {string} target
+ * @returns {string[]}
+ */
+export function removeUnregisteredWorktree(main, branch, target) {
+  const expected = conventionalWorktreePath(main, branch);
+  const abs = resolve(target);
+  if (!expected || !samePath(abs, expected)) {
+    throw new Stop('删工作树', `只删 .claude/worktrees 下物理路径在主检出里的空目录，不会删 ${abs}`);
+  }
+  if (samePath(abs, resolve(main))) throw new Stop('删工作树', `目标是主检出 ${main}，不删`);
+  let names;
+  try {
+    names = readdirSync(abs);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Stop('删工作树', `读不了 ${abs}：${message}`);
+  }
+  if (names.length > 0) {
+    throw new Stop('删工作树', `目录还有内容，没有删，留给人处理：${abs}`);
+  }
+  rmdirSync(abs);
+  if (existsSync(abs)) throw new Stop('删工作树', `目录还在：${abs}`);
+  return [];
 }
 
 /**
@@ -502,7 +599,12 @@ export async function closeRun(argv, io = {}) {
     const mine = trees.filter((t) => t.branch === wantRef);
     if (mine.length > 1)
       throw new Stop('核对', `分支 ${opt.branch} 检出了 ${mine.length} 棵工作树，不确定删哪棵`);
-    const worktree = mine[0]?.path ?? null;
+    const registeredPath = mine[0]?.path ? resolve(mine[0].path) : null;
+    if (registeredPath && samePath(registeredPath, main)) {
+      throw new Stop('核对', `分支 ${opt.branch} 的路径是主检出，不删目录`);
+    }
+    const registered = Boolean(registeredPath);
+    const worktree = registeredPath ?? conventionalWorktreePath(main, opt.branch);
 
     const localBranch = git(exec, main, ['show-ref', '--verify', '--quiet', wantRef]);
     const branchExists = localBranch.code === 0;
@@ -510,7 +612,7 @@ export async function closeRun(argv, io = {}) {
       say(`[核对] 工作树和本地分支 ${opt.branch} 都已经不在`);
     }
 
-    if (worktree) {
+    if (registered && worktree) {
       const dirty = git(exec, worktree, ['status', '--porcelain', '--untracked-files=all']);
       if (dirty.code !== 0) failExec('核对', dirty, '看工作树有没有未提交改动');
       if (dirty.stdout.trim()) {
@@ -520,6 +622,19 @@ export async function closeRun(argv, io = {}) {
         );
       }
       say(`[核对] 工作树没有未提交改动：${worktree}`);
+    } else if (worktree) {
+      let names;
+      try {
+        names = readdirSync(worktree);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Stop('核对', `读不了 ${worktree}：${message}`);
+      }
+      if (names.length === 0) {
+        say(`[核对] 空目录残留，里面没有文件：${worktree}`);
+      } else {
+        throw new Stop('核对', `目录还有内容，没有删，留给人处理：${worktree}`);
+      }
     } else say('[核对] 没有这棵工作树，跳过未提交检查');
 
     const headRef = git(exec, main, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
@@ -686,44 +801,57 @@ export async function closeRun(argv, io = {}) {
       say('[拆联接] 不适用：工作树已经不在');
     } else {
       const before = snapshotDepCounts(main, worktree);
-      let removed = [];
-      try {
-        const unlinked = unlinkDirectoryLinks(worktree);
-        removed = unlinked.removed;
-        if (unlinked.left.length > 0) {
-          throw new Stop(
-            '拆联接',
-            `拆完还有目录联接，没有删工作树：${unlinked.left.join('、')}。只对这些路径 unlink（不要 rm -rf），确认没有了再重跑：${again()}`,
-          );
-        }
-      } catch (err) {
-        if (err instanceof Stop) throw err;
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Stop(
-          '拆联接',
-          `拆目录联接没成：${message}。不要 git worktree remove。修好后重跑：${again()}`,
-        );
-      }
-      say(removed.length === 0 ? '[拆联接] 没有目录联接' : `[拆联接] 已拆 ${removed.length} 个，没有剩余`);
-      const gone = git(exec, main, ['worktree', 'remove', worktree]);
-      if (gone.code !== 0) {
-        throw new Stop(
-          '删工作树',
-          `目录联接已经拆了，git worktree remove 没成。不要用会跟着联接走的删法。看完原因再重跑：${again()}\n${(gone.stderr || gone.stdout).trim().slice(0, 400)}`,
-        );
-      }
-      say(`[删工作树] 已删 ${worktree}`);
-      for (const [dir, n] of before) {
-        const after = entryCount(dir);
-        if (after !== n) {
+      if (!registered) {
+        let removed = [];
+        try {
+          removed = removeUnregisteredWorktree(main, opt.branch, worktree);
+        } catch (err) {
+          if (err instanceof Stop) throw err;
+          const message = err instanceof Error ? err.message : String(err);
           throw new Stop(
             '删工作树',
-            `主检出依赖目录项数变了：${dir} 删除前 ${n}，删除后 ${after ?? '目录没了'}。不要继续删别的。先把依赖恢复再重跑。`,
+            `删残留目录没成：${message}。目标仍是 ${resolve(worktree)}。重跑：${again()}`,
           );
         }
+        if (existsSync(worktree)) {
+          throw new Stop(
+            '删工作树',
+            `目标目录还在：${resolve(worktree)}。没有把登记消失当成目录已删。重跑：${again()}`,
+          );
+        }
+        say(removed.length === 0 ? '[拆联接] 没有目录联接' : `[拆联接] 已拆 ${removed.length} 个，没有剩余`);
+        say(`[删工作树] 已删 ${worktree}`);
+      } else {
+        let removed = [];
+        try {
+          const unlinked = unlinkDirectoryLinks(worktree);
+          removed = unlinked.removed;
+          if (unlinked.left.length > 0) {
+            throw new Stop(
+              '拆联接',
+              `拆完还有目录联接，没有删工作树：${unlinked.left.join('、')}。只对这些路径 unlink（不要 rm -rf），确认没有了再重跑：${again()}`,
+            );
+          }
+        } catch (err) {
+          if (err instanceof Stop) throw err;
+          const message = err instanceof Error ? err.message : String(err);
+          throw new Stop(
+            '拆联接',
+            `拆目录联接没成：${message}。不要 git worktree remove。修好后重跑：${again()}`,
+          );
+        }
+        say(removed.length === 0 ? '[拆联接] 没有目录联接' : `[拆联接] 已拆 ${removed.length} 个，没有剩余`);
+        const gone = git(exec, main, ['worktree', 'remove', worktree]);
+        if (existsSync(worktree)) {
+          const detail = (gone.stderr || gone.stdout).trim().slice(0, 400);
+          throw new Stop(
+            '删工作树',
+            `目标目录还在：${resolve(worktree)}。git 退出码 ${gone.code}${detail ? `：${detail}` : ''}。没有把登记消失当成目录已删。重跑同一条会再试这个绝对路径：${again()}`,
+          );
+        }
+        say(`[删工作树] 已删 ${worktree}`);
       }
-      if (before.size === 0) say('[删工作树] 主检出没有依赖目录可核');
-      else say(`[删工作树] 主检出依赖目录项数未变（${[...before.values()].join('、')}）`);
+      reportDepCounts(say, before);
     }
 
     const localStill = git(exec, main, ['show-ref', '--verify', '--quiet', wantRef]).code === 0;
