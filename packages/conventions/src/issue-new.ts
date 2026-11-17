@@ -2,7 +2,7 @@
 // [--allow-pr-body-acceptance "<理由>"]
 // 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（决定 0071：以后要做的事得是一张
 // 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
-// 里程碑＝版本（替代 P 阶段，一周一版、到期自动收口）：--milestone 认「当前」（开着的那个 v<N>）、全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
+// 里程碑＝版本（替代 P 阶段，一周一版、到期自动收口）：--milestone 认「当前」（开着的那个 v<N>；旧版过了到期日还没关、下一版已经开着时指下一版）、全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
 // 未排期时不挂里程碑（建单不带 --milestone），结果里 milestone 记「未排期」。--mother 给这张单多贴「母单」标签
 // （一组能一起验收的子单，用 GitHub 自带子议题挂在它下面）。--parent 开的是子单：先不带里程碑建单、挂到母单下面，
 // 再挂里程碑——接活派的是独立单（design 第九节「在哪能做与接活开关」，母单、子单不派），带着当前版本先建、
@@ -58,6 +58,7 @@ import {
 } from './off-diff-acceptance.ts';
 import { withParentField } from './parent-field.ts';
 import { addToOrder, type OrderParse, parseOrder } from './plan-view.ts';
+import { dueDateOf, expired } from './version-cut.ts';
 
 export interface GhResult {
   code: number;
@@ -118,7 +119,7 @@ export const USAGE =
   ' [--allow-pr-body-acceptance "<理由>"] [--force | --merge-into 单号]' +
   '（开单先走法国的开单服务，连不上、401、503 才退回 gh 直连；法国回 409 同题强命中：打出候选、退出码 1，确实是新的加 --force 照开，其实是同一件事加 --merge-into <号> 并进那张单；422 正文问题同样不退回；--merge-into 只有法国能做，连不上就不开）' +
   '（--domain、--nature 每轴恰好一个，和类别同一次贴上：标签名是「域:…」「性质:…」，只用来筛，不参与派工和合并；' +
-  '--milestone 写「当前」挂开着的那个版本（一周一版、到期自动收口，别写死 v<N>），也认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节（--kind 缺陷 另要写了字的「## 影响」：会让哪项结果变差），' +
+  '--milestone 写「当前」挂开着的那个版本（一周一版、到期自动收口，别写死 v<N>；旧版过了到期日还没关、下一版已经开着时挂下一版），也认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节（--kind 缺陷 另要写了字的「## 影响」：会让哪项结果变差），' +
   '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
   '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派；' +
   '挂版本的母单、单独的单开完自动排进版本里程碑说明的先后末尾，--order-after 插在那张后面；子单、未排期不排；' +
@@ -773,6 +774,49 @@ interface Picked {
   raw: unknown;
 }
 
+/** 给「当前」挑版本用的开放里程碑。dueOn 是 GitHub 的 due_on；没设是 null，接口没给是 undefined。 */
+export interface OpenVersionMilestone {
+  title: string;
+  dueOn?: string | null;
+}
+
+/**
+ * 「当前」挂哪一版。恰好一个开着的 v<N> 就用它。
+ * 两个、且是挨着的两号、旧的那个过了到期日：收口断在半路（version-cut 认的同一对），当前是下一版，不挂已经过期的旧版。
+ * 其余不是恰好一个就不猜。
+ */
+export function chooseCurrentMilestone(
+  open: readonly OpenVersionMilestone[],
+  now: Date,
+): { ok: true; title: string } | { ok: false; message: string } {
+  const versions = open.filter((m) => milestoneVersion(m.title) !== undefined);
+  const [only, ...rest] = versions;
+  if (only !== undefined && rest.length === 0) return { ok: true, title: only.title };
+  if (versions.length === 2 && only && rest[0]) {
+    const newerFirst = (milestoneVersion(only.title) ?? 0) > (milestoneVersion(rest[0].title) ?? 0);
+    const older = newerFirst ? rest[0] : only;
+    const newer = newerFirst ? only : rest[0];
+    const ov = milestoneVersion(older.title);
+    const nv = milestoneVersion(newer.title);
+    const due = dueDateOf({ dueOn: older.dueOn });
+    if (ov !== undefined && nv === ov + 1 && typeof due === 'string' && expired(due, now)) {
+      return { ok: true, title: newer.title };
+    }
+  }
+  const list = versions.map((m) => m.title).join('、') || '一个也没有';
+  return {
+    ok: false,
+    message: `--milestone 当前：开着的 v<N> 版本该恰好一个，现在是 ${versions.length} 个（${list}），单没开。`,
+  };
+}
+
+function dueOnFromRaw(raw: unknown): string | null | undefined {
+  if (typeof raw !== 'object' || raw === null || !('due_on' in raw)) return undefined;
+  const due = raw.due_on;
+  if (due === null) return null;
+  return typeof due === 'string' ? due : undefined;
+}
+
 /**
  * 「v1」「P1」（旧）→ 开放里程碑里那个简写开头的那一个；给的就是全名也行。
  * 「未排期」不经过这里：issueNew 里直接处理，不查里程碑列表。
@@ -793,14 +837,17 @@ async function resolveMilestone(gh: Gh, want: string): Promise<Picked> {
     throw new Error(`gh 读回来的里程碑认不出（${message(e)}），单没开。`);
   }
   if (want === CURRENT) {
-    // 「当前」＝开着的那个 v<N>（一周一版、到期自动收口，#2683）：不是恰好一个就不猜
-    const versions = items.filter((m) => milestoneVersion(m.title) !== undefined);
-    const [only, ...more] = versions;
-    if (only !== undefined && more.length === 0) return only;
-    const list = versions.map((m) => m.title).join('、') || '一个也没有';
-    throw new Error(
-      `--milestone 当前：开着的 v<N> 版本该恰好一个，现在是 ${versions.length} 个（${list}），单没开。`,
+    const picked = chooseCurrentMilestone(
+      items.map((m) => {
+        const dueOn = dueOnFromRaw(m.raw);
+        return dueOn === undefined ? { title: m.title } : { title: m.title, dueOn };
+      }),
+      new Date(),
     );
+    if (!picked.ok) throw new Error(picked.message);
+    const found = items.find((m) => m.title === picked.title);
+    if (!found) throw new Error(`--milestone 当前：没有叫「${picked.title}」的开放里程碑，单没开。`);
+    return found;
   }
   const exact = items.filter((m) => m.title === want);
   const phase = /^P\d+$/.test(want) ? Number(want.slice(1)) : undefined;
