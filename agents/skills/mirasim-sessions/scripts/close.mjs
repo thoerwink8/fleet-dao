@@ -571,7 +571,6 @@ export async function getSessionRow(env, exec, sessionKey) {
   });
   const out = `${r.stdout}\n${r.stderr}`;
   if (r.code !== 0) {
-    if (/not found|不存在|unknown session|does not exist|no such session/i.test(out)) return null;
     throw new Stop('删会话', `getSessionRow 没成（退出码 ${r.code}）：${out.trim().slice(0, 400)}`);
   }
   let parsed;

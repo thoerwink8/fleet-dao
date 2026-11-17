@@ -489,32 +489,44 @@ describe('git 登记消失不能当成目录已删', () => {
     rmSync(gitdir, { recursive: true, force: true });
   }
 
-  it('git worktree remove 退出码 0 但目录还在：会话先释放，失败后可重跑', async () => {
+  it('工作树删除失败后重跑：已删除会话不再查询，接着清理工作树和分支', async () => {
     const { main, wt, branch } = mergedRepo();
     let dropped = false;
+    let firstRemove = true;
     const lines: string[] = [];
-    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:abc'], {
+    const argv = ['--repo', main, '--branch', branch, '--session', 'kimi:abc'];
+    const first = await mod.closeRun(argv, {
       log: (line) => lines.push(line),
-      sessionRow: async () => sessionRow('kimi:abc', wt),
+      sessionRow: async () => (dropped ? null : sessionRow('kimi:abc', wt)),
       deleteSession: async () => {
         dropped = true;
         return { skipped: false, detail: '已删会话 kimi:abc' };
       },
       exec: (cmd, args) => {
-        if (cmd === 'git' && args.includes('worktree') && args.includes('remove')) {
+        if (cmd === 'git' && args.includes('worktree') && args.includes('remove') && firstRemove) {
+          firstRemove = false;
           return { code: 0, stdout: '', stderr: '' };
         }
         return realGit(cmd, args);
       },
     });
-    const out = lines.join('\n');
-    expect(code, out).not.toBe(0);
-    expect(out).toMatch(/停在：删工作树/);
-    expect(out).toContain('已删会话 kimi:abc');
-    expect(out).toContain('没有把登记消失当成目录已删');
-    expect(dropped).toBe(true);
+    const firstOut = lines.join('\n');
+    expect(first, firstOut).not.toBe(0);
+    expect(firstOut).toMatch(/停在：删工作树/);
+    expect(firstOut).toContain('已删会话 kimi:abc');
     expect(existsSync(wt)).toBe(true);
     expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
+
+    lines.length = 0;
+    const second = await mod.closeRun(argv, {
+      log: (line) => lines.push(line),
+      sessionRow: async () => null,
+    });
+    const secondOut = lines.join('\n');
+    expect(second, secondOut).toBe(0);
+    expect(secondOut).toContain('会话已经不在');
+    expect(existsSync(wt)).toBe(false);
+    expect(git(main, ['branch', '--list', branch]).trim()).toBe('');
   });
 
   it('登记没了、目录里还有文件：停住不删，主检出还在', async () => {
