@@ -1,0 +1,402 @@
+// 扫尾：非 running 的会话按工作树和 PR 判类。默认只列。
+// --apply 才收「可收」和「孤儿」。收的动作是 close.mjs（closeRun / deleteSession），这里不另写删工作树。
+// 会话工作目录是 record.json 的 workdir。会话目录里的 workspace 只是会话自己的文件夹，不算工作树还在。
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { closeRun, deleteSession, gitlabApi, gitlabToken, realExec, remoteHost } from './close.mjs';
+
+export const USAGE = `用法：node sweep.mjs [--root <会话根目录>] [--apply]
+列出 ~/.mirasim/sessions 下各 agent 里 runState 不是 running 的会话。
+可收：链接工作树干净、提交已推、PR/MR 已合并或已关闭。
+要人看：没有 PR/MR、有未推提交，或有真实未提交改动（写明是哪一种）。
+孤儿：workdir 指向的工作树和会话工作目录都已不在。
+默认只列。--apply 才收可收和孤儿：可收走 close.mjs，孤儿只走它的删会话。`;
+
+/**
+ * @param {string} state
+ */
+function normState(state) {
+  const s = String(state).toUpperCase();
+  if (s === 'OPENED') return 'OPEN';
+  return s;
+}
+
+/**
+ * @param {string} a
+ * @param {string} b
+ */
+function samePath(a, b) {
+  const ra = resolve(a);
+  const rb = resolve(b);
+  return process.platform === 'win32' ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
+}
+
+/**
+ * @param {import('./close.mjs').Exec} exec
+ * @param {string} repo
+ * @param {string[]} args
+ */
+function git(exec, repo, args) {
+  return exec('git', ['-C', repo, ...args]);
+}
+
+/**
+ * @param {string[]} argv
+ */
+export function parseArgs(argv) {
+  /** @type {{ root: string, apply: boolean }} */
+  const opt = { root: '', apply: false };
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    if (token === '--apply') {
+      if (opt.apply) throw new Error(`--apply 写了两次\n${USAGE}`);
+      opt.apply = true;
+      continue;
+    }
+    if (token === '--root') {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) throw new Error(`--root 缺值\n${USAGE}`);
+      if (opt.root) throw new Error(`--root 写了两次\n${USAGE}`);
+      opt.root = value;
+      i += 1;
+      continue;
+    }
+    throw new Error(`不认识的参数 ${token}\n${USAGE}`);
+  }
+  return opt;
+}
+
+/**
+ * @param {import('./close.mjs').Exec} exec
+ * @param {typeof fetch} fetchImpl
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} workdir
+ * @param {string} branch
+ * @returns {Promise<{ prs: { number: string, state: string }[] | null, request: 'pr' | 'mr' }>}
+ */
+export async function listRequests(exec, fetchImpl, env, workdir, branch) {
+  const url = git(exec, workdir, ['remote', 'get-url', 'origin']);
+  if (url.code !== 0) return { prs: [], request: 'pr' };
+  const host = remoteHost(url.stdout);
+  if (!host) return { prs: [], request: 'pr' };
+  if (host.host === 'github.com') {
+    const listed = exec('gh', [
+      'pr',
+      'list',
+      '--repo',
+      host.project,
+      '--head',
+      branch,
+      '--state',
+      'all',
+      '--json',
+      'number,state',
+    ]);
+    if (listed.code !== 0) return { prs: null, request: 'pr' };
+    try {
+      const parsed = JSON.parse(listed.stdout);
+      if (!Array.isArray(parsed)) return { prs: null, request: 'pr' };
+      return {
+        request: 'pr',
+        prs: parsed.map((item) => ({
+          number: String(item.number),
+          state: normState(item.state),
+        })),
+      };
+    } catch {
+      return { prs: null, request: 'pr' };
+    }
+  }
+  const token = gitlabToken(exec, workdir, env);
+  if (!token) return { prs: null, request: 'mr' };
+  const api = gitlabApi(env, host.host);
+  const endpoint = `${api}/projects/${encodeURIComponent(host.project)}/merge_requests?source_branch=${encodeURIComponent(branch)}&state=all`;
+  const res = await fetchImpl(endpoint, { headers: { 'PRIVATE-TOKEN': token, accept: 'application/json' } });
+  const text = await res.text();
+  if (res.status !== 200) return { prs: null, request: 'mr' };
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return { prs: null, request: 'mr' };
+    return {
+      request: 'mr',
+      prs: parsed.map((item) => ({
+        number: String(item.iid),
+        state: normState(item.state),
+      })),
+    };
+  } catch {
+    return { prs: null, request: 'mr' };
+  }
+}
+
+/**
+ * @param {{
+ *   runState: string,
+ *   workdirExists: boolean,
+ *   linked: boolean,
+ *   dirty: boolean,
+ *   unpushed: boolean,
+ *   prs: { number: string, state: string }[] | null,
+ * }} facts
+ * @returns {{ kind: '跳过' | '可收' | '要人看' | '孤儿' | '还开着', reason: string, pr: string | null }}
+ */
+export function classify(facts) {
+  if (facts.runState === 'running') return { kind: '跳过', reason: '在跑', pr: null };
+  if (!facts.workdirExists) return { kind: '孤儿', reason: '工作树和会话工作目录都已不在', pr: null };
+  if (!facts.linked) return { kind: '跳过', reason: '在主检出', pr: null };
+  if (facts.dirty) return { kind: '要人看', reason: '有真实未提交改动', pr: null };
+  if (facts.unpushed) return { kind: '要人看', reason: '有未推提交', pr: null };
+  if (facts.prs === null) return { kind: '要人看', reason: '查 PR 没成', pr: null };
+  const open = facts.prs.find((p) => p.state === 'OPEN');
+  if (open) return { kind: '还开着', reason: 'PR 还开着', pr: open.number };
+  const merged = facts.prs.find((p) => p.state === 'MERGED');
+  if (merged) return { kind: '可收', reason: '已合并', pr: merged.number };
+  const closed = facts.prs.find((p) => p.state === 'CLOSED');
+  if (closed) return { kind: '可收', reason: '已关闭', pr: closed.number };
+  return { kind: '要人看', reason: '没有 PR', pr: null };
+}
+
+/**
+ * @param {string} root 会话根，下面是 agent 目录
+ * @param {{
+ *   exec?: import('./close.mjs').Exec,
+ *   env?: NodeJS.ProcessEnv,
+ *   fetch?: typeof fetch,
+ *   listPrs?: (ctx: { workdir: string, branch: string }) => Promise<{ number: string, state: string }[] | null>,
+ * }} io
+ */
+export async function scanSessions(root, io = {}) {
+  const exec = io.exec ?? realExec;
+  const env = io.env ?? process.env;
+  const fetchImpl = io.fetch ?? fetch;
+  if (!existsSync(root)) return [];
+  /** @type {Awaited<ReturnType<typeof inspectSession>>[]} */
+  const rows = [];
+  for (const agentDir of readdirSync(root, { withFileTypes: true })) {
+    if (!agentDir.isDirectory()) continue;
+    const agentRoot = resolve(root, agentDir.name);
+    for (const sessionDir of readdirSync(agentRoot, { withFileTypes: true })) {
+      if (!sessionDir.isDirectory()) continue;
+      const recordPath = resolve(agentRoot, sessionDir.name, 'record.json');
+      if (!existsSync(recordPath)) continue;
+      let rec;
+      try {
+        rec = JSON.parse(readFileSync(recordPath, 'utf8'));
+      } catch {
+        continue;
+      }
+      rows.push(await inspectSession(agentDir.name, sessionDir.name, rec, exec, env, fetchImpl, io.listPrs));
+    }
+  }
+  return rows;
+}
+
+/**
+ * @param {string} agentDir
+ * @param {string} dirName
+ * @param {Record<string, unknown>} rec
+ * @param {import('./close.mjs').Exec} exec
+ * @param {NodeJS.ProcessEnv} env
+ * @param {typeof fetch} fetchImpl
+ * @param {((ctx: { workdir: string, branch: string }) => Promise<{ number: string, state: string }[] | null>) | undefined} listPrs
+ */
+async function inspectSession(agentDir, dirName, rec, exec, env, fetchImpl, listPrs) {
+  const agent = typeof rec.agent === 'string' && rec.agent ? rec.agent : agentDir;
+  const sessionId = typeof rec.sessionId === 'string' && rec.sessionId ? rec.sessionId : dirName;
+  const runState = typeof rec.runState === 'string' ? rec.runState : '';
+  const workdir = typeof rec.workdir === 'string' ? rec.workdir : '';
+  /** @type {{ agent: string, sessionId: string, runState: string, workdir: string, branch: string, kind: string, reason: string, pr: string | null, request: 'pr' | 'mr' }} */
+  const row = {
+    agent,
+    sessionId,
+    runState,
+    workdir,
+    branch: '',
+    kind: '跳过',
+    reason: '',
+    pr: null,
+    request: 'pr',
+  };
+  if (runState === 'running') {
+    row.reason = '在跑';
+    return row;
+  }
+  if (!workdir || !existsSync(workdir)) {
+    const judged = classify({
+      runState,
+      workdirExists: false,
+      linked: false,
+      dirty: false,
+      unpushed: false,
+      prs: [],
+    });
+    row.kind = judged.kind;
+    row.reason = judged.reason;
+    return row;
+  }
+  const gitDir = git(exec, workdir, ['rev-parse', '--path-format=absolute', '--git-dir']);
+  const common = git(exec, workdir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (gitDir.code !== 0 || common.code !== 0) {
+    row.kind = '要人看';
+    row.reason = '工作目录不是 git 工作树';
+    return row;
+  }
+  const linked = !samePath(gitDir.stdout.trim(), common.stdout.trim());
+  if (!linked) {
+    row.kind = '跳过';
+    row.reason = '在主检出';
+    return row;
+  }
+  const branchR = git(exec, workdir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = branchR.stdout.trim();
+  if (branchR.code !== 0 || !branch || branch === 'HEAD') {
+    row.kind = '要人看';
+    row.reason = '认不出分支';
+    return row;
+  }
+  row.branch = branch;
+  const dirty = git(exec, workdir, ['status', '--porcelain', '--untracked-files=all']);
+  if (dirty.code !== 0) {
+    row.kind = '要人看';
+    row.reason = '读不了工作树';
+    return row;
+  }
+  const unpushed = git(exec, workdir, ['rev-list', '--count', 'HEAD', '--not', '--remotes']);
+  if (unpushed.code !== 0) {
+    row.kind = '要人看';
+    row.reason = '有未推提交';
+    return row;
+  }
+  /** @type {{ number: string, state: string }[] | null} */
+  let prs = null;
+  /** @type {'pr' | 'mr'} */
+  let request = 'pr';
+  if (listPrs) {
+    prs = await listPrs({ workdir, branch });
+    if (prs) prs = prs.map((item) => ({ number: String(item.number), state: normState(item.state) }));
+  } else {
+    const listed = await listRequests(exec, fetchImpl, env, workdir, branch);
+    prs = listed.prs;
+    request = listed.request;
+  }
+  const judged = classify({
+    runState,
+    workdirExists: true,
+    linked: true,
+    dirty: dirty.stdout.trim() !== '',
+    unpushed: Number(unpushed.stdout.trim()) > 0,
+    prs,
+  });
+  row.kind = judged.kind;
+  row.reason = judged.reason;
+  row.pr = judged.pr;
+  row.request = request;
+  return row;
+}
+
+/** @param {{ kind: string, agent: string, sessionId: string, branch: string, reason: string, pr: string | null }} row */
+export function formatRow(row) {
+  const id = `${row.agent}:${row.sessionId.slice(0, 8)}`;
+  if (row.kind === '可收') return `可收 ${id} ${row.branch} PR #${row.pr} ${row.reason}`;
+  if (row.kind === '要人看') return `要人看 ${id} ${row.branch} ${row.reason}`;
+  if (row.kind === '孤儿') return `孤儿 ${id} ${row.reason}`;
+  if (row.kind === '还开着') return `还开着 ${id} ${row.branch} PR #${row.pr}`;
+  return '';
+}
+
+const ORDER = ['可收', '要人看', '孤儿', '还开着'];
+
+/**
+ * @param {string} workdir
+ * @param {import('./close.mjs').Exec} exec
+ */
+function mainCheckout(workdir, exec) {
+  const common = git(exec, workdir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (common.code !== 0) return null;
+  const dir = resolve(common.stdout.trim());
+  if (!dir.endsWith('.git')) return null;
+  return dirname(dir);
+}
+
+/**
+ * @param {string[]} argv
+ * @param {{
+ *   exec?: import('./close.mjs').Exec,
+ *   env?: NodeJS.ProcessEnv,
+ *   fetch?: typeof fetch,
+ *   log?: (line: string) => void,
+ *   listPrs?: (ctx: { workdir: string, branch: string }) => Promise<{ number: string, state: string }[] | null>,
+ *   closeRun?: typeof closeRun,
+ *   deleteSession?: (sessionKey: string) => Promise<{ skipped: boolean, detail: string }>,
+ * }} [io]
+ */
+export async function sweepRun(argv, io = {}) {
+  let opt;
+  try {
+    opt = parseArgs(argv);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    (io.log ?? console.log)(message);
+    return 2;
+  }
+  const log = io.log ?? ((line) => console.log(line));
+  const exec = io.exec ?? realExec;
+  const env = io.env ?? process.env;
+  const root = opt.root ? resolve(opt.root) : resolve(homedir(), '.mirasim', 'sessions');
+  const rows = await scanSessions(root, { exec, env, fetch: io.fetch, listPrs: io.listPrs });
+  const listed = rows
+    .filter((row) => ORDER.includes(row.kind))
+    .sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
+  for (const row of listed) log(formatRow(row));
+  if (!listed.length) log('没有可收、要人看或孤儿会话');
+  if (!opt.apply) return 0;
+  let failed = 0;
+  for (const row of listed) {
+    if (row.kind === '可收') {
+      const main = mainCheckout(row.workdir, exec);
+      if (!main || !row.branch) {
+        log(`停在：收 ${row.agent}:${row.sessionId.slice(0, 8)} 认不出主检出`);
+        failed += 1;
+        continue;
+      }
+      const args = ['--repo', main, '--branch', row.branch, '--session', `${row.agent}:${row.sessionId}`];
+      if (row.pr) args.push(row.request === 'mr' ? '--mr' : '--pr', row.pr);
+      const run = io.closeRun ?? closeRun;
+      const code = await run(args, { exec, env, log, fetch: io.fetch, deleteSession: io.deleteSession });
+      if (code !== 0) failed += 1;
+    } else if (row.kind === '孤儿') {
+      const key = `${row.agent}:${row.sessionId}`;
+      try {
+        const drop = io.deleteSession ?? ((sessionKey) => deleteSession(env, exec, sessionKey));
+        const result = await drop(key);
+        log(`[删会话] ${result.detail}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`停在：删会话 ${key} ${message}`);
+        failed += 1;
+      }
+    }
+  }
+  return failed === 0 ? 0 : 1;
+}
+
+function invokedDirectly() {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try {
+    return import.meta.url === pathToFileURL(arg).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
+  sweepRun(process.argv.slice(2))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    });
+}

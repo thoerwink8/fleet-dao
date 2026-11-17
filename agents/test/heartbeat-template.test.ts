@@ -19,6 +19,9 @@ describe('心跳模板', () => {
     expect(template).not.toMatch(/Users[/\\]Administrator|fleet-agent-carpool|sslip\.io/i);
     expect(template).toContain('gh pr list');
     expect(template).toContain('scripts/close.mjs');
+    expect(template).toContain('scripts/sweep.mjs');
+    expect(skill).toContain('scripts/sweep.mjs');
+    expect(skill).toContain('每轮先列可收');
     expect(template).toContain('stopAndRun');
   });
 });
