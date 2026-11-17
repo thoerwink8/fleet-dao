@@ -358,3 +358,52 @@ describe('performMerge 只用仓自己的远端', () => {
     expect(mod.remoteHost('D:/repos/origin.git')).toBeNull();
   });
 });
+
+describe('历史无共同祖先时快进失败仍继续收', () => {
+  it('报告主检出没快进，工作树和分支仍删，会话仍收，退出码 0', async () => {
+    const { main, wt, branch } = mergedRepo();
+    const bare = join(main, '..', 'unrelated.git');
+    const seed = join(main, '..', 'seed');
+    mkdirSync(seed);
+    git(seed, ['init', '-b', 'main']);
+    writeFileSync(join(seed, 'other.txt'), 'other\n');
+    git(seed, ['add', 'other.txt']);
+    git(seed, ['commit', '-m', 'other']);
+    git(seed, ['init', '--bare', bare]);
+    git(seed, ['remote', 'add', 'origin', bare]);
+    git(seed, ['push', 'origin', 'main']);
+    git(main, ['remote', 'add', 'origin', bare]);
+    git(main, ['fetch', 'origin', 'main']);
+    git(main, ['remote', 'set-head', 'origin', 'main']);
+    const head = git(main, ['rev-parse', 'HEAD']);
+    const dropped: string[] = [];
+    const lines: string[] = [];
+    const code = await mod.closeRun(
+      ['--repo', main, '--branch', branch, '--pr', '7', '--session', 'kimi:abc'],
+      {
+        log: (line) => lines.push(line),
+        deleteSession: async (key) => {
+          dropped.push(key);
+          return { skipped: false, detail: `已删会话 ${key}` };
+        },
+        exec: (cmd, args) => {
+          if (cmd === 'gh') return { code: 0, stdout: '{"state":"MERGED"}', stderr: '' };
+          if (cmd === 'git' && args.includes('fetch')) return { code: 0, stdout: '', stderr: '' };
+          if (cmd === 'git' && args.includes('get-url') && args.at(-1) === 'origin') {
+            return { code: 0, stdout: 'https://github.com/acme/widgets.git\n', stderr: '' };
+          }
+          return realGit(cmd, args);
+        },
+      },
+    );
+    const out = lines.join('\n');
+    expect(code, out).toBe(0);
+    expect(out).toContain('主检出没快进：历史无共同祖先');
+    expect(out).not.toMatch(/停在：/);
+    expect(existsSync(wt)).toBe(false);
+    expect(git(main, ['branch', '--list', branch]).trim()).toBe('');
+    expect(git(main, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(dropped).toEqual(['kimi:abc']);
+    expect(out).toContain('已删会话 kimi:abc');
+  });
+});
