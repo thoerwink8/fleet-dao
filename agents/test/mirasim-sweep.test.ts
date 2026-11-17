@@ -301,7 +301,6 @@ describe('sweep.mjs 五种判类', () => {
     expect(lines.join('\n')).toContain('--repo 缺值');
   });
 
-
   it('工作目录不是 git 仓库时不列成要人看，别的仓的链接工作树仍列', async () => {
     const home = mkdtempSync(join(tmpdir(), 'sweep-home-'));
     roots.push(home);
