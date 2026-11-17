@@ -232,7 +232,9 @@ function entryCount(dir) {
 }
 
 /**
- * 主检出的 node_modules，以及工作树里指回主检出的每个目录链接的目标。项数只数这一层。
+ * 主检出的 node_modules，以及工作树里目录链接指向的目标里、落在主检出且不在这棵工作树里的那些。
+ * 工作树建在主检出里面时，指回工作树自己的目录也落在主检出路径下，跟着工作树一起没，不能进这张表。
+ * 项数只数这一层。
  * @param {string} main
  * @param {string | null} worktree
  * @returns {Map<string, number>}
@@ -241,6 +243,7 @@ export function snapshotDepCounts(main, worktree) {
   /** @type {Map<string, number>} */
   const counts = new Map();
   const mainReal = realpathSync(main);
+  const worktreeReal = worktree && existsSync(worktree) ? realpathSync(worktree) : '';
   const add = (dir) => {
     let real;
     try {
@@ -249,8 +252,13 @@ export function snapshotDepCounts(main, worktree) {
       return;
     }
     const rel = relative(mainReal, real);
-    const inside = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-    if (!inside) return;
+    const insideMain = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    if (!insideMain) return;
+    if (worktreeReal) {
+      const inWt = relative(worktreeReal, real);
+      const insideWt = inWt === '' || (!inWt.startsWith('..') && !isAbsolute(inWt));
+      if (insideWt) return;
+    }
     if (counts.has(real)) return;
     const n = entryCount(real);
     if (n === null) return;
