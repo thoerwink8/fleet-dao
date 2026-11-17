@@ -174,6 +174,82 @@ describe('close.mjs 删工作树不跟着目录联接', () => {
   });
 });
 
+describe('工作树落在主检出里时，不把工作树自己的目录算进依赖项数', () => {
+  /** 工作树在主检出的 .claude/worktrees 下。packages/adapters 有 6 项，主检出 node_modules 有 2 项。 */
+  function nestedRepo(): { main: string; wt: string; branch: string } {
+    const root = mkdtempSync(join(tmpdir(), 'close-4079-'));
+    roots.push(root);
+    const main = join(root, 'main');
+    const wt = join(main, '.claude', 'worktrees', 'demo');
+    mkdirSync(main);
+    git(main, ['init', '-b', 'main']);
+    writeFileSync(join(main, '.gitignore'), 'node_modules\n');
+    mkdirSync(join(main, 'packages', 'adapters'), { recursive: true });
+    for (const name of ['a', 'b', 'c', 'd', 'e', 'f']) {
+      writeFileSync(join(main, 'packages', 'adapters', `${name}.txt`), `${name}\n`);
+    }
+    writeFileSync(join(main, 'readme.txt'), 'ok\n');
+    git(main, ['add', '.gitignore', 'readme.txt', 'packages']);
+    git(main, ['commit', '-m', 'init']);
+    const branch = 'local/4079-demo';
+    mkdirSync(join(main, '.claude', 'worktrees'), { recursive: true });
+    git(main, ['worktree', 'add', '-b', branch, wt]);
+    writeFileSync(join(wt, 'change.txt'), 'change\n');
+    git(wt, ['add', 'change.txt']);
+    git(wt, ['commit', '-m', 'change']);
+    git(main, ['merge', '--no-ff', branch, '-m', 'merge']);
+    mkdirSync(join(main, 'node_modules'));
+    writeFileSync(join(main, 'node_modules', 'keep.txt'), 'keep\n');
+    writeFileSync(join(main, 'node_modules', 'also.txt'), 'also\n');
+    return { main, wt, branch };
+  }
+
+  /** 一个联接指回工作树自己的 packages/adapters，一个指回主检出的 node_modules。 */
+  function linkOwnAndMain(main: string, wt: string) {
+    const kind = process.platform === 'win32' ? 'junction' : 'dir';
+    const nm = join(wt, 'node_modules');
+    mkdirSync(join(nm, '@local'), { recursive: true });
+    symlinkSync(join(wt, 'packages', 'adapters'), join(nm, '@local', 'adapters'), kind);
+    symlinkSync(join(main, 'node_modules'), join(nm, '.main-deps'), kind);
+  }
+
+  it('指向自己的联接和指向主检出的联接：删完不报项数变了', async () => {
+    const { main, wt, branch } = nestedRepo();
+    linkOwnAndMain(main, wt);
+    const { code, out } = await runClose(main, branch);
+    expect(code, out).toBe(0);
+    expect(out).not.toMatch(/项数变了/);
+    expect(out).toMatch(/项数未变/);
+    expect(existsSync(wt)).toBe(false);
+    expect(depCount(main)).toBe(2);
+    expect(readFileSync(join(main, 'node_modules', 'keep.txt'), 'utf8')).toBe('keep\n');
+    expect(git(main, ['branch', '--list', branch]).trim()).toBe('');
+  });
+
+  it('主检出依赖真被删空时照样报，不继续删分支', async () => {
+    const { main, wt, branch } = nestedRepo();
+    linkOwnAndMain(main, wt);
+    const lines: string[] = [];
+    const code = await mod.closeRun(['--repo', main, '--branch', branch], {
+      log: (line) => lines.push(line),
+      exec: (cmd, args) => {
+        const result = realGit(cmd, args);
+        const removing = cmd === 'git' && args.at(-3) === 'worktree' && args.at(-2) === 'remove';
+        if (removing && result.code === 0)
+          rmSync(join(main, 'node_modules'), { recursive: true, force: true });
+        return result;
+      },
+    });
+    const out = lines.join('\n');
+    expect(code, out).not.toBe(0);
+    expect(out).toMatch(/停在：删工作树/);
+    expect(out).toMatch(/项数变了/);
+    expect(out).toMatch(/node_modules 删除前 2，删除后 目录没了/);
+    expect(out).not.toMatch(/packages[\\/]adapters/);
+    expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
+  });
+});
+
 describe('推其余远端时跳过推不出去的', () => {
   /** 另加一个本地远端当「其余远端」。origin 仍是快进来源，这个不该挡住后面的删除。 */
   function withOther(pushUrl: string): { main: string; wt: string; branch: string } {
