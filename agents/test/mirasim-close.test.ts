@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -458,7 +459,8 @@ describe('git 登记消失不能当成目录已删', () => {
     const out = lines.join('\n');
     expect(code, out).not.toBe(0);
     expect(out).toMatch(/停在：删工作树/);
-    expect(out).toContain(wt);
+    // mkdtemp 给 8.3 短名，close 日志走 git rev-parse 的全名，先对齐再断言
+    expect(out).toContain(realpathSync.native(wt));
     expect(existsSync(wt)).toBe(true);
     expect(existsSync(join(main, 'readme.txt'))).toBe(true);
     expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
@@ -527,7 +529,7 @@ describe('git 登记消失不能当成目录已删', () => {
     writeFileSync(join(kept, 'note.txt'), 'keep\n');
     const { code, out } = await runClose(main, 'local/kept');
     expect(code, out).not.toBe(0);
-    expect(out).toContain(kept);
+    expect(out).toContain(realpathSync.native(kept));
     expect(readFileSync(join(kept, 'note.txt'), 'utf8')).toBe('keep\n');
     expect(readFileSync(join(main, 'readme.txt'), 'utf8')).toBe('ok\n');
   });
