@@ -28,6 +28,7 @@ interface SessionRow {
   sessionKey: string;
   runState: string;
   workdir: string;
+  archived?: boolean;
   title?: string;
   source?: 'managed' | 'native';
 }
@@ -58,12 +59,17 @@ interface CloseMod {
       deleteSession?: (key: string, row?: SessionRow) => Promise<{ skipped: boolean; detail: string }>;
     },
   ): Promise<number>;
+  deleteSession(
+    env: NodeJS.ProcessEnv,
+    exec: (cmd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => ExecResult,
+    key: string,
+    row?: SessionRow,
+  ): Promise<{ skipped: boolean; detail: string }>;
   performMerge(o: MergeOpts): Promise<{ skipped: boolean; detail: string }>;
   remoteHost(url: string): { host: string; project: string } | null;
   directoryLinks(root: string): string[];
   conventionalWorktreePath(main: string, branch: string): string | null;
 }
-
 const mod = (await import(pathToFileURL(SCRIPT).href)) as CloseMod;
 
 const roots: string[] = [];
@@ -111,7 +117,7 @@ function mergedRepo(): { main: string; wt: string; branch: string } {
   return { main, wt, branch };
 }
 function sessionRow(sessionKey: string, workdir: string, runState = 'completed'): SessionRow {
-  return { sessionKey, workdir, runState, source: 'managed', title: 'test' };
+  return { sessionKey, workdir, runState, archived: true, source: 'managed', title: 'test' };
 }
 
 function linkModules(main: string, wt: string, kind: 'junction' | 'dir') {
@@ -127,6 +133,46 @@ async function runClose(main: string, branch: string): Promise<{ code: number; o
 function depCount(main: string): number {
   return readdirSync(join(main, 'node_modules')).length;
 }
+describe('deleteSession 使用官方入口且不删除工作树', () => {
+  it('只传目标会话、身份和 removeWorktree:false', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'close-session-'));
+    roots.push(home);
+    const version = 'test-version';
+    const app = join(home, '.mirasim', 'app');
+    mkdirSync(join(app, version), { recursive: true });
+    writeFileSync(join(app, 'state.json'), JSON.stringify({ good: version }));
+    writeFileSync(join(app, version, 'server.cjs'), '');
+
+    let called = false;
+    const result = await mod.deleteSession(
+      { USERPROFILE: home, MIRASIM_HOST_PORT: '4970' },
+      (cmd, args) => {
+        called = true;
+        expect(cmd).toBe(process.execPath);
+        expect(args).toEqual([
+          join(app, version, 'server.cjs'),
+          'ui-cli',
+          '--port',
+          '4970',
+          'call',
+          'deleteSession',
+          '--args',
+          JSON.stringify({
+            sessionKey: 'kimi:target',
+            removeWorktree: false,
+            title: 'test',
+            source: 'managed',
+          }),
+        ]);
+        return { code: 0, stdout: '{"ok":true}', stderr: '' };
+      },
+      'kimi:target',
+      sessionRow('kimi:target', 'D:/repo/.claude/worktrees/task'),
+    );
+    expect(called).toBe(true);
+    expect(result).toEqual({ skipped: false, detail: '已删会话 kimi:target' });
+  });
+});
 
 describe('close.mjs 删工作树不跟着目录联接', () => {
   it.skipIf(process.platform !== 'win32')('Windows 目录联接：主检出依赖还在，项数不变', async () => {
@@ -457,6 +503,25 @@ describe('会话释放先于工作树删除', () => {
     expect(out).toContain('释放会话 kimi:failed 没成');
     expect(existsSync(wt)).toBe(true);
     expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
+  });
+  it('未归档会话不能被清理', async () => {
+    const { main, wt, branch } = mergedRepo();
+    let dropped = false;
+    const lines: string[] = [];
+    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:unarchived'], {
+      log: (line) => lines.push(line),
+      sessionRow: async () => ({ sessionKey: 'kimi:unarchived', workdir: wt, runState: 'completed' }),
+      deleteSession: async () => {
+        dropped = true;
+        return { skipped: false, detail: '不该删' };
+      },
+    });
+    const out = lines.join('\n');
+    expect(code, out).not.toBe(0);
+    expect(out).toContain('还没归档');
+    expect(existsSync(wt)).toBe(true);
+    expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
+    expect(dropped).toBe(false);
   });
 });
 

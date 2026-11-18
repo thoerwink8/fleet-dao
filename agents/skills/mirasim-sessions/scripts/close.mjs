@@ -522,8 +522,30 @@ export async function performMerge(o) {
 }
 
 /**
- * @typedef {{ sessionKey?: unknown, runState?: unknown, workdir?: unknown, title?: unknown, source?: unknown }} SessionRow
+ * @typedef {{ sessionKey?: unknown, runState?: unknown, workdir?: unknown, title?: unknown, source?: unknown, archived?: unknown }} SessionRow
  */
+/**
+ * @param {SessionRow} row
+ * @param {string} sessionKey
+ * @param {string | null} worktree
+ */
+function assertSessionEligible(row, sessionKey, worktree) {
+  if (
+    row.sessionKey !== sessionKey ||
+    typeof row.workdir !== 'string' ||
+    !worktree ||
+    !samePath(row.workdir, worktree)
+  ) {
+    throw new Stop('删会话', `目标会话 ${sessionKey} 不对应这棵工作树 ${worktree ?? '(未确认)'}，没有删。`);
+  }
+  if (row.archived !== true) throw new Stop('删会话', `目标会话 ${sessionKey} 还没归档，没有删。`);
+  if (typeof row.runState !== 'string' || !row.runState) {
+    throw new Stop('删会话', `读不到目标会话 ${sessionKey} 的状态，没有删。`);
+  }
+  if (row.runState === 'running') {
+    throw new Stop('删会话', `目标会话 ${sessionKey} 还在运行，没有删工作树、分支或会话。`);
+  }
+}
 
 /**
  * @param {NodeJS.ProcessEnv} env
@@ -701,6 +723,14 @@ export async function closeRun(argv, io = {}) {
         throw new Stop('核对', `目录还有内容，没有删，留给人处理：${worktree}`);
       }
     } else say('[核对] 没有这棵工作树，跳过未提交检查');
+    const readSession = io.sessionRow ?? ((key) => getSessionRow(env, exec, key));
+    const initialSession = opt.session ? await readSession(opt.session) : null;
+    if (initialSession)
+      assertSessionEligible(
+        initialSession,
+        opt.session,
+        worktree ?? expectedConventionalWorktreePath(main, opt.branch),
+      );
 
     const headRef = git(exec, main, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
     let defaultBranch = '';
@@ -863,42 +893,32 @@ export async function closeRun(argv, io = {}) {
     }
 
     if (opt.session) {
-      const readSession = io.sessionRow ?? ((key) => getSessionRow(env, exec, key));
-      const sessionInfo = await readSession(opt.session);
-      if (!sessionInfo) {
+      if (!initialSession) {
         say('[删会话] 会话已经不在，按旧行为继续');
       } else {
-        const sessionWorktree = worktree ?? expectedConventionalWorktreePath(main, opt.branch);
-        if (
-          sessionInfo.sessionKey !== opt.session ||
-          typeof sessionInfo.workdir !== 'string' ||
-          !sessionWorktree ||
-          !samePath(sessionInfo.workdir, sessionWorktree)
-        ) {
-          throw new Stop(
-            '删会话',
-            `目标会话 ${opt.session} 不对应这棵工作树 ${sessionWorktree ?? '(已不存在)'}，没有删。`,
+        const sessionInfo = await readSession(opt.session);
+        if (!sessionInfo) {
+          say('[删会话] 会话已经不在，按旧行为继续');
+        } else {
+          assertSessionEligible(
+            sessionInfo,
+            opt.session,
+            worktree ?? expectedConventionalWorktreePath(main, opt.branch),
           );
+          const drop = io.deleteSession ?? ((key, row) => deleteSession(env, exec, key, row));
+          let result;
+          try {
+            result = await drop(opt.session, sessionInfo);
+          } catch (err) {
+            if (err instanceof Stop) throw err;
+            const message = err instanceof Error ? err.message : String(err);
+            throw new Stop(
+              '删会话',
+              `释放会话 ${opt.session} 没成：${message}。工作树和分支还没删，修好后重跑：${again()}`,
+            );
+          }
+          say(`[删会话] ${result.detail}；已释放会话资源，继续删工作树`);
         }
-        if (typeof sessionInfo.runState !== 'string' || !sessionInfo.runState) {
-          throw new Stop('删会话', `读不到目标会话 ${opt.session} 的状态，没有删。`);
-        }
-        if (sessionInfo.runState === 'running') {
-          throw new Stop('删会话', `目标会话 ${opt.session} 还在运行，没有删工作树、分支或会话。`);
-        }
-        const drop = io.deleteSession ?? ((key, row) => deleteSession(env, exec, key, row));
-        let result;
-        try {
-          result = await drop(opt.session, sessionInfo);
-        } catch (err) {
-          if (err instanceof Stop) throw err;
-          const message = err instanceof Error ? err.message : String(err);
-          throw new Stop(
-            '删会话',
-            `释放会话 ${opt.session} 没成：${message}。工作树和分支还没删，修好后重跑：${again()}`,
-          );
-        }
-        say(`[删会话] ${result.detail}；已释放会话资源，继续删工作树`);
       }
     }
     if (!worktree || !existsSync(worktree)) {
