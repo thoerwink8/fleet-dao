@@ -1,4 +1,4 @@
-// mirasim-sessions 收单：合并 → 主检出快进并推其余远端 → 拆目录联接后再删工作树和分支 → 删会话。
+// mirasim-sessions 收单：合并 → 主检出快进并推其余远端 → 释放已结束会话 → 拆目录联接后再删工作树和分支。
 // 为什么先拆联接：Windows 上工作树里的 node_modules 常是指回主检出的目录联接，git worktree remove 会顺着联接
 // 把主检出的依赖删空（同一台机器踩过三次，最近 2026-11-12）。这里只 unlink 链接本身，不进链接里面。
 // 地址和令牌只从这次要收的仓读（远端 URL、环境变量、仓本地 git config），脚本里不写任何主机名。
@@ -522,7 +522,7 @@ export async function performMerge(o) {
 }
 
 /**
- * @typedef {{ sessionKey?: unknown, runState?: unknown, workdir?: unknown, title?: unknown, source?: unknown, archived?: unknown }} SessionRow
+ * @typedef {{ sessionKey?: unknown, runState?: unknown, workdir?: unknown, title?: unknown, source?: unknown }} SessionRow
  */
 /**
  * @param {SessionRow} row
@@ -538,12 +538,15 @@ function assertSessionEligible(row, sessionKey, worktree) {
   ) {
     throw new Stop('删会话', `目标会话 ${sessionKey} 不对应这棵工作树 ${worktree ?? '(未确认)'}，没有删。`);
   }
-  if (row.archived !== true) throw new Stop('删会话', `目标会话 ${sessionKey} 还没归档，没有删。`);
   if (typeof row.runState !== 'string' || !row.runState) {
     throw new Stop('删会话', `读不到目标会话 ${sessionKey} 的状态，没有删。`);
   }
   if (row.runState === 'running') {
     throw new Stop('删会话', `目标会话 ${sessionKey} 还在运行，没有删工作树、分支或会话。`);
+  }
+  // 官方 SessionStore 收轮写 completed / incomplete；其它状态不能证明已结束。
+  if (row.runState !== 'completed' && row.runState !== 'incomplete') {
+    throw new Stop('删会话', `目标会话 ${sessionKey} 的状态未知：${row.runState}，没有删。`);
   }
 }
 
@@ -587,10 +590,8 @@ function sessionCli(env, exec, atom, args) {
  * @returns {Promise<SessionRow | null>}
  */
 export async function getSessionRow(env, exec, sessionKey) {
-  const r = sessionCli(env, exec, 'getSessionRow', {
-    reqId: `close-${sessionKey}`,
-    sessionKey,
-  });
+  const reqId = `close-${sessionKey}`;
+  const r = sessionCli(env, exec, 'getSessionRow', { reqId, sessionKey });
   const out = `${r.stdout}\n${r.stderr}`;
   if (r.code !== 0) {
     throw new Stop('删会话', `getSessionRow 没成（退出码 ${r.code}）：${out.trim().slice(0, 400)}`);
@@ -601,10 +602,41 @@ export async function getSessionRow(env, exec, sessionKey) {
   } catch {
     throw new Stop('删会话', 'getSessionRow 的输出不是 JSON');
   }
-  const frames = Array.isArray(parsed?.frames) ? parsed.frames : [parsed];
-  const frame = frames.find((item) => item && typeof item === 'object' && item.type === 'sessionRow');
-  if (!frame || !('row' in frame)) throw new Stop('删会话', 'getSessionRow 没返回 sessionRow');
-  return frame.row && typeof frame.row === 'object' ? frame.row : null;
+  // ui-cli call 的成功 envelope；sessionRowByKey 仅用 null 表示不存在。
+  if (!parsed || typeof parsed !== 'object' || parsed.ok !== true) {
+    throw new Stop('删会话', 'getSessionRow 没返回正常成功响应');
+  }
+  if (parsed.atom !== 'getSessionRow' || !Array.isArray(parsed.frames)) {
+    throw new Stop('删会话', 'getSessionRow 响应格式畸形');
+  }
+  if (parsed.frames.length !== 1) throw new Stop('删会话', 'getSessionRow 没返回唯一 sessionRow');
+  const frame = parsed.frames[0];
+  if (
+    !frame ||
+    typeof frame !== 'object' ||
+    frame.type !== 'sessionRow' ||
+    frame.sessionKey !== sessionKey ||
+    typeof frame.reqId !== 'string' ||
+    !frame.reqId ||
+    !Object.hasOwn(frame, 'row') ||
+    ('ok' in frame && frame.ok !== true)
+  ) {
+    throw new Stop('删会话', 'getSessionRow 的 sessionRow 格式或身份不符');
+  }
+  if (frame.row === null) return null;
+  if (typeof frame.row !== 'object' || Array.isArray(frame.row)) {
+    throw new Stop('删会话', 'getSessionRow 的 row 不是会话对象或 null');
+  }
+  if (
+    frame.row.sessionKey !== sessionKey ||
+    typeof frame.row.workdir !== 'string' ||
+    !frame.row.workdir.trim() ||
+    typeof frame.row.runState !== 'string' ||
+    !frame.row.runState
+  ) {
+    throw new Stop('删会话', 'getSessionRow 的 row 身份、工作目录或状态缺失');
+  }
+  return frame.row;
 }
 
 /**
@@ -893,32 +925,28 @@ export async function closeRun(argv, io = {}) {
     }
 
     if (opt.session) {
-      if (!initialSession) {
+      const sessionInfo = await readSession(opt.session);
+      if (!sessionInfo) {
         say('[删会话] 会话已经不在，按旧行为继续');
       } else {
-        const sessionInfo = await readSession(opt.session);
-        if (!sessionInfo) {
-          say('[删会话] 会话已经不在，按旧行为继续');
-        } else {
-          assertSessionEligible(
-            sessionInfo,
-            opt.session,
-            worktree ?? expectedConventionalWorktreePath(main, opt.branch),
+        assertSessionEligible(
+          sessionInfo,
+          opt.session,
+          worktree ?? expectedConventionalWorktreePath(main, opt.branch),
+        );
+        const drop = io.deleteSession ?? ((key, row) => deleteSession(env, exec, key, row));
+        let result;
+        try {
+          result = await drop(opt.session, sessionInfo);
+        } catch (err) {
+          if (err instanceof Stop) throw err;
+          const message = err instanceof Error ? err.message : String(err);
+          throw new Stop(
+            '删会话',
+            `释放会话 ${opt.session} 没成：${message}。工作树和分支还没删，修好后重跑：${again()}`,
           );
-          const drop = io.deleteSession ?? ((key, row) => deleteSession(env, exec, key, row));
-          let result;
-          try {
-            result = await drop(opt.session, sessionInfo);
-          } catch (err) {
-            if (err instanceof Stop) throw err;
-            const message = err instanceof Error ? err.message : String(err);
-            throw new Stop(
-              '删会话',
-              `释放会话 ${opt.session} 没成：${message}。工作树和分支还没删，修好后重跑：${again()}`,
-            );
-          }
-          say(`[删会话] ${result.detail}；已释放会话资源，继续删工作树`);
         }
+        say(`[删会话] ${result.detail}；已释放会话资源，继续删工作树`);
       }
     }
     if (!worktree || !existsSync(worktree)) {

@@ -28,7 +28,6 @@ interface SessionRow {
   sessionKey: string;
   runState: string;
   workdir: string;
-  archived?: boolean;
   title?: string;
   source?: 'managed' | 'native';
 }
@@ -59,6 +58,11 @@ interface CloseMod {
       deleteSession?: (key: string, row?: SessionRow) => Promise<{ skipped: boolean; detail: string }>;
     },
   ): Promise<number>;
+  getSessionRow(
+    env: NodeJS.ProcessEnv,
+    exec: (cmd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => ExecResult,
+    key: string,
+  ): Promise<SessionRow | null>;
   deleteSession(
     env: NodeJS.ProcessEnv,
     exec: (cmd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => ExecResult,
@@ -117,7 +121,7 @@ function mergedRepo(): { main: string; wt: string; branch: string } {
   return { main, wt, branch };
 }
 function sessionRow(sessionKey: string, workdir: string, runState = 'completed'): SessionRow {
-  return { sessionKey, workdir, runState, archived: true, source: 'managed', title: 'test' };
+  return { sessionKey, workdir, runState, source: 'managed', title: 'test' };
 }
 
 function linkModules(main: string, wt: string, kind: 'junction' | 'dir') {
@@ -133,6 +137,90 @@ async function runClose(main: string, branch: string): Promise<{ code: number; o
 function depCount(main: string): number {
   return readdirSync(join(main, 'node_modules')).length;
 }
+function sessionEnv(): NodeJS.ProcessEnv {
+  const home = mkdtempSync(join(tmpdir(), 'close-protocol-'));
+  roots.push(home);
+  const app = join(home, '.mirasim', 'app');
+  mkdirSync(join(app, 'test-version'), { recursive: true });
+  writeFileSync(join(app, 'state.json'), JSON.stringify({ good: 'test-version' }));
+  writeFileSync(join(app, 'test-version', 'server.cjs'), '');
+  return { USERPROFILE: home, MIRASIM_HOST_PORT: '4970' };
+}
+
+function sessionFrame(sessionKey: string, row: unknown): string {
+  return JSON.stringify({
+    ok: true,
+    atom: 'getSessionRow',
+    frames: [{ type: 'sessionRow', reqId: `close-${sessionKey}`, sessionKey, row }],
+  });
+}
+
+describe('getSessionRow accepts only the official successful frame', () => {
+  const key = 'kimi:protocol-test';
+  const session = { sessionKey: key, workdir: 'D:/repo/task', runState: 'completed' };
+  const query = (stdout: string, code = 0) =>
+    mod.getSessionRow(sessionEnv(), () => ({ code, stdout, stderr: '' }), key);
+
+  it.each(['"bad"', '42', 'null', '{"ok":false,"atom":"getSessionRow","frames":[]}'])(
+    'rejects malformed or failed response %s',
+    async (stdout) => {
+      await expect(query(stdout)).rejects.toThrow();
+    },
+  );
+
+  it('rejects a malformed row instead of treating it as missing', async () => {
+    for (const row of ['"bad"', '42', 'false', '[]']) {
+      await expect(query(sessionFrame(key, JSON.parse(row)))).rejects.toThrow(/row/);
+    }
+  });
+
+  it('requires one identity-matching sessionRow frame', async () => {
+    await expect(query(JSON.stringify({ ok: true, atom: 'getSessionRow', frames: [] }))).rejects.toThrow();
+    await expect(query(sessionFrame('kimi:other', session))).rejects.toThrow(/格式或身份/);
+    const duplicate = JSON.parse(sessionFrame(key, session));
+    duplicate.frames.push(duplicate.frames[0]);
+    await expect(query(JSON.stringify(duplicate))).rejects.toThrow(/唯一/);
+  });
+
+  it('accepts only protocol null as missing and an object as present', async () => {
+    await expect(query(sessionFrame(key, null))).resolves.toBeNull();
+    await expect(query(sessionFrame(key, session))).resolves.toEqual(session);
+  });
+
+  it('rejects a failed atom process', async () => {
+    await expect(query(sessionFrame(key, session), 1)).rejects.toThrow(/退出码 1/);
+  });
+
+  it('rejects failed envelopes even when they contain a plausible missing row', async () => {
+    const response = JSON.parse(sessionFrame(key, null));
+    response.ok = false;
+    await expect(query(JSON.stringify(response))).rejects.toThrow();
+  });
+
+  it('rejects missing fields, failed frames and incomplete session objects', async () => {
+    const valid = JSON.parse(sessionFrame(key, null));
+    const frame = valid.frames[0];
+    for (const response of [
+      { ...valid, atom: 'listSessions' },
+      { ...valid, frames: [null] },
+      { ...valid, frames: [{ ...frame, row: undefined }] },
+      { ...valid, frames: [{ ...frame, reqId: undefined }] },
+      { ...valid, frames: [{ ...frame, ok: false }] },
+      { ...valid, frames: [{ ...frame, type: 'error' }] },
+    ]) {
+      await expect(query(JSON.stringify(response))).rejects.toThrow();
+    }
+    for (const row of [
+      {},
+      { ...session, sessionKey: 'kimi:other' },
+      { ...session, workdir: '' },
+      { ...session, runState: null },
+    ]) {
+      await expect(query(sessionFrame(key, row))).rejects.toThrow();
+    }
+  });
+});
+
 describe('deleteSession 使用官方入口且不删除工作树', () => {
   it('只传目标会话、身份和 removeWorktree:false', async () => {
     const home = mkdtempSync(join(tmpdir(), 'close-session-'));
@@ -504,24 +592,89 @@ describe('会话释放先于工作树删除', () => {
     expect(existsSync(wt)).toBe(true);
     expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
   });
-  it('未归档会话不能被清理', async () => {
+
+  it.each(['completed', 'incomplete'])('已结束的 %s 会话没有 archived 字段也能释放', async (state) => {
     const { main, wt, branch } = mergedRepo();
-    let dropped = false;
+    const drop = vi.fn(async () => ({ skipped: false, detail: '已释放目标会话' }));
     const lines: string[] = [];
-    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:unarchived'], {
+    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:ended'], {
       log: (line) => lines.push(line),
-      sessionRow: async () => ({ sessionKey: 'kimi:unarchived', workdir: wt, runState: 'completed' }),
-      deleteSession: async () => {
-        dropped = true;
-        return { skipped: false, detail: '不该删' };
-      },
+      sessionRow: async () => sessionRow('kimi:ended', wt, state),
+      deleteSession: drop,
     });
-    const out = lines.join('\n');
-    expect(code, out).not.toBe(0);
-    expect(out).toContain('还没归档');
+    expect(code, lines.join('\n')).toBe(0);
+    expect(drop).toHaveBeenCalledOnce();
+    expect(existsSync(wt)).toBe(false);
+    expect(git(main, ['branch', '--list', branch]).trim()).toBe('');
+  });
+
+  it.each([1, 2])('第 %i 次读取都拒绝未知状态且保留树和分支', async (badRead) => {
+    const { main, wt, branch } = mergedRepo();
+    let reads = 0;
+    const drop = vi.fn(async () => ({ skipped: false, detail: '不该删' }));
+    const lines: string[] = [];
+    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:unknown'], {
+      log: (line) => lines.push(line),
+      sessionRow: async () =>
+        sessionRow('kimi:unknown', wt, ++reads === badRead ? 'future-state' : 'completed'),
+      deleteSession: drop,
+    });
+    expect(code, lines.join('\n')).toBe(1);
+    expect(lines.join('\n')).toContain('状态未知');
+    expect(drop).not.toHaveBeenCalled();
     expect(existsSync(wt)).toBe(true);
     expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
-    expect(dropped).toBe(false);
+  });
+
+  it.each(['running', 'identity', 'workdir'])('删除前复查拒绝变化的 %s', async (change) => {
+    const { main, wt, branch } = mergedRepo();
+    let reads = 0;
+    const drop = vi.fn(async () => ({ skipped: false, detail: '不该删' }));
+    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:changed'], {
+      log: () => {},
+      sessionRow: async () => {
+        const row = sessionRow('kimi:changed', wt);
+        if (++reads === 2) {
+          if (change === 'running') row.runState = 'running';
+          if (change === 'identity') row.sessionKey = 'kimi:other';
+          if (change === 'workdir') row.workdir = main;
+        }
+        return row;
+      },
+      deleteSession: drop,
+    });
+    expect(code).toBe(1);
+    expect(drop).not.toHaveBeenCalled();
+    expect(existsSync(wt)).toBe(true);
+    expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
+  });
+
+  it.each([1, 2])('第 %i 次查询协议失败都停止删除', async (badRead) => {
+    const { main, wt, branch } = mergedRepo();
+    let reads = 0;
+    const env = sessionEnv();
+    const drop = vi.fn(async () => ({ skipped: false, detail: '不该删' }));
+    const code = await mod.closeRun(['--repo', main, '--branch', branch, '--session', 'kimi:bad-frame'], {
+      log: () => {},
+      sessionRow: async (key) =>
+        mod.getSessionRow(
+          env,
+          () => ({
+            code: 0,
+            stdout:
+              ++reads === badRead
+                ? '{"ok":false,"frames":[{"row":null}]}'
+                : sessionFrame(key, sessionRow(key, wt)),
+            stderr: '',
+          }),
+          key,
+        ),
+      deleteSession: drop,
+    });
+    expect(code).toBe(1);
+    expect(drop).not.toHaveBeenCalled();
+    expect(existsSync(wt)).toBe(true);
+    expect(git(main, ['branch', '--list', branch]).trim()).toContain(branch);
   });
 });
 
