@@ -4,10 +4,13 @@
 // workflows/{fusion,requirement,subtask,merge-queue}.ts 和开 PR 前验证那块（verify.ts）一起删了；留的是 task.ts（#632）
 // 用的这几样。
 
+import { defineSearchAttributeKey, SearchAttributeType } from '@temporalio/common';
 import {
   ActivityFailure,
   ApplicationFailure,
+  CancellationScope,
   ChildWorkflowFailure,
+  condition,
   isCancellation,
   log,
   patched,
@@ -16,6 +19,8 @@ import {
   sleep,
   TemporalFailure,
   TimeoutFailure,
+  upsertSearchAttributes,
+  workflowInfo,
 } from '@temporalio/workflow';
 import {
   ACTIVITY_PROFILE,
@@ -71,13 +76,58 @@ export function limitsFor(partial: Partial<Limits> | undefined): Promise<Limits>
   return judgeRetrying('limits', partial ?? {});
 }
 
+/** 自测超时这档的补丁。查询把本地活动结果隔到下一个 workflow task 时，重放要单独补命令。 */
+export const SELF_CHECK_OWN_TIMEOUT = 'self-check-own-timeout';
+
+const changeVersion = defineSearchAttributeKey('TemporalChangeVersion', SearchAttributeType.KEYWORD_LIST);
+
+interface Activator {
+  knownPresentPatches: { has(id: string): boolean };
+  sentPatches: { has(id: string): boolean; add(id: string): void };
+  commands: { scheduleActivity?: { activityId?: string } }[];
+  pushCommand(command: { setPatchMarker: { patchId: string; deprecated: boolean } }): void;
+}
+
+function activator(): Activator | undefined {
+  return (globalThis as { __TEMPORAL_ACTIVATOR__?: Activator }).__TEMPORAL_ACTIVATOR__;
+}
+
+/** 重放时这一拍的前瞻里已经有标记。和 patched() 用的是同一份集合。 */
+export function selfCheckPatchKnown(): boolean {
+  return activator()?.knownPresentPatches.has(SELF_CHECK_OWN_TIMEOUT) ?? false;
+}
+
+/**
+ * 重放、而且标记还不在这一拍的前瞻里。可能是老历史（根本没有这个标记），
+ * 也可能是查询把 decide(limits) 和这个标记拆进了相邻两个 workflow task。
+ */
+export function selfCheckPatchDeferred(): boolean {
+  return workflowInfo().unsafe.isReplaying && !selfCheckPatchKnown();
+}
+
+/**
+ * 标记命令先入队，但不记成已经问过。下一事件是普通活动时 core 丢掉这条多出来的命令（老历史）；
+ * 下一事件是这个标记时对得上。搜索属性要等标记真的出现在前瞻里再补，否则老历史的下一条活动对不上。
+ */
+function queueSelfCheckPatchWithoutDecision(): void {
+  const current = activator();
+  if (!current || current.sentPatches.has(SELF_CHECK_OWN_TIMEOUT)) return;
+  current.pushCommand({
+    setPatchMarker: { patchId: SELF_CHECK_OWN_TIMEOUT, deprecated: false },
+  });
+  current.sentPatches.add(SELF_CHECK_OWN_TIMEOUT);
+}
+
 /** 给每个活动配上它自己的选项（那一档的超时与重试、叫停时等不等它收场），见 activity-options.ts。 */
 export function activitiesFor(limits: Limits): EngineActivities {
   const out: Partial<Record<ActivityName, unknown>> = {};
   // 自测原来和建树同一档（20 分钟、重试 3 次）。预算比这档长，限时先到就整段重跑。
   // 新历史用自己的档。老历史重放仍用建树那档，调度出去的超时和重试才和历史对得上。
   // 只在造代理时问一次：问过档就定了，同一条历史里不会一会儿旧档一会儿新档。
-  const selfCheckOwnTimeout = patched('self-check-own-timeout');
+  // 跨任务的那一种重放先不在这里问：问了会得到假、又不发命令，标记却在下一个任务里。
+  const deferred = selfCheckPatchDeferred();
+  if (deferred) queueSelfCheckPatchWithoutDecision();
+  const selfCheckOwnTimeout = deferred ? false : patched(SELF_CHECK_OWN_TIMEOUT);
   for (const name of Object.keys(ACTIVITY_PROFILE) as ActivityName[]) {
     const options =
       name === 'selfCheck' && !selfCheckOwnTimeout
@@ -86,6 +136,63 @@ export function activitiesFor(limits: Limits): EngineActivities {
     out[name] = proxyActivities<EngineActivities>(options)[name];
   }
   return out as EngineActivities;
+}
+
+/** 撤掉尚未入史的调度之后，用同一个活动编号再排一次，历史里的 activityId 才对得上。 */
+export function readTaskBriefWithId(limits: Limits, activityId: string): EngineActivities['readTaskBrief'] {
+  return proxyActivities<EngineActivities>({
+    ...activityOptions('readTaskBrief', limits),
+    activityId,
+  }).readTaskBrief;
+}
+
+/** 标记已经能看见：记下档位，并把 core 当时一起写上的版本搜索属性补进命令。 */
+export function adoptSelfCheckOwnTimeout(acts: EngineActivities, limits: Limits): boolean {
+  const yes = patched(SELF_CHECK_OWN_TIMEOUT);
+  if (!yes) return false;
+  acts.selfCheck = proxyActivities<EngineActivities>(activityOptions('selfCheck', limits)).selfCheck;
+  upsertSearchAttributes([{ key: changeVersion, value: [SELF_CHECK_OWN_TIMEOUT] }]);
+  return true;
+}
+
+/**
+ * 读交代这一下可能落在补丁标记后面（查询把本地活动隔开的历史）。
+ * 先把活动排上：老历史的下一条就是它，标记命令被丢掉。若标记在活动入史之前出现在前瞻里，
+ * 撤掉这次尚未入史的调度，补上版本搜索属性，再用原来的活动编号重排，编号才和历史一致。
+ */
+export async function replayActivityAcrossSelfCheckPatch<T>(
+  schedule: (activityId?: string) => Promise<T>,
+  adopt: () => void,
+): Promise<T> {
+  const scope = new CancellationScope();
+  const attempt = scope.run(() => schedule());
+  const activityId = lastScheduledActivityId();
+  const wait = new CancellationScope();
+  const seen = wait.run(() => condition(() => selfCheckPatchKnown()));
+  seen.catch(() => undefined);
+  const outcome = await Promise.race([
+    attempt.then(
+      (value) => ({ kind: 'value' as const, value }),
+      (error: unknown) => ({ kind: 'error' as const, error }),
+    ),
+    seen.then(() => ({ kind: 'marker' as const })),
+  ]);
+  wait.cancel();
+  if (outcome.kind === 'value') return outcome.value;
+  if (outcome.kind === 'error') throw outcome.error;
+  scope.cancel();
+  await Promise.resolve();
+  adopt();
+  return schedule(activityId);
+}
+
+function lastScheduledActivityId(): string {
+  const commands = activator()?.commands ?? [];
+  for (let i = commands.length - 1; i >= 0; i -= 1) {
+    const id = commands[i]?.scheduleActivity?.activityId;
+    if (id) return id;
+  }
+  throw new Error('跨任务补丁重放时没有读到刚排上的活动编号');
 }
 
 /**

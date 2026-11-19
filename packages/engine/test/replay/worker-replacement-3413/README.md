@@ -14,7 +14,7 @@
 
 这是这条原用例自己的 run。CI run 39392992046 没有留下历史，不能拿这份冒充那一次。`abandon-buffered-3413/` 是放弃那一步的另一条本机复现，不能解释这次停在查停点。push-handback-contract 的 park-kind（#3258）是别的用例、别的 run；错误种类同为 `self-check-own-timeout` 的 TMPRL1100，不能据此写成同根，也不改 `kit.ts` 里那条标记。
 
-同一份 protobuf 用现在的工作流代码离线重放，稳定报 `DeterminismViolationError`，正文仍是上面那句 TMPRL1100。这钉的是「对不上」，不是修复。单次把原用例跑绿不能当成这次超时已修，也不许为了让重放变绿而改写这些字节。#3258 若改了标记行为、让同一份字节重放通过，只改 `worker-replacement-capture.test.ts` 里那条断言。
+同一份 protobuf 用现在的工作流代码离线重放通过（#3258：查询把本地活动和补丁拆开时，重放补上标记命令和版本搜索属性）。不许为了让重放变绿而改写这些字节。`worker-replacement-capture.test.ts` 里那条断言改成重放成功。
 
 同文件里别的用例在并行负载下也可能停在查停点，工作流任务失败的标记是 `park-kind`。那是别的 run，不是这份 `6385a827-f825-4d12-8bd9-d3e2351b6db6`，不能拿来替换或解释这份取证。
 
@@ -30,6 +30,6 @@
 
 ## 原用例怎么改的
 
-`push-handback.test.ts` 第一个工人先用假世界的 `until` 等「停下」写进假库（`saveTaskState` 的 phase `parked`，不发查询），再照旧 `parked()` 查一次拿凭据。60 秒、20 秒等待、cache0、换工人、业务断言都没变，没加重试或 sleep。这样第一段不再在走向停下的路上查询：上面两种卡法的触发都在这段。同文件的 `parked()` 也先等假库写进停下再轮询查询：本机四文件并行时 `accepted and ready do not succeed before main loop consumes; duplicate returns same receipt`（同为 cache0）在查停点等满 20 秒，最后状态 phase 仍是 implement，属第二种卡法，没有取证帧，不是这份 TMPRL1100。已停过的再查，假库里已有停下，照旧直接轮询。查询撞上本地活动结果这个生产问题本身没修（归 #3258），由 `la-query-split.test.ts` 确定钉住，不再靠这条用例偶发撞上。
+`push-handback.test.ts` 第一个工人先用假世界的 `until` 等「停下」写进假库（`saveTaskState` 的 phase `parked`，不发查询），再照旧 `parked()` 查一次拿凭据。60 秒、20 秒等待、cache0、换工人、业务断言都没变，没加重试或 sleep。这样第一段不再在走向停下的路上查询：上面两种卡法的触发都在这段。同文件的 `parked()` 也先等假库写进停下再轮询查询：本机四文件并行时 `accepted and ready do not succeed before main loop consumes; duplicate returns same receipt`（同为 cache0）在查停点等满 20 秒，最后状态 phase 仍是 implement，属第二种卡法，没有取证帧，不是这份 TMPRL1100。已停过的再查，假库里已有停下，照旧直接轮询。查询撞上本地活动结果之后的重放由 #3258 修（`self-check-patch-replay.test.ts` 同时钉跨任务的失败形状和同一个任务里的同行）。`la-query-split.test.ts` 仍用最小工作流钉「切开就会对不上」，生产修的是任务工作流，不改那份最小历史。
 
 CI run 39392992046 没留历史；PR #3488 那次（`test (5/8)`，同一处查停点 20 秒超时、phase 停在 brief）日志里若有取证帧，这里也还没解出来。两次都不能断言是这个机制，只是症状一致。

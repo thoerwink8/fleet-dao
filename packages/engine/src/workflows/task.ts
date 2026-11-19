@@ -142,7 +142,15 @@ import {
   type TaskWorkflowInput,
   taskBranch,
 } from '../task-contract.ts';
-import { activitiesFor, iso, limitsFor } from './kit.ts';
+import {
+  activitiesFor,
+  adoptSelfCheckOwnTimeout,
+  iso,
+  limitsFor,
+  readTaskBriefWithId,
+  replayActivityAcrossSelfCheckPatch,
+  selfCheckPatchDeferred,
+} from './kit.ts';
 import { parkedMeasurementBase } from './task-budget-remeasure.ts';
 import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
@@ -219,9 +227,19 @@ class TaskFlow {
   /** 体量预算（#2755）：打回过一次没有；人看过点「继续」后这张单不再判。 */
   private budgetBounced = false;
   private budgetApproved = false;
+  /**
+   * 查询把 limits 本地活动和 self-check-own-timeout 拆进相邻两个 workflow task 时，
+   * 第一次读交代要等标记露出来再补搜索属性。老历史用不到，保持 null。
+   */
+  private selfCheckProbe: Limits | null = null;
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
     this.rt = new TaskRuntime(input, acts, limits);
+  }
+
+  /** 只在重放且标记还不在前瞻里时由 taskWorkflow 装上。第一次读交代用掉。 */
+  armSelfCheckProbe(limits: Limits): void {
+    this.selfCheckProbe = limits;
   }
 
   async run(): Promise<TaskRun> {
@@ -702,22 +720,33 @@ class TaskFlow {
     const rt = this.rt;
     for (;;) {
       rt.set('brief', '读单子和需求文档');
-      const got = await rt.step('readTaskBrief', () =>
-        rt.acts.readTaskBrief({
-          schemaVersion: 1,
-          repo: { owner: rt.input.repo.owner, name: rt.input.repo.name },
-          issueNumber: rt.input.issueNumber,
-          ...(boundary ? { checkContract: true as const } : {}),
-          ...(boundary && rt.prNumber !== null
-            ? {
-                contractGuard: {
-                  prNumber: rt.prNumber,
-                  ...(rt.brief?.contract ? { expected: rt.brief.contract } : {}),
-                },
-              }
-            : {}),
-        }),
-      );
+      const probe = this.selfCheckProbe;
+      this.selfCheckProbe = null;
+      const request = {
+        schemaVersion: 1 as const,
+        repo: { owner: rt.input.repo.owner, name: rt.input.repo.name },
+        issueNumber: rt.input.issueNumber,
+        ...(boundary ? { checkContract: true as const } : {}),
+        ...(boundary && rt.prNumber !== null
+          ? {
+              contractGuard: {
+                prNumber: rt.prNumber,
+                ...(rt.brief?.contract ? { expected: rt.brief.contract } : {}),
+              },
+            }
+          : {}),
+      };
+      const got = await rt.step('readTaskBrief', () => {
+        const read = (activityId?: string) => {
+          const fn = activityId ? readTaskBriefWithId(rt.limits, activityId) : rt.acts.readTaskBrief;
+          return fn(request);
+        };
+        return probe
+          ? replayActivityAcrossSelfCheckPatch(read, () => {
+              adoptSelfCheckOwnTimeout(rt.acts, probe);
+            })
+          : read();
+      });
       if (got.ok) {
         if (
           boundary &&
@@ -1424,7 +1453,9 @@ class TaskFlow {
 
 export async function taskWorkflow(input: TaskWorkflowInput): Promise<TaskRun> {
   const limits = await limitsFor(undefined);
+  const deferred = selfCheckPatchDeferred();
   const flow = new TaskFlow(input, activitiesFor(limits), limits);
+  if (deferred) flow.armSelfCheckProbe(limits);
   try {
     return await flow.run();
   } catch (error) {
