@@ -4,7 +4,6 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { historyToJSON } from '@temporalio/common/lib/proto-utils.js';
 import { Worker } from '@temporalio/worker';
-import { DeterminismViolationError } from '@temporalio/workflow';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { engineBundle } from './support.ts';
 
@@ -182,18 +181,13 @@ describe('#3413 原用例停在查停点的取证', { timeout: 60_000 }, () => {
     expect(patchId(events[8] ?? {})).toBe('self-check-own-timeout');
   });
 
-  // 钉的是现在的代码对不上这份原字节，不是修复。不改 kit.ts（那条标记归 #3258）。
-  // 若那边的改动让同一份字节重放通过，改这条断言，不许重录覆盖。
-  it('现在的代码离线重放这份原字节仍报 self-check-own-timeout 的 TMPRL1100', async () => {
+  // #3258 让这份原字节重放通过。断言改成重放成功，字节不许重录覆盖。
+  it('现在的代码离线重放这份原字节，self-check-own-timeout 跨任务也不再报 TMPRL1100', async () => {
     const decoded = History.decode(readFileSync(`${directory}park-query-timeout.history.bin`));
-    const error = await Worker.runReplayHistory(
+    await Worker.runReplayHistory(
       { workflowBundle: bundle },
       JSON.parse(historyToJSON(decoded as unknown as Parameters<typeof historyToJSON>[0])),
       WORKFLOW_ID,
-    ).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(DeterminismViolationError);
-    expect(String((error as Error).message)).toContain(
-      '[TMPRL1100] Nondeterminism error: Non-deprecated patch marker encountered for change self-check-own-timeout, but there is no corresponding change command!',
     );
   });
 });
